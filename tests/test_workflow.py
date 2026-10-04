@@ -33,6 +33,8 @@ Pending.
 
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
+# Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
+assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
 args = sys.argv[1:]
 assert '--permission-mode' in args and args[args.index('--permission-mode')+1] == 'dontAsk'
 assert '--' in args
@@ -148,6 +150,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'permissi
 
 MOCK_CODEX = r'''#!/usr/bin/env python3
 import os, pathlib, sys
+assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'codex stdin not /dev/null'
 args = sys.argv[1:]
 assert args[0] == 'exec'
 assert args[args.index('--sandbox')+1] == 'read-only'

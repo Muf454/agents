@@ -116,7 +116,7 @@ claude_session() {
       --tools Read,Glob,Grep,Edit,Write,Bash --allowedTools "${allowed[@]}" \
       --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
       "${model_args[@]}" "${knowledge_args[@]}" \
-      -- "$prompt" > "$log" 2> "$errors"
+      -- "$prompt" < /dev/null > "$log" 2> "$errors"
     code=$?
     set -e
     ai_guard_verify
