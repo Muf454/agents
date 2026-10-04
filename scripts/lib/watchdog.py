@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import tempfile
 import subprocess
 import sys
 import time
@@ -21,9 +22,71 @@ def positive(value):
 
 
 def save(path, data):
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(data)
-    temporary.replace(path)
+    # Unpredictable, exclusively created temp name: nothing can pre-plant it as a symlink.
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name + '.')
+    try:
+        with os.fdopen(descriptor, 'w') as file:
+            file.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def mtime(path):
+    """mtime in ns, or 0: runners create and delete these files while we look."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def read(path):
+    try:
+        return path.read_text()
+    except OSError:
+        return ''
+
+
+BOOT_NS = None
+
+
+def start_ns(ticks):
+    """Process start (/proc/PID/stat field 22, clock ticks since boot) as epoch ns."""
+    global BOOT_NS
+    if BOOT_NS is None:
+        btime = re.search(r'^btime (\d+)$', Path('/proc/stat').read_text(), re.M)
+        BOOT_NS = int(btime[1]) * 1_000_000_000
+    return BOOT_NS + int(ticks) * 1_000_000_000 // os.sysconf('SC_CLK_TCK')
+
+
+def process(pid):
+    """(args, start ticks) of a live, non-zombie process, or None."""
+    entry = Path('/proc') / str(pid)
+    try:
+        status = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        args = (entry / 'cmdline').read_bytes().split(b'\0')
+    except (OSError, IndexError):
+        return None
+    return None if status[0] == 'Z' else (args, status[19])
+
+
+def is_runner(args, names=('ai-run', 'ai-pipeline')):
+    # Match executable/script arguments, never a prompt or shell command string.
+    return any(Path(os.fsdecode(arg)).name in names for arg in args[:3] if arg)
+
+
+def pipeline_alive(marker):
+    """The marker's own ai-pipeline process is alive (children don't count)."""
+    try:
+        pid = int(marker.read_text().split()[0])
+        written = marker.stat().st_mtime_ns
+    except (OSError, ValueError, IndexError):
+        return False
+    found = process(pid)
+    # A reused PID would have started after the marker was written.
+    return bool(found and is_runner(found[0], ('ai-pipeline',))
+                and start_ns(found[1]) <= written + 1_000_000_000)
 
 
 def paused_until(local):
@@ -97,15 +160,11 @@ def runners(root):
         try:
             if (entry / 'cwd').resolve() != root:
                 continue
-            args = (entry / 'cmdline').read_bytes().split(b'\0')
-            # Match executable/script arguments, never a prompt or shell command string.
-            if any(Path(os.fsdecode(arg)).name in ('ai-run', 'ai-pipeline')
-                   for arg in args[:3] if arg):
-                status = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
-                if status[0] != 'Z':
-                    found.append(entry.name + ':' + status[19])
         except (OSError, RuntimeError):
             continue  # Processes may disappear during the snapshot.
+        live = process(entry.name)
+        if live and is_runner(live[0]):
+            found.append((entry.name, live[1]))
     return sorted(found)
 
 
@@ -149,33 +208,38 @@ def main():
             previous = {}
         except (ValueError, OSError) as error:
             parser.error('cannot read watchdog.json: ' + str(error))
-        now = time.time_ns()
+        # AI_WATCHDOG_NOW (epoch seconds) is for tests, like AI_SLEEP.
+        now = int(float(os.environ['AI_WATCHDOG_NOW']) * 1e9) if os.environ.get('AI_WATCHDOG_NOW') else time.time_ns()
         alive = runners(root)
-        state = (ai / 'state.md').read_text() if (ai / 'state.md').exists() else ''
-        phase = re.search(r'^Phase:\s*(\S+)\s*$', state, re.M)
-        activity = [ai / 'run-log.md', local / 'pauses.log',
-                    *local.glob('claude-*.json'), *local.glob('*events.log')]
-        newest = max((p.stat().st_mtime_ns for p in activity if p.is_file()), default=ai.stat().st_mtime_ns)
+        phase = re.search(r'^Phase:\s*(\S+)\s*$', read(ai / 'state.md'), re.M)
+        activity = [ai / 'run-log.md', local / 'pauses.log', *local.glob('claude-*.json'),
+                    *local.glob('*events.log'), *local.glob('check-*.log')]
+        newest = max([mtime(path) for path in activity] + [mtime(ai)])
         incidents = {}
         error = local / 'last-error'
-        error_time = error.stat().st_mtime_ns if error.is_file() else 0
-        # ai-pipeline writes this marker at start and removes it on every exit it controls
-        # (finish or ai_die), so a leftover marker means it was killed, crashed or rebooted.
+        error_time = mtime(error)
+        # ai-pipeline writes this marker (its PID) at start and removes it on every exit it
+        # controls (finish or ai_die), so a marker whose own process is gone means it was
+        # killed, crashed or rebooted, even if an orphaned ai-run child still runs.
         marker = local / 'pipeline.active'
-        if not alive and marker.is_file():
-            incidents['died:' + str(marker.stat().st_mtime_ns)] = (
+        if mtime(marker) and not pipeline_alive(marker):
+            incidents['died:' + str(mtime(marker))] = (
                 'Watchdog: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
         elif not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review'):
             # With a last-error the stop below explains it; this catches a killed ai-run.
             incidents['stalled'] = f'Watchdog: stalled/crashed ({phase[1]}); no checkout runner is alive.'
-        # A usage-limit pause is quiet by design until its announced resume time.
+        # Quiet time counts from this run's start (old logs of a resumed run don't count),
+        # and a usage-limit pause is quiet by design until its announced resume time.
         quiet_since = max(newest, paused_until(local))
+        if alive:
+            quiet_since = max(quiet_since, min(start_ns(ticks) for _, ticks in alive))
         if alive and now - quiet_since > args.stale_minutes * 60 * 1_000_000_000:
-            incidents['hung:' + ','.join(alive) + ':' + str(quiet_since)] = (
+            identity = ','.join(pid + ':' + ticks for pid, ticks in alive)
+            incidents['hung:' + identity + ':' + str(quiet_since)] = (
                 f'Watchdog: hung; runner alive with no activity for over {args.stale_minutes} minutes.')
         if error_time > previous.get('notified_at_ns', 0):
-            incidents['stop:' + str(error_time)] = 'Watchdog: stopped: ' + ' '.join(error.read_text().split())[:500]
+            incidents['stop:' + str(error_time)] = 'Watchdog: stopped: ' + (' '.join(read(error).split())[:500] or 'see .ai/local')
         # Keep an already acknowledged stop active until the file changes/disappears.
         stop_key = 'stop:' + str(error_time)
         if error_time and stop_key in previous.get('active', []):

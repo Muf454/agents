@@ -460,11 +460,12 @@ CLI behavior was checked against installed help and the official
 without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` when:
 
 - `ai-pipeline` is gone without finishing or reporting a stop (killed, crashed or
-  machine restarted), in any phase;
+  machine restarted), in any phase, even if an orphaned `ai-run` child survives;
 - an implementing/fixing_review checkout has no runner and no recorded stop
   (e.g. a killed standalone `ai-run`);
 - an alive runner has no log activity for `--stale-minutes` (default 45), not
-  counting a usage-limit pause until its announced resume time;
+  counting a usage-limit pause until its announced resume time or logs from before
+  the current run started;
 - a new `last-error` records a stop.
 
 Exit codes are 0 healthy, 1 incident (including already notified), 2 usage error.

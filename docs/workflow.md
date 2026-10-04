@@ -255,8 +255,9 @@ arguments and the process's exact checkout working directory.
 
 Incidents:
 
-- **died**: `.ai/local/pipeline.active` exists but no runner is alive. `ai-pipeline`
-  writes this marker at start and removes it on every exit it controls (completion
+- **died**: `.ai/local/pipeline.active` exists but the `ai-pipeline` process it
+  names is gone (an orphaned `ai-run` child doesn't count; a reused PID that started
+  after the marker was written doesn't either). `ai-pipeline` writes this marker at start and removes it on every exit it controls (completion
   and `ai_die`, which also records `last-error`), so a leftover marker means it was
   killed, crashed or the machine restarted, in any phase. A new pipeline run rewrites
   the marker and rearms the incident.
@@ -264,8 +265,9 @@ Incidents:
   (a killed standalone `ai-run`). A recorded stop is reported as **stop** instead.
 - **hung**: a live runner whose newest activity is older than `--stale-minutes`
   (default 45). Activity is the newest mtime of `.ai/run-log.md`,
-  `.ai/local/pauses.log`, `claude-*.json` and `*events.log` in `.ai/local/`
-  (fallback: `.ai/`'s mtime). The latest `pauses.log` entry counts as activity until
+  `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in
+  `.ai/local/`, or `.ai/`'s mtime, and never earlier than the oldest live runner's
+  start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
   its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
   `--session-timeout` (default 30 minutes), which stays below the default.
 - **stop**: a `last-error` newer than the watchdog's last notification. The
@@ -273,7 +275,8 @@ Incidents:
 
 A separate `.ai/local/watchdog.lock` serializes probes without blocking the
 workflow lock. Atomic `.ai/local/watchdog.json` records active incidents and the
-last notification timestamp. Persistent incidents notify once; recovery rearms them.
+last notification timestamp, written via unpredictable temp files. Files that
+runners delete mid-probe count as absent. Persistent incidents notify once; recovery rearms them.
 Hung incidents are bound to process start identities and activity timestamps.
 Healthy checks are silent. Exit codes: 0 healthy, 1 incident, 2 invalid
 arguments/checkout/dedupe record. Notifications use common.sh's best-effort
