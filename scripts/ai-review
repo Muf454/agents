@@ -34,12 +34,28 @@ events="${report%.md}.events.log"
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='
 prompt+="$head; supplied base=$base_sha; merge-base=$merge_base. Inspect git diff $merge_base..$head and actual source. Validation evidence: .ai/local/validation.json. Return the full Markdown review as the final response. Do not write project files or invoke network/MCP integrations."
-timeout --signal=TERM --kill-after=10s "$limit" codex exec \
-  --ignore-user-config -c 'approval_policy="never"' --sandbox read-only \
-  --output-last-message "$report" "$prompt" > "$events" 2>&1 || \
+# A usage/rate-limit failure pauses until the reset and retries; other failures stop.
+while true; do
+  set +e
+  timeout --signal=TERM --kill-after=10s "$limit" codex exec \
+    --ignore-user-config -c 'approval_policy="never"' --sandbox read-only \
+    --output-last-message "$report" "$prompt" > "$events" 2>&1
+  code=$?
+  set -e
+  (( code != 0 )) || break
+  if (( code != 124 && code != 137 )) && reset=$(ai_helper limit-check "$events"); then
+    ai_limit_pause Codex "$reset"
+    [[ "$(git rev-parse HEAD)" == "$head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
+      ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
+    continue
+  fi
   ai_die "Codex failed; prior review preserved. See $events."
+done
 [[ -s "$report" ]] || ai_die "Codex produced no review; see $events."
 [[ "$(git rev-parse HEAD)" == "$head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
   ai_die 'Checkout changed during review; report kept locally, not published as current.'
 ai_helper publish-review "$report" "$head" "$merge_base"
-printf 'Review saved to .ai/reviews/current.md (HEAD %s). Read it; Claude evaluates findings before fixing.\n' "$head"
+read -r _ blockers majors minors < <(ai_helper review-info)
+printf 'Review saved to .ai/reviews/current.md (HEAD %s): BLOCKER %s, MAJOR %s, MINOR %s. Claude evaluates findings before fixing.\n' \
+  "$head" "$blockers" "$majors" "$minors"
+[[ -n "${AI_PIPELINE:-}" ]] || ai_notify "Codex review done: BLOCKER $blockers, MAJOR $majors, MINOR $minors."

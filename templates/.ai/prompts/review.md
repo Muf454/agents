@@ -11,6 +11,10 @@ Look for requirement gaps, logic bugs, regressions, incorrect assumptions,
 architecture violations, needless complexity, security/auth/authz issues, data
 consistency, races, state bugs, error handling gaps, and missing edge-case tests.
 
+Directly below "Overall verdict:", include exactly one machine-readable line
+`Finding counts: BLOCKER=<n> MAJOR=<n> MINOR=<n>` matching the findings you list;
+the pipeline uses it to decide whether fixes are needed. Count only real findings.
+
 Use the structure in `.ai/reviews/current.md`: overall verdict; BLOCKER, MAJOR,
 MINOR findings; missing coverage; security concerns; architecture concerns; manual
 testing recommendations. Each finding needs a stable ID, problem, location,

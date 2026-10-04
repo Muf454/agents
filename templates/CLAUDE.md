@@ -62,6 +62,9 @@ When implementation is authorized, do not request approval between ordinary task
    git add -A/--all/. or secrets/logs. Never bypass hooks with --no-verify or -n.
 7. Continue to the next unblocked task. Completing one task is not a reason to stop.
 
+Keep `.ai/handoff.md` → "Manual testing for the human" current: `ai-pipeline` puts it
+into the pull request as the human's test instructions.
+
 The bounded runner may request ONE task per invocation. In that mode, checkpoint
 and return after that task: the runner launches a fresh session for the next task.
 Direct interactive sessions continue through the queue themselves.
