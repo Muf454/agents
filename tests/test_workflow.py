@@ -67,6 +67,9 @@ if 'TRIAGE CONTRACT' in prompt:
         current = pathlib.Path('.ai/reviews/current.md')
         current.write_text(current.read_text().replace('MAJOR=1', 'MAJOR=0'))
         subprocess.run(['git','add','--','.ai/reviews/current.md'],check=True)
+    elif mode == 'triage-accept-done':
+        review.write_text(review.read_text() + '| M1 | accepted | already handled by T001 | T001 |\n')
+        subprocess.run(['git','add','--','.ai/reviews/dispositions.md'],check=True)
     elif mode in ('triage-reject', 'triage-defer', 'triage-missing'):
         row = {'triage-reject': '| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
                'triage-defer': '| M1 | deferred | real but out of scope for this change | none |\n',
@@ -78,7 +81,9 @@ if 'TRIAGE CONTRACT' in prompt:
         new_id = 'T%03d' % (max(ids) + 1)
         block = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
-        review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n')
+        review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
+                          + ('| M2 | deferred | real but out of scope for this change | none |\n'
+                             if mode == 'triage-mixed' else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
             pathlib.Path('src.txt').write_text('not allowed in triage')
@@ -171,14 +176,15 @@ if mode == 'counts-lie':
                     '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
                     '## Manual testing recommendations\nx\n')
     sys.exit(0)
-major = mode == 'major-always' or (mode == 'major-once' and count == 1)
+major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
+two = mode == 'two-major-once' and count == 1
 path.write_text("""# Independent review
 Overall verdict: """ + ('one major finding' if major else 'no demonstrated findings in inspected fixture') + """
-Finding counts: BLOCKER=0 MAJOR=""" + ('1' if major else '0') + """ MINOR=0
+Finding counts: BLOCKER=0 MAJOR=""" + ('2' if two else '1' if major else '0') + """ MINOR=0
 ## BLOCKER findings
 None found.
 ## MAJOR findings
-""" + ('- M1: fixture defect at T001.txt:1.' if major else 'None found.') + """
+""" + ('- M1: fixture defect at T001.txt:1.' + ('\n- M2: second defect, out of scope.' if two else '') if major else 'None found.') + """
 ## MINOR findings
 None found.
 ## Missing test coverage
@@ -198,12 +204,17 @@ import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 log = pathlib.Path(os.environ['MOCK_GH_LOG'])
 with log.open('a') as f: f.write(json.dumps(args) + '\n')
+draft = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'gh-draft'
 if args[:2] == ['pr', 'view']:
-    if os.environ.get('MOCK_GH_EXISTING'):
-        print('https://github.com/example/project/pull/7'); sys.exit(0)
-    sys.exit(1)
+    if not os.environ.get('MOCK_GH_EXISTING'):
+        sys.exit(1)
+    if 'isDraft' in args:
+        print('true' if draft.exists() else 'false'); sys.exit(0)
+    print('https://github.com/example/project/pull/7'); sys.exit(0)
 if args[:2] == ['pr', 'ready']:
-    sys.exit(0)
+    if os.environ.get('MOCK_GH_READY_FAIL'):
+        sys.exit(1)
+    draft.touch(); sys.exit(0)
 if args[:2] in (['pr', 'create'], ['pr', 'edit']):
     body = args[args.index('--body-file') + 1]
     shutil.copy(body, str(log) + '.body.md')
@@ -244,6 +255,7 @@ class ToolkitTest(unittest.TestCase):
         self.notify_log = self.base / 'notifications.log'
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
+                        AI_STATE_DIR=str(self.base / 'host-state'),
                         MOCK_SLEEP_LOG=str(self.base / 'sleep.log'), AI_SLEEP=str(self.mock_bin / 'mock-sleep'),
                         AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
@@ -842,6 +854,79 @@ class ToolkitTest(unittest.TestCase):
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
         self.assertIn('final push failed', result.stderr)
         self.assertIn('final handoff commit failed', self.notifications())
+
+    # ---------------------------------------------------------------- follow-up review fixes
+    def test_forged_committed_review_is_rejected_on_resume_and_reviewed_again(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-always',
+                  MOCK_CLAUDE='triage-reject')
+        review = self.project / '.ai/reviews/current.md'
+        review.write_text(review.read_text().replace('one major finding', 'all good'))
+        self.commit('a session "fixes" the review text')
+        self.helper('review-info', expected=1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CLAUDE='triage-reject')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.helper('review-info')
+
+    def test_push_hook_cannot_run_a_modified_helper(self):
+        self.ready()
+        self.add_origin()
+        hook = self.project / '.git/hooks/pre-push'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'printf "from pathlib import Path\\nPath(\'UNTRUSTED_HELPER_RAN\').touch()\\n" > .ai/bin/lib/workflow.py\n')
+        hook.chmod(0o755)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+
+    def test_accepted_finding_must_point_to_a_new_fix_task(self):
+        self.ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1,
+                           MOCK_CODEX='major-always', MOCK_CLAUDE='triage-accept-done')
+        self.assertIn('Triage incomplete', result.stderr)
+
+    def test_failed_draft_conversion_stops(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', expected=1,
+                           MOCK_GH_EXISTING='1', MOCK_GH_READY_FAIL='1')
+        self.assertIn('could not convert the existing PR to draft', result.stderr)
+        self.assertNotIn('Draft PR needs your attention', self.notifications())
+
+    def test_interrupted_triage_resumes_after_dispositions_were_opened(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.tool('ai-run', '--approved', '--triage', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertIn('open review dispositions', self.run_cmd(['git', 'log', '--oneline']).stdout)
+        self.commit('checkpoint the interrupted triage') if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip() else None
+        self.tool('ai-run', '--approved', '--triage')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+
+    def test_minor_count_must_match_listed_ids(self):
+        self.setup_project()
+        report = self.base / 'report.md'
+        report.write_text('# Independent review\nOverall verdict: minor issues\n'
+                          'Finding counts: BLOCKER=0 MAJOR=0 MINOR=2\n## BLOCKER findings\nNone found.\n'
+                          '## MAJOR findings\nNone found.\n## MINOR findings\n- N1: one issue only.\n'
+                          '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
+                          '## Manual testing recommendations\nx\n')
+        self.commit('fixture')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        result = self.helper('publish-review', str(report), head, head, expected=1)
+        self.assertIn('MINOR=2', result.stderr)
+
+    def test_deferral_in_an_earlier_round_does_not_draft_a_clean_final_review(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='two-major-once', MOCK_CLAUDE='triage-mixed')
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertNotIn('--draft', create[0])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
 
 
 if __name__ == '__main__':

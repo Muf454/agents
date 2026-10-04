@@ -100,8 +100,9 @@ ensure_validated() {
 }
 
 ai_notify "Pipeline started on $branch."
-unresolved=0
 while true; do
+  # Derived from the current review each round, so an earlier deferral doesn't stick.
+  unresolved=0
   ai_guard_verify
   if ! ai_helper tasks complete 2>/dev/null; then
     step 'Implementation (Claude)'
@@ -120,8 +121,11 @@ while true; do
   (( blockers + majors > 0 )) || break
   # Dispositions for this exact review already complete (e.g. a rerun after triage)?
   if verdict=$(ai_helper triage-check 2>/dev/null) && ai_helper tasks complete 2>/dev/null; then
-    [[ "$verdict" == deferred ]] && unresolved=1
-    printf 'Findings already triaged without open fix tasks (%s).\n' "$verdict"
+    read -r accepted deferred <<< "${verdict//[a-z=]/ }"
+    # Accepted fixes always need a new review; if the review is still current, the
+    # "fixes" changed nothing reviewable: hand it to the human as a draft.
+    if (( accepted > 0 || deferred > 0 )); then unresolved=1; fi
+    printf 'Findings already triaged (%s) and the review is still current.\n' "$verdict"
     break
   fi
   fixes=$(count_commits '^chore(ai): record review triage')
@@ -137,10 +141,11 @@ while true; do
   done
   "$AI_BIN/ai-run" --approved --triage "${triage_args[@]}" || stop triage
   ai_guard_verify
-  verdict=$(ai_helper triage-check) || stop triage
-  [[ "$verdict" == deferred ]] && unresolved=1
-  if ai_helper tasks complete 2>/dev/null; then
+  verdict=$(ai_helper triage-check --fresh) || stop triage
+  read -r accepted deferred <<< "${verdict//[a-z=]/ }"
+  if (( accepted == 0 )); then
     # Every significant finding was rejected (with evidence) or deferred.
+    if (( deferred > 0 )); then unresolved=1; fi
     printf 'Triage added no fix tasks (%s); dispositions are recorded.\n' "$verdict"
     break
   fi
@@ -162,6 +167,7 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   exit 0
 fi
 git push -u origin "$branch" || { printf '%s\n' 'git push failed' > .ai/local/last-error; stop push; }
+ai_guard_verify  # push hooks run project code too
 if ! command -v gh >/dev/null; then
   ai_notify "Branch $branch pushed. Install the GitHub CLI (gh) to open PRs automatically."
   exit 0
@@ -173,9 +179,11 @@ make_draft=no
 if [[ "$draft" == yes || "$unresolved" == 1 ]]; then make_draft=yes; fi
 if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" ]]; then
   gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
-  if [[ "$make_draft" == yes ]]; then
+  if [[ "$make_draft" == yes && "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" != true ]]; then
     # Never leave an existing ready PR "ready" when the policy says draft.
-    gh pr ready --undo "$branch" >/dev/null 2>&1 || true
+    gh pr ready --undo "$branch" >/dev/null 2>&1 && \
+      [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
+      { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
   fi
 else
   pr_args=(--title "$title" --body-file "$body" --base "$pr_base")
@@ -185,7 +193,7 @@ fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'
 host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md
-if ! git push origin "$branch" >/dev/null 2>&1; then
+if ! git push origin "$branch" >/dev/null 2>&1 || ! ai_guard_verify; then
   ai_notify "PR is open ($url), but pushing the final handoff commit failed. Rerun ai-pipeline."
   ai_die "PR open at $url, but the final push failed; rerun ai-pipeline to publish the handoff."
 fi
