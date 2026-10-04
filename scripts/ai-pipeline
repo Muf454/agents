@@ -50,6 +50,11 @@ ai_root
 ai_lock
 export AI_LOCK_HELD=$$
 rm -f .ai/local/last-error
+# Liveness marker for ai-watchdog: removed by ai_die and finish, so one left behind
+# with no runner alive means the pipeline was killed or the machine restarted.
+AI_PIPELINE_MARKER=.ai/local/pipeline.active
+printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
+finish() { rm -f -- "$AI_PIPELINE_MARKER"; exit 0; }
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
 base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
@@ -158,20 +163,20 @@ reviews=$(count_commits '^chore(ai): record independent review')
 if [[ "$open_pr" != yes ]]; then
   ai_notify "Done on $branch: validated and reviewed ($reviews review round(s)); no PR requested."
   printf '%s\n' 'Pipeline complete (no PR requested).'
-  exit 0
+  finish
 fi
 step 'Pull request'
 if ! git remote get-url origin >/dev/null 2>&1; then
   ai_notify "Done on $branch, but there is no 'origin' remote to open a PR on."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
-  exit 0
+  finish
 fi
 git push -u origin "$branch" || { printf '%s\n' 'git push failed' > .ai/local/last-error; stop push; }
 ai_guard_verify  # push hooks run project code too
 ai_helper review-info >/dev/null || stop 'pull request (review integrity)'
 if ! command -v gh >/dev/null; then
   ai_notify "Branch $branch pushed. Install the GitHub CLI (gh) to open PRs automatically."
-  exit 0
+  finish
 fi
 title=$(ai_helper pr-title)
 body=$(mktemp .ai/local/pr-XXXXXXXX.md)
@@ -204,3 +209,4 @@ else
   ai_notify "PR ready for testing: $url"
 fi
 printf 'Pull request: %s\n' "$url"
+finish
