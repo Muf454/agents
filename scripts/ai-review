@@ -65,6 +65,11 @@ if [[ "$plan" == yes ]]; then
   prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
   codex_review "$prompt"
   ai_helper publish-plan-review "$report" "$digest"
+  # Run by hand, record it like the pipeline does, so the checkout stays clean for ai-pipeline.
+  if [[ -z "${AI_PIPELINE:-}" ]]; then
+    git add -- .ai/reviews/plan.md
+    git commit -q -m 'chore(ai): record plan review' -- .ai/reviews/plan.md
+  fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
   printf 'Plan review saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' "$blockers" "$majors" "$minors"
   exit 0

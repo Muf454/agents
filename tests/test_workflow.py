@@ -40,6 +40,7 @@ assert '--permission-mode' in args and args[args.index('--permission-mode')+1] =
 assert '--' in args
 prompt = args[args.index('--')+1]
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
+assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with cd' in prompt
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -868,6 +869,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(log.count('record independent review'), 1)
         self.assertIn('Pipeline started', self.notifications())
         self.assertIn('PR ready for testing: https://github.com/example/project/pull/7', self.notifications())
+        self.assertIn('Done: T001 Verify T001 (1/1 done)', self.notifications())
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
     def test_pipeline_fixes_major_findings_then_reviews_again(self):
@@ -962,6 +964,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for call in calls:
             self.assertIn('-c model_reasoning_effort="high" --model gpt-test', call)
         self.tool('ai-review', '--plan', expected=1, AI_REVIEW_EFFORT='turbo')
+        self.tool('ai-review', '--plan')  # by hand: committed, checkout stays clean
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('record plan review', self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout)
 
     def test_plan_review_stops_if_commit_hook_changes_reviewed_content(self):
         self.ready()
