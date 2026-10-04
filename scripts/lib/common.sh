@@ -113,6 +113,8 @@ ai_guard_verify() {
 }
 ai_lock() {
   # One writer/reviewer per checkout. Kernel releases locks on exit or crash.
+  # ai-pipeline holds this lock for its whole run; its direct children skip it.
+  if [[ -n "${AI_LOCK_HELD:-}" && "$AI_LOCK_HELD" == "$PPID" ]]; then return 0; fi
   exec 9>.ai/local/workflow.lock
   flock -n 9 || ai_die 'Another runner/reviewer owns this checkout.'
 }

@@ -14,6 +14,8 @@ consistency, races, state bugs, error handling gaps, and missing edge-case tests
 Directly below "Overall verdict:", include exactly one machine-readable line
 `Finding counts: BLOCKER=<n> MAJOR=<n> MINOR=<n>` matching the findings you list;
 the pipeline uses it to decide whether fixes are needed. Count only real findings.
+Start every finding with its stable ID as a heading or bullet (`### B1 — ...`,
+`- M2: ...`); counts must match the listed IDs or the report is rejected.
 
 Use the structure in `.ai/reviews/current.md`: overall verdict; BLOCKER, MAJOR,
 MINOR findings; missing coverage; security concerns; architecture concerns; manual

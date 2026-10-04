@@ -102,7 +102,8 @@ acceptance steps, and set `Phase: ready_for_review`. This is not human acceptanc
 
 ## Independent review and fixes
 
-Read `.ai/reviews/current.md` and evaluate each finding against repository reality,
+Read `.ai/reviews/current.md` (never edit it; record decisions in
+`.ai/reviews/dispositions.md`) and evaluate each finding against repository reality,
 the spec, architecture, and tests. Do not blindly obey Codex. Add tasks for valid
 BLOCKER/MAJOR findings, record accepted/rejected/deferred dispositions and reasons,
 fix valid findings, and rerun checks. Keep findings and evidence intact. A rejection

@@ -22,7 +22,8 @@ line `Finding counts: BLOCKER=<n> MAJOR=<n> MINOR=<n>` under the verdict. Classi
 - MAJOR: significant correctness/requirement/regression gap requiring a fix.
 - MINOR: localized lower-impact issue or improvement.
 
-Each finding has a stable ID, problem, location (`path:line`), why it matters,
+Start each finding with its stable ID as a heading or bullet (e.g. `### M1 — ...`),
+then the problem, location (`path:line`), why it matters,
 evidence/reproduction where practical, and recommended direction. Record validation
 actually observed, commands not run, scope limitations, missing tests, security
 and architecture concerns, manual testing recommendations, and overall verdict.

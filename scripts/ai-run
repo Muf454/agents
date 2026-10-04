@@ -84,6 +84,8 @@ dirty_beyond_records() {
   git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
 
+review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
+
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
 knowledge_prompt() {
@@ -95,7 +97,7 @@ knowledge_prompt() {
 
 # One fresh Claude session; a usage/rate-limit error pauses until the reset and retries.
 claude_session() {
-  local prompt=$1 session_model=$2 limit code reset log errors remaining
+  local prompt=$1 session_model=$2 limit code reset log errors remaining review_before
   local model_args=()
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
   while true; do
@@ -105,6 +107,7 @@ claude_session() {
     (( limit <= remaining )) || limit=$remaining
     log=$(mktemp .ai/local/claude-XXXXXXXX.json)
     errors="${log%.json}.stderr.log"
+    review_before=$(review_digest)
     printf 'Session: %s%s (limit %ss; log %s)\n' "$active_task" \
       "${session_model:+ [model $session_model]}" "$limit" "$log"
     set +e
@@ -117,6 +120,9 @@ claude_session() {
     code=$?
     set -e
     ai_guard_verify
+    # The independent review is Codex's evidence; no Claude session may alter it.
+    [[ "$(review_digest)" == "$review_before" ]] || \
+      ai_die 'A Claude session modified .ai/reviews/current.md; inspect and restore the Codex report.'
     if (( code != 124 && code != 137 )) && ! ai_helper claude-result "$log" --check-only 2>/dev/null; then
       # Only a failed session is checked for limit messages (normal output may mention limits).
       if reset=$(ai_helper limit-check "$log" "$errors"); then
@@ -133,11 +139,16 @@ claude_session() {
 if [[ "$triage" == yes ]]; then
   # Evaluate the current review into dispositions and new tasks. No implementation.
   [[ -f .ai/reviews/current.md ]] || ai_die 'No review to triage.'
-  ai_helper review-info >/dev/null || ai_die 'Current review was not produced by ai-review.'
-  before=$(git rev-parse HEAD)
+  reviewed=$(ai_helper review-info) || ai_die 'Current review was not produced by ai-review.'
   active_task=triage
+  # Host-written dispositions file bound to this review; Claude fills in the rows.
+  ai_helper start-dispositions "${reviewed%% *}"
+  git add -- .ai/reviews/dispositions.md
+  git commit -m 'chore(ai): open review dispositions' >/dev/null
+  ai_guard_verify
+  before=$(git rev-parse HEAD)
   prompt=$(cat .ai/prompts/triage.md)
-  prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md only. Record a disposition for every BLOCKER/MAJOR finding (and MINOR where relevant). Append new TODO tasks with new IDs for accepted findings. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the review and task changes, then return.'
+  prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
   prompt+=$(knowledge_prompt)
   claude_session "$prompt" "$model"
   ai_branch
@@ -145,9 +156,10 @@ if [[ "$triage" == yes ]]; then
   [[ -z "$(dirty_beyond_records)" ]] || \
     ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
   # Triage may only touch workflow records, never source, tests, or the gate.
-  changed=$(git diff --name-only "$before" HEAD -- . ':!.ai/tasks.md' ':!.ai/reviews/current.md' \
+  changed=$(git diff --name-only "$before" HEAD -- . ':!.ai/tasks.md' ':!.ai/reviews/dispositions.md' \
     ':!.ai/state.md' ':!.ai/handoff.md' ':!.ai/run-log.md' ':!.ai/current-plan.md')
   [[ -z "$changed" ]] || ai_die "Triage changed files outside workflow records: $(tr '\n' ' ' <<< "$changed")"
+  ai_helper triage-check >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md

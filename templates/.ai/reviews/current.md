@@ -24,6 +24,5 @@ evidence/reproduction, recommended direction. “None found” if actually inspe
 
 ## Manual testing recommendations
 
-## Finding dispositions (Claude)
-<!-- Finding ID | accepted/rejected/deferred | evidence/reason | fix task | validation.
-Preserve the original findings. Rejected findings require concrete evidence. -->
+<!-- Claude's dispositions live in .ai/reviews/dispositions.md; this report is never
+edited after the host saves it. -->
