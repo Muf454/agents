@@ -289,6 +289,7 @@ class ToolkitTest(unittest.TestCase):
         template.write_text(task('TXXX'))
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
+        self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
                         AI_STATE_DIR=str(self.base / 'host-state'),
@@ -555,6 +556,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog(expected=1)
         self.assertIn('⛔ STOPPED, needs you: Stopped: Codex failed', self.notifications())
 
+    def test_watchdog_waits_for_a_live_runner_before_reporting_a_stop(self):
+        self.setup_project()
+        error = self.project / '.ai/local/last-error'
+        error.parent.mkdir(exist_ok=True)
+        error.write_text('stopped during review')
+        runner = self.watchdog_runner()
+        self.watchdog()  # still running (e.g. recovery deciding): nothing to report yet
+        self.assertEqual(self.notifications(), '')
+        runner.kill()
+        runner.wait()
+        self.watchdog(expected=1)
+        self.assertIn('⛔ STOPPED, needs you: Stopped: stopped during review', self.notifications())
+
     def test_watchdog_install_and_uninstall_timer(self):
         project = self.base / 'my 100% project'
         project.mkdir()
@@ -571,6 +585,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         service = units[0].read_text()
         exec_start = next(line for line in service.splitlines() if line.startswith('ExecStart='))
         self.assertIn('"' + str(project).replace('%', '%%') + '"', exec_start)
+        host = self.base / 'xdg-data/ai-toolkit/watchdog' / units[0].stem
+        self.assertIn('"' + str(host / 'bin/ai-watchdog') + '"', exec_start)
+        self.assertTrue((host / 'bin/lib/common.sh').is_file())
         self.assertIn('"--stale-minutes" "90" "--diagnose"', exec_start)
         self.assertIn('SuccessExitStatus=1', service)
         self.assertIn('Unit=' + units[0].name, units[1].read_text())
@@ -578,6 +595,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(calls, ['--user daemon-reload', '--user enable --now ' + units[1].name])
         self.watchdog('--uninstall-timer')
         self.assertEqual(list((self.config / 'systemd/user').iterdir()), [])
+        self.assertFalse(host.exists())
         self.assertIn('--user disable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
         self.watchdog('--install-timer', '--uninstall-timer', expected=2)
         self.watchdog('--install-timer')
@@ -1178,7 +1196,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             (dict(ok, result='{"action": "delete_branch", "reason": "x"}'), '0', 'escalate'),
             (dict(ok, result='{"action": "rerun"}'), '0', 'escalate'),  # no reason
             (dict(ok, result=['not', 'a', 'string']), '0', 'escalate'),
+            (dict(ok, result='{"action": "escalate", "reason": "x", "n": {"action": "commit_and_rerun"}}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "escalate", "action": "rerun", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='Decision:\n```json\n{"action": "rerun", "reason": "crash"}\n```'), '0', 'rerun'),
         ]
+        log.write_text(json.dumps(['not', 'an', 'envelope']))
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
         for envelope, code, expected in cases:
             log.write_text(json.dumps(envelope))
             self.assertEqual(self.helper('recover-decision', str(log), code).stdout.split('\t')[0], expected, envelope)
@@ -1211,6 +1234,60 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         'git diff --cached --name-only | grep -q T001.txt || exit 0\n'
                         'echo sneaky > sneaky.txt && git add sneaky.txt\n')
         hook.chmod(0o755)
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def test_recovery_signal_and_rejected_process_handling(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        marker = self.project / '.ai/local/pipeline.active'
+        # A second recovery that can't get the lock leaves the live run's marker alone.
+        marker.write_text('999999\n')
+        lock = subprocess.Popen(['flock', '-o', str(self.project / '.ai/local/workflow.lock'), 'sleep', '30'])
+        self.addCleanup(lambda: (lock.kill(), lock.wait()))
+        import time
+        time.sleep(0.3)
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertEqual(marker.read_text(), '999999\n')
+        self.assertIn('Claude session failed', (self.project / '.ai/local/last-error').read_text())
+        lock.kill()
+        lock.wait()
+        # A killed recovery still sends exactly one final ⛔ and drops its own marker.
+        slow = self.mock_bin / 'slow-claude'
+        (self.mock_bin / 'claude').rename(slow)
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nsleep 3\n')
+        (self.mock_bin / 'claude').chmod(0o755)
+        before = self.notifications().count('⛔')
+        recover = subprocess.Popen([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
+                                   cwd=self.project, env=dict(self.env, AI_AUTO_RECOVER='1'),
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for _ in range(100):
+            if marker.exists() and marker.read_text().strip() == str(recover.pid):
+                break
+            time.sleep(0.05)
+        recover.terminate()
+        out = recover.communicate(timeout=60)[0].decode()
+        self.assertEqual(self.notifications().count('⛔') - before, 1, out + self.notifications())
+        self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
+        self.assertFalse(marker.exists())
+
+    def test_recovery_restores_the_approved_runs_settings(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_RECOVER_MAX'], '1')
+        self.assertEqual(manifest['env']['AI_AUTO_RECOVER'], '1')
+        # Started without those settings (as a detached service would be), it uses the approved ones.
+        self.tool('ai-recover', '--stage', 'implementation', expected=1)
+        self.assertIn('already tried 1 time(s)', self.notifications())
+
+    def test_committed_content_must_match_validated_files(self):
+        self.ready()
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        self.commit('filter')
         self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
         self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
 

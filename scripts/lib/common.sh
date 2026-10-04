@@ -2,6 +2,12 @@
 # Shared by the toolkit scripts and their copies in .ai/bin/.
 set -euo pipefail
 AI_BIN=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Remove the liveness marker only if this process owns it (a rejected second process
+# must never erase a live pipeline's marker).
+ai_drop_marker() {
+  [[ -n "${AI_PIPELINE_MARKER:-}" && "$(cat -- "$AI_PIPELINE_MARKER" 2>/dev/null)" == "$$" ]] || return 0
+  rm -f -- "$AI_PIPELINE_MARKER"
+}
 ai_die() {
   printf 'Error: %s\n' "$*" >&2
   # Last error for the pipeline/notifications; best effort, never fatal.
@@ -11,7 +17,7 @@ ai_die() {
     [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
     AI_STOP_NOTIFIED=1
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
-    rm -f -- "$AI_PIPELINE_MARKER"
+    ai_drop_marker
   fi
   # Tells ai-watchdog this stop was announced (written after last-error, so it is newer).
   [[ -z "${AI_STOP_NOTIFIED:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
@@ -139,7 +145,11 @@ ai_lock() {
   # ai-pipeline <-> ai-recover hand over by exec: same PID, lock still held on fd 9.
   if [[ "${AI_LOCK_HELD:-}" == "$$" && -e /proc/$$/fd/9 ]] && flock -n 9; then return 0; fi
   exec 9>.ai/local/workflow.lock
-  flock -n 9 || ai_die 'Another runner/reviewer owns this checkout.'
+  if ! flock -n 9; then
+    # A second recovery must not overwrite the real stop reason in last-error.
+    [[ -z "${AI_LOCK_QUIET:-}" ]] || { printf '%s\n' 'Another runner owns this checkout; nothing to recover.' >&2; exit 1; }
+    ai_die 'Another runner/reviewer owns this checkout.'
+  fi
 }
 ai_branch() {
   local branch

@@ -544,7 +544,8 @@ systemctl --user list-timers 'ai-watchdog-*'
 
 `--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
 `~/.config/systemd/user/` with the absolute checkout path, the given options and the
-installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings (so the timer
+installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and runs a copy of
+the scripts kept outside the checkout (rerun `--install-timer` after updating the toolkit) (so the timer
 finds `claude`, `curl` and your notification command; the unit file is readable like your
 user config). Notification
 settings come from the user config described above. Existing projects need the new

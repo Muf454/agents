@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import tempfile
 import subprocess
 import sys
@@ -133,16 +134,23 @@ def timer(root, args, install):
         result = subprocess.run(['systemctl', '--user', *command])
         if result.returncode:
             sys.exit(f'systemctl --user {" ".join(command)} failed (exit {result.returncode})')
+    # The timer runs a host copy of the toolkit scripts (outside the checkout), so the code
+    # that verifies the gate before crash recovery is never code an agent session could edit.
+    host = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'ai-toolkit' / 'watchdog' / name
     if not install:
         if timer_unit.exists():
             systemctl('disable', '--now', timer_unit.name)  # exits before removing anything
         for unit in (service, timer_unit):
             unit.unlink(missing_ok=True)
+        shutil.rmtree(host, ignore_errors=True)
         systemctl('daemon-reload')
         print('Removed ' + name)
         return 0
-    command = [str(Path(__file__).resolve().parent.parent / 'ai-watchdog'), str(root),
-               '--stale-minutes', str(args.stale_minutes)]
+    if host.exists():
+        shutil.rmtree(host)
+    shutil.copytree(Path(__file__).resolve().parent.parent, host / 'bin',
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    command = [str(host / 'bin' / 'ai-watchdog'), str(root), '--stale-minutes', str(args.stale_minutes)]
     if args.recover:
         command += ['--recover']
     if args.diagnose:
@@ -163,7 +171,8 @@ def timer(root, args, install):
         '[Install]\nWantedBy=timers.target\n')
     systemctl('daemon-reload')
     systemctl('enable', '--now', timer_unit.name)
-    print(f'Installed {timer_unit}\nRemove with: {shlex.quote(command[0])} {shlex.quote(str(root))} --uninstall-timer')
+    print(f'Installed {timer_unit} (scripts copied to {host}; reinstall after updating the toolkit)\n'
+          f'Remove with: {shlex.quote(str(root / ".ai/bin/ai-watchdog"))} {shlex.quote(str(root))} --uninstall-timer')
     return 0
 
 
@@ -183,6 +192,7 @@ def start_recovery(root, local, marker):
     recovery confirmed it took over, else the reason it didn't (the human must be told)."""
     if os.environ.get('AI_AUTO_RECOVER', '1') == '0':
         return 'auto-recovery is off'
+    # Verify with THIS copy's code (the host copy --install-timer made), not checkout code.
     bin_dir = Path(__file__).resolve().parent.parent
     common = bin_dir / 'lib' / 'common.sh'
     # Same check ai-pipeline does before handing over: only approved gate code may run.
@@ -196,11 +206,12 @@ def start_recovery(root, local, marker):
     if not error.exists():
         save(error, 'ai-pipeline was killed, crashed or the machine restarted\n')
     before = marker_snapshot(marker)
+    launched_ns = time.time_ns()
     unit = f'ai-recover-{re.sub(r"[^A-Za-z0-9_.-]+", "-", root.name)}-{int(time.time())}'
     command = ['systemd-run', '--user', '--collect', '--quiet', '--service-type=exec', '--unit=' + unit,
                '--working-directory=' + str(root)]
     command += ['--setenv=' + key + '=' + value for key, value in sorted(forwarded_env().items())]
-    command += ['--', str(bin_dir / 'ai-recover'), '--stage', 'crash (pipeline killed or restarted)']
+    command += ['--', str(root / '.ai' / 'bin' / 'ai-recover'), '--stage', 'crash (pipeline killed or restarted)']
     try:
         if subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True).returncode:
             return 'auto-recovery could not be started (systemd-run failed)'
@@ -209,7 +220,8 @@ def start_recovery(root, local, marker):
     # Hand over notification duty only once ai-recover owns the marker (or escalated).
     deadline = time.monotonic() + float(os.environ.get('AI_RECOVER_ACK_SECONDS', '20'))
     while time.monotonic() < deadline:
-        if marker_snapshot(marker) != before:
+        # Took over the marker, or already escalated with its own ⛔.
+        if marker_snapshot(marker) != before or mtime(local / 'last-error.notified') >= launched_ns:
             return None
         time.sleep(0.2)
     return 'auto-recovery did not confirm it started within 20 seconds'
@@ -308,7 +320,8 @@ def main():
             incidents['hung:' + identity + ':' + str(quiet_since)] = (
                 f'⚠ HUNG? A runner is alive but has logged nothing for over {args.stale_minutes} minutes. '
                 'It keeps running; check it.')
-        if error_time > previous.get('notified_at_ns', 0):
+        # A stop while a runner/recovery is still alive isn't final yet: judge it once it ends.
+        if error_time > previous.get('notified_at_ns', 0) and not alive:
             incidents['stop:' + str(error_time)] = 'Stopped: ' + (' '.join(read(error).split())[:500] or 'see .ai/local')
         # Keep an already acknowledged stop active until the file changes/disappears.
         stop_key = 'stop:' + str(error_time)
