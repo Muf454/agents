@@ -233,12 +233,22 @@ committed tree to match the validation stamp (a commit hook can't sneak content 
 `ai-pipeline` with the saved arguments and `AI_RECOVERY_ATTEMPT=n`, which refuses to
 start if the gate digest differs from the approved one. Escalation sends one
 `⛔ STOPPED, needs you` with the reason and next step, records `last-error` and removes
-the marker. `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
-stamp check after the commit. `ai-watchdog --recover` launches `ai-recover` via
+the marker. The manifest also stores the run's effective `AI_*` settings (notify command, models,
+budgets), which `ai-recover` restores, so a resume behaves like the approved run. Order in
+`ai-recover`: take the lock (a rejected second process exits quietly and touches neither
+`last-error` nor the marker), reserve the attempt, then publish the marker; TERM/INT/HUP
+handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
+(HEAD blobs equal the unfiltered bytes on disk, defeating clean/smudge filters).
+`ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
+checks after the commit. The timer runs a host copy of `.ai/bin`
+(`$XDG_DATA_HOME/ai-toolkit/watchdog/<unit>/bin`, refreshed by `--install-timer`), so the
+code that verifies the gate before crash recovery isn't checkout code; it then launches the
+checkout's `ai-recover`. `ai-watchdog --recover` launches `ai-recover` via
 `systemd-run --service-type=exec` only if the gate digest matches the manifest, forwards
 `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and keeps notification duty until
 `ai-recover` takes over the marker (20 s), otherwise it reports ⛔ with the reason. It
-re-announces a stop only if the runner didn't (`.ai/local/last-error.notified`).
+re-announces a stop only if the runner didn't (`.ai/local/last-error.notified`), and only
+once no runner or recovery is alive.
 
 ## Review and fixes
 

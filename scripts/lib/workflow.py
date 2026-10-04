@@ -574,7 +574,9 @@ def run_manifest(arguments):
         if not re.fullmatch(r'[0-9a-f]{64}', gate):
             fail('Invalid gate digest.')
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0}) + '\n')
+        settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
+        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0,
+                                 'env': settings}) + '\n')
         return
     try:
         data = json.loads(path.read_text())
@@ -592,6 +594,11 @@ def run_manifest(arguments):
         print(data['branch'])
     elif action == 'args':
         sys.stdout.write(''.join(arg + '\0' for arg in data['args']))
+    elif action == 'env':
+        # The approved run's settings, so a resume behaves like the run the human started.
+        settings = data.get('env') if isinstance(data.get('env'), dict) else {}
+        sys.stdout.write(''.join(f'{key}={value}\0' for key, value in settings.items()
+                                 if key in RUN_SETTINGS and isinstance(value, str) and '\0' not in value))
     elif action == 'reserve-attempt':
         # Reserved before any fallible recovery work, so failures can't retry for free.
         data['attempts'] += 1
@@ -628,43 +635,80 @@ def review_info_values():
 
 
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
+# Settings captured with the approved run and restored for its resumes.
+RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_AUTO_RECOVER',
+                'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
+
+
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError('duplicate key')
+    return dict(pairs)
 
 
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
-    Only a successful claude exit, a success envelope and exactly one valid decision
-    object count; everything else escalates."""
+    Only a successful claude exit, a success envelope and exactly ONE complete decision
+    object (no duplicate keys; the span from the first '{' to the last '}') count.
+    Everything else escalates."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
     try:
         envelope = json.loads(Path(log).read_text())
     except (OSError, ValueError):
+        envelope = None
+    if not isinstance(envelope, dict) or exit_code != '0' or envelope.get('is_error') is not False \
+            or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
-    result = envelope.get('result') if isinstance(envelope, dict) else None
-    if exit_code != '0' or envelope.get('is_error') is not False or envelope.get('subtype') != 'success' \
-            or not isinstance(result, str):
+    text = envelope['result']
+    start, end = text.find('{'), text.rfind('}')
+    try:
+        decision = json.loads(text[start:end + 1], object_pairs_hook=_no_duplicate_keys) if start >= 0 else None
+    except ValueError:
+        decision = None
+    if not isinstance(decision, dict):
         print(escalate)
         return
-    decisions = []
-    for match in re.finditer(r'\{[^{}]*\}', result):
-        try:
-            candidate = json.loads(match.group(0))
-        except ValueError:
-            continue
-        if isinstance(candidate, dict) and 'action' in candidate:
-            decisions.append(candidate)
-    if len(decisions) != 1:
-        print(escalate)
-        return
-    decision = decisions[0]
     fields = (decision.get('action'), decision.get('reason'), decision.get('human_action', ''))
-    if decision['action'] not in RECOVER_ACTIONS or not all(isinstance(f, str) for f in fields) \
+    if fields[0] not in RECOVER_ACTIONS or not all(isinstance(f, str) for f in fields) \
             or not fields[1].strip():
         print(escalate)
         return
     clean = lambda value: ' '.join(value.split())[:300]
     print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
+
+
+def committed_matches_worktree(arguments):
+    """The HEAD tree holds exactly the bytes on disk (what validation hashed). Catches
+    clean/smudge filters and hooks that commit something other than what was validated."""
+    entries = [entry for entry in git('ls-tree', '-r', '-z', 'HEAD').split(b'\0') if entry]
+    files, expected = [], {}
+    for entry in entries:
+        meta, raw = entry.split(b'\t', 1)
+        mode, _, sha = meta.decode().split()
+        name = os.fsdecode(raw)
+        if mode == '160000':
+            continue  # submodule: its own HEAD is checked by validation
+        if mode == '120000':
+            if not Path(name).is_symlink():
+                fail(f'Committed symlink differs on disk: {name}')
+            actual = subprocess.run(['git', 'hash-object', '--no-filters', '--stdin'], check=True,
+                                    input=os.fsencode(os.readlink(name)), capture_output=True).stdout.decode().strip()
+            if actual != sha:
+                fail(f'Committed symlink differs on disk: {name}')
+            continue
+        if '\n' in name or not Path(name).is_file() or Path(name).is_symlink():
+            fail(f'Committed file differs on disk: {name}')
+        files.append(name)
+        expected[name] = sha
+    if files:
+        hashes = subprocess.run(['git', 'hash-object', '--no-filters', '--stdin-paths'], check=True,
+                                input='\n'.join(files).encode(), capture_output=True).stdout.decode().split()
+        for name, actual in zip(files, hashes):
+            if actual != expected[name]:
+                fail(f'Committed content of {name} differs from the validated file on disk.')
 
 
 def finish_summary(arguments):
@@ -904,6 +948,8 @@ def main():
         review_info(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'committed-matches-worktree':
+        committed_matches_worktree(arguments)
     elif command == 'recover-decision':
         recover_decision(arguments)
     elif command == 'finish-summary':

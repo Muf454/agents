@@ -58,7 +58,7 @@ AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 finish() {
   ai_helper run-manifest clear-attempts 2>/dev/null || true
-  rm -f -- "$AI_PIPELINE_MARKER"
+  ai_drop_marker
   exit 0
 }
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
