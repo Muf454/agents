@@ -260,9 +260,9 @@ def task_command(arguments):
         if not blocks or any(task['status'] != 'DONE' for task in blocks):
             fail('Task queue is not complete.')
     elif action == 'untouched':
-        # The approved plan has not been started: the moment to review it.
-        if not blocks or any(task['status'] != 'TODO' for task in blocks):
-            fail('Implementation has started (or there are no tasks).')
+        # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
+        if not blocks or any(task['status'] == 'DONE' for task in blocks):
+            fail('A task is already DONE (or there are no tasks).')
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -575,15 +575,18 @@ def review_info(arguments):
     print(head.group(1), *review_counts(content))
 
 
-PLAN_FILES = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md')
 PLAN_REVIEW = Path('.ai/reviews/plan.md')
+# Workflow records that change without changing what the plan review judged.
+PLAN_BOOKKEEPING = ('.ai/reviews/', '.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')
 
 
 def plan_digest():
-    digest = hashlib.sha256()
-    for name in PLAN_FILES:
-        digest.update(name.encode() + b'\0' + Path(name).read_bytes() + b'\0')
-    return digest.hexdigest()
+    """Digest of the committed tree the plan review judged: spec, plan, tasks, source,
+    validation and prompts (the review reads all of them), minus workflow bookkeeping."""
+    entries = git('ls-tree', '-r', '-z', 'HEAD').split(b'\0')
+    kept = [entry for entry in entries if entry and not
+            entry.split(b'\t', 1)[1].decode(errors='replace').startswith(PLAN_BOOKKEEPING)]
+    return hashlib.sha256(b'\0'.join(kept)).hexdigest()
 
 
 def publish_plan_review(arguments):
@@ -593,7 +596,12 @@ def publish_plan_review(arguments):
         if field not in content:
             fail(f'Plan review is missing {field}; inspect the local report.')
     review_counts(content)
-    atomic(PLAN_REVIEW, f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + content)
+    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + content
+    atomic(PLAN_REVIEW, content)
+    # Host-side binding, like implementation reviews: an edited report is not a review.
+    directory = binding_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic(directory / f'plan-{arguments[1]}.sha256', hashlib.sha256(content.encode()).hexdigest() + '\n')
 
 
 def plan_review_info(arguments):
@@ -602,7 +610,11 @@ def plan_review_info(arguments):
         fail('No plan review yet.')
     content = PLAN_REVIEW.read_text()
     reviewed = re.search(r'Plan review of plan digest ([0-9a-f]{64});', content)
-    print('current' if reviewed and reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
+    binding = binding_dir() / f'plan-{reviewed.group(1)}.sha256' if reviewed else None
+    if not binding or not binding.exists() or \
+            binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        fail('Plan review does not match the report ai-review published; Codex must review again.')
+    print('current' if reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
 
 
 LIMIT_TEXT = re.compile(
