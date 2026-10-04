@@ -9,9 +9,12 @@ ai_die() {
   if [[ -n "${AI_PIPELINE_MARKER:-}" ]]; then
     # The pipeline shell itself is stopping for good: say so unless stop() already did.
     [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
+    AI_STOP_NOTIFIED=1
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     rm -f -- "$AI_PIPELINE_MARKER"
   fi
+  # Tells ai-watchdog this stop was announced (written after last-error, so it is newer).
+  [[ -z "${AI_STOP_NOTIFIED:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
   exit 1
 }
 
@@ -133,6 +136,8 @@ ai_lock() {
   # One writer/reviewer per checkout. Kernel releases locks on exit or crash.
   # ai-pipeline holds this lock for its whole run; its direct children skip it.
   if [[ -n "${AI_LOCK_HELD:-}" && "$AI_LOCK_HELD" == "$PPID" ]]; then return 0; fi
+  # ai-pipeline <-> ai-recover hand over by exec: same PID, lock still held on fd 9.
+  if [[ "${AI_LOCK_HELD:-}" == "$$" && -e /proc/$$/fd/9 ]] && flock -n 9; then return 0; fi
   exec 9>.ai/local/workflow.lock
   flock -n 9 || ai_die 'Another runner/reviewer owns this checkout.'
 }

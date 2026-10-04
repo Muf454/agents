@@ -72,6 +72,7 @@ on_exit() {
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
       ai_notify "⛔ STOPPED, needs you: runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+    [[ -n "${AI_PIPELINE:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
   fi
 }
 trap on_exit EXIT
@@ -131,7 +132,7 @@ claude_session() {
       fi
     fi
     (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error). Preserve partial work; see $log and $errors."
-    ai_helper claude-result "$log" || ai_die 'Claude reported an error or denied tools; inspect logs.'
+    ai_helper claude-result "$log" || ai_die "Claude session failed or reported an error; see $log."
     return 0
   done
 }
@@ -236,6 +237,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
         git add --all -- .
         git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
         ai_guard_verify
+        # A commit hook must not have slipped unvalidated content into that checkpoint.
+        [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null || \
+          ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
         ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it."
       fi
       ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
