@@ -175,6 +175,17 @@ tmux new -s my-app-ai
 .ai/bin/ai-pipeline --approved --base main --model sonnet
 ```
 
+0. **Plan review**: until the first task is DONE, Codex reviews the spec, plan and tasks
+   read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
+   is committed as `.ai/reviews/plan.md`. BLOCKER/MAJOR findings stop the run with a
+   notification before any Claude usage is spent: revise the plan and rerun, or pass
+   `--skip-plan-review` (on every rerun) to proceed anyway. The verdict is reused while
+   the committed tree is unchanged apart from workflow records; any plan, source or
+   validation change is reviewed again. Like implementation reviews, the report is
+   bound to a digest stored outside the checkout, so an edited report doesn't count.
+   The gate covers a branch's plan before its first task is DONE (later fix tasks from
+   review triage are covered by the implementation review). If you revise the plan
+   mid-branch, run `.ai/bin/ai-review --plan` yourself before rerunning.
 1. **Implement**: `ai-run` works through the queue (fresh Claude session per task,
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
@@ -203,6 +214,42 @@ the checkout lock for its whole run and re-verifies the gate after each of its o
 commits. `--no-pr` stops after the review;
 `--draft` always opens a draft. The pipeline keeps its own gate digest across steps.
 
+### Notifications you can read at a glance
+
+| Marker | Meaning |
+| --- | --- |
+| ▶ STARTED / RESUMED | a run began, or resumed after auto-recovery |
+| ✅ Done / ⚠ Blocked | a task finished (with progress, e.g. 1/2), or was blocked |
+| ⏸ PAUSED | usage limit; it resumes by itself at the stated time |
+| 🔧 Recovering / Recovered | auto-recovery is handling a stop; no action needed yet |
+| ⚠ HUNG? | a runner is alive but silent for too long; it keeps running |
+| ⛔ STOPPED, needs you | fully stopped; nothing automatic follows. Says why and what to do |
+| 🏁 FINISHED | all tasks done: review result, PR link and your numbered todo list |
+
+The finish summary lists: deciding unresolved findings (draft PR), the manual test
+steps from `.ai/handoff.md`, merging, and every item under the handoff's "Human todos".
+
+### Auto-recovery
+
+Stops are recovered in tiers, so a hiccup doesn't wait for you:
+
+1. **Rules, no AI.** A task Claude finished and the full gate validated but Claude left
+   uncommitted is committed by the runner (the gate verified unchanged). Pushes retry
+   3 times. Usage limits pause and resume.
+2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
+   the same process. Hard rules escalate at once (gate, permissions, branch, review
+   integrity, plan-review findings, weekly limit, a changed gate digest). Otherwise a
+   read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
+   action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
+   gate passes on the leftovers), or `escalate`. Malformed answers escalate.
+3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
+   pipeline was killed or the machine restarted.
+
+At most `AI_RECOVER_MAX` (default 2) attempts per human-started run; resumes keep the
+approved gate digest from the original `--approved` start and refuse a changed gate.
+Codex never steers: it diagnoses (`--diagnose`) and reviews. Disable with
+`AI_AUTO_RECOVER=0` (both keys are allowed in the user config).
+
 ### Usage limits
 
 A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
@@ -215,9 +262,17 @@ notification so you can rerun after the reset. Pauses are logged in the ignored
 ### Models
 
 `--model NAME` (or `AI_MODEL`) picks the Claude model for implementation and triage.
+Planning writes an explicit `Model:` on every task by risk (haiku for mechanical, sonnet for ordinary work, opus for
+security, auth/RLS, concurrency, destructive migrations or tasks that failed before), and
+the Codex plan review flags a mismatch before any Claude usage.
 A task may override it with an optional line under its `Dependencies:` line, e.g.
 `Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
 stretch subscription limits.
+
+Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
+default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
+default **high**). Reviews are where a stronger model pays off most: findings caught
+there save Claude fix rounds.
 
 ### Notifications
 
@@ -225,7 +280,8 @@ Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$
 and can never break the workflow. For phone notifications, install the free ntfy app,
 subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
-`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`; environment variables win):
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`;
+environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>
@@ -473,10 +529,12 @@ without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` wh
 Exit codes are 0 healthy, 1 incident (including already notified), 2 usage error.
 It never restarts or repairs the workflow.
 
-`--diagnose` opts into one headless Claude attempt per newly detected incident
-batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10 seconds kill
-grace). Only Read/Glob/Grep tools and project settings are enabled; MCP is disabled
-and stdin is `/dev/null`; `AI_MODEL` applies. The watchdog saves the response to
+`--diagnose` opts into one headless, read-only diagnosis per newly detected
+incident batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10
+seconds kill grace). By default Codex diagnoses (`codex exec --sandbox read-only`,
+medium effort), because Codex has its own limit while Claude's is shared with your
+interactive sessions. `--diagnosis-agent claude` uses Claude instead: Read/Glob/Grep
+only, project settings, MCP disabled, `AI_MODEL` applies. Stdin is `/dev/null`. The watchdog saves the response to
 ignored `.ai/local/diagnosis.md` and includes its first line in the notification.
 Inspect trusted project settings/hooks before opting in; tool restrictions are not
 an OS sandbox. Failed or interrupted attempts are not retried for that incident.
@@ -484,14 +542,17 @@ an OS sandbox. Failed or interrupted attempts are not retried for that incident.
 Run it every 10 minutes with a systemd user timer (one per checkout):
 
 ```bash
-.ai/bin/ai-watchdog --install-timer --diagnose     # writes, enables and starts the units
+.ai/bin/ai-watchdog --install-timer --diagnose --recover   # writes, enables and starts the units
 systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
 
 `--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
 `~/.config/systemd/user/` with the absolute checkout path, the given options and the
-installing shell's `PATH` (so the timer finds `claude`, `curl` and friends). Notification
+installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and runs a copy of
+the scripts kept outside the checkout (rerun `--install-timer` after updating the toolkit) (so the timer
+finds `claude`, `curl` and your notification command; the unit file is readable like your
+user config). Notification
 settings come from the user config described above. Existing projects need the new
 `ai-watchdog` and `lib/watchdog.py` copied into `.ai/bin/` deliberately, because setup
 preserves existing files.

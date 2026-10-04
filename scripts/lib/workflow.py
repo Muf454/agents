@@ -115,7 +115,7 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog',
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover',
                  'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     generated = '.ai/validation-candidates.md'
@@ -259,6 +259,10 @@ def task_command(arguments):
     elif action == 'complete':
         if not blocks or any(task['status'] != 'DONE' for task in blocks):
             fail('Task queue is not complete.')
+    elif action == 'untouched':
+        # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
+        if not blocks or any(task['status'] == 'DONE' for task in blocks):
+            fail('A task is already DONE (or there are no tasks).')
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -272,6 +276,13 @@ def task_command(arguments):
         print(task['model'])
     elif action == 'count':
         print(len(blocks))
+    elif action == 'progress':
+        # One line for notifications: "<id> <title> (<done>/<total> done)".
+        task = next((task for task in blocks if task['id'] == arguments[1]), None)
+        if task is None:
+            fail(f'Unknown task: {arguments[1]}')
+        done = sum(t['status'] == 'DONE' for t in blocks)
+        print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
     elif action in ('status', 'set'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
@@ -552,6 +563,54 @@ def binding_dir():
     return Path(base) / 'reviews' / key
 
 
+def run_manifest(arguments):
+    """Host-side record of the human-approved run (outside the checkout, like review
+    bindings): approved gate digest, branch, arguments and the recovery attempt budget.
+    Agent sessions cannot write here, so recovery never trusts checkout files for authority."""
+    path = binding_dir() / 'run.json'
+    action = arguments[0]
+    if action == 'start':
+        gate, branch, args = arguments[1], arguments[2], arguments[3:]
+        if not re.fullmatch(r'[0-9a-f]{64}', gate):
+            fail('Invalid gate digest.')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
+        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0,
+                                 'env': settings}) + '\n')
+        return
+    try:
+        data = json.loads(path.read_text())
+        valid = (isinstance(data, dict) and isinstance(data.get('gate'), str)
+                 and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
+                 and all(isinstance(a, str) for a in data['args'])
+                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100)
+    except (OSError, ValueError):
+        valid = False
+    if not valid:
+        fail('No valid run manifest; rerun ai-pipeline --approved by hand.')
+    if action == 'gate':
+        print(data['gate'])
+    elif action == 'branch':
+        print(data['branch'])
+    elif action == 'args':
+        sys.stdout.write(''.join(arg + '\0' for arg in data['args']))
+    elif action == 'env':
+        # The approved run's settings, so a resume behaves like the run the human started.
+        settings = data.get('env') if isinstance(data.get('env'), dict) else {}
+        sys.stdout.write(''.join(f'{key}={value}\0' for key, value in settings.items()
+                                 if key in RUN_SETTINGS and isinstance(value, str) and '\0' not in value))
+    elif action == 'reserve-attempt':
+        # Reserved before any fallible recovery work, so failures can't retry for free.
+        data['attempts'] += 1
+        atomic(path, json.dumps(data) + '\n')
+        print(data['attempts'])
+    elif action == 'clear-attempts':
+        data['attempts'] = 0
+        atomic(path, json.dumps(data) + '\n')
+    else:
+        fail('Unknown run-manifest action.')
+
+
 def bind_review(head, content):
     directory = binding_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -561,6 +620,10 @@ def bind_review(head, content):
 def review_info(arguments):
     """Print reviewed HEAD and finding counts: HEAD BLOCKER MAJOR MINOR. The report must match
     the digest the host recorded when ai-review published it."""
+    print(*review_info_values())
+
+
+def review_info_values():
     content = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', content)
     if not head:
@@ -568,7 +631,159 @@ def review_info(arguments):
     binding = binding_dir() / f'{head.group(1)}.sha256'
     if not binding.exists() or binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
         fail('Current review does not match the report ai-review published; it is invalid until Codex reviews again.')
-    print(head.group(1), *review_counts(content))
+    return (head.group(1), *review_counts(content))
+
+
+RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
+# Settings captured with the approved run and restored for its resumes.
+RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_AUTO_RECOVER',
+                'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
+
+
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError('duplicate key')
+    return dict(pairs)
+
+
+def recover_decision(arguments):
+    """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
+    Only a successful claude exit, a success envelope and exactly ONE complete decision
+    object (no duplicate keys; the span from the first '{' to the last '}') count.
+    Everything else escalates."""
+    log, exit_code = arguments[0], arguments[1]
+    escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
+    try:
+        envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
+    except (OSError, ValueError):
+        envelope = None
+    if not isinstance(envelope, dict) or exit_code != '0' or envelope.get('is_error') is not False \
+            or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
+        print(escalate)
+        return
+    # The answer must be exactly one JSON object (optionally in a ```json fence), nothing else.
+    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
+    try:
+        decision = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except ValueError:
+        decision = None
+    if not isinstance(decision, dict):
+        print(escalate)
+        return
+    fields = (decision.get('action'), decision.get('reason'), decision.get('human_action', ''))
+    if fields[0] not in RECOVER_ACTIONS or not all(isinstance(f, str) for f in fields) \
+            or not fields[1].strip():
+        print(escalate)
+        return
+    clean = lambda value: ' '.join(value.split())[:300]
+    print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
+
+
+def committed_matches_worktree(arguments):
+    """The HEAD tree holds exactly the bytes on disk (what validation hashed). Catches
+    clean/smudge filters and hooks that commit something other than what was validated."""
+    entries = [entry for entry in git('ls-tree', '-r', '-z', 'HEAD').split(b'\0') if entry]
+    files, expected = [], {}
+    for entry in entries:
+        meta, raw = entry.split(b'\t', 1)
+        mode, _, sha = meta.decode().split()
+        name = os.fsdecode(raw)
+        if mode == '160000':
+            continue  # submodule: its own HEAD is checked by validation
+        if mode == '120000':
+            if not Path(name).is_symlink():
+                fail(f'Committed symlink differs on disk: {name}')
+            actual = subprocess.run(['git', 'hash-object', '--no-filters', '--stdin'], check=True,
+                                    input=os.fsencode(os.readlink(name)), capture_output=True).stdout.decode().strip()
+            if actual != sha:
+                fail(f'Committed symlink differs on disk: {name}')
+            continue
+        if '\n' in name or not Path(name).is_file() or Path(name).is_symlink():
+            fail(f'Committed file differs on disk: {name}')
+        executable = bool(Path(name).stat().st_mode & 0o111)
+        if mode != ('100755' if executable else '100644'):
+            fail(f'Committed mode of {name} ({mode}) differs from the validated file on disk.')
+        files.append(name)
+        expected[name] = sha
+    if files:
+        hashes = subprocess.run(['git', 'hash-object', '--no-filters', '--stdin-paths'], check=True,
+                                input='\n'.join(files).encode(), capture_output=True).stdout.decode().split()
+        for name, actual in zip(files, hashes):
+            if actual != expected[name]:
+                fail(f'Committed content of {name} differs from the validated file on disk.')
+
+
+def finish_summary(arguments):
+    """The final notification: what was delivered and the human's todo list."""
+    url, reviews, unresolved = arguments[0], arguments[1], arguments[2] == '1'
+    blocks = tasks()
+    done = sum(task['status'] == 'DONE' for task in blocks)
+    handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
+    steps = [line for line in section(handoff, 'Manual testing for the human').splitlines()
+             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    extra = [re.sub(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?', '', line).strip()
+             for line in section(handoff, 'Human todos').splitlines()
+             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    extra = [item for item in extra if not NONE_TEXT.match(item)]
+    try:
+        _, blockers, majors, minors = review_info_values()
+        review = f'Codex review: BLOCKER {blockers}, MAJOR {majors}, MINOR {minors} ({reviews} round(s))'
+    except (ValueError, OSError):
+        review = f'Codex review rounds: {reviews}'
+    todos = []
+    if unresolved:
+        todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
+    todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
+    todos.append('Merge the PR')
+    todos += extra[:10]
+    if len(extra) > 10:
+        todos.append(f'...and {len(extra) - 10} more under "Human todos" in .ai/handoff.md')
+    lines = [f'🏁 FINISHED: all {done}/{len(blocks)} tasks done and validated. {review}.', f'PR: {url}', 'Your todos:']
+    lines += [f'{n}. {todo[:200]}' for n, todo in enumerate(todos, 1)]
+    print('\n'.join(lines))
+
+
+PLAN_REVIEW = Path('.ai/reviews/plan.md')
+# Workflow records that change without changing what the plan review judged.
+PLAN_BOOKKEEPING = ('.ai/reviews/', '.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')
+
+
+def plan_digest():
+    """Digest of the committed tree the plan review judged: spec, plan, tasks, source,
+    validation and prompts (the review reads all of them), minus workflow bookkeeping."""
+    entries = git('ls-tree', '-r', '-z', 'HEAD').split(b'\0')
+    kept = [entry for entry in entries if entry and not
+            entry.split(b'\t', 1)[1].decode(errors='replace').startswith(PLAN_BOOKKEEPING)]
+    return hashlib.sha256(b'\0'.join(kept)).hexdigest()
+
+
+def publish_plan_review(arguments):
+    """Save Codex's plan review, bound to the exact spec/plan/tasks it reviewed."""
+    content = Path(arguments[0]).read_text()
+    for field in ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings'):
+        if field not in content:
+            fail(f'Plan review is missing {field}; inspect the local report.')
+    review_counts(content)
+    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + content
+    atomic(PLAN_REVIEW, content)
+    # Host-side binding, like implementation reviews: an edited report is not a review.
+    directory = binding_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic(directory / f'plan-{arguments[1]}.sha256', hashlib.sha256(content.encode()).hexdigest() + '\n')
+
+
+def plan_review_info(arguments):
+    """Print 'current|stale BLOCKER MAJOR MINOR' for the saved plan review."""
+    if not PLAN_REVIEW.exists():
+        fail('No plan review yet.')
+    content = PLAN_REVIEW.read_text()
+    reviewed = re.search(r'Plan review of plan digest ([0-9a-f]{64});', content)
+    binding = binding_dir() / f'plan-{reviewed.group(1)}.sha256' if reviewed else None
+    if not binding or not binding.exists() or \
+            binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        fail('Plan review does not match the report ai-review published; Codex must review again.')
+    print('current' if reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
 
 
 LIMIT_TEXT = re.compile(
@@ -734,6 +949,20 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'run-manifest':
+        run_manifest(arguments)
+    elif command == 'committed-matches-worktree':
+        committed_matches_worktree(arguments)
+    elif command == 'recover-decision':
+        recover_decision(arguments)
+    elif command == 'finish-summary':
+        finish_summary(arguments)
+    elif command == 'plan-digest':
+        print(plan_digest())
+    elif command == 'publish-plan-review':
+        publish_plan_review(arguments)
+    elif command == 'plan-review-info':
+        plan_review_info(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'pr-title':

@@ -71,7 +71,8 @@ on_exit() {
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
-      ai_notify "Runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+      ai_notify "⛔ STOPPED, needs you: runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+    [[ -n "${AI_PIPELINE:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
   fi
 }
 trap on_exit EXIT
@@ -131,7 +132,7 @@ claude_session() {
       fi
     fi
     (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error). Preserve partial work; see $log and $errors."
-    ai_helper claude-result "$log" || ai_die 'Claude reported an error or denied tools; inspect logs.'
+    ai_helper claude-result "$log" || ai_die "Claude session failed or reported an error; see $log."
     return 0
   done
 }
@@ -212,7 +213,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions.'
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Your shell already starts in the project root: never prefix commands with cd (permission rules check every part of a compound command, and a denied git commit stops the whole run); run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
   claude_session "$prompt" "${task_model:-$model}"
@@ -230,13 +231,25 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
         ai_die "Validation failed; $active_task returned to IN_PROGRESS."
       fi
       ai_guard_verify
-      [[ -z "$(dirty_beyond_records)" ]] || \
-        ai_die 'Claude left uncommitted work; inspect and checkpoint before continuing.'
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
+      if [[ -n "$(dirty_beyond_records)" ]]; then
+        # Tier-1 recovery: the session finished and the full gate just passed on exactly
+        # this content (gate files verified unchanged), but it didn't commit. Commit it.
+        git add --all -- .
+        git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
+        ai_guard_verify
+        # A commit hook must not have slipped unvalidated content into that checkpoint.
+        [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+          ai_helper committed-matches-worktree || \
+          ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
+        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it."
+      fi
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
+      ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
-      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result' ;;
+      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
+      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
     *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
   ai_helper state implementing 'Continue queue; see task results for any blockers'

@@ -2,24 +2,39 @@
 # Shared by the toolkit scripts and their copies in .ai/bin/.
 set -euo pipefail
 AI_BIN=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Remove the liveness marker only if this process owns it (a rejected second process
+# must never erase a live pipeline's marker).
+ai_drop_marker() {
+  [[ -n "${AI_PIPELINE_MARKER:-}" && "$(cat -- "$AI_PIPELINE_MARKER" 2>/dev/null)" == "$$" ]] || return 0
+  rm -f -- "$AI_PIPELINE_MARKER"
+}
 ai_die() {
   printf 'Error: %s\n' "$*" >&2
   # Last error for the pipeline/notifications; best effort, never fatal.
   [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
-  # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
-  [[ -z "${AI_PIPELINE_MARKER:-}" ]] || rm -f -- "$AI_PIPELINE_MARKER"
+  if [[ -n "${AI_PIPELINE_MARKER:-}" ]]; then
+    # The pipeline shell itself is stopping for good: say so unless stop() already did.
+    [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
+    AI_STOP_NOTIFIED=1
+    # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
+    ai_drop_marker
+  fi
+  # Tells ai-watchdog this stop was announced (written after last-error, so it is newer).
+  [[ -z "${AI_STOP_NOTIFIED:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
   exit 1
 }
 
 # Optional per-user settings: ${XDG_CONFIG_HOME:-~/.config}/ai-toolkit/config with
 # KEY=value lines. Only known keys are read (never sourced); environment wins.
 ai_config() {
+  # A recovery resume runs with the approved run's settings only (restored by ai-recover).
+  [[ -z "${AI_SETTINGS_FROM_MANIFEST:-}" ]] || return 0
   local file="${XDG_CONFIG_HOME:-$HOME/.config}/ai-toolkit/config" line key value
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -27,6 +42,18 @@ ai_config() {
   done < "$file"
 }
 ai_config
+
+# Codex review model/effort: reviews are where a stronger model pays off most.
+# AI_REVIEW_MODEL (default: Codex's own default) and AI_REVIEW_EFFORT (default high).
+ai_review_args() {
+  local effort=${AI_REVIEW_EFFORT:-high}
+  [[ "$effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_REVIEW_EFFORT: $effort"
+  AI_REVIEW_ARGS=(-c "model_reasoning_effort=\"$effort\"")
+  if [[ -n "${AI_REVIEW_MODEL:-}" ]]; then
+    [[ "$AI_REVIEW_MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || ai_die "Invalid AI_REVIEW_MODEL: $AI_REVIEW_MODEL"
+    AI_REVIEW_ARGS+=(--model "$AI_REVIEW_MODEL")
+  fi
+}
 
 # Notification hook: AI_NOTIFY_CMD runs via bash with the message as $1
 # (e.g. curl -s -d "$1" ntfy.sh/<topic>). Failures never affect the workflow.
@@ -52,7 +79,7 @@ ai_limit_pause() {
   # Pauses go to an ignored local log: touching tracked files would dirty the checkpoint.
   [[ -d .ai/local ]] && printf '%s paused %ss: %s usage limit (resume ~%s)\n' \
     "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
-  ai_notify "Paused: $agent usage limit reached. Resuming around $until."
+  ai_notify "⏸ PAUSED: $agent usage limit reached. Resumes by itself around $until."
   ${AI_SLEEP:-sleep} "$wait"
   AI_WAITED=$(( AI_WAITED + wait ))
 }
@@ -117,8 +144,14 @@ ai_lock() {
   # One writer/reviewer per checkout. Kernel releases locks on exit or crash.
   # ai-pipeline holds this lock for its whole run; its direct children skip it.
   if [[ -n "${AI_LOCK_HELD:-}" && "$AI_LOCK_HELD" == "$PPID" ]]; then return 0; fi
+  # ai-pipeline <-> ai-recover hand over by exec: same PID, lock still held on fd 9.
+  if [[ "${AI_LOCK_HELD:-}" == "$$" && -e /proc/$$/fd/9 ]] && flock -n 9; then return 0; fi
   exec 9>.ai/local/workflow.lock
-  flock -n 9 || ai_die 'Another runner/reviewer owns this checkout.'
+  if ! flock -n 9; then
+    # A second recovery must not overwrite the real stop reason in last-error.
+    [[ -z "${AI_LOCK_QUIET:-}" ]] || { printf '%s\n' 'Another runner owns this checkout; nothing to recover.' >&2; exit 1; }
+    ai_die 'Another runner/reviewer owns this checkout.'
+  fi
 }
 ai_branch() {
   local branch

@@ -21,5 +21,10 @@ The validation entry point is unconfigured and deliberately exits nonzero.
 ## Manual testing for the human
 <!-- Concrete steps and expected results; include failure/edge cases. -->
 
+## Human todos
+<!-- Actions only the human can take (decisions, credentials, manual setup, content
+checks), one bullet each, or "None". The final notification lists them. -->
+None.
+
 ## Next action
 Describe the desired project or feature to Claude using the planning prompt.

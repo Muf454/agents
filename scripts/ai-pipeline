@@ -3,11 +3,11 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 usage() {
   cat <<'EOF'
 Usage: ai-pipeline --approved [--base REF] [--pr-base BRANCH] [--max-fix-rounds N]
-                   [--draft] [--no-pr] [--review-timeout SECONDS]
+                   [--draft] [--no-pr] [--review-timeout SECONDS] [--skip-plan-review]
                    [ai-run options: --sessions N --session-timeout S --run-timeout S
                     --model NAME --knowledge-dir DIR]
 Hands-off delivery of an approved plan on a feature branch:
-  implement (ai-run) -> full gate -> independent Codex review (ai-review)
+  Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
   -> Claude triage + fix tasks (at most N rounds, default 2) -> review again
   -> push the feature branch and open/update a pull request -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
@@ -16,13 +16,15 @@ The human tests and merges the PR. Nothing is merged or deployed. Rerun to resum
 Usage limits pause and resume (see ai-run). Notifications use AI_NOTIFY_CMD.
 EOF
 }
-base=main; pr_base=''; max_fix_rounds=2; draft=no; open_pr=yes; approved=no
+orig_args=("$@")
+base=main; pr_base=''; max_fix_rounds=2; draft=no; open_pr=yes; approved=no; plan_review=yes
 review_args=(); run_args=()
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
     --draft) draft=yes; shift ;;
     --no-pr) open_pr=no; shift ;;
+    --skip-plan-review) plan_review=no; shift ;;
     --base)
       (( $# >= 2 )) && [[ "$2" != -* ]] || ai_die 'Missing base REF'
       base=$2; shift 2 ;;
@@ -54,7 +56,11 @@ rm -f .ai/local/last-error
 # with no runner alive means the pipeline was killed or the machine restarted.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
-finish() { rm -f -- "$AI_PIPELINE_MARKER"; exit 0; }
+finish() {
+  ai_helper run-manifest clear-attempts 2>/dev/null || true
+  ai_drop_marker
+  exit 0
+}
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
 base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
@@ -70,14 +76,43 @@ fi
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
 readonly AI_APPROVED_GATE
+if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
+  # A resume must run under the gate and branch the human approved (host-side manifest).
+  [[ "$AI_APPROVED_GATE" == "$(ai_helper run-manifest gate 2>/dev/null)" ]] || \
+    ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'
+  [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
+    ai_die 'Resumed on a different branch than the approved run.'
+else
+  # A human (re)start: record the approved run and give it a fresh recovery budget.
+  ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \
+    ai_die 'Cannot record the run manifest in the host state directory.'
+fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
 
 stop() {
   local stage=$1 reason
   reason=$(cat .ai/local/last-error 2>/dev/null || true)
-  ai_notify "Pipeline stopped during $stage on $branch: ${reason:-see terminal}. Rerun ai-pipeline after fixing."
+  reason=${reason:-see terminal}
+  # Only hand over to checkout code that is still exactly the approved gate.
+  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && \
+        "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+    # Bounded auto-recovery takes over this process (same PID, lock and marker).
+    [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
+    exec "$AI_BIN/ai-recover" --stage "$stage"
+  fi
+  AI_STOP_NOTIFIED=1
+  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
+}
+# Pushes hit transient network/auth hiccups; retry before treating it as a stop.
+push() {
+  local try
+  for try in 1 2 3; do
+    git push "$@" && return 0
+    (( try == 3 )) || ${AI_SLEEP:-sleep} $(( try * 20 ))
+  done
+  return 1
 }
 step() { printf '\n== %s ==\n' "$*"; }
 count_commits() { git log --oneline "$base_sha..HEAD" --grep="$1" | wc -l; }
@@ -104,7 +139,29 @@ ensure_validated() {
   fi
 }
 
-ai_notify "Pipeline started on $branch."
+if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
+  ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
+else
+  ai_notify "▶ STARTED on $branch."
+fi
+# Plan review: cheapest place to catch gaps, before any Claude usage is spent.
+if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
+  if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
+    step 'Plan review (Codex)'
+    "$AI_BIN/ai-review" --plan "${review_args[@]}" || stop 'plan review'
+    ai_guard_verify
+    host_commit 'chore(ai): record plan review' .ai/reviews/plan.md
+    plan_info=$(ai_helper plan-review-info) || stop 'plan review'
+    # A commit hook that changed reviewed content would make the verdict stale.
+    [[ "$plan_info" == current* ]] || \
+      { printf '%s\n' 'reviewed content changed while recording the plan review (commit hook?)' > .ai/local/last-error; stop 'plan review'; }
+  fi
+  read -r _ plan_blockers plan_majors _ <<< "$plan_info"
+  if (( plan_blockers + plan_majors > 0 )); then
+    printf '%s\n' "plan review found BLOCKER $plan_blockers, MAJOR $plan_majors; revise the plan (see .ai/reviews/plan.md) or rerun with --skip-plan-review" > .ai/local/last-error
+    stop 'plan review'
+  fi
+fi
 while true; do
   # Derived from the current review each round, so an earlier deferral doesn't stick.
   unresolved=0
@@ -161,21 +218,21 @@ ensure_validated
 reviews=$(count_commits '^chore(ai): record independent review')
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || stop 'pull request preparation'
 if [[ "$open_pr" != yes ]]; then
-  ai_notify "Done on $branch: validated and reviewed ($reviews review round(s)); no PR requested."
+  ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally."
   printf '%s\n' 'Pipeline complete (no PR requested).'
   finish
 fi
 step 'Pull request'
 if ! git remote get-url origin >/dev/null 2>&1; then
-  ai_notify "Done on $branch, but there is no 'origin' remote to open a PR on."
+  ai_notify "🏁 FINISHED on $branch (local only): no 'origin' remote to open a PR on. Your todo: push and open a PR."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
   finish
 fi
-git push -u origin "$branch" || { printf '%s\n' 'git push failed' > .ai/local/last-error; stop push; }
+push -u origin "$branch" || { printf '%s\n' 'git push failed (3 tries)' > .ai/local/last-error; stop push; }
 ai_guard_verify  # push hooks run project code too
 ai_helper review-info >/dev/null || stop 'pull request (review integrity)'
 if ! command -v gh >/dev/null; then
-  ai_notify "Branch $branch pushed. Install the GitHub CLI (gh) to open PRs automatically."
+  ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
   finish
 fi
 title=$(ai_helper pr-title)
@@ -199,14 +256,10 @@ fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'
 host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md
-if ! git push origin "$branch" >/dev/null 2>&1 || ! ai_guard_verify; then
-  ai_notify "PR is open ($url), but pushing the final handoff commit failed. Rerun ai-pipeline."
-  ai_die "PR open at $url, but the final push failed; rerun ai-pipeline to publish the handoff."
+if ! push origin "$branch" >/dev/null 2>&1 || ! ai_guard_verify; then
+  printf '%s\n' "PR is open at $url, but pushing the final handoff commit failed" > .ai/local/last-error
+  stop 'final push'
 fi
-if [[ "$make_draft" == yes ]]; then
-  ai_notify "Draft PR needs your attention (unresolved review findings or --draft): $url"
-else
-  ai_notify "PR ready for testing: $url"
-fi
+ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
 finish

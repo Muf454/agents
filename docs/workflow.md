@@ -165,7 +165,11 @@ with the same care as other local transcripts.
 
 ## Pipeline contract (`ai-pipeline`)
 
-Stages, each resumable by rerunning: implement (`ai-run`) → validate if the stamp is
+Stages, each resumable by rerunning: plan review (only while no task is DONE;
+`ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
+minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
+host review store; committed as `chore(ai): record plan review`; reused while that digest is
+unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
 `--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
@@ -205,6 +209,54 @@ Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
 start, pauses, stops (with `.ai/local/last-error`), and the PR. Usage-limit pauses
 are described in the README; they never write tracked files.
+
+## Recovery contract (`ai-recover`)
+
+On a human start `ai-pipeline` writes a **run manifest** to the host state directory
+(`run.json` beside the review bindings, outside the checkout, where agent sessions can't
+write): approved gate digest, branch, arguments and the attempt counter. Recovery takes
+its authority only from there, never from checkout files. `stop()` re-verifies the gate
+digest against the pipeline's in-memory approved digest and only then execs
+`ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
+(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: current gate
+digest must equal the manifest's, the branch must be the manifest's, then one attempt is
+reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
+on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
+denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints);
+an EXIT trap guarantees one final ⛔ on unexpected exits; bookkeeping-only leftovers
+(state, run log, handoff) are committed as `chore(ai): record stop during S`; one
+read-only Claude session returns `{"action", "reason", "human_action"}`;
+the decision counts only with a zero exit, a success envelope and exactly one valid
+`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree and a passing
+`ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
+committed tree to match the validation stamp (a commit hook can't sneak content in); `rerun` requires a clean tree. Resumes run
+`ai-pipeline` with the saved arguments and `AI_RECOVERY_ATTEMPT=n`, which refuses to
+start if the gate digest differs from the approved one. Escalation sends one
+`⛔ STOPPED, needs you` with the reason and next step, records `last-error` and removes
+the marker. The manifest also stores the run's effective `AI_*` settings (notify command, models,
+budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn't have are
+cleared to their defaults, and the resumed pipeline skips the user config file
+(`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
+live inside it: install the timer with the same state directory the pipeline uses (the
+default unless you changed it). `--recover` only works from the installed host copy; run
+from the checkout it refuses and reports (a human running checkout scripts trusts them,
+as with `ai-pipeline`; the protected path is the timer's host copy). Order in
+`ai-recover`: take the lock (a rejected second process exits quietly and touches neither
+`last-error` nor the marker), reserve the attempt, then publish the marker; TERM/INT/HUP
+handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
+(HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
+filters and staged mode changes). The recovery decision must be exactly one JSON object
+(optionally fenced); envelope and decision reject duplicate keys.
+`ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
+checks after the commit. The timer runs a host copy of `.ai/bin`
+(`$XDG_DATA_HOME/ai-toolkit/watchdog/<unit>/bin`, refreshed by `--install-timer`), so the
+code that verifies the gate before crash recovery isn't checkout code; it then launches the
+checkout's `ai-recover`. `ai-watchdog --recover` launches `ai-recover` via
+`systemd-run --service-type=exec` only if the gate digest matches the manifest, forwards
+`PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and keeps notification duty until
+`ai-recover` takes over the marker (20 s), otherwise it reports ⛔ with the reason. It
+re-announces a stop only if the runner didn't (`.ai/local/last-error.notified`), and only
+once no runner or recovery is alive.
 
 ## Review and fixes
 
@@ -284,8 +336,10 @@ arguments/checkout/dedupe record. Notifications use common.sh's best-effort
 cause repeated alerts.
 
 `--diagnose` reserves one attempt for each new incident batch before starting
-`timeout ... claude -p`, with dontAsk, Read/Glob/Grep only, project setting sources,
-empty strict MCP configuration, `AI_MODEL` when set, and `/dev/null` stdin. It asks
+`timeout ... codex exec` (default; read-only sandbox, never-approve, medium effort,
+answer via an mkstemp output file) or, with `--diagnosis-agent claude`,
+`timeout ... claude -p` with dontAsk, Read/Glob/Grep only, project setting sources,
+empty strict MCP configuration and `AI_MODEL` when set. Stdin is `/dev/null`. It asks
 for evidence and human recovery advice, never writes or repairs through Claude tools.
 The host saves stdout (or failure information) to `.ai/local/diagnosis.md` and adds a
 one-line summary to the alert. Existing acknowledged incidents are not diagnosed later

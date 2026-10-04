@@ -39,7 +39,17 @@ args = sys.argv[1:]
 assert '--permission-mode' in args and args[args.index('--permission-mode')+1] == 'dontAsk'
 assert '--' in args
 prompt = args[args.index('--')+1]
+if 'RECOVERY CONTRACT' in prompt:
+    assert args[args.index('--tools')+1] == 'Read,Glob,Grep'
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'recover-calls', 'a') as f: f.write(prompt.split('RECOVERY CONTRACT')[1][:400].replace('\n', ' ') + '\n')
+    decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
+                'human_action': 'look at T001 yourself'}
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                      'result': json.dumps(decision)}))
+    sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
+assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with cd' in prompt
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -94,6 +104,14 @@ if 'TRIAGE CONTRACT' in prompt:
     subprocess.run(['git','commit','-qm','triage review'],check=True)
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
+if mode in ('error-once', 'error-once-partial') and not pathlib.Path('.ai/local/mock-error-hit').exists():
+    pathlib.Path('.ai/local/mock-error-hit').touch()
+    if mode == 'error-once-partial':
+        pathlib.Path('partial.txt').write_text('finished work the session never committed')
+    print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+    sys.exit(0)
+if mode in ('error-once', 'error-once-partial'):
+    mode = 'success'
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
@@ -156,8 +174,22 @@ assert args[0] == 'exec'
 assert args[args.index('--sandbox')+1] == 'read-only'
 assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
-mode = os.environ.get('MOCK_CODEX', 'success')
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
+with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
+if 'Diagnose this workflow incident' in args[-1]:
+    path = pathlib.Path(args[args.index('--output-last-message')+1])
+    path.write_text('Codex: the runner was killed.\nEvidence follows.')
+    sys.exit(0)
+if 'PLAN SCOPE' in args[-1]:
+    with open(state / 'codex-plan-calls', 'a') as f: f.write('call\n')
+    major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
+    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
+        '# Plan review\nOverall verdict: ' + ('gap' if major else 'ok') + '\n'
+        'Finding counts: BLOCKER=0 MAJOR=' + ('1' if major else '0') + ' MINOR=0\n'
+        '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- P1: T001 has no test.\n' if major else 'None.\n') +
+        '## MINOR findings\nNone.\n')
+    sys.exit(0)
+mode = os.environ.get('MOCK_CODEX', 'success')
 calls = state / 'codex-calls'
 calls.write_text(calls.read_text() + 'call\n' if calls.exists() else 'call\n')
 count = calls.read_text().count('call')
@@ -256,6 +288,8 @@ class ToolkitTest(unittest.TestCase):
         template = self.base / 'task-template.md'
         template.write_text(task('TXXX'))
         self.notify_log = self.base / 'notifications.log'
+        self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
+        self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
                         AI_STATE_DIR=str(self.base / 'host-state'),
@@ -279,8 +313,8 @@ class ToolkitTest(unittest.TestCase):
         self.run_cmd(['git', 'add', '--all'])
         self.run_cmd(['git', 'commit', '-qm', message])
 
-    def watchdog(self, *args, expected=0):
-        return self.tool('ai-watchdog', *args, expected=expected)
+    def watchdog(self, *args, expected=0, **env):
+        return self.tool('ai-watchdog', *args, expected=expected, **env)
 
     def watchdog_phase(self, phase):
         (self.project / '.ai/state.md').write_text('Phase: ' + phase + '\n')
@@ -357,13 +391,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         error = self.project / '.ai/local/last-error'
         error.parent.mkdir(exist_ok=True)
         error.write_text('validation failed')
-        self.watchdog('--diagnose', expected=1)
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 1)
         self.assertIn('Runner stopped after a failed check.', self.notifications())
         self.assertIn('Inspect validation evidence.', (self.project / '.ai/local/diagnosis.md').read_text())
         error.write_text('another stop')
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 2)
 
     def test_watchdog_diagnosis_failure_is_not_retried_and_usage(self):
@@ -372,8 +406,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog('--unknown', expected=2)
         self.watchdog_phase('implementing')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
-        self.watchdog('--diagnose', expected=1)
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertIn('exit 17', (self.project / '.ai/local/diagnosis.md').read_text())
         self.assertEqual(len(self.notifications().splitlines()), 1)
 
@@ -393,7 +427,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         pauses.write_text(start + ' paused 60s: Claude usage limit (resume ~Mon 12:00)\n')
         os.utime(pauses, (old, old))
         self.watchdog(expected=1)
-        self.assertIn('hung', self.notifications())
+        self.assertIn('⚠ HUNG?', self.notifications())
 
     def test_watchdog_pipeline_marker_detects_killed_pipeline(self):
         self.setup_project()
@@ -455,6 +489,109 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog()  # just started: not hung despite 2-hour-old logs
         self.assertEqual(self.notifications(), '')
 
+    def test_watchdog_diagnosis_defaults_to_codex(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        self.watchdog('--diagnose', expected=1)
+        self.assertIn('Codex: the runner was killed.', self.notifications())
+        self.assertIn('Evidence follows.', (self.project / '.ai/local/diagnosis.md').read_text())
+        self.assertIn('--sandbox read-only', (self.base / 'codex-args.log').read_text())
+        self.assertEqual(list((self.project / '.ai/local').glob('.diagnosis-*')), [])
+
+    def host_watchdog(self, *args, expected=0, **env):
+        # What --install-timer runs: a copy of .ai/bin outside the checkout.
+        import shutil
+        host = self.base / 'host-bin'
+        if not host.exists():
+            shutil.copytree(self.project / '.ai/bin', host)
+        return self.run_cmd([str(host / 'ai-watchdog'), str(self.project), *args], expected=expected,
+                            env=dict(self.env, **env))
+
+    def approve_run(self):
+        digest = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', digest, 'main', '--approved')
+
+    def crashed_marker(self):
+        marker = self.project / '.ai/local/pipeline.active'
+        marker.parent.mkdir(exist_ok=True)
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        marker.write_text(f'{dead.pid}\n')
+        return marker
+
+    def mock_systemd_run(self, takes_over=True):
+        (self.mock_bin / 'systemd-run').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemd-run.log"\n'
+            + ('printf "4242\\n" > .ai/local/pipeline.active\n' if takes_over else ''))
+        (self.mock_bin / 'systemd-run').chmod(0o755)
+
+    def test_watchdog_recover_starts_ai_recover_after_a_crash(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_NOTIFY_CMD='true')
+        self.watchdog('--recover', expected=1)  # from the checkout: refused, the human is told
+        launched = (self.base / 'systemd-run.log').read_text()
+        self.assertIn('--user --collect --quiet --service-type=exec', launched)
+        self.assertIn('--setenv=AI_STATE_DIR=', launched)
+        self.assertNotIn('AI_WATCHDOG_NOW', launched)
+        self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage crash', launched)
+        self.assertIn('killed', (self.project / '.ai/local/last-error').read_text())
+        # Only the checkout run (refused) spoke; the host run handed over silently.
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('only runs from the installed timer', self.notifications())
+
+    def test_watchdog_recover_refuses_changed_gate_and_reports_unconfirmed_launch(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'systemd-run.log').exists())
+        self.assertIn('⛔ STOPPED, needs you', self.notifications())
+        self.assertIn('auto-recovery refused: gate files changed', self.notifications())
+        self.approve_run()
+        self.mock_systemd_run(takes_over=False)
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
+        self.assertIn('did not confirm it started', self.notifications())
+
+    def test_watchdog_reports_unannounced_stops(self):
+        self.setup_project()
+        error = self.project / '.ai/local/last-error'
+        error.parent.mkdir(exist_ok=True)
+        error.write_text('Codex failed; prior review preserved.')
+        self.watchdog(expected=1)
+        self.assertIn('⛔ STOPPED, needs you: Stopped: Codex failed', self.notifications())
+
+    def test_committed_mode_must_match_validated_file(self):
+        self.ready()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -q T001.txt || exit 0\n'
+                        'git update-index --chmod=+x T001.txt\n')
+        hook.chmod(0o755)
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def test_watchdog_waits_for_a_live_runner_before_reporting_a_stop(self):
+        self.setup_project()
+        error = self.project / '.ai/local/last-error'
+        error.parent.mkdir(exist_ok=True)
+        error.write_text('stopped during review')
+        runner = self.watchdog_runner()
+        self.watchdog()  # still running (e.g. recovery deciding): nothing to report yet
+        self.assertEqual(self.notifications(), '')
+        runner.kill()
+        runner.wait()
+        self.watchdog(expected=1)
+        self.assertIn('⛔ STOPPED, needs you: Stopped: stopped during review', self.notifications())
+
     def test_watchdog_install_and_uninstall_timer(self):
         project = self.base / 'my 100% project'
         project.mkdir()
@@ -471,6 +608,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         service = units[0].read_text()
         exec_start = next(line for line in service.splitlines() if line.startswith('ExecStart='))
         self.assertIn('"' + str(project).replace('%', '%%') + '"', exec_start)
+        host = self.base / 'xdg-data/ai-toolkit/watchdog' / units[0].stem
+        self.assertIn('"' + str(host / 'bin/ai-watchdog') + '"', exec_start)
+        self.assertTrue((host / 'bin/lib/common.sh').is_file())
         self.assertIn('"--stale-minutes" "90" "--diagnose"', exec_start)
         self.assertIn('SuccessExitStatus=1', service)
         self.assertIn('Unit=' + units[0].name, units[1].read_text())
@@ -478,6 +618,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(calls, ['--user daemon-reload', '--user enable --now ' + units[1].name])
         self.watchdog('--uninstall-timer')
         self.assertEqual(list((self.config / 'systemd/user').iterdir()), [])
+        self.assertFalse(host.exists())
         self.assertIn('--user disable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
         self.watchdog('--install-timer', '--uninstall-timer', expected=2)
         self.watchdog('--install-timer')
@@ -490,11 +631,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog_phase('implementing')
         (self.mock_bin / 'claude').write_text(
             '#!/usr/bin/env bash\nprintf "call\\n" >> "$MOCK_STATE_DIR/timeout-calls"\nsleep 30\n')
-        command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1']
+        command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude']
         first = subprocess.Popen(command, cwd=self.project, env=self.env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            self.watchdog('--diagnose', '--diagnosis-timeout', '1', expected=1)
+            self.watchdog('--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude', expected=1)
             first.communicate(timeout=15)
             self.assertEqual(first.returncode, 1)
         finally:
@@ -734,8 +875,20 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
         self.assertIn('stopped', (self.project / '.ai/run-log.md').read_text())
 
-    def test_runner_dirty_output_is_not_auto_staged(self):
+    def test_runner_commits_validated_leftovers_but_never_failing_work(self):
         self.ready()
+        # Tier-1 recovery: DONE + full gate passed on this content, but the session didn't commit.
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='dirty')
+        self.assertIn('T001.txt', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('checkpoint T001 (validated; the session did not commit)',
+                      self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertIn("Claude didn't commit its validated work", self.notifications())
+
+    def test_runner_dirty_output_failing_validation_is_not_committed(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntest ! -e T001.txt\n')
+        self.commit('gate that rejects the fixture output')
         self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
         self.assertIn('T001.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
         self.assertNotIn('T001.txt', self.run_cmd(['git', 'ls-files']).stdout)
@@ -843,8 +996,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
         log = self.run_cmd(['git', 'log', '--oneline']).stdout
         self.assertEqual(log.count('record independent review'), 1)
-        self.assertIn('Pipeline started', self.notifications())
-        self.assertIn('PR ready for testing: https://github.com/example/project/pull/7', self.notifications())
+        self.assertIn('▶ STARTED on feature/test', self.notifications())
+        self.assertIn('🏁 FINISHED: all 1/1 tasks done', self.notifications())
+        self.assertIn('PR: https://github.com/example/project/pull/7', self.notifications())
+        self.assertIn('1. Test: 1 manual step(s) in the PR', self.notifications())
+        self.assertIn('Done: T001 Verify T001 (1/1 done)', self.notifications())
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
     def test_pipeline_fixes_major_findings_then_reviews_again(self):
@@ -868,7 +1024,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
         self.assertIn('--draft', create[0])
         self.assertIn('significant review findings remain', (self.base / 'gh.log.body.md').read_text())
-        self.assertIn('Draft PR needs your attention', self.notifications())
+        self.assertIn('1. Decide the unresolved review findings', self.notifications())
 
     def test_pipeline_rejected_findings_still_open_normal_pr(self):
         self.ready()
@@ -893,19 +1049,305 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn("no 'origin' remote", self.notifications())
         self.assertEqual(self.gh_calls(), [])
 
+    def test_pipeline_plan_review_gates_implementation(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during plan review', self.notifications())
+        self.assertIn('P1: T001 has no test.', (self.project / '.ai/reviews/plan.md').read_text())
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')  # no Claude spent
+        self.assertFalse((self.base / 'codex-calls').exists())
+        # The same plan is not reviewed again; skipping is explicit.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual((self.base / 'codex-plan-calls').read_text().count('call'), 1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
+        self.helper('tasks', 'complete')
+
+    def test_plan_review_is_bound_and_tracks_the_whole_tree(self):
+        self.ready(task('T001', 'BLOCKED') + '\n' + task('T002'))
+        # A BLOCKED task doesn't lift the gate for the untouched rest of the queue.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        plans = lambda: (self.base / 'codex-plan-calls').read_text().count('call')
+        self.assertEqual(plans(), 1)
+        # A forged clean report (edited counts and findings) is not a review.
+        review = self.project / '.ai/reviews/plan.md'
+        forged = review.read_text().replace('MAJOR=1', 'MAJOR=0').replace('- P1: T001 has no test.', 'None.')
+        review.write_text(forged)
+        self.commit('forge plan review')
+        self.helper('plan-review-info', expected=1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        self.assertEqual(plans(), 2)
+        # Unchanged tree: the verdict is reused. A source-only change is reviewed again.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual(plans(), 2)
+        (self.project / 'src.txt').write_text('changed source\n')
+        self.commit('source change')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual(plans(), 3)
+
+    def test_pipeline_plan_review_passes_and_reviews_use_effort(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_REVIEW_MODEL='gpt-test')
+        self.assertEqual((self.base / 'codex-plan-calls').read_text().count('call'), 1)
+        log = self.run_cmd(['git', 'log', '--oneline']).stdout
+        self.assertIn('record plan review', log)
+        calls = (self.base / 'codex-args.log').read_text().splitlines()
+        self.assertEqual(len(calls), 2)  # plan review + implementation review
+        for call in calls:
+            self.assertIn('-c model_reasoning_effort="high" --model gpt-test', call)
+        self.tool('ai-review', '--plan', expected=1, AI_REVIEW_EFFORT='turbo')
+        self.tool('ai-review', '--plan')  # by hand: committed, checkout stays clean
+        self.tool('ai-review', '--plan')  # unchanged report: still succeeds
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('record plan review', self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout)
+
+    def test_plan_review_stops_if_commit_hook_changes_reviewed_content(self):
+        self.ready()
+        hook = self.project / '.git/hooks/post-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git log -1 --format=%s | grep -q "record plan review" || exit 0\n'
+                        'echo hooked >> hook.txt && git add hook.txt && git commit -qm hook\n')
+        hook.chmod(0o755)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('reviewed content changed while recording the plan review', self.notifications())
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        # Run by hand, the same hook makes ai-review --plan fail instead of reporting success.
+        self.tool('ai-review', '--plan', expected=1)
+        self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
+
+    def test_progress_notifications_for_done_and_blocked_tasks(self):
+        title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')
+        self.ready(title_task + '\n' + task('T002'))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-first')
+        notes = self.notifications()
+        self.assertIn('Blocked: T001 Fix "$(touch pwned)" & `id`; rm -rf x (0/2 done)', notes)
+        self.assertIn('Done: T002 Verify T002 (1/2 done)', notes)
+        self.assertFalse((self.project / 'pwned').exists())
+
     def test_pipeline_stop_is_notified(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CLAUDE='error')
-        self.assertIn('Pipeline stopped during implementation', self.notifications())
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', self.notifications())
         # A reported stop removes the liveness marker: the watchdog reports the stop, not a crash.
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
         self.tool('ai-watchdog', expected=1)
         self.assertNotIn('gone without finishing', self.notifications())
         self.assertNotIn('stalled', self.notifications())
-        self.assertIn('Watchdog: stopped:', self.notifications())
+        # The runner announced the stop; the watchdog doesn't repeat it.
+        self.assertEqual(self.notifications().count('⛔ STOPPED'), 1)
         self.tool('ai-pipeline', '--approved', '--base', 'not-a-ref', expected=1)
         self.run_cmd(['git', 'switch', 'main'])
         self.tool('ai-pipeline', '--approved', expected=1)
+
+    # ---------------------------------------------------------------- auto-recovery
+    def recovery_calls(self):
+        calls = self.base / 'recover-calls'
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def test_recovery_reruns_after_a_transient_stop_and_finishes(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        self.helper('tasks', 'complete')
+        notes = self.notifications()
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('stopped during: implementation', self.recovery_calls()[0].lower())
+        self.assertIn('🔧 Recovering (1/2)', notes)
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('▶ RESUMED on feature/test after auto-recovery (1)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertIn('record stop during implementation', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertFalse((self.project / '.ai/local/recovery-attempts').exists())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_recovery_commits_validated_leftovers_then_resumes(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun')
+        self.assertIn('partial.txt', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertIn('recovery checkpoint (validated leftover work)', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    def test_recovery_escalates_with_the_next_step(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', notes)
+        self.assertIn('Next: look at T001 yourself', notes)
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_recovery_is_bounded_per_run(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error')
+        notes = self.notifications()
+        self.assertEqual(len(self.recovery_calls()), 2)
+        self.assertIn('already tried 2 time(s)', notes)
+        self.assertEqual(notes.count('⛔'), 1)
+        # A human restart (after recording the stop) gets a fresh budget.
+        self.commit('record the stop')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error')
+        self.assertEqual(len(self.recovery_calls()), 3)
+
+    def test_recovery_never_passes_a_changed_gate_or_hard_stop(self):
+        self.ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
+        self.commit('weaken the gate')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('gate files changed since you approved the run', self.notifications())
+        self.assertEqual(len(self.recovery_calls()), 1)  # no AI consulted for the gate
+        self.run_cmd(['git', 'revert', '--no-edit', 'HEAD'])  # gate back to the approved one
+        (self.project / '.ai/local/last-error').write_text('Approved workflow gate changed during this run.')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+        self.assertEqual(len(self.recovery_calls()), 1)
+
+    def test_recovery_decision_parsing_is_strict(self):
+        log = self.base / 'decision.json'
+        ok = {'type': 'result', 'subtype': 'success', 'is_error': False}
+        cases = [
+            (dict(ok, result='{"action": "rerun", "reason": "crash"}'), '0', 'rerun'),
+            (dict(ok, result='{"action": "rerun", "reason": "crash"}'), '1', 'escalate'),  # nonzero exit
+            (dict(ok, is_error=True, result='{"action": "rerun", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "rerun", "reason": "a"} {"action": "commit_and_rerun", "reason": "b"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "delete_branch", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "rerun"}'), '0', 'escalate'),  # no reason
+            (dict(ok, result=['not', 'a', 'string']), '0', 'escalate'),
+            (dict(ok, result='{"action": "escalate", "reason": "x", "n": {"action": "commit_and_rerun"}}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "escalate", "action": "rerun", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='```json\n{"action": "rerun", "reason": "crash"}\n```'), '0', 'rerun'),
+            (dict(ok, result='Decision: {"action": "rerun", "reason": "crash"}'), '0', 'escalate'),
+            (dict(ok, result='[{"action": "rerun", "reason": "crash"}]'), '0', 'escalate'),
+        ]
+        log.write_text('{"type": "result", "subtype": "success", "is_error": true, "is_error": false, '
+                       '"result": "{\\"action\\": \\"rerun\\", \\"reason\\": \\"x\\"}"}')
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
+        log.write_text(json.dumps(['not', 'an', 'envelope']))
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
+        for envelope, code, expected in cases:
+            log.write_text(json.dumps(envelope))
+            self.assertEqual(self.helper('recover-decision', str(log), code).stdout.split('\t')[0], expected, envelope)
+        log.write_text('not json')
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
+
+    def test_recovery_refuses_other_branch_and_tampered_manifest(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        calls = len(self.recovery_calls())
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other-branch'])
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn("not the approved run's branch", self.notifications())
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        data = json.loads(manifest.read_text())
+        data['attempts'] = 'BASH_VERSINFO[$(touch pwned)0]'
+        manifest.write_text(json.dumps(data))
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('no approved run to resume', self.notifications())
+        self.assertFalse((self.project / 'pwned').exists())
+        self.assertEqual(len(self.recovery_calls()), calls)  # no AI consulted
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_tier1_checkpoint_rejects_hook_changed_content(self):
+        self.ready()
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -q T001.txt || exit 0\n'
+                        'echo sneaky > sneaky.txt && git add sneaky.txt\n')
+        hook.chmod(0o755)
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def test_recovery_signal_and_rejected_process_handling(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        marker = self.project / '.ai/local/pipeline.active'
+        # A second recovery that can't get the lock leaves the live run's marker alone.
+        marker.write_text('999999\n')
+        lock = subprocess.Popen(['flock', '-o', str(self.project / '.ai/local/workflow.lock'), 'sleep', '30'])
+        self.addCleanup(lambda: (lock.kill(), lock.wait()))
+        import time
+        time.sleep(0.3)
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertEqual(marker.read_text(), '999999\n')
+        self.assertIn('Claude session failed', (self.project / '.ai/local/last-error').read_text())
+        lock.kill()
+        lock.wait()
+        # A killed recovery still sends exactly one final ⛔ and drops its own marker.
+        slow = self.mock_bin / 'slow-claude'
+        (self.mock_bin / 'claude').rename(slow)
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nsleep 3\n')
+        (self.mock_bin / 'claude').chmod(0o755)
+        before = self.notifications().count('⛔')
+        recover = subprocess.Popen([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
+                                   cwd=self.project, env=dict(self.env, AI_AUTO_RECOVER='1'),
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for _ in range(100):
+            if marker.exists() and marker.read_text().strip() == str(recover.pid):
+                break
+            time.sleep(0.05)
+        recover.terminate()
+        out = recover.communicate(timeout=60)[0].decode()
+        self.assertEqual(self.notifications().count('⛔') - before, 1, out + self.notifications())
+        self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
+        self.assertFalse(marker.exists())
+
+    def test_recovery_restores_the_approved_runs_settings(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_RECOVER_MAX'], '1')
+        self.assertEqual(manifest['env']['AI_AUTO_RECOVER'], '1')
+        # Started without those settings (as a detached service would be), it uses the approved ones.
+        self.tool('ai-recover', '--stage', 'implementation', expected=1)
+        self.assertIn('already tried 1 time(s)', self.notifications())
+
+    def test_resume_ignores_user_config_the_approved_run_did_not_have(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        # Added to the user config after approval: a resume must not pick it up.
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        (self.config / 'ai-toolkit/config').write_text('AI_MODEL=opus-later\n')
+        (self.project / '.ai/local/mock-args').unlink()
+        self.tool('ai-recover', '--stage', 'implementation', MOCK_RECOVER='rerun')
+        self.helper('tasks', 'complete')
+        args = (self.project / '.ai/local/mock-args').read_text()
+        self.assertNotIn('opus-later', args)
+        # Control: a human start does read it.
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertNotIn('AI_MODEL', manifest['env'])
+
+    def test_committed_content_must_match_validated_files(self):
+        self.ready()
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        self.commit('filter')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def test_finish_summary_lists_human_todos(self):
+        self.ready()
+        self.add_origin()
+        (self.project / '.ai/handoff.md').write_text(
+            '# Handoff\n\n## Manual testing for the human\n1. Open the app.\n2. Drag a card.\n\n'
+            '## Human todos\n- Create the Discord app credentials\n- [ ] Decide the guild limit\n')
+        self.commit('handoff with human todos')
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        notes = self.notifications()
+        self.assertIn('1. Test: 2 manual step(s) in the PR', notes)
+        self.assertIn('2. Merge the PR', notes)
+        self.assertIn('3. Create the Discord app credentials', notes)
+        self.assertIn('4. Decide the guild limit', notes)
 
     # ---------------------------------------------------------------- limits, models, triage, config
     def test_worked_around_denials_and_bookkeeping_leftovers_do_not_stop_the_run(self):
@@ -923,7 +1365,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'complete')
         waited = int((self.base / 'sleep.log').read_text().split()[0])
         self.assertTrue(150 <= waited <= 200, waited)  # "try again in 2 minutes" + 60s buffer
-        self.assertIn('Paused: Claude usage limit', self.notifications())
+        self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
         self.assertIn('Claude usage limit', (self.project / '.ai/local/pauses.log').read_text())
 
     def test_usage_limit_beyond_wait_budget_stops(self):
@@ -931,14 +1373,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='3600')
         self.assertIn('wait budget', result.stderr)
         self.assertFalse((self.base / 'sleep.log').exists())
-        self.assertIn('Runner stopped', self.notifications())
+        self.assertIn('⛔ STOPPED, needs you: runner stopped at T001', self.notifications())
 
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
         self.tool('ai-run', '--approved')
         self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once')
         self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
-        self.assertIn('Paused: Codex usage limit', self.notifications())
+        self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
         self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
 
     def test_task_model_line_overrides_run_model(self):
@@ -1017,7 +1459,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1,
                            MOCK_CODEX='major-always', MOCK_CLAUDE='triage-missing')
         self.assertIn('Triage incomplete', result.stderr)
-        self.assertIn('Pipeline stopped during triage', self.notifications())
+        self.assertIn('stopped during triage', self.notifications())
 
     def test_rerun_reuses_completed_rejection_triage(self):
         self.ready()
@@ -1088,7 +1530,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         hook.write_text('#!/usr/bin/env bash\n[[ "$(git log -1 --format=%s)" != "chore(ai): record pull request" ]]\n')
         hook.chmod(0o755)
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
-        self.assertIn('final push failed', result.stderr)
+        self.assertIn('pushing the final handoff commit failed', result.stderr)
+        self.assertIn('⛔ STOPPED, needs you', self.notifications())
         self.assertIn('final handoff commit failed', self.notifications())
 
     # ---------------------------------------------------------------- follow-up review fixes
@@ -1140,7 +1583,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', expected=1,
                            MOCK_GH_EXISTING='1', MOCK_GH_READY_FAIL='1')
         self.assertIn('could not convert the existing PR to draft', result.stderr)
-        self.assertNotIn('Draft PR needs your attention', self.notifications())
+        self.assertNotIn('1. Decide the unresolved review findings', self.notifications())
 
     def test_interrupted_triage_resumes_after_dispositions_were_opened(self):
         self.ready()
