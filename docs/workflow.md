@@ -246,3 +246,52 @@ deliberately. Use project-specific ignored build/cache directories and separate 
 services/ports if testing concurrently. Do not let multiple agents edit one checkout,
 and don't put the review worktree on the writable implementation branch. Human removes
 worktrees when no longer needed. This future isolation doesn't require an orchestrator.
+
+## Checkout health monitoring
+
+The optional `ai-watchdog [PROJECT]` is a deterministic Linux `/proc` probe, not
+an agent or recovery runner. It matches `ai-run`/`ai-pipeline` executable/script
+arguments and the process's exact checkout working directory.
+
+Incidents:
+
+- **died**: `.ai/local/pipeline.active` exists but the `ai-pipeline` process it
+  names is gone (an orphaned `ai-run` child doesn't count; a reused PID that started
+  after the marker was written doesn't either). `ai-pipeline` writes this marker at start and removes it on every exit it controls (completion
+  and `ai_die`, which also records `last-error`), so a leftover marker means it was
+  killed, crashed or the machine restarted, in any phase. A new pipeline run rewrites
+  the marker and rearms the incident.
+- **stalled**: implementing/fixing_review, no runner, no marker and no `last-error`
+  (a killed standalone `ai-run`). A recorded stop is reported as **stop** instead.
+- **hung**: a live runner whose newest activity is older than `--stale-minutes`
+  (default 45). Activity is the newest mtime of `.ai/run-log.md`,
+  `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in
+  `.ai/local/`, or `.ai/`'s mtime, and never earlier than the oldest live runner's
+  start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
+  its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
+  `--session-timeout` (default 30 minutes), which stays below the default.
+- **stop**: a `last-error` newer than the watchdog's last notification. The
+  acknowledged stop remains an incident until removed or replaced.
+
+A separate `.ai/local/watchdog.lock` serializes probes without blocking the
+workflow lock. Atomic `.ai/local/watchdog.json` records active incidents and the
+last notification timestamp, written via unpredictable temp files. Files that
+runners delete mid-probe count as absent. Persistent incidents notify once; recovery rearms them.
+Hung incidents are bound to process start identities and activity timestamps.
+Healthy checks are silent. Exit codes: 0 healthy, 1 incident, 2 invalid
+arguments/checkout/dedupe record. Notifications use common.sh's best-effort
+`ai_notify` and reserve dedupe state before sending, so delivery failures do not
+cause repeated alerts.
+
+`--diagnose` reserves one attempt for each new incident batch before starting
+`timeout ... claude -p`, with dontAsk, Read/Glob/Grep only, project setting sources,
+empty strict MCP configuration, `AI_MODEL` when set, and `/dev/null` stdin. It asks
+for evidence and human recovery advice, never writes or repairs through Claude tools.
+The host saves stdout (or failure information) to `.ai/local/diagnosis.md` and adds a
+one-line summary to the alert. Existing acknowledged incidents are not diagnosed later
+merely because the option is enabled. No diagnosis runs by default.
+
+`--install-timer [--diagnose ...]` generates a per-checkout systemd user service and
+10-minute timer with systemd-quoted absolute paths and the current `PATH`, then
+enables it; `--uninstall-timer` disables and removes it. `SuccessExitStatus=1` treats
+an incident as a successful probe. Nothing is installed by `setup-project`.

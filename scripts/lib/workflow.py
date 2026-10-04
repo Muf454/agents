@@ -115,7 +115,8 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'lib/common.sh', 'lib/workflow.py'):
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog',
+                 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     generated = '.ai/validation-candidates.md'
     destinations = list(copies) + [generated, '.gitignore', '.ai/local']

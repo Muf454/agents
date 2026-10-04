@@ -279,6 +279,232 @@ class ToolkitTest(unittest.TestCase):
         self.run_cmd(['git', 'add', '--all'])
         self.run_cmd(['git', 'commit', '-qm', message])
 
+    def watchdog(self, *args, expected=0):
+        return self.tool('ai-watchdog', *args, expected=expected)
+
+    def watchdog_phase(self, phase):
+        (self.project / '.ai/state.md').write_text('Phase: ' + phase + '\n')
+
+    def watchdog_runner(self, project=None, name='ai-run'):
+        script = self.base / name
+        script.write_text(f'#!/usr/bin/env bash\nexec -a {name} sleep 30\n')
+        script.chmod(0o755)
+        process = subprocess.Popen([str(script)], cwd=project or self.project, env=self.env)
+        self.addCleanup(lambda: (process.terminate(), process.wait()) if process.poll() is None else None)
+        # Wait for exec using the process command line rather than a timing guess.
+        import time
+        for _ in range(100):
+            if Path(f'/proc/{process.pid}/cmdline').read_bytes().startswith(name.encode() + b'\0'):
+                break
+            time.sleep(0.01)
+        return process
+
+    def test_watchdog_health_stall_recovery_and_checkout_scope(self):
+        self.setup_project()
+        self.watchdog()
+        self.assertEqual(self.notifications(), '')
+        self.watchdog_phase('implementing')
+        other = self.base / 'other'
+        other.mkdir()
+        self.watchdog_runner(other)
+        self.watchdog(expected=1)
+        self.watchdog(expected=1)
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.watchdog_phase('ready_for_review')
+        self.watchdog()
+        self.watchdog_phase('fixing_review')
+        self.watchdog(expected=1)
+        self.assertEqual(len(self.notifications().splitlines()), 2)
+
+    def test_watchdog_hung_activity_sources_and_new_incident(self):
+        import time
+        self.setup_project()
+        self.watchdog_runner()
+        fake = time.time() + 3600  # the runner has been alive for an hour
+        self.env['AI_WATCHDOG_NOW'] = str(fake)
+        log = self.project / '.ai/run-log.md'
+        old = time.time() - 3600
+        os.utime(log, (old, old))
+        self.watchdog('--stale-minutes', '120')
+        self.watchdog(expected=1)
+        self.watchdog(expected=1)
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        for name in ('pauses.log', 'claude-test.json', 'test-events.log'):
+            activity = self.project / '.ai/local' / name
+            activity.touch()
+            os.utime(activity, (fake, fake))
+            self.watchdog()
+            os.utime(activity, (old, old))
+        self.watchdog(expected=1)
+        self.assertEqual(len(self.notifications().splitlines()), 2)
+
+    def test_watchdog_stop_diagnosis_once_and_new_stop(self):
+        self.setup_project()
+        mock = self.mock_bin / 'claude'
+        mock.write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+assert os.path.samestat(os.fstat(0), os.stat('/dev/null'))
+a = sys.argv[1:]
+assert a[0] == '-p'
+assert a[a.index('--tools')+1] == 'Read,Glob,Grep'
+assert a[a.index('--allowedTools')+1] == 'Read,Glob,Grep'
+assert a[a.index('--permission-mode')+1] == 'dontAsk'
+assert a[a.index('--setting-sources')+1] == 'project'
+assert '--strict-mcp-config' in a
+with open(os.environ['MOCK_STATE_DIR'] + '/diagnosis-calls', 'a') as f: f.write('call\\n')
+print('Runner stopped after a failed check.\\nInspect validation evidence.')
+''')
+        error = self.project / '.ai/local/last-error'
+        error.parent.mkdir(exist_ok=True)
+        error.write_text('validation failed')
+        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', expected=1)
+        self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 1)
+        self.assertIn('Runner stopped after a failed check.', self.notifications())
+        self.assertIn('Inspect validation evidence.', (self.project / '.ai/local/diagnosis.md').read_text())
+        error.write_text('another stop')
+        self.watchdog('--diagnose', expected=1)
+        self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 2)
+
+    def test_watchdog_diagnosis_failure_is_not_retried_and_usage(self):
+        self.setup_project()
+        self.watchdog('--stale-minutes', '0', expected=2)
+        self.watchdog('--unknown', expected=2)
+        self.watchdog_phase('implementing')
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
+        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', expected=1)
+        self.assertIn('exit 17', (self.project / '.ai/local/diagnosis.md').read_text())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+
+    def test_watchdog_usage_pause_is_not_hung(self):
+        import time
+        self.setup_project()
+        self.watchdog_runner()
+        self.env['AI_WATCHDOG_NOW'] = str(time.time() + 3600)
+        old = time.time() - 3600
+        os.utime(self.project / '.ai/run-log.md', (old, old))
+        pauses = self.project / '.ai/local/pauses.log'
+        pauses.parent.mkdir(exist_ok=True)
+        start = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(old))
+        pauses.write_text(start + ' paused 9000s: Claude usage limit (resume ~Mon 12:00)\n')
+        os.utime(pauses, (old, old))
+        self.watchdog()
+        pauses.write_text(start + ' paused 60s: Claude usage limit (resume ~Mon 12:00)\n')
+        os.utime(pauses, (old, old))
+        self.watchdog(expected=1)
+        self.assertIn('hung', self.notifications())
+
+    def test_watchdog_pipeline_marker_detects_killed_pipeline(self):
+        self.setup_project()
+        self.watchdog_phase('ready_for_review')
+        marker = self.project / '.ai/local/pipeline.active'
+        marker.parent.mkdir(exist_ok=True)
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        marker.write_text(f'{dead.pid}\n')
+        self.watchdog(expected=1)
+        self.watchdog(expected=1)
+        self.assertEqual(self.notifications().count('gone without finishing'), 1)
+        self.assertNotIn('stalled', self.notifications())
+
+    def test_watchdog_orphaned_child_does_not_hide_dead_pipeline(self):
+        self.setup_project()
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        self.watchdog_runner()  # its ai-run child
+        marker = self.project / '.ai/local/pipeline.active'
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text(f'{pipeline.pid}\n')
+        self.watchdog()
+        pipeline.kill()
+        pipeline.wait()
+        self.watchdog(expected=1)
+        self.assertIn('gone without finishing', self.notifications())
+        # A reused PID that started after the marker was written is not the pipeline.
+        os.utime(marker, (1, 1))
+        later = self.watchdog_runner(name='ai-pipeline')
+        marker.write_text(f'{later.pid}\n')
+        os.utime(marker, (1, 1))
+        self.watchdog(expected=1)
+
+    def test_watchdog_finished_pipeline_is_not_a_crash(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('watchdog', ROOT / 'scripts/lib/watchdog.py')
+        watchdog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watchdog)
+        marker = self.base / 'pipeline.active'
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        marker.write_text(f'{dead.pid}\n')
+        self.assertTrue(watchdog.pipeline_died(marker))
+        snapshot = watchdog.marker_snapshot
+        def finishing(path):
+            result = snapshot(path)
+            path.unlink(missing_ok=True)  # the pipeline finishes mid-probe
+            return result
+        watchdog.marker_snapshot = finishing
+        self.assertEqual(watchdog.pipeline_died(marker), 0)
+
+    def test_watchdog_resumed_run_ignores_old_logs(self):
+        import time
+        self.setup_project()
+        old = time.time() - 7200
+        for path in (self.project / '.ai/run-log.md', self.project / '.ai'):
+            os.utime(path, (old, old))
+        self.watchdog_runner()
+        self.watchdog()  # just started: not hung despite 2-hour-old logs
+        self.assertEqual(self.notifications(), '')
+
+    def test_watchdog_install_and_uninstall_timer(self):
+        project = self.base / 'my 100% project'
+        project.mkdir()
+        self.project = project
+        self.run_cmd(['git', 'init', '-q', '-b', 'main'])
+        self.setup_project()
+        (self.mock_bin / 'systemctl').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n')
+        (self.mock_bin / 'systemctl').chmod(0o755)
+        self.watchdog('--install-timer', '--diagnose', '--stale-minutes', '90')
+        units = sorted((self.config / 'systemd/user').iterdir())
+        self.assertEqual([u.suffix for u in units], ['.service', '.timer'])
+        self.assertTrue(units[0].name.startswith('ai-watchdog-my-100-project-'))
+        service = units[0].read_text()
+        exec_start = next(line for line in service.splitlines() if line.startswith('ExecStart='))
+        self.assertIn('"' + str(project).replace('%', '%%') + '"', exec_start)
+        self.assertIn('"--stale-minutes" "90" "--diagnose"', exec_start)
+        self.assertIn('SuccessExitStatus=1', service)
+        self.assertIn('Unit=' + units[0].name, units[1].read_text())
+        calls = (self.base / 'systemctl.log').read_text().splitlines()
+        self.assertEqual(calls, ['--user daemon-reload', '--user enable --now ' + units[1].name])
+        self.watchdog('--uninstall-timer')
+        self.assertEqual(list((self.config / 'systemd/user').iterdir()), [])
+        self.assertIn('--user disable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
+        self.watchdog('--install-timer', '--uninstall-timer', expected=2)
+        self.watchdog('--install-timer')
+        (self.mock_bin / 'systemctl').write_text('#!/usr/bin/env bash\n[[ "$2" != disable ]]\n')
+        self.watchdog('--uninstall-timer', expected=1)
+        self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
+
+    def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        (self.mock_bin / 'claude').write_text(
+            '#!/usr/bin/env bash\nprintf "call\\n" >> "$MOCK_STATE_DIR/timeout-calls"\nsleep 30\n')
+        command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1']
+        first = subprocess.Popen(command, cwd=self.project, env=self.env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.watchdog('--diagnose', '--diagnosis-timeout', '1', expected=1)
+            first.communicate(timeout=15)
+            self.assertEqual(first.returncode, 1)
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.wait()
+        self.assertEqual((self.base / 'timeout-calls').read_text().count('call'), 1)
+        self.assertIn('exit 124', (self.project / '.ai/local/diagnosis.md').read_text())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+
     def ready(self, queue=None):
         self.setup_project()
         self.commit('bootstrap')
@@ -619,6 +845,7 @@ class ToolkitTest(unittest.TestCase):
         self.assertEqual(log.count('record independent review'), 1)
         self.assertIn('Pipeline started', self.notifications())
         self.assertIn('PR ready for testing: https://github.com/example/project/pull/7', self.notifications())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
     def test_pipeline_fixes_major_findings_then_reviews_again(self):
         self.ready()
@@ -670,6 +897,12 @@ class ToolkitTest(unittest.TestCase):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CLAUDE='error')
         self.assertIn('Pipeline stopped during implementation', self.notifications())
+        # A reported stop removes the liveness marker: the watchdog reports the stop, not a crash.
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.tool('ai-watchdog', expected=1)
+        self.assertNotIn('gone without finishing', self.notifications())
+        self.assertNotIn('stalled', self.notifications())
+        self.assertIn('Watchdog: stopped:', self.notifications())
         self.tool('ai-pipeline', '--approved', '--base', 'not-a-ref', expected=1)
         self.run_cmd(['git', 'switch', 'main'])
         self.tool('ai-pipeline', '--approved', expected=1)

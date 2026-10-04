@@ -455,3 +455,43 @@ CLI behavior was checked against installed help and the official
 [Claude headless documentation](https://code.claude.com/docs/en/headless),
 [Claude permissions documentation](https://code.claude.com/docs/en/permissions), and
 [Codex CLI reference](https://developers.openai.com/codex/cli/reference).
+
+## Optional checkout watchdog
+
+`.ai/bin/ai-watchdog [PROJECT]` checks one checkout (default: the current directory)
+without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` when:
+
+- `ai-pipeline` is gone without finishing or reporting a stop (killed, crashed or
+  machine restarted), in any phase, even if an orphaned `ai-run` child survives;
+- an implementing/fixing_review checkout has no runner and no recorded stop
+  (e.g. a killed standalone `ai-run`);
+- an alive runner has no log activity for `--stale-minutes` (default 45), not
+  counting a usage-limit pause until its announced resume time or logs from before
+  the current run started;
+- a new `last-error` records a stop.
+
+Exit codes are 0 healthy, 1 incident (including already notified), 2 usage error.
+It never restarts or repairs the workflow.
+
+`--diagnose` opts into one headless Claude attempt per newly detected incident
+batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10 seconds kill
+grace). Only Read/Glob/Grep tools and project settings are enabled; MCP is disabled
+and stdin is `/dev/null`; `AI_MODEL` applies. The watchdog saves the response to
+ignored `.ai/local/diagnosis.md` and includes its first line in the notification.
+Inspect trusted project settings/hooks before opting in; tool restrictions are not
+an OS sandbox. Failed or interrupted attempts are not retried for that incident.
+
+Run it every 10 minutes with a systemd user timer (one per checkout):
+
+```bash
+.ai/bin/ai-watchdog --install-timer --diagnose     # writes, enables and starts the units
+systemctl --user list-timers 'ai-watchdog-*'
+.ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
+```
+
+`--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
+`~/.config/systemd/user/` with the absolute checkout path, the given options and the
+installing shell's `PATH` (so the timer finds `claude`, `curl` and friends). Notification
+settings come from the user config described above. Existing projects need the new
+`ai-watchdog` and `lib/watchdog.py` copied into `.ai/bin/` deliberately, because setup
+preserves existing files.
