@@ -190,10 +190,11 @@ def forwarded_env():
 def start_recovery(root, local, marker):
     """Start ai-recover outside this (oneshot, soon reaped) service. Returns None when
     recovery confirmed it took over, else the reason it didn't (the human must be told)."""
-    if os.environ.get('AI_AUTO_RECOVER', '1') == '0':
-        return 'auto-recovery is off'
-    # Verify with THIS copy's code (the host copy --install-timer made), not checkout code.
+    # Verify with THIS copy's code (the host copy --install-timer made), never checkout code.
+    # Whether recovery is allowed is the approved run's setting; ai-recover enforces it.
     bin_dir = Path(__file__).resolve().parent.parent
+    if bin_dir.is_relative_to(root):
+        return 'auto-recovery only runs from the installed timer (ai-watchdog --install-timer --recover)'
     common = bin_dir / 'lib' / 'common.sh'
     # Same check ai-pipeline does before handing over: only approved gate code may run.
     digest = subprocess.run(['bash', '-c', 'source "$1"; ai_guard_digest', 'ai-watchdog', str(common)],

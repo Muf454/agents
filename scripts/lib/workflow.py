@@ -655,17 +655,17 @@ def recover_decision(arguments):
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
     try:
-        envelope = json.loads(Path(log).read_text())
+        envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
         envelope = None
     if not isinstance(envelope, dict) or exit_code != '0' or envelope.get('is_error') is not False \
             or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
-    text = envelope['result']
-    start, end = text.find('{'), text.rfind('}')
+    # The answer must be exactly one JSON object (optionally in a ```json fence), nothing else.
+    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
-        decision = json.loads(text[start:end + 1], object_pairs_hook=_no_duplicate_keys) if start >= 0 else None
+        decision = json.loads(text, object_pairs_hook=_no_duplicate_keys)
     except ValueError:
         decision = None
     if not isinstance(decision, dict):
@@ -701,6 +701,9 @@ def committed_matches_worktree(arguments):
             continue
         if '\n' in name or not Path(name).is_file() or Path(name).is_symlink():
             fail(f'Committed file differs on disk: {name}')
+        executable = bool(Path(name).stat().st_mode & 0o111)
+        if mode != ('100755' if executable else '100644'):
+            fail(f'Committed mode of {name} ({mode}) differs from the validated file on disk.')
         files.append(name)
         expected[name] = sha
     if files:
