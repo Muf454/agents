@@ -1,6 +1,7 @@
 # Independent review
 
 Overall verdict: NOT REVIEWED
+Finding counts: not reviewed
 Reviewed HEAD: unset
 Comparison base / merge-base: unset
 Validation evidence: none

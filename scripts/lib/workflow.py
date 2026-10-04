@@ -12,7 +12,8 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 
 def fail(message):
@@ -114,7 +115,7 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-check', 'ai-status', 'ai-review', 'lib/common.sh', 'lib/workflow.py'):
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'lib/common.sh', 'lib/workflow.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     generated = '.ai/validation-candidates.md'
     destinations = list(copies) + [generated, '.gitignore', '.ai/local']
@@ -161,7 +162,7 @@ def setup(arguments):
         # Exclusive creation protects existing files even if setup is repeated.
         with target.open('xb') as file:
             file.write(source.read_bytes())
-        target.chmod(0o755 if relative.startswith('.ai/bin/') or relative == '.ai/validate' else 0o644)
+        target.chmod(0o755 if relative.startswith('.ai/bin/') or relative in ('.ai/validate', '.ai/ci-setup') else 0o644)
         if relative == '.ai/state.md':
             text = target.read_text().replace('Project: unset', f'Project: {root.name}')
             try:
@@ -221,6 +222,12 @@ def tasks():
             if len(values) != 1:
                 fail(f"{task['id']}: expected exactly one {field}: line")
             task[field.lower()] = values[0]
+        models = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith('Model:')]
+        if len(models) > 1:
+            fail(f"{task['id']}: at most one Model: line")
+        task['model'] = models[0] if models else ''
+        if task['model'] and not re.fullmatch(r'[A-Za-z0-9._:\[\]-]{1,64}', task['model']):
+            fail(f"{task['id']}: invalid Model: value")
         if task['status'] not in ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'):
             fail(f"{task['id']}: invalid status")
         value = task['dependencies']
@@ -257,6 +264,13 @@ def task_command(arguments):
                     and all(by_id[d]['status'] == 'DONE' for d in task['deps'])]
         active = next((task for task in eligible if task['status'] == 'IN_PROGRESS'), None)
         print((active or (eligible[0] if eligible else {'id': 'none'}))['id'])
+    elif action == 'model':
+        task = next((task for task in blocks if task['id'] == arguments[1]), None)
+        if task is None:
+            fail(f'Unknown task: {arguments[1]}')
+        print(task['model'])
+    elif action == 'count':
+        print(len(blocks))
     elif action in ('status', 'set'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
@@ -405,27 +419,178 @@ def status():
         print('Last validation: not run')
 
 
-def claude_result(path):
+def claude_result(path, check_only=False):
     data = json.loads(Path(path).read_text())
     if not isinstance(data, dict) or data.get('type') != 'result' or data.get('is_error') is not False:
         fail('Missing/failed Claude result.')
     if data.get('subtype') != 'success':
         fail(f"Claude did not finish successfully: {data.get('subtype')}")
-    if data.get('permission_denials'):
-        fail('Claude reported permission denials. Inspect the result and update policy as the human.')
+    denials = data.get('permission_denials') or []
+    if denials and not check_only:
+        # Denied attempts are reported, not fatal: the runner still requires a real
+        # DONE/BLOCKED checkpoint, so a session that couldn't work around them stops anyway.
+        with open('.ai/local/denials.log', 'a') as log:
+            for denial in denials:
+                command = json.dumps(denial.get('tool_input', {}))[:300]
+                log.write(f"{now()} {denial.get('tool_name')} {command}\n")
+        print(f'Note: {len(denials)} denied tool call(s) logged in .ai/local/denials.log', file=sys.stderr)
 
 
 def publish_review(arguments):
     source, head, base = arguments
     content = Path(source).read_text()
-    required = ('Overall verdict:', '## BLOCKER findings', '## MAJOR findings',
+    required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
                 '## MINOR findings', '## Missing test coverage', '## Security concerns',
                 '## Architecture concerns', '## Manual testing recommendations')
     for field in required:
         if field not in content:
             fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
+    review_counts(content)
     header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n'
     atomic('.ai/reviews/current.md', header + content)
+
+
+COUNTS = re.compile(r'^Finding counts:\s*BLOCKER=(\d+)\s+MAJOR=(\d+)\s+MINOR=(\d+)\s*$', re.M)
+
+
+def review_counts(content):
+    match = COUNTS.search(content)
+    if not match:
+        fail('Review lacks "Finding counts: BLOCKER=n MAJOR=n MINOR=n".')
+    return tuple(int(x) for x in match.groups())
+
+
+def review_info(arguments):
+    """Print reviewed HEAD and finding counts of the current review: HEAD BLOCKER MAJOR MINOR."""
+    content = Path(arguments[0] if arguments else '.ai/reviews/current.md').read_text()
+    head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', content)
+    if not head:
+        fail('Current review has no host evidence; it was not produced by ai-review.')
+    print(head.group(1), *review_counts(content))
+
+
+LIMIT_TEXT = re.compile(
+    r"usage limit|rate[ _-]?limit|limit reached|hit your (?:usage )?limit|out of (?:usage|credits)|"
+    r"too many requests|quota exceeded|\b429\b|resets? at|try again (?:in|at|later)", re.I)
+
+
+def _next_clock(hour, minute, meridiem, reference):
+    if meridiem:
+        hour = hour % 12 + (12 if meridiem.lower() == 'pm' else 0)
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return 0
+    moment = reference.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if moment <= reference:
+        moment += timedelta(days=1)
+    return int(moment.timestamp())
+
+
+def parse_reset(text, reference=None):
+    """Best-effort reset time (epoch seconds) from a provider limit message; 0 if unknown."""
+    reference = reference or datetime.now().astimezone()
+    match = re.search(r'\|(\d{10})\b', text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'(?:reset|again)\D{0,20}(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)', text, re.I)
+    if match:
+        try:
+            value = datetime.fromisoformat(match.group(1).replace('Z', '+00:00').replace(' ', 'T'))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=reference.tzinfo)
+            return int(value.timestamp())
+        except ValueError:
+            pass
+    match = re.search(r'(?:try again in|resets? in|retry in|available in)\s*(?:(\d+)\s*d(?:ays?)?)?\s*(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?\s*(?:(\d+)\s*s(?:ec(?:ond)?s?)?)?', text, re.I)
+    if match and any(match.groups()):
+        days, hours, minutes, seconds = (int(x or 0) for x in match.groups())
+        return int(reference.timestamp()) + ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+    match = re.search(r'(?:resets?|again)(?: at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b', text, re.I) or \
+        re.search(r'(?:resets?|again) at\s+(\d{1,2}):(\d{2})\b()', text, re.I)
+    if match:
+        return _next_clock(int(match.group(1)), int(match.group(2) or 0), match.group(3), reference)
+    return 0
+
+
+def limit_check(paths):
+    """Exit 0 and print the reset epoch (0 = unknown) if the files show a usage/rate limit."""
+    text = ''
+    for name in paths:
+        try:
+            text += Path(name).read_text(errors='replace')[-20000:] + '\n'
+        except OSError:
+            continue
+    try:
+        data = json.loads(Path(paths[0]).read_text())
+        if isinstance(data, dict):
+            text += ' ' + str(data.get('result', '')) + ' ' + str(data.get('error', ''))
+    except (OSError, ValueError, IndexError):
+        pass
+    if not LIMIT_TEXT.search(text):
+        sys.exit(1)
+    print(parse_reset(text))
+
+
+def section(text, heading):
+    match = re.search(r'^##\s+' + re.escape(heading) + r'\s*$(.*?)(?=^##\s|\Z)', text, re.M | re.S)
+    if not match:
+        return ''
+    body = re.sub(r'<!--.*?-->', '', match.group(1), flags=re.S).strip()
+    return body
+
+
+def pr_title(arguments):
+    """PR title: first line of the spec objective, else the branch name."""
+    objective = section(Path('.ai/project-spec.md').read_text(), 'Objective') if Path('.ai/project-spec.md').exists() else ''
+    line = next((l.strip(' #-*') for l in objective.splitlines() if l.strip()), '')
+    if not line:
+        line = git('symbolic-ref', '--short', 'HEAD').decode().strip()
+    print(line[:72])
+
+
+def pr_body(arguments):
+    """Markdown PR description from workflow records. Args: rounds unresolved(0/1)."""
+    rounds, unresolved = int(arguments[0]), arguments[1] == '1'
+    spec = Path('.ai/project-spec.md').read_text() if Path('.ai/project-spec.md').exists() else ''
+    handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
+    review = Path('.ai/reviews/current.md').read_text() if Path('.ai/reviews/current.md').exists() else ''
+    lines = []
+    if unresolved:
+        lines += ['> [!WARNING]', '> Draft: significant review findings remain after the automatic fix rounds.',
+                  '> See "Independent review" below before testing.', '']
+    objective = section(spec, 'Objective')
+    lines += ['## Summary', '', objective or 'See `.ai/project-spec.md`.', '']
+    lines += ['## Tasks', '']
+    for task in tasks():
+        mark = {'DONE': 'x'}.get(task['status'], ' ')
+        suffix = '' if task['status'] == 'DONE' else f" ({task['status']})"
+        lines.append(f"- [{mark}] {task['id']} {task['title']}{suffix}")
+    lines.append('')
+    evidence = Path('.ai/local/validation.json')
+    lines += ['## Validation', '']
+    if evidence.exists():
+        data = json.loads(evidence.read_text())
+        lines.append(f"`.ai/validate`: **{data.get('result')}** at {data.get('timestamp', '?')} "
+                     f"(commit {str(data.get('head', '?'))[:9]}).")
+    else:
+        lines.append('No local validation evidence recorded.')
+    lines.append('')
+    lines += ['## Independent review (Codex)', '']
+    if review:
+        verdict = re.search(r'^Overall verdict:\s*(.*)$', review, re.M)
+        counts = COUNTS.search(review)
+        verdict_text = verdict.group(1).strip().rstrip('.') if verdict else 'unknown'
+        lines.append(f"Rounds: {rounds}. Verdict: {verdict_text}.")
+        if counts:
+            lines.append(f"Findings in the last review: BLOCKER {counts.group(1)}, MAJOR {counts.group(2)}, "
+                         f"MINOR {counts.group(3)}. Full report and Claude's dispositions: `.ai/reviews/current.md`.")
+    else:
+        lines.append('No review recorded.')
+    lines.append('')
+    manual = section(handoff, 'Manual testing for the human')
+    lines += ['## How to test', '', manual or 'See `.ai/handoff.md`.', '']
+    lines += ['---', 'Opened by `ai-pipeline`. Merging and deployment remain with the human.', '',
+              '🤖 Generated with [Claude Code](https://claude.com/claude-code)']
+    print('\n'.join(lines))
 
 
 def main():
@@ -445,9 +610,17 @@ def main():
     elif command == 'status':
         status()
     elif command == 'claude-result':
-        claude_result(arguments[0])
+        claude_result(arguments[0], '--check-only' in arguments[1:])
     elif command == 'publish-review':
         publish_review(arguments)
+    elif command == 'review-info':
+        review_info(arguments)
+    elif command == 'limit-check':
+        limit_check(arguments)
+    elif command == 'pr-title':
+        pr_title(arguments)
+    elif command == 'pr-body':
+        pr_body(arguments)
     else:
         fail(f'Unknown helper command: {command}')
 

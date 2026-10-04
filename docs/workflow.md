@@ -163,6 +163,33 @@ Git hooks remain active and may consume additional time. Monitor your provider u
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
+## Pipeline contract (`ai-pipeline`)
+
+Stages, each resumable by rerunning: implement (`ai-run`) → validate if the stamp is
+stale → review (`ai-review`, then the review is committed as
+`chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
+`--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
+committed as `chore(ai): record review triage`) → implement the new tasks → review
+again. A review counts as current when only `.ai/reviews`, state, run log, and handoff
+changed since its recorded HEAD. Rounds are counted from those commit messages since
+the base, so no hidden state is needed.
+
+Triage sessions may change only `.ai/tasks.md`, `.ai/reviews/current.md`,
+`.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and `.ai/current-plan.md`; any
+other path stops the run. Fix tasks then go through the normal per-task gate.
+
+PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
+protected branches are refused earlier); `gh pr view` decides create vs. edit;
+`--base` is passed when the base is a local branch; draft when `--draft` or when
+significant findings remain after the round limit. The PR body is generated from the
+spec objective, task list, validation stamp, review counts/verdict, and the handoff's
+"Manual testing for the human" section. State becomes `ready_for_acceptance`.
+
+Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
+commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
+start, pauses, stops (with `.ai/local/last-error`), and the PR. Usage-limit pauses
+are described in the README; they never write tracked files.
+
 ## Review and fixes
 
 Review begins at a clean committed checkpoint with a complete queue and fresh successful

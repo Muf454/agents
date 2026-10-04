@@ -22,7 +22,11 @@
       "Edit(.ai/permissions.allow)",
       "Write(.ai/permissions.allow)",
       "Edit(.claude/settings.json)",
-      "Write(.claude/settings.json)"
+      "Write(.claude/settings.json)",
+      "Edit(.ai/ci-setup)",
+      "Write(.ai/ci-setup)",
+      "Edit(.github/workflows/ai-validate.yml)",
+      "Write(.github/workflows/ai-validate.yml)"
     ]
   }
 }

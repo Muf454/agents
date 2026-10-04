@@ -37,7 +37,7 @@ args = sys.argv[1:]
 assert '--permission-mode' in args and args[args.index('--permission-mode')+1] == 'dontAsk'
 assert '--' in args
 prompt = args[args.index('--')+1]
-assert 'RUNNER CONTRACT' in prompt
+assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -49,6 +49,37 @@ else:
     assert '--add-dir' not in args
 mode = os.environ.get('MOCK_CLAUDE', 'success')
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
+with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
+if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
+    pathlib.Path('.ai/local/mock-limit-hit').touch()
+    print(json.dumps({'type':'result','subtype':'error','is_error':True,
+                      'result':"You've hit your usage limit. Try again in 2 minutes."}))
+    sys.exit(1)
+if mode == 'limit-far':
+    print(json.dumps({'type':'result','subtype':'error','is_error':True,
+                      'result':'Claude AI usage limit reached|' + str(int(time.time()) + 7 * 86400)}))
+    sys.exit(1)
+if 'TRIAGE CONTRACT' in prompt:
+    tasks_file = pathlib.Path('.ai/tasks.md')
+    text = tasks_file.read_text()
+    review = pathlib.Path('.ai/reviews/current.md')
+    if mode == 'triage-reject':
+        review.write_text(review.read_text() + '\n| M1 | rejected | fixture evidence | none | n/a |\n')
+        subprocess.run(['git','add','--','.ai/reviews/current.md'],check=True)
+    else:
+        ids = [int(x) for x in re.findall(r'^## T(\d+)', text, re.M)]
+        new_id = 'T%03d' % (max(ids) + 1)
+        block = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+        tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
+        review.write_text(review.read_text() + f'\n| M1 | accepted | fixture | {new_id} | pending |\n')
+        paths = ['.ai/tasks.md', '.ai/reviews/current.md']
+        if mode == 'triage-touches-source':
+            pathlib.Path('src.txt').write_text('not allowed in triage')
+            paths.append('src.txt')
+        subprocess.run(['git','add','--',*paths],check=True)
+    subprocess.run(['git','commit','-qm','triage review'],check=True)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+    sys.exit(0)
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
@@ -59,6 +90,9 @@ if mode == 'denied':
     print(json.dumps({'type':'result','subtype':'success','is_error':False,
                       'permission_denials':[{'tool_name':'Bash'}]}))
     sys.exit(0)
+denied_but_done = mode == 'denied-but-done'
+if denied_but_done:
+    mode = 'success'
 if mode == 'invalid':
     print('not JSON')
     sys.exit(0)
@@ -91,6 +125,12 @@ if mode not in ('no-progress', 'bad-format'):
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
 if mode == 'bad-format':
     pathlib.Path('.ai/tasks.md').write_text('## T001 — broken\nStatus: MAGIC\n')
+if denied_but_done:
+    # Real-run behaviour: a denied shell write, worked around, plus an uncommitted run-log line.
+    with open('.ai/run-log.md', 'a') as f: f.write('| now | claude | T001 | done | pass | x | note |\n')
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,
+                      'permission_denials':[{'tool_name':'Bash','tool_input':{'command':'cat > greet.py'}}]}))
+    sys.exit(0)
 print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
 '''
 
@@ -102,7 +142,14 @@ assert args[args.index('--sandbox')+1] == 'read-only'
 assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
 mode = os.environ.get('MOCK_CODEX', 'success')
+state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
+calls = state / 'codex-calls'
+calls.write_text(calls.read_text() + 'call\n' if calls.exists() else 'call\n')
+count = calls.read_text().count('call')
 if mode == 'error': sys.exit(17)
+if mode == 'limit-once' and count == 1:
+    print('ERROR: usage_limit_reached. You have hit your usage limit. Try again in 3 minutes.')
+    sys.exit(1)
 path = pathlib.Path(args[args.index('--output-last-message')+1])
 if mode == 'empty': sys.exit(0)
 if mode == 'malformed':
@@ -110,12 +157,14 @@ if mode == 'malformed':
     sys.exit(0)
 if mode == 'mutates':
     pathlib.Path('unexpected.txt').write_text('unexpected concurrent edit')
+major = mode == 'major-always' or (mode == 'major-once' and count == 1)
 path.write_text("""# Independent review
-Overall verdict: no demonstrated findings in inspected fixture
+Overall verdict: """ + ('one major finding' if major else 'no demonstrated findings in inspected fixture') + """
+Finding counts: BLOCKER=0 MAJOR=""" + ('1' if major else '0') + """ MINOR=0
 ## BLOCKER findings
 None found.
 ## MAJOR findings
-None found.
+""" + ('M1: fixture defect at T001.txt:1.' if major else 'None found.') + """
 ## MINOR findings
 None found.
 ## Missing test coverage
@@ -127,6 +176,28 @@ No application built.
 ## Manual testing recommendations
 Run a supervised CLI smoke test in a real project.
 """)
+'''
+
+
+MOCK_GH = r'''#!/usr/bin/env python3
+import json, os, pathlib, shutil, sys
+args = sys.argv[1:]
+log = pathlib.Path(os.environ['MOCK_GH_LOG'])
+with log.open('a') as f: f.write(json.dumps(args) + '\n')
+if args[:2] == ['pr', 'view']:
+    if os.environ.get('MOCK_GH_EXISTING'):
+        print('https://github.com/example/project/pull/7'); sys.exit(0)
+    sys.exit(1)
+if args[:2] in (['pr', 'create'], ['pr', 'edit']):
+    body = args[args.index('--body-file') + 1]
+    shutil.copy(body, str(log) + '.body.md')
+    if args[1] == 'create': print('https://github.com/example/project/pull/7')
+    sys.exit(0)
+sys.exit(2)
+'''
+
+MOCK_SLEEP = r'''#!/usr/bin/env bash
+echo "$1" >> "$MOCK_SLEEP_LOG"
 '''
 
 
@@ -144,11 +215,21 @@ class ToolkitTest(unittest.TestCase):
         self.run_cmd(['git', 'config', 'commit.gpgsign', 'false'])
         self.mock_bin = self.base / 'mock-bin'
         self.mock_bin.mkdir()
-        for name, contents in (('claude', MOCK_CLAUDE), ('codex', MOCK_CODEX)):
+        for name, contents in (('claude', MOCK_CLAUDE), ('codex', MOCK_CODEX), ('gh', MOCK_GH),
+                               ('mock-sleep', MOCK_SLEEP)):
             file = self.mock_bin / name
             file.write_text(contents)
             file.chmod(0o755)
         self.env['PATH'] = str(self.mock_bin) + os.pathsep + self.env['PATH']
+        self.config = self.base / 'xdg-config'
+        self.config.mkdir()
+        template = self.base / 'task-template.md'
+        template.write_text(task('TXXX'))
+        self.notify_log = self.base / 'notifications.log'
+        self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
+                        MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
+                        MOCK_SLEEP_LOG=str(self.base / 'sleep.log'), AI_SLEEP=str(self.mock_bin / 'mock-sleep'),
+                        AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
     def run_cmd(self, command, expected=0, env=None):
         result = subprocess.run(command, cwd=self.project, env=env or self.env,
@@ -327,8 +408,9 @@ class ToolkitTest(unittest.TestCase):
     def test_permission_policy_protects_gate_tools_and_prompts(self):
         deny = json.loads((ROOT / 'templates/.claude/settings.json').read_text())['permissions']['deny']
         for tool in ('Edit', 'Write'):
-            for path in ('.ai/bin/**', '.ai/validate', '.ai/prompts/**',
-                         '.ai/permissions.allow', '.claude/settings.json'):
+            for path in ('.ai/bin/**', '.ai/validate', '.ai/prompts/**', '.ai/ci-setup',
+                         '.ai/permissions.allow', '.claude/settings.json',
+                         '.github/workflows/ai-validate.yml'):
                 self.assertIn(f'{tool}({path})', deny)
         for command in ('git commit --no-verify *', 'git commit -n *',
                         'git commit * --no-verify', 'git commit * -n'):
@@ -336,7 +418,8 @@ class ToolkitTest(unittest.TestCase):
 
     def test_runner_detects_even_committed_gate_changes_before_untrusted_helpers(self):
         self.ready()
-        targets = ('.ai/validate', '.ai/bin/ai-check', '.ai/bin/lib/workflow.py',
+        targets = ('.ai/validate', '.ai/ci-setup', '.github/workflows/ai-validate.yml',
+                   '.ai/bin/ai-pipeline', '.ai/prompts/runner.md', '.ai/bin/ai-check', '.ai/bin/lib/workflow.py',
                    '.ai/bin/lib/common.sh', '.ai/bin/ai-run', '.ai/prompts/implement.md',
                    '.ai/permissions.allow', '.claude/settings.json', '.ai/bin/added-tool')
         for target in targets:
@@ -465,6 +548,179 @@ class ToolkitTest(unittest.TestCase):
             self.tool('ai-run', '--approved', expected=1)
             self.tool('ai-review', '--base', 'main', expected=1)
         self.tool('ai-run', '--approved')
+
+    # ---------------------------------------------------------------- pipeline
+    def add_origin(self):
+        origin = self.base / 'origin.git'
+        subprocess.run(['git', 'init', '-q', '--bare', str(origin)], check=True, env=self.env)
+        self.run_cmd(['git', 'remote', 'add', 'origin', str(origin)])
+        return origin
+
+    def gh_calls(self):
+        log = self.base / 'gh.log'
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def notifications(self):
+        return self.notify_log.read_text() if self.notify_log.exists() else ''
+
+    def test_pipeline_clean_review_pushes_and_opens_pr(self):
+        self.ready()
+        origin = self.add_origin()
+        (self.project / '.ai/handoff.md').write_text(
+            '# Handoff\n\n## Manual testing for the human\n1. Open the app and check T001.\n')
+        self.commit('handoff with test steps')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.helper('tasks', 'complete')
+        branches = subprocess.run(['git', '--git-dir', str(origin), 'branch'], capture_output=True, text=True).stdout
+        self.assertIn('feature/test', branches)
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertEqual(len(create), 1)
+        self.assertNotIn('--draft', create[0])
+        self.assertEqual(create[0][create[0].index('--base') + 1], 'main')
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('[x] T001', body)
+        self.assertIn('Open the app and check T001.', body)
+        self.assertIn('BLOCKER 0, MAJOR 0', body)
+        self.assertIn('Phase: ready_for_acceptance', (self.project / '.ai/state.md').read_text())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        log = self.run_cmd(['git', 'log', '--oneline']).stdout
+        self.assertEqual(log.count('record independent review'), 1)
+        self.assertIn('Pipeline started', self.notifications())
+        self.assertIn('PR ready for testing: https://github.com/example/project/pull/7', self.notifications())
+
+    def test_pipeline_fixes_major_findings_then_reviews_again(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        log = self.run_cmd(['git', 'log', '--oneline']).stdout
+        self.assertEqual(log.count('record independent review'), 2)
+        self.assertEqual(log.count('record review triage'), 1)
+        self.assertIn('accepted', (self.project / '.ai/reviews/current.md').read_text().lower() +
+                      self.run_cmd(['git', 'show', 'HEAD~3:.ai/reviews/current.md'], expected=None).stdout.lower())
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertNotIn('--draft', create[0])
+
+    def test_pipeline_opens_draft_when_findings_persist(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '1',
+                  MOCK_CODEX='major-always')
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertIn('--draft', create[0])
+        self.assertIn('significant review findings remain', (self.base / 'gh.log.body.md').read_text())
+        self.assertIn('Draft PR needs your attention', self.notifications())
+
+    def test_pipeline_rejected_findings_still_open_normal_pr(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main',
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-reject')
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertNotIn('--draft', create[0])
+        self.assertIn('rejected', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_pipeline_rerun_updates_existing_pr_without_new_review(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertTrue(any(c[:2] == ['pr', 'edit'] for c in self.gh_calls()))
+
+    def test_pipeline_without_remote_or_pr_reports_ready(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertIn("no 'origin' remote", self.notifications())
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_pipeline_stop_is_notified(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Pipeline stopped during implementation', self.notifications())
+        self.tool('ai-pipeline', '--approved', '--base', 'not-a-ref', expected=1)
+        self.run_cmd(['git', 'switch', 'main'])
+        self.tool('ai-pipeline', '--approved', expected=1)
+
+    # ---------------------------------------------------------------- limits, models, triage, config
+    def test_worked_around_denials_and_bookkeeping_leftovers_do_not_stop_the_run(self):
+        self.ready()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='denied-but-done')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('| claude | T001 |', self.run_cmd(['git', 'show', 'HEAD~1:.ai/run-log.md'], expected=None).stdout +
+                      (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual((self.project / '.ai/local/denials.log').read_text().count('cat > greet.py'), 1)
+
+    def test_claude_usage_limit_pauses_then_resumes(self):
+        self.ready()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once')
+        self.helper('tasks', 'complete')
+        waited = int((self.base / 'sleep.log').read_text().split()[0])
+        self.assertTrue(150 <= waited <= 200, waited)  # "try again in 2 minutes" + 60s buffer
+        self.assertIn('Paused: Claude usage limit', self.notifications())
+        self.assertIn('Claude usage limit', (self.project / '.ai/local/pauses.log').read_text())
+
+    def test_usage_limit_beyond_wait_budget_stops(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='3600')
+        self.assertIn('wait budget', result.stderr)
+        self.assertFalse((self.base / 'sleep.log').exists())
+        self.assertIn('Runner stopped', self.notifications())
+
+    def test_codex_usage_limit_pauses_then_retries(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertIn('Paused: Codex usage limit', self.notifications())
+        self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_task_model_line_overrides_run_model(self):
+        self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +
+                   task('T002', dependencies='T001'))
+        self.tool('ai-run', '--approved', '--model', 'opus')
+        calls = (self.project / '.ai/local/mock-args').read_text().splitlines()
+        self.assertIn('--model sonnet', calls[0])
+        self.assertIn('--model opus', calls[1])
+        self.tool('ai-run', '--approved', '--model', 'bad model', expected=1)
+        (self.project / '.ai/tasks.md').write_text(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: a b'))
+        self.helper('tasks', 'check', expected=1)
+
+    def test_triage_may_only_change_workflow_records(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        result = self.tool('ai-run', '--approved', '--triage', expected=1, MOCK_CLAUDE='triage-touches-source')
+        self.assertIn('outside workflow records', result.stderr)
+
+    def test_user_config_file_supplies_notify_command_only_for_known_keys(self):
+        self.ready()
+        out = self.base / 'from-config.log'
+        cfg = self.config / 'ai-toolkit'
+        cfg.mkdir()
+        (cfg / 'config').write_text(f'AI_NOTIFY_CMD="echo \\"$1\\" >> {out}"\nPATH=/nowhere\nAI_UNKNOWN=1\n')
+        env = {k: v for k, v in self.env.items() if k != 'AI_NOTIFY_CMD'}
+        result = self.run_cmd([str(self.project / '.ai/bin/ai-run'), '--approved'], env=env)
+        self.assertIn('ready for independent review', out.read_text())
+        self.assertEqual(result.returncode, 0)
+
+    def test_reset_time_parsing(self):
+        import importlib.util
+        from datetime import datetime
+        spec = importlib.util.spec_from_file_location('workflow', HELPER)
+        wf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf)
+        ref = datetime(2026, 10, 4, 15, 30).astimezone()
+        base = int(ref.timestamp())
+        self.assertEqual(wf.parse_reset('limit reached|1791134319', ref), 1791134319)
+        self.assertEqual(wf.parse_reset('Rate limit. Try again in 2h 13m.', ref), base + 7980)
+        self.assertEqual(datetime.fromtimestamp(wf.parse_reset("hit your limit · resets 7pm", ref)).hour, 19)
+        self.assertEqual(datetime.fromtimestamp(wf.parse_reset('resets at 3:05 PM', ref)).day, 5)
+        self.assertEqual(wf.parse_reset('usage limit, no time given', ref), 0)
+        self.assertIsNone(wf.LIMIT_TEXT.search('Error: unrelated failure'))
 
 
 if __name__ == '__main__':

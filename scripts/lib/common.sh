@@ -2,7 +2,58 @@
 # Shared by the toolkit scripts and their copies in .ai/bin/.
 set -euo pipefail
 AI_BIN=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-ai_die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+ai_die() {
+  printf 'Error: %s\n' "$*" >&2
+  # Last error for the pipeline/notifications; best effort, never fatal.
+  [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
+  exit 1
+}
+
+# Optional per-user settings: ${XDG_CONFIG_HOME:-~/.config}/ai-toolkit/config with
+# KEY=value lines. Only known keys are read (never sourced); environment wins.
+ai_config() {
+  local file="${XDG_CONFIG_HOME:-$HOME/.config}/ai-toolkit/config" line key value
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL) ;; *) continue ;; esac
+    [[ -z "${!key+x}" ]] || continue
+    if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
+    printf -v "$key" '%s' "$value"
+    export "${key?}"
+  done < "$file"
+}
+ai_config
+
+# Notification hook: AI_NOTIFY_CMD runs via bash with the message as $1
+# (e.g. curl -s -d "$1" ntfy.sh/<topic>). Failures never affect the workflow.
+ai_notify() {
+  [[ -n "${AI_NOTIFY_CMD:-}" ]] || return 0
+  local project
+  project=$(basename -- "${AI_ROOT:-$PWD}")
+  timeout 20 bash -c "$AI_NOTIFY_CMD" ai-notify "[$project] $*" </dev/null >/dev/null 2>&1 || true
+}
+
+# Usage-limit pause: wait until the provider's reset (or AI_LIMIT_RETRY seconds when
+# unknown), bounded by AI_LIMIT_MAX_WAIT total seconds per command. AI_SLEEP is for tests.
+AI_WAITED=0
+ai_limit_pause() {
+  local agent=$1 reset=$2 now wait until
+  local max=${AI_LIMIT_MAX_WAIT:-28800} retry=${AI_LIMIT_RETRY:-1800}
+  now=$(date +%s)
+  if (( reset > now )); then wait=$(( reset - now + 60 )); else wait=$retry; fi
+  (( AI_WAITED + wait <= max )) || \
+    ai_die "$agent usage limit: the reset is beyond the ${max}s wait budget. Rerun after it resets."
+  until=$(date -d "@$(( now + wait ))" '+%a %H:%M')
+  printf '%s usage limit reached; pausing %ss (until %s), then resuming.\n' "$agent" "$wait" "$until"
+  # Pauses go to an ignored local log: touching tracked files would dirty the checkpoint.
+  [[ -d .ai/local ]] && printf '%s paused %ss: %s usage limit (resume ~%s)\n' \
+    "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
+  ai_notify "Paused: $agent usage limit reached. Resuming around $until."
+  ${AI_SLEEP:-sleep} "$wait"
+  AI_WAITED=$(( AI_WAITED + wait ))
+}
 ai_root() {
   AI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ai_die 'Run inside a Git project.'
   cd -- "$AI_ROOT"
@@ -21,8 +72,10 @@ import stat
 import sys
 
 digest = hashlib.sha256()
-roots = ('.ai/validate', '.ai/bin', '.ai/prompts',
-         '.ai/permissions.allow', '.claude/settings.json')
+roots = ('.ai/validate', '.ai/ci-setup', '.ai/bin', '.ai/prompts',
+         '.ai/permissions.allow', '.claude/settings.json',
+         '.github/workflows/ai-validate.yml')
+optional = ('.claude/settings.json', '.github/workflows/ai-validate.yml')
 try:
     for name in roots:
         root = Path(name)
@@ -35,7 +88,7 @@ try:
         for path in paths:
             digest.update(str(path).encode() + b'\0')
             if not path.exists():
-                if name != '.claude/settings.json' or path != root:
+                if name not in optional or path != root:
                     raise ValueError(f'Missing protected workflow path: {path}')
                 digest.update(b'absent\0')
                 continue
