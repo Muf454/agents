@@ -1311,6 +1311,22 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
 
+    def test_resume_ignores_user_config_the_approved_run_did_not_have(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        # Added to the user config after approval: a resume must not pick it up.
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        (self.config / 'ai-toolkit/config').write_text('AI_MODEL=opus-later\n')
+        (self.project / '.ai/local/mock-args').unlink()
+        self.tool('ai-recover', '--stage', 'implementation', MOCK_RECOVER='rerun')
+        self.helper('tasks', 'complete')
+        args = (self.project / '.ai/local/mock-args').read_text()
+        self.assertNotIn('opus-later', args)
+        # Control: a human start does read it.
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertNotIn('AI_MODEL', manifest['env'])
+
     def test_committed_content_must_match_validated_files(self):
         self.ready()
         (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')

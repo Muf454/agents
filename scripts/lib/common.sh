@@ -27,6 +27,8 @@ ai_die() {
 # Optional per-user settings: ${XDG_CONFIG_HOME:-~/.config}/ai-toolkit/config with
 # KEY=value lines. Only known keys are read (never sourced); environment wins.
 ai_config() {
+  # A recovery resume runs with the approved run's settings only (restored by ai-recover).
+  [[ -z "${AI_SETTINGS_FROM_MANIFEST:-}" ]] || return 0
   local file="${XDG_CONFIG_HOME:-$HOME/.config}/ai-toolkit/config" line key value
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
