@@ -71,7 +71,7 @@ def process(pid):
     return None if status[0] == 'Z' else (args, status[19])
 
 
-def is_runner(args, names=('ai-run', 'ai-pipeline')):
+def is_runner(args, names=('ai-run', 'ai-pipeline', 'ai-recover')):
     # Match executable/script arguments, never a prompt or shell command string.
     return any(Path(os.fsdecode(arg)).name in names for arg in args[:3] if arg)
 
@@ -93,7 +93,8 @@ def pipeline_died(marker):
     pid, written = snapshot
     found = process(pid)
     # A reused PID would have started after the marker was written.
-    if found and is_runner(found[0], ('ai-pipeline',)) and start_ns(found[1]) <= written + 1_000_000_000:
+    # ai-recover replaces the pipeline process (exec, same PID) while it decides.
+    if found and is_runner(found[0], ('ai-pipeline', 'ai-recover')) and start_ns(found[1]) <= written + 1_000_000_000:
         return 0
     # A pipeline that just finished removes its marker: only an unchanged marker is a crash.
     return written if marker_snapshot(marker) == snapshot else 0
@@ -142,6 +143,8 @@ def timer(root, args, install):
         return 0
     command = [str(Path(__file__).resolve().parent.parent / 'ai-watchdog'), str(root),
                '--stale-minutes', str(args.stale_minutes)]
+    if args.recover:
+        command += ['--recover']
     if args.diagnose:
         command += ['--diagnose', '--diagnosis-timeout', str(args.diagnosis_timeout),
                     '--diagnosis-agent', args.diagnosis_agent]
@@ -161,6 +164,24 @@ def timer(root, args, install):
     systemctl('enable', '--now', timer_unit.name)
     print(f'Installed {timer_unit}\nRemove with: {shlex.quote(command[0])} {shlex.quote(str(root))} --uninstall-timer')
     return 0
+
+
+def start_recovery(root, local):
+    """Start ai-recover outside this (oneshot, soon reaped) service. True if launched."""
+    if os.environ.get('AI_AUTO_RECOVER', '1') == '0':
+        return False
+    error = local / 'last-error'
+    if not error.exists():
+        save(error, 'ai-pipeline was killed, crashed or the machine restarted\n')
+    recover = Path(__file__).resolve().parent.parent / 'ai-recover'
+    unit = f'ai-recover-{re.sub(r"[^A-Za-z0-9_.-]+", "-", root.name)}-{int(time.time())}'
+    command = ['systemd-run', '--user', '--collect', '--quiet', '--unit=' + unit,
+               '--working-directory=' + str(root), '--setenv=PATH=' + os.environ.get('PATH', '/usr/bin:/bin'),
+               '--', str(recover), '--stage', 'crash (pipeline killed or restarted)']
+    try:
+        return subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def runners(root):
@@ -184,6 +205,8 @@ def main():
     parser.add_argument('project', nargs='?', default='.')
     parser.add_argument('--stale-minutes', type=positive, default=45)
     parser.add_argument('--diagnose', action='store_true')
+    parser.add_argument('--recover', action='store_true',
+                        help='after a crashed ai-pipeline, start ai-recover (bounded auto-recovery)')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
     parser.add_argument('--diagnosis-agent', choices=('codex', 'claude'), default='codex',
                         help='read-only diagnosis by Codex (default; separate limit) or Claude')
@@ -238,11 +261,12 @@ def main():
         died = pipeline_died(marker)
         if died:
             incidents['died:' + str(died)] = (
-                'Watchdog: ai-pipeline is gone without finishing or reporting a stop '
+                '⛔ STOPPED, needs you: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
         elif not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review'):
             # With a last-error the stop below explains it; this catches a killed ai-run.
-            incidents['stalled'] = f'Watchdog: stalled/crashed ({phase[1]}); no checkout runner is alive.'
+            incidents['stalled'] = (f'⛔ STOPPED, needs you: nothing is running but the checkout is mid-'
+                                    f'{phase[1]} (killed runner?). Rerun ai-pipeline or ai-run to resume.')
         # Quiet time counts from this run's start (old logs of a resumed run don't count),
         # and a usage-limit pause is quiet by design until its announced resume time.
         quiet_since = max(newest, paused_until(local))
@@ -251,20 +275,34 @@ def main():
         if alive and now - quiet_since > args.stale_minutes * 60 * 1_000_000_000:
             identity = ','.join(pid + ':' + ticks for pid, ticks in alive)
             incidents['hung:' + identity + ':' + str(quiet_since)] = (
-                f'Watchdog: hung; runner alive with no activity for over {args.stale_minutes} minutes.')
+                f'⚠ HUNG? A runner is alive but has logged nothing for over {args.stale_minutes} minutes. '
+                'It keeps running; check it.')
         if error_time > previous.get('notified_at_ns', 0):
-            incidents['stop:' + str(error_time)] = 'Watchdog: stopped: ' + (' '.join(read(error).split())[:500] or 'see .ai/local')
+            incidents['stop:' + str(error_time)] = 'Stopped: ' + (' '.join(read(error).split())[:500] or 'see .ai/local')
         # Keep an already acknowledged stop active until the file changes/disappears.
         stop_key = 'stop:' + str(error_time)
         if error_time and stop_key in previous.get('active', []):
-            incidents.setdefault(stop_key, 'Watchdog: stopped.')
+            incidents.setdefault(stop_key, 'Stopped.')
         fresh = sorted(set(incidents) - set(previous.get('active', [])))
         record = {'active': sorted(incidents), 'notified_at_ns': previous.get('notified_at_ns', 0)}
         if fresh:
             record['notified_at_ns'] = now
             # Reserve before inference/notification: interrupted probes never start it twice.
             save(state_file, json.dumps(record) + '\n')
-            message = ' '.join(incidents[key] for key in fresh)
+            # The runner already announced its own stops: those alone only matter for a diagnosis.
+            loud = [key for key in fresh if not key.startswith('stop:')]
+            message = ' '.join(incidents[key] for key in loud)
+            if not loud and args.diagnose:
+                message = '🩺 Diagnosis of the stop (' + incidents[fresh[0]][:200] + ').'
+            if args.recover and any(key.startswith('died:') for key in fresh):
+                started = start_recovery(root, local)
+                if started:
+                    # ai-recover announces itself (🔧 Recovering / ⛔ STOPPED); stay quiet.
+                    loud = [key for key in loud if not key.startswith('died:')]
+                    message = ' '.join(incidents[key] for key in loud)
+            if not message:
+                save(state_file, json.dumps(record) + '\n')
+                return 1
             if args.diagnose:
                 prompt = ('Diagnose this workflow incident read-only: inspect files, but never modify, '
                           'create or delete anything or run project code (tests, builds, git writes). '

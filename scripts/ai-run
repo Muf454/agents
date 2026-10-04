@@ -71,7 +71,7 @@ on_exit() {
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
-      ai_notify "Runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+      ai_notify "⛔ STOPPED, needs you: runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
   fi
 }
 trap on_exit EXIT
@@ -230,15 +230,21 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
         ai_die "Validation failed; $active_task returned to IN_PROGRESS."
       fi
       ai_guard_verify
-      [[ -z "$(dirty_beyond_records)" ]] || \
-        ai_die 'Claude left uncommitted work; inspect and checkpoint before continuing.'
+      if [[ -n "$(dirty_beyond_records)" ]]; then
+        # Tier-1 recovery: the session finished and the full gate just passed on exactly
+        # this content (gate files verified unchanged), but it didn't commit. Commit it.
+        git add --all -- .
+        git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
+        ai_guard_verify
+        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it."
+      fi
       ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
-      ai_notify "Done: $(ai_helper tasks progress "$active_task")" ;;
+      ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
-      ai_notify "Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
+      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
     *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
   ai_helper state implementing 'Continue queue; see task results for any blockers'

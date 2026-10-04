@@ -214,6 +214,42 @@ the checkout lock for its whole run and re-verifies the gate after each of its o
 commits. `--no-pr` stops after the review;
 `--draft` always opens a draft. The pipeline keeps its own gate digest across steps.
 
+### Notifications you can read at a glance
+
+| Marker | Meaning |
+| --- | --- |
+| ▶ STARTED / RESUMED | a run began, or resumed after auto-recovery |
+| ✅ Done / ⚠ Blocked | a task finished (with progress, e.g. 1/2), or was blocked |
+| ⏸ PAUSED | usage limit; it resumes by itself at the stated time |
+| 🔧 Recovering / Recovered | auto-recovery is handling a stop; no action needed yet |
+| ⚠ HUNG? | a runner is alive but silent for too long; it keeps running |
+| ⛔ STOPPED, needs you | fully stopped; nothing automatic follows. Says why and what to do |
+| 🏁 FINISHED | all tasks done: review result, PR link and your numbered todo list |
+
+The finish summary lists: deciding unresolved findings (draft PR), the manual test
+steps from `.ai/handoff.md`, merging, and every item under the handoff's "Human todos".
+
+### Auto-recovery
+
+Stops are recovered in tiers, so a hiccup doesn't wait for you:
+
+1. **Rules, no AI.** A task Claude finished and the full gate validated but Claude left
+   uncommitted is committed by the runner (the gate verified unchanged). Pushes retry
+   3 times. Usage limits pause and resume.
+2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
+   the same process. Hard rules escalate at once (gate, permissions, branch, review
+   integrity, plan-review findings, weekly limit, a changed gate digest). Otherwise a
+   read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
+   action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
+   gate passes on the leftovers), or `escalate`. Malformed answers escalate.
+3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
+   pipeline was killed or the machine restarted.
+
+At most `AI_RECOVER_MAX` (default 2) attempts per human-started run; resumes keep the
+approved gate digest from the original `--approved` start and refuse a changed gate.
+Codex never steers: it diagnoses (`--diagnose`) and reviews. Disable with
+`AI_AUTO_RECOVER=0` (both keys are allowed in the user config).
+
 ### Usage limits
 
 A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
@@ -501,7 +537,7 @@ an OS sandbox. Failed or interrupted attempts are not retried for that incident.
 Run it every 10 minutes with a systemd user timer (one per checkout):
 
 ```bash
-.ai/bin/ai-watchdog --install-timer --diagnose     # writes, enables and starts the units
+.ai/bin/ai-watchdog --install-timer --diagnose --recover   # writes, enables and starts the units
 systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
