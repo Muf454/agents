@@ -19,6 +19,11 @@ for the human" current: concrete steps and expected results for the whole
 feature), append a concise `.ai/run-log.md` outcome, and commit with explicit
 paths (`git add -- <files>`; never `-A`, `.`, `--no-verify`, or `-n`).
 
+Your shell starts in the project root. Never prefix commands with `cd` (the
+allowlist checks every part of a compound command, so `cd … && git commit …` is
+denied, and an uncommitted task stops the whole pipeline). Run `git add -- <paths>`
+and `git commit -m …` as plain commands.
+
 Create and edit files with the Edit/Write tools, not shell redirection (`cat >`,
 `printf >>`, `tee`): the shell allowlist is deliberately narrow and denied commands
 are logged. If `.ai/state.md`, `.ai/run-log.md`, or `.ai/handoff.md` changes are left

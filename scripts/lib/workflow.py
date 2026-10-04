@@ -276,6 +276,13 @@ def task_command(arguments):
         print(task['model'])
     elif action == 'count':
         print(len(blocks))
+    elif action == 'progress':
+        # One line for notifications: "<id> <title> (<done>/<total> done)".
+        task = next((task for task in blocks if task['id'] == arguments[1]), None)
+        if task is None:
+            fail(f'Unknown task: {arguments[1]}')
+        done = sum(t['status'] == 'DONE' for t in blocks)
+        print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
     elif action in ('status', 'set'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:

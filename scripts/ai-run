@@ -212,7 +212,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions.'
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Your shell already starts in the project root: never prefix commands with cd (permission rules check every part of a compound command, and a denied git commit stops the whole run); run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
   claude_session "$prompt" "${task_model:-$model}"
@@ -232,11 +232,13 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       ai_guard_verify
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Claude left uncommitted work; inspect and checkpoint before continuing.'
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
+      ai_notify "Done: $(ai_helper tasks progress "$active_task")" ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
-      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result' ;;
+      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
+      ai_notify "Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
     *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
   ai_helper state implementing 'Continue queue; see task results for any blockers'
