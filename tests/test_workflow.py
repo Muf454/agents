@@ -156,8 +156,22 @@ assert args[0] == 'exec'
 assert args[args.index('--sandbox')+1] == 'read-only'
 assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
-mode = os.environ.get('MOCK_CODEX', 'success')
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
+with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
+if 'Diagnose this workflow incident' in args[-1]:
+    path = pathlib.Path(args[args.index('--output-last-message')+1])
+    path.write_text('Codex: the runner was killed.\nEvidence follows.')
+    sys.exit(0)
+if 'PLAN SCOPE' in args[-1]:
+    with open(state / 'codex-plan-calls', 'a') as f: f.write('call\n')
+    major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
+    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
+        '# Plan review\nOverall verdict: ' + ('gap' if major else 'ok') + '\n'
+        'Finding counts: BLOCKER=0 MAJOR=' + ('1' if major else '0') + ' MINOR=0\n'
+        '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- P1: T001 has no test.\n' if major else 'None.\n') +
+        '## MINOR findings\nNone.\n')
+    sys.exit(0)
+mode = os.environ.get('MOCK_CODEX', 'success')
 calls = state / 'codex-calls'
 calls.write_text(calls.read_text() + 'call\n' if calls.exists() else 'call\n')
 count = calls.read_text().count('call')
@@ -357,13 +371,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         error = self.project / '.ai/local/last-error'
         error.parent.mkdir(exist_ok=True)
         error.write_text('validation failed')
-        self.watchdog('--diagnose', expected=1)
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 1)
         self.assertIn('Runner stopped after a failed check.', self.notifications())
         self.assertIn('Inspect validation evidence.', (self.project / '.ai/local/diagnosis.md').read_text())
         error.write_text('another stop')
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertEqual((self.base / 'diagnosis-calls').read_text().count('call'), 2)
 
     def test_watchdog_diagnosis_failure_is_not_retried_and_usage(self):
@@ -372,8 +386,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog('--unknown', expected=2)
         self.watchdog_phase('implementing')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
-        self.watchdog('--diagnose', expected=1)
-        self.watchdog('--diagnose', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
+        self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.assertIn('exit 17', (self.project / '.ai/local/diagnosis.md').read_text())
         self.assertEqual(len(self.notifications().splitlines()), 1)
 
@@ -455,6 +469,15 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog()  # just started: not hung despite 2-hour-old logs
         self.assertEqual(self.notifications(), '')
 
+    def test_watchdog_diagnosis_defaults_to_codex(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        self.watchdog('--diagnose', expected=1)
+        self.assertIn('Codex: the runner was killed.', self.notifications())
+        self.assertIn('Evidence follows.', (self.project / '.ai/local/diagnosis.md').read_text())
+        self.assertIn('--sandbox read-only', (self.base / 'codex-args.log').read_text())
+        self.assertEqual(list((self.project / '.ai/local').glob('.diagnosis-*')), [])
+
     def test_watchdog_install_and_uninstall_timer(self):
         project = self.base / 'my 100% project'
         project.mkdir()
@@ -490,11 +513,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog_phase('implementing')
         (self.mock_bin / 'claude').write_text(
             '#!/usr/bin/env bash\nprintf "call\\n" >> "$MOCK_STATE_DIR/timeout-calls"\nsleep 30\n')
-        command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1']
+        command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude']
         first = subprocess.Popen(command, cwd=self.project, env=self.env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            self.watchdog('--diagnose', '--diagnosis-timeout', '1', expected=1)
+            self.watchdog('--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude', expected=1)
             first.communicate(timeout=15)
             self.assertEqual(first.returncode, 1)
         finally:
@@ -892,6 +915,31 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main')
         self.assertIn("no 'origin' remote", self.notifications())
         self.assertEqual(self.gh_calls(), [])
+
+    def test_pipeline_plan_review_gates_implementation(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        self.assertIn('Pipeline stopped during plan review', self.notifications())
+        self.assertIn('P1: T001 has no test.', (self.project / '.ai/reviews/plan.md').read_text())
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')  # no Claude spent
+        self.assertFalse((self.base / 'codex-calls').exists())
+        # The same plan is not reviewed again; skipping is explicit.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual((self.base / 'codex-plan-calls').read_text().count('call'), 1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
+        self.helper('tasks', 'complete')
+
+    def test_pipeline_plan_review_passes_and_reviews_use_effort(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_REVIEW_MODEL='gpt-test')
+        self.assertEqual((self.base / 'codex-plan-calls').read_text().count('call'), 1)
+        log = self.run_cmd(['git', 'log', '--oneline']).stdout
+        self.assertIn('record plan review', log)
+        calls = (self.base / 'codex-args.log').read_text().splitlines()
+        self.assertEqual(len(calls), 2)  # plan review + implementation review
+        for call in calls:
+            self.assertIn('-c model_reasoning_effort="high" --model gpt-test', call)
+        self.tool('ai-review', '--plan', expected=1, AI_REVIEW_EFFORT='turbo')
 
     def test_pipeline_stop_is_notified(self):
         self.ready()

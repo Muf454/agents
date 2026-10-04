@@ -165,7 +165,10 @@ with the same care as other local transcripts.
 
 ## Pipeline contract (`ai-pipeline`)
 
-Stages, each resumable by rerunning: implement (`ai-run`) → validate if the stamp is
+Stages, each resumable by rerunning: plan review (only while every task is TODO;
+`ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the spec, plan and
+task files, committed as `chore(ai): record plan review`; reused while that digest is
+unchanged; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
 `--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
@@ -284,8 +287,10 @@ arguments/checkout/dedupe record. Notifications use common.sh's best-effort
 cause repeated alerts.
 
 `--diagnose` reserves one attempt for each new incident batch before starting
-`timeout ... claude -p`, with dontAsk, Read/Glob/Grep only, project setting sources,
-empty strict MCP configuration, `AI_MODEL` when set, and `/dev/null` stdin. It asks
+`timeout ... codex exec` (default; read-only sandbox, never-approve, medium effort,
+answer via an mkstemp output file) or, with `--diagnosis-agent claude`,
+`timeout ... claude -p` with dontAsk, Read/Glob/Grep only, project setting sources,
+empty strict MCP configuration and `AI_MODEL` when set. Stdin is `/dev/null`. It asks
 for evidence and human recovery advice, never writes or repairs through Claude tools.
 The host saves stdout (or failure information) to `.ai/local/diagnosis.md` and adds a
 one-line summary to the alert. Existing acknowledged incidents are not diagnosed later

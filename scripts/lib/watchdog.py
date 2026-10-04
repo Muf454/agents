@@ -143,7 +143,8 @@ def timer(root, args, install):
     command = [str(Path(__file__).resolve().parent.parent / 'ai-watchdog'), str(root),
                '--stale-minutes', str(args.stale_minutes)]
     if args.diagnose:
-        command += ['--diagnose', '--diagnosis-timeout', str(args.diagnosis_timeout)]
+        command += ['--diagnose', '--diagnosis-timeout', str(args.diagnosis_timeout),
+                    '--diagnosis-agent', args.diagnosis_agent]
     units.mkdir(parents=True, exist_ok=True)
     # The timer has no login shell: keep the installing shell's PATH (claude, curl, timeout).
     service.write_text(
@@ -184,6 +185,8 @@ def main():
     parser.add_argument('--stale-minutes', type=positive, default=45)
     parser.add_argument('--diagnose', action='store_true')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
+    parser.add_argument('--diagnosis-agent', choices=('codex', 'claude'), default='codex',
+                        help='read-only diagnosis by Codex (default; separate limit) or Claude')
     timer_group = parser.add_mutually_exclusive_group()
     timer_group.add_argument('--install-timer', action='store_true',
                              help='install and start a systemd user timer (every 10 min) with these options')
@@ -266,21 +269,33 @@ def main():
                 prompt = ('Diagnose this workflow incident read-only. Do not change files or run commands. '
                           'Inspect .ai/state.md, .ai/run-log.md and .ai/local logs as needed. '
                           'Start with a one-line summary, then evidence and suggested human recovery.\n' + message)
-                command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout),
-                           'claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
-                           '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
-                           '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
-                if os.environ.get('AI_MODEL'):
-                    command += ['--model', os.environ['AI_MODEL']]
-                command += ['--', prompt]
+                command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]
+                output = None
+                if args.diagnosis_agent == 'codex':
+                    # Default: Codex has its own limit; Claude's is shared with interactive sessions.
+                    descriptor, output = tempfile.mkstemp(dir=local, prefix='.diagnosis-', suffix='.md')
+                    os.close(descriptor)
+                    command += ['codex', 'exec', '--ignore-user-config', '-c', 'approval_policy="never"',
+                                '--sandbox', 'read-only', '-c', 'model_reasoning_effort="medium"',
+                                '--output-last-message', output, prompt]
+                else:
+                    command += ['claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
+                                '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
+                                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
+                    if os.environ.get('AI_MODEL'):
+                        command += ['--model', os.environ['AI_MODEL']]
+                    command += ['--', prompt]
                 try:
                     with open('/dev/null') as stdin:
                         result = subprocess.run(command, stdin=stdin, capture_output=True, text=True)
-                    diagnosis = result.stdout.strip()
+                    diagnosis = (read(Path(output)) if output else result.stdout).strip()
                     if result.returncode or not diagnosis:
                         diagnosis = f'Diagnosis unavailable (exit {result.returncode}).\n' + diagnosis
                 except OSError as error:
                     diagnosis = f'Diagnosis unavailable: {error}'
+                finally:
+                    if output:
+                        Path(output).unlink(missing_ok=True)
                 save(local / 'diagnosis.md', diagnosis + '\n')
                 message += ' Diagnosis: ' + ' '.join(diagnosis.splitlines()[0].split())[:300]
             common = Path(__file__).resolve().with_name('common.sh')

@@ -259,6 +259,10 @@ def task_command(arguments):
     elif action == 'complete':
         if not blocks or any(task['status'] != 'DONE' for task in blocks):
             fail('Task queue is not complete.')
+    elif action == 'untouched':
+        # The approved plan has not been started: the moment to review it.
+        if not blocks or any(task['status'] != 'TODO' for task in blocks):
+            fail('Implementation has started (or there are no tasks).')
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -571,6 +575,36 @@ def review_info(arguments):
     print(head.group(1), *review_counts(content))
 
 
+PLAN_FILES = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md')
+PLAN_REVIEW = Path('.ai/reviews/plan.md')
+
+
+def plan_digest():
+    digest = hashlib.sha256()
+    for name in PLAN_FILES:
+        digest.update(name.encode() + b'\0' + Path(name).read_bytes() + b'\0')
+    return digest.hexdigest()
+
+
+def publish_plan_review(arguments):
+    """Save Codex's plan review, bound to the exact spec/plan/tasks it reviewed."""
+    content = Path(arguments[0]).read_text()
+    for field in ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings'):
+        if field not in content:
+            fail(f'Plan review is missing {field}; inspect the local report.')
+    review_counts(content)
+    atomic(PLAN_REVIEW, f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + content)
+
+
+def plan_review_info(arguments):
+    """Print 'current|stale BLOCKER MAJOR MINOR' for the saved plan review."""
+    if not PLAN_REVIEW.exists():
+        fail('No plan review yet.')
+    content = PLAN_REVIEW.read_text()
+    reviewed = re.search(r'Plan review of plan digest ([0-9a-f]{64});', content)
+    print('current' if reviewed and reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
+
+
 LIMIT_TEXT = re.compile(
     r"usage limit|rate[ _-]?limit|limit reached|hit your (?:usage )?limit|out of (?:usage|credits)|"
     r"too many requests|quota exceeded|\b429\b|resets? at|try again (?:in|at|later)", re.I)
@@ -734,6 +768,12 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'plan-digest':
+        print(plan_digest())
+    elif command == 'publish-plan-review':
+        publish_plan_review(arguments)
+    elif command == 'plan-review-info':
+        plan_review_info(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'pr-title':

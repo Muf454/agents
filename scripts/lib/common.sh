@@ -19,7 +19,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -27,6 +27,18 @@ ai_config() {
   done < "$file"
 }
 ai_config
+
+# Codex review model/effort: reviews are where a stronger model pays off most.
+# AI_REVIEW_MODEL (default: Codex's own default) and AI_REVIEW_EFFORT (default high).
+ai_review_args() {
+  local effort=${AI_REVIEW_EFFORT:-high}
+  [[ "$effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_REVIEW_EFFORT: $effort"
+  AI_REVIEW_ARGS=(-c "model_reasoning_effort=\"$effort\"")
+  if [[ -n "${AI_REVIEW_MODEL:-}" ]]; then
+    [[ "$AI_REVIEW_MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || ai_die "Invalid AI_REVIEW_MODEL: $AI_REVIEW_MODEL"
+    AI_REVIEW_ARGS+=(--model "$AI_REVIEW_MODEL")
+  fi
+}
 
 # Notification hook: AI_NOTIFY_CMD runs via bash with the message as $1
 # (e.g. curl -s -d "$1" ntfy.sh/<topic>). Failures never affect the workflow.
