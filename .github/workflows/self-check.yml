@@ -1,0 +1,14 @@
+name: Self-check
+
+on: [push, pull_request]
+
+jobs:
+  self-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "Toolkit CI"
+          git config --global user.email "toolkit-ci@example.com"
+      - run: ./scripts/ai-check
