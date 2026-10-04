@@ -26,7 +26,9 @@
       "Edit(.ai/ci-setup)",
       "Write(.ai/ci-setup)",
       "Edit(.github/workflows/ai-validate.yml)",
-      "Write(.github/workflows/ai-validate.yml)"
+      "Write(.github/workflows/ai-validate.yml)",
+      "Edit(.ai/reviews/current.md)",
+      "Write(.ai/reviews/current.md)"
     ]
   }
 }

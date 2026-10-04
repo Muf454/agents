@@ -179,20 +179,28 @@ tmux new -s my-app-ai
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
    read-only review. The review must contain `Finding counts: BLOCKER=n MAJOR=n MINOR=n`.
-3. **Fix**: with BLOCKER/MAJOR findings, `ai-run --triage` has Claude record a
-   disposition per finding and append fix tasks (triage may only touch workflow
-   records). The new tasks are implemented, and Codex reviews again. At most
-   `--max-fix-rounds` rounds (default 2). If Claude rejects every finding with
-   evidence, the pipeline continues and the PR shows the dispositions.
+3. **Fix**: with BLOCKER/MAJOR findings, `ai-run --triage` has Claude record one
+   row per finding in `.ai/reviews/dispositions.md` (accepted with a fix task,
+   rejected with evidence, or deferred) and append fix tasks. Triage may only touch
+   workflow records; the host validates that every significant finding has a valid
+   disposition. The new tasks are implemented, and Codex reviews again. At most
+   `--max-fix-rounds` rounds (default 2). Codex's report is never edited by Claude:
+   the runner stops if any session changes `.ai/reviews/current.md`, and a report
+   whose counts disagree with its listed finding IDs is rejected.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
-   and the handoff's manual test steps. Unresolved significant findings make it a
-   **draft**. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   and the handoff's manual test steps. Unresolved or deferred significant findings
+   make it a **draft** (an existing PR is converted). The PR targets `--pr-base`,
+   inferred from `--base` when that is a local or `origin/` branch, otherwise
+   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
-redone, a review is reused while only workflow records changed since it, and an
-existing PR is updated instead of duplicated. `--no-pr` stops after the review;
+redone, a review is reused while only workflow records changed since it, completed
+dispositions for that review are reused, validation is re-verified before
+publishing, and an existing PR is updated instead of duplicated. The pipeline holds
+the checkout lock for its whole run and re-verifies the gate after each of its own
+commits. `--no-pr` stops after the review;
 `--draft` always opens a draft. The pipeline keeps its own gate digest across steps.
 
 ### Usage limits

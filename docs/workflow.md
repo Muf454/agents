@@ -174,9 +174,15 @@ again. A review counts as current when only `.ai/reviews`, state, run log, and h
 changed since its recorded HEAD. Rounds are counted from those commit messages since
 the base, so no hidden state is needed.
 
-Triage sessions may change only `.ai/tasks.md`, `.ai/reviews/current.md`,
-`.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and `.ai/current-plan.md`; any
-other path stops the run. Fix tasks then go through the normal per-task gate.
+Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
+(`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
+row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
+deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
+`.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
+`.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
+runner compares its digest around every session (plus a deny rule). Published
+reviews need exactly one counts line that agrees with the listed finding IDs.
+On rerun, complete dispositions for the current review are reused, not re-triaged.
 
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;

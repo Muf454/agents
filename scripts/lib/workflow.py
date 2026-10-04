@@ -453,11 +453,83 @@ def publish_review(arguments):
 COUNTS = re.compile(r'^Finding counts:\s*BLOCKER=(\d+)\s+MAJOR=(\d+)\s+MINOR=(\d+)\s*$', re.M)
 
 
+FINDING_ID = re.compile(r'^(?:#{2,6}\s+|[-*]\s+(?:\*\*)?)\s*([A-Z][A-Z0-9]{0,4}-?\d+)\b', re.M)
+NONE_TEXT = re.compile(r'^(?:none|no findings|n/?a)\b', re.I)
+
+
+def finding_ids(content, level):
+    """IDs of findings listed under '## <level> findings' (headings or bullets starting with an ID)."""
+    return list(dict.fromkeys(FINDING_ID.findall(section(content, f'{level} findings'))))
+
+
 def review_counts(content):
-    match = COUNTS.search(content)
-    if not match:
-        fail('Review lacks "Finding counts: BLOCKER=n MAJOR=n MINOR=n".')
-    return tuple(int(x) for x in match.groups())
+    """Counts line, which must be unique and agree with the listed findings."""
+    matches = COUNTS.findall(content)
+    if len(matches) != 1:
+        fail('Review needs exactly one "Finding counts: BLOCKER=n MAJOR=n MINOR=n" line.')
+    counts = tuple(int(x) for x in matches[0])
+    for level, count in zip(('BLOCKER', 'MAJOR', 'MINOR'), counts):
+        body = section(content, f'{level} findings')
+        listed = bool(body) and not NONE_TEXT.match(body)
+        if count == 0 and listed:
+            fail(f'Review lists {level} findings but counts {level}=0.')
+        if count > 0 and not listed:
+            fail(f'Review counts {level}={count} but lists none.')
+        if level != 'MINOR' and count and len(finding_ids(content, level)) != count:
+            fail(f'Review counts {level}={count} but lists {len(finding_ids(content, level))} '
+                 f'{level} finding IDs; each finding needs a stable ID such as M1.')
+    return counts
+
+
+DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
+                             r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+
+
+def start_dispositions(arguments):
+    """Host-written dispositions file bound to the current review's HEAD (Claude fills the rows)."""
+    head = arguments[0]
+    atomic('.ai/reviews/dispositions.md', f"""# Review dispositions (Claude)
+
+Review HEAD: {head}
+
+<!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
+fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
+explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+""")
+
+
+def triage_check(arguments):
+    """Validate dispositions against the current review. Prints 'ok' or 'deferred'."""
+    review = Path('.ai/reviews/current.md').read_text()
+    head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
+    path = Path('.ai/reviews/dispositions.md')
+    if not head or not path.exists():
+        fail('No dispositions for the current review.')
+    text = path.read_text()
+    bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
+    if not bound or bound.group(1) != head.group(1):
+        fail('Dispositions belong to a different review.')
+    rows = {m.group(1): (m.group(2).lower(), m.group(3), m.group(4)) for m in DISPOSITION_ROW.finditer(text)}
+    task_ids = {t['id'] for t in tasks()}
+    deferred = False
+    for level in ('BLOCKER', 'MAJOR'):
+        for finding in finding_ids(review, level):
+            if finding not in rows:
+                fail(f'{level} finding {finding} has no disposition.')
+            disposition, evidence, task_ref = rows[finding]
+            if disposition == 'accepted':
+                refs = set(re.findall(r'T\d{3,}', task_ref))
+                if not refs or not refs <= task_ids:
+                    fail(f'Accepted finding {finding} needs an existing fix task ID.')
+            elif disposition == 'rejected':
+                if len(evidence.strip()) < 15:
+                    fail(f'Rejected finding {finding} needs concrete evidence.')
+            else:
+                deferred = True
+    print('deferred' if deferred else 'ok')
 
 
 def review_info(arguments):
@@ -583,6 +655,12 @@ def pr_body(arguments):
         if counts:
             lines.append(f"Findings in the last review: BLOCKER {counts.group(1)}, MAJOR {counts.group(2)}, "
                          f"MINOR {counts.group(3)}. Full report and Claude's dispositions: `.ai/reviews/current.md`.")
+        dispositions = Path('.ai/reviews/dispositions.md')
+        if dispositions.exists():
+            rows = [m.group(2).lower() for m in DISPOSITION_ROW.finditer(dispositions.read_text())]
+            if rows:
+                summary = ', '.join(f'{rows.count(kind)} {kind}' for kind in ('accepted', 'rejected', 'deferred') if rows.count(kind))
+                lines.append(f'Claude\'s dispositions of earlier findings: {summary} (`.ai/reviews/dispositions.md`).')
     else:
         lines.append('No review recorded.')
     lines.append('')
@@ -613,6 +691,10 @@ def main():
         claude_result(arguments[0], '--check-only' in arguments[1:])
     elif command == 'publish-review':
         publish_review(arguments)
+    elif command == 'start-dispositions':
+        start_dispositions(arguments)
+    elif command == 'triage-check':
+        triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
     elif command == 'limit-check':
