@@ -44,10 +44,10 @@ by dependencies. Make them independently understandable and verifiable where
 practical, small enough to checkpoint, and larger than pointless microtasks.
 Follow the exact task format in `.ai/tasks.md`. Never invent completed work.
 
-Pick each task's Claude model by risk, with an optional `Model:` line under
-`Dependencies:` (the run default, `--model`/`AI_MODEL`, is usually `sonnet`):
+Pick each task's Claude model by risk and write it explicitly as a `Model:` line
+under `Dependencies:` on EVERY task (don't rely on the run default, which may differ):
 - `haiku`: mechanical work (docs, renames, copy changes, simple config).
-- `sonnet` (default, no line needed): ordinary features, UI, tests, routine fixes.
+- `sonnet`: ordinary features, UI, tests, routine fixes.
 - `opus`: security, authentication/authorization or RLS policies, concurrency and
   locking, data migrations that move or delete data, payment or irreversible
   operations, and any task that already failed review or validation once.
