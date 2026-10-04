@@ -46,7 +46,7 @@ if 'RECOVERY CONTRACT' in prompt:
     decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
-                      'result': 'Decision:\n' + json.dumps(decision)}))
+                      'result': json.dumps(decision)}))
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with cd' in prompt
@@ -498,6 +498,15 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('--sandbox read-only', (self.base / 'codex-args.log').read_text())
         self.assertEqual(list((self.project / '.ai/local').glob('.diagnosis-*')), [])
 
+    def host_watchdog(self, *args, expected=0, **env):
+        # What --install-timer runs: a copy of .ai/bin outside the checkout.
+        import shutil
+        host = self.base / 'host-bin'
+        if not host.exists():
+            shutil.copytree(self.project / '.ai/bin', host)
+        return self.run_cmd([str(host / 'ai-watchdog'), str(self.project), *args], expected=expected,
+                            env=dict(self.env, **env))
+
     def approve_run(self):
         digest = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
         self.helper('run-manifest', 'start', digest, 'main', '--approved')
@@ -522,14 +531,17 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.approve_run()
         self.mock_systemd_run()
         self.crashed_marker()
-        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_NOTIFY_CMD='true')
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_NOTIFY_CMD='true')
+        self.watchdog('--recover', expected=1)  # from the checkout: refused, the human is told
         launched = (self.base / 'systemd-run.log').read_text()
         self.assertIn('--user --collect --quiet --service-type=exec', launched)
         self.assertIn('--setenv=AI_STATE_DIR=', launched)
         self.assertNotIn('AI_WATCHDOG_NOW', launched)
-        self.assertIn('ai-recover --stage crash', launched)
-        self.assertEqual(self.notifications(), '')  # ai-recover announces itself
+        self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage crash', launched)
         self.assertIn('killed', (self.project / '.ai/local/last-error').read_text())
+        # Only the checkout run (refused) spoke; the host run handed over silently.
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('only runs from the installed timer', self.notifications())
 
     def test_watchdog_recover_refuses_changed_gate_and_reports_unconfirmed_launch(self):
         self.setup_project()
@@ -538,14 +550,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
         self.mock_systemd_run()
         self.crashed_marker()
-        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
         self.assertFalse((self.base / 'systemd-run.log').exists())
         self.assertIn('⛔ STOPPED, needs you', self.notifications())
         self.assertIn('auto-recovery refused: gate files changed', self.notifications())
         self.approve_run()
         self.mock_systemd_run(takes_over=False)
         self.crashed_marker()
-        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
         self.assertIn('did not confirm it started', self.notifications())
 
     def test_watchdog_reports_unannounced_stops(self):
@@ -555,6 +567,17 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         error.write_text('Codex failed; prior review preserved.')
         self.watchdog(expected=1)
         self.assertIn('⛔ STOPPED, needs you: Stopped: Codex failed', self.notifications())
+
+    def test_committed_mode_must_match_validated_file(self):
+        self.ready()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -q T001.txt || exit 0\n'
+                        'git update-index --chmod=+x T001.txt\n')
+        hook.chmod(0o755)
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
 
     def test_watchdog_waits_for_a_live_runner_before_reporting_a_stop(self):
         self.setup_project()
@@ -1198,8 +1221,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             (dict(ok, result=['not', 'a', 'string']), '0', 'escalate'),
             (dict(ok, result='{"action": "escalate", "reason": "x", "n": {"action": "commit_and_rerun"}}'), '0', 'escalate'),
             (dict(ok, result='{"action": "escalate", "action": "rerun", "reason": "x"}'), '0', 'escalate'),
-            (dict(ok, result='Decision:\n```json\n{"action": "rerun", "reason": "crash"}\n```'), '0', 'rerun'),
+            (dict(ok, result='```json\n{"action": "rerun", "reason": "crash"}\n```'), '0', 'rerun'),
+            (dict(ok, result='Decision: {"action": "rerun", "reason": "crash"}'), '0', 'escalate'),
+            (dict(ok, result='[{"action": "rerun", "reason": "crash"}]'), '0', 'escalate'),
         ]
+        log.write_text('{"type": "result", "subtype": "success", "is_error": true, "is_error": false, '
+                       '"result": "{\\"action\\": \\"rerun\\", \\"reason\\": \\"x\\"}"}')
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
         log.write_text(json.dumps(['not', 'an', 'envelope']))
         self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
         for envelope, code, expected in cases:
