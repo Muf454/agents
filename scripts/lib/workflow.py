@@ -563,6 +563,47 @@ def binding_dir():
     return Path(base) / 'reviews' / key
 
 
+def run_manifest(arguments):
+    """Host-side record of the human-approved run (outside the checkout, like review
+    bindings): approved gate digest, branch, arguments and the recovery attempt budget.
+    Agent sessions cannot write here, so recovery never trusts checkout files for authority."""
+    path = binding_dir() / 'run.json'
+    action = arguments[0]
+    if action == 'start':
+        gate, branch, args = arguments[1], arguments[2], arguments[3:]
+        if not re.fullmatch(r'[0-9a-f]{64}', gate):
+            fail('Invalid gate digest.')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0}) + '\n')
+        return
+    try:
+        data = json.loads(path.read_text())
+        valid = (isinstance(data, dict) and isinstance(data.get('gate'), str)
+                 and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
+                 and all(isinstance(a, str) for a in data['args'])
+                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100)
+    except (OSError, ValueError):
+        valid = False
+    if not valid:
+        fail('No valid run manifest; rerun ai-pipeline --approved by hand.')
+    if action == 'gate':
+        print(data['gate'])
+    elif action == 'branch':
+        print(data['branch'])
+    elif action == 'args':
+        sys.stdout.write(''.join(arg + '\0' for arg in data['args']))
+    elif action == 'reserve-attempt':
+        # Reserved before any fallible recovery work, so failures can't retry for free.
+        data['attempts'] += 1
+        atomic(path, json.dumps(data) + '\n')
+        print(data['attempts'])
+    elif action == 'clear-attempts':
+        data['attempts'] = 0
+        atomic(path, json.dumps(data) + '\n')
+    else:
+        fail('Unknown run-manifest action.')
+
+
 def bind_review(head, content):
     directory = binding_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -590,20 +631,40 @@ RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 
 
 def recover_decision(arguments):
-    """Parse the recovery session's JSON verdict from Claude's --output-format json log.
-    Prints 'action<TAB>reason<TAB>human_action'; anything malformed becomes an escalation."""
+    """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
+    Only a successful claude exit, a success envelope and exactly one valid decision
+    object count; everything else escalates."""
+    log, exit_code = arguments[0], arguments[1]
+    escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
     try:
-        result = json.loads(Path(arguments[0]).read_text()).get('result') or ''
-        match = re.search(r'\{[^{}]*"action"[^{}]*\}', result, re.S)
-        decision = json.loads(match.group(0)) if match else {}
-    except (OSError, ValueError, AttributeError):
-        decision = {}
-    action = decision.get('action')
-    clean = lambda value, limit: ' '.join(str(value or '').split())[:limit]
-    if action not in RECOVER_ACTIONS:
-        print('escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+        envelope = json.loads(Path(log).read_text())
+    except (OSError, ValueError):
+        print(escalate)
         return
-    print(f"{action}\t{clean(decision.get('reason'), 300)}\t{clean(decision.get('human_action'), 300)}")
+    result = envelope.get('result') if isinstance(envelope, dict) else None
+    if exit_code != '0' or envelope.get('is_error') is not False or envelope.get('subtype') != 'success' \
+            or not isinstance(result, str):
+        print(escalate)
+        return
+    decisions = []
+    for match in re.finditer(r'\{[^{}]*\}', result):
+        try:
+            candidate = json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and 'action' in candidate:
+            decisions.append(candidate)
+    if len(decisions) != 1:
+        print(escalate)
+        return
+    decision = decisions[0]
+    fields = (decision.get('action'), decision.get('reason'), decision.get('human_action', ''))
+    if decision['action'] not in RECOVER_ACTIONS or not all(isinstance(f, str) for f in fields) \
+            or not fields[1].strip():
+        print(escalate)
+        return
+    clean = lambda value: ' '.join(value.split())[:300]
+    print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
 
 
 def finish_summary(arguments):
@@ -628,7 +689,9 @@ def finish_summary(arguments):
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
     todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
     todos.append('Merge the PR')
-    todos += extra[:5]
+    todos += extra[:10]
+    if len(extra) > 10:
+        todos.append(f'...and {len(extra) - 10} more under "Human todos" in .ai/handoff.md')
     lines = [f'🏁 FINISHED: all {done}/{len(blocks)} tasks done and validated. {review}.', f'PR: {url}', 'Your todos:']
     lines += [f'{n}. {todo[:200]}' for n, todo in enumerate(todos, 1)]
     print('\n'.join(lines))
@@ -839,6 +902,8 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'run-manifest':
+        run_manifest(arguments)
     elif command == 'recover-decision':
         recover_decision(arguments)
     elif command == 'finish-summary':

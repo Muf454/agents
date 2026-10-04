@@ -153,7 +153,8 @@ def timer(root, args, install):
     service.write_text(
         '[Unit]\nDescription=AI workflow health check for ' + str(root).replace('%', '%%') + '\n\n'
         '[Service]\nType=oneshot\n'
-        'Environment=' + unit_quote('PATH=' + os.environ.get('PATH', '/usr/bin:/bin'), command=False) + '\n'
+        + ''.join('Environment=' + unit_quote(key + '=' + value, command=False) + '\n'
+                  for key, value in sorted(forwarded_env().items())) +
         'ExecStart=' + ' '.join(unit_quote(part) for part in command) + '\n'
         '# Exit 1 means "incident reported", not a failed probe.\nSuccessExitStatus=1\n')
     timer_unit.write_text(
@@ -166,22 +167,52 @@ def timer(root, args, install):
     return 0
 
 
-def start_recovery(root, local):
-    """Start ai-recover outside this (oneshot, soon reaped) service. True if launched."""
+# Settings a detached service needs to behave like the human's shell (notifications,
+# budgets, host state location). The test clock is deliberately not forwarded.
+FORWARDED_ENV = ('PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'AI_STATE_DIR')
+
+
+def forwarded_env():
+    return {key: value for key, value in os.environ.items()
+            if (key in FORWARDED_ENV or key.startswith('AI_')) and key != 'AI_WATCHDOG_NOW'
+            and '\n' not in value}
+
+
+def start_recovery(root, local, marker):
+    """Start ai-recover outside this (oneshot, soon reaped) service. Returns None when
+    recovery confirmed it took over, else the reason it didn't (the human must be told)."""
     if os.environ.get('AI_AUTO_RECOVER', '1') == '0':
-        return False
+        return 'auto-recovery is off'
+    bin_dir = Path(__file__).resolve().parent.parent
+    common = bin_dir / 'lib' / 'common.sh'
+    # Same check ai-pipeline does before handing over: only approved gate code may run.
+    digest = subprocess.run(['bash', '-c', 'source "$1"; ai_guard_digest', 'ai-watchdog', str(common)],
+                            capture_output=True, text=True)
+    approved = subprocess.run(['python3', str(bin_dir / 'lib' / 'workflow.py'), 'run-manifest', 'gate'],
+                              capture_output=True, text=True)
+    if digest.returncode or approved.returncode or digest.stdout.strip() != approved.stdout.strip():
+        return 'auto-recovery refused: gate files changed since the run was approved (or no approved run)'
     error = local / 'last-error'
     if not error.exists():
         save(error, 'ai-pipeline was killed, crashed or the machine restarted\n')
-    recover = Path(__file__).resolve().parent.parent / 'ai-recover'
+    before = marker_snapshot(marker)
     unit = f'ai-recover-{re.sub(r"[^A-Za-z0-9_.-]+", "-", root.name)}-{int(time.time())}'
-    command = ['systemd-run', '--user', '--collect', '--quiet', '--unit=' + unit,
-               '--working-directory=' + str(root), '--setenv=PATH=' + os.environ.get('PATH', '/usr/bin:/bin'),
-               '--', str(recover), '--stage', 'crash (pipeline killed or restarted)']
+    command = ['systemd-run', '--user', '--collect', '--quiet', '--service-type=exec', '--unit=' + unit,
+               '--working-directory=' + str(root)]
+    command += ['--setenv=' + key + '=' + value for key, value in sorted(forwarded_env().items())]
+    command += ['--', str(bin_dir / 'ai-recover'), '--stage', 'crash (pipeline killed or restarted)']
     try:
-        return subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
+        if subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True).returncode:
+            return 'auto-recovery could not be started (systemd-run failed)'
     except OSError:
-        return False
+        return 'auto-recovery could not be started (no systemd-run)'
+    # Hand over notification duty only once ai-recover owns the marker (or escalated).
+    deadline = time.monotonic() + float(os.environ.get('AI_RECOVER_ACK_SECONDS', '20'))
+    while time.monotonic() < deadline:
+        if marker_snapshot(marker) != before:
+            return None
+        time.sleep(0.2)
+    return 'auto-recovery did not confirm it started within 20 seconds'
 
 
 def runners(root):
@@ -289,17 +320,23 @@ def main():
             record['notified_at_ns'] = now
             # Reserve before inference/notification: interrupted probes never start it twice.
             save(state_file, json.dumps(record) + '\n')
-            # The runner already announced its own stops: those alone only matter for a diagnosis.
-            loud = [key for key in fresh if not key.startswith('stop:')]
+            # Stops the runner already announced aren't repeated (they only matter for a diagnosis).
+            announced = mtime(local / 'last-error.notified') >= error_time > 0
+            loud = [key for key in fresh if not (key.startswith('stop:') and announced)]
+            for key in loud:
+                if key.startswith('stop:'):
+                    incidents[key] = '⛔ STOPPED, needs you: ' + incidents[key]
             message = ' '.join(incidents[key] for key in loud)
             if not loud and args.diagnose:
                 message = '🩺 Diagnosis of the stop (' + incidents[fresh[0]][:200] + ').'
             if args.recover and any(key.startswith('died:') for key in fresh):
-                started = start_recovery(root, local)
-                if started:
+                refused = start_recovery(root, local, marker)
+                if refused is None:
                     # ai-recover announces itself (🔧 Recovering / ⛔ STOPPED); stay quiet.
                     loud = [key for key in loud if not key.startswith('died:')]
                     message = ' '.join(incidents[key] for key in loud)
+                else:
+                    message += ' (' + refused + '.)'
             if not message:
                 save(state_file, json.dumps(record) + '\n')
                 return 1

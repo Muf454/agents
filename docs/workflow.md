@@ -212,20 +212,33 @@ are described in the README; they never write tracked files.
 
 ## Recovery contract (`ai-recover`)
 
-`ai-pipeline` records `.ai/local/pipeline.args` (NUL-separated arguments) and, on a human
-start, `.ai/local/pipeline.gate` (the approved gate digest). `stop()` execs
-`ai-recover --stage S` unless `AI_AUTO_RECOVER=0`, keeping the PID, checkout lock and
-liveness marker. `ai-recover`: attempts counter `.ai/local/recovery-attempts` (reset by a
-human start and on finish; max `AI_RECOVER_MAX`, default 2); hard-rule escalation by
-reason; current gate digest must equal the approved one; bookkeeping-only leftovers
+On a human start `ai-pipeline` writes a **run manifest** to the host state directory
+(`run.json` beside the review bindings, outside the checkout, where agent sessions can't
+write): approved gate digest, branch, arguments and the attempt counter. Recovery takes
+its authority only from there, never from checkout files. `stop()` re-verifies the gate
+digest against the pipeline's in-memory approved digest and only then execs
+`ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
+(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: current gate
+digest must equal the manifest's, the branch must be the manifest's, then one attempt is
+reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
+on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
+denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints);
+an EXIT trap guarantees one final ⛔ on unexpected exits; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
-`commit_and_rerun` requires a dirty tree and a passing `ai-check`, then commits all
-non-ignored changes and re-verifies the gate; `rerun` requires a clean tree. Resumes run
+the decision counts only with a zero exit, a success envelope and exactly one valid
+`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree and a passing
+`ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
+committed tree to match the validation stamp (a commit hook can't sneak content in); `rerun` requires a clean tree. Resumes run
 `ai-pipeline` with the saved arguments and `AI_RECOVERY_ATTEMPT=n`, which refuses to
 start if the gate digest differs from the approved one. Escalation sends one
 `⛔ STOPPED, needs you` with the reason and next step, records `last-error` and removes
-the marker. `ai-run` commits validated leftovers of a DONE task itself (tier 1).
+the marker. `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
+stamp check after the commit. `ai-watchdog --recover` launches `ai-recover` via
+`systemd-run --service-type=exec` only if the gate digest matches the manifest, forwards
+`PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and keeps notification duty until
+`ai-recover` takes over the marker (20 s), otherwise it reports ⛔ with the reason. It
+re-announces a stop only if the runner didn't (`.ai/local/last-error.notified`).
 
 ## Review and fixes
 

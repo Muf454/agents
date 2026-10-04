@@ -56,11 +56,11 @@ rm -f .ai/local/last-error
 # with no runner alive means the pipeline was killed or the machine restarted.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
-finish() { rm -f -- "$AI_PIPELINE_MARKER" .ai/local/recovery-attempts; exit 0; }
-# A human (re)start gets a fresh recovery budget; ai-recover's resumes keep counting.
-[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || rm -f .ai/local/recovery-attempts
-# What ai-recover needs to resume this exact run: the arguments and the approved gate.
-printf '%s\0' "${orig_args[@]}" > .ai/local/pipeline.args
+finish() {
+  ai_helper run-manifest clear-attempts 2>/dev/null || true
+  rm -f -- "$AI_PIPELINE_MARKER"
+  exit 0
+}
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
 base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
@@ -77,11 +77,15 @@ fi
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
 readonly AI_APPROVED_GATE
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
-  # A resume must run under the gate the human approved (ai-recover checked it too).
-  [[ "$AI_APPROVED_GATE" == "$(cat .ai/local/pipeline.gate 2>/dev/null)" ]] || \
+  # A resume must run under the gate and branch the human approved (host-side manifest).
+  [[ "$AI_APPROVED_GATE" == "$(ai_helper run-manifest gate 2>/dev/null)" ]] || \
     ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'
+  [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
+    ai_die 'Resumed on a different branch than the approved run.'
 else
-  printf '%s\n' "$AI_APPROVED_GATE" > .ai/local/pipeline.gate
+  # A human (re)start: record the approved run and give it a fresh recovery budget.
+  ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \
+    ai_die 'Cannot record the run manifest in the host state directory.'
 fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
@@ -90,7 +94,9 @@ stop() {
   local stage=$1 reason
   reason=$(cat .ai/local/last-error 2>/dev/null || true)
   reason=${reason:-see terminal}
-  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" ]]; then
+  # Only hand over to checkout code that is still exactly the approved gate.
+  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && \
+        "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
     # Bounded auto-recovery takes over this process (same PID, lock and marker).
     [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
     exec "$AI_BIN/ai-recover" --stage "$stage"

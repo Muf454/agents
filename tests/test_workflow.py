@@ -497,22 +497,63 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('--sandbox read-only', (self.base / 'codex-args.log').read_text())
         self.assertEqual(list((self.project / '.ai/local').glob('.diagnosis-*')), [])
 
-    def test_watchdog_recover_starts_ai_recover_after_a_crash(self):
-        self.setup_project()
-        (self.mock_bin / 'systemd-run').write_text(
-            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemd-run.log"\n')
-        (self.mock_bin / 'systemd-run').chmod(0o755)
+    def approve_run(self):
+        digest = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', digest, 'main', '--approved')
+
+    def crashed_marker(self):
         marker = self.project / '.ai/local/pipeline.active'
         marker.parent.mkdir(exist_ok=True)
         dead = subprocess.Popen(['true'])
         dead.wait()
         marker.write_text(f'{dead.pid}\n')
-        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        return marker
+
+    def mock_systemd_run(self, takes_over=True):
+        (self.mock_bin / 'systemd-run').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemd-run.log"\n'
+            + ('printf "4242\\n" > .ai/local/pipeline.active\n' if takes_over else ''))
+        (self.mock_bin / 'systemd-run').chmod(0o755)
+
+    def test_watchdog_recover_starts_ai_recover_after_a_crash(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_NOTIFY_CMD='true')
         launched = (self.base / 'systemd-run.log').read_text()
-        self.assertIn('--user --collect', launched)
+        self.assertIn('--user --collect --quiet --service-type=exec', launched)
+        self.assertIn('--setenv=AI_STATE_DIR=', launched)
+        self.assertNotIn('AI_WATCHDOG_NOW', launched)
         self.assertIn('ai-recover --stage crash', launched)
         self.assertEqual(self.notifications(), '')  # ai-recover announces itself
         self.assertIn('killed', (self.project / '.ai/local/last-error').read_text())
+
+    def test_watchdog_recover_refuses_changed_gate_and_reports_unconfirmed_launch(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'systemd-run.log').exists())
+        self.assertIn('⛔ STOPPED, needs you', self.notifications())
+        self.assertIn('auto-recovery refused: gate files changed', self.notifications())
+        self.approve_run()
+        self.mock_systemd_run(takes_over=False)
+        self.crashed_marker()
+        self.watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
+        self.assertIn('did not confirm it started', self.notifications())
+
+    def test_watchdog_reports_unannounced_stops(self):
+        self.setup_project()
+        error = self.project / '.ai/local/last-error'
+        error.parent.mkdir(exist_ok=True)
+        error.write_text('Codex failed; prior review preserved.')
+        self.watchdog(expected=1)
+        self.assertIn('⛔ STOPPED, needs you: Stopped: Codex failed', self.notifications())
 
     def test_watchdog_install_and_uninstall_timer(self):
         project = self.base / 'my 100% project'
@@ -1120,10 +1161,58 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
         self.assertIn('gate files changed since you approved the run', self.notifications())
         self.assertEqual(len(self.recovery_calls()), 1)  # no AI consulted for the gate
+        self.run_cmd(['git', 'revert', '--no-edit', 'HEAD'])  # gate back to the approved one
         (self.project / '.ai/local/last-error').write_text('Approved workflow gate changed during this run.')
         self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
         self.assertIn('this kind of stop always needs a human', self.notifications())
         self.assertEqual(len(self.recovery_calls()), 1)
+
+    def test_recovery_decision_parsing_is_strict(self):
+        log = self.base / 'decision.json'
+        ok = {'type': 'result', 'subtype': 'success', 'is_error': False}
+        cases = [
+            (dict(ok, result='{"action": "rerun", "reason": "crash"}'), '0', 'rerun'),
+            (dict(ok, result='{"action": "rerun", "reason": "crash"}'), '1', 'escalate'),  # nonzero exit
+            (dict(ok, is_error=True, result='{"action": "rerun", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "rerun", "reason": "a"} {"action": "commit_and_rerun", "reason": "b"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "delete_branch", "reason": "x"}'), '0', 'escalate'),
+            (dict(ok, result='{"action": "rerun"}'), '0', 'escalate'),  # no reason
+            (dict(ok, result=['not', 'a', 'string']), '0', 'escalate'),
+        ]
+        for envelope, code, expected in cases:
+            log.write_text(json.dumps(envelope))
+            self.assertEqual(self.helper('recover-decision', str(log), code).stdout.split('\t')[0], expected, envelope)
+        log.write_text('not json')
+        self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
+
+    def test_recovery_refuses_other_branch_and_tampered_manifest(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        calls = len(self.recovery_calls())
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other-branch'])
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn("not the approved run's branch", self.notifications())
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        data = json.loads(manifest.read_text())
+        data['attempts'] = 'BASH_VERSINFO[$(touch pwned)0]'
+        manifest.write_text(json.dumps(data))
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('no approved run to resume', self.notifications())
+        self.assertFalse((self.project / 'pwned').exists())
+        self.assertEqual(len(self.recovery_calls()), calls)  # no AI consulted
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_tier1_checkpoint_rejects_hook_changed_content(self):
+        self.ready()
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -q T001.txt || exit 0\n'
+                        'echo sneaky > sneaky.txt && git add sneaky.txt\n')
+        hook.chmod(0o755)
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
+        self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
 
     def test_finish_summary_lists_human_todos(self):
         self.ready()
