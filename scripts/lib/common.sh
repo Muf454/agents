@@ -6,6 +6,8 @@ ai_die() {
   printf 'Error: %s\n' "$*" >&2
   # Last error for the pipeline/notifications; best effort, never fatal.
   [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
+  # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
+  [[ -z "${AI_PIPELINE_MARKER:-}" ]] || rm -f -- "$AI_PIPELINE_MARKER"
   exit 1
 }
 
