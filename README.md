@@ -436,6 +436,8 @@ cd ~/Projects/agents
 ./scripts/ai-check
 ```
 
+CI runs the same `./scripts/ai-check` on every push and pull request.
+
 This checks Bash syntax and runs offline integration tests for setup, task parsing,
 validation evidence, runner behavior, and review safety. It does not spend tokens
 or validate the models' reasoning. Do a short supervised real CLI run in your first
