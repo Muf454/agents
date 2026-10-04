@@ -148,4 +148,4 @@ esac
 ai_notify "🔧 Recovered ($attempt/$max): $why Resuming the pipeline."
 rm -f .ai/local/last-error
 trap - EXIT
-exec env AI_RECOVERY_ATTEMPT="$attempt" "$AI_BIN/ai-pipeline" "${args[@]}"
+exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"

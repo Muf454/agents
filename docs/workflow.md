@@ -235,10 +235,12 @@ start if the gate digest differs from the approved one. Escalation sends one
 `⛔ STOPPED, needs you` with the reason and next step, records `last-error` and removes
 the marker. The manifest also stores the run's effective `AI_*` settings (notify command, models,
 budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn't have are
-cleared to their defaults. The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
+cleared to their defaults, and the resumed pipeline skips the user config file
+(`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
 default unless you changed it). `--recover` only works from the installed host copy; run
-from the checkout it refuses and reports. Order in
+from the checkout it refuses and reports (a human running checkout scripts trusts them,
+as with `ai-pipeline`; the protected path is the timer's host copy). Order in
 `ai-recover`: take the lock (a rejected second process exits quietly and touches neither
 `last-error` nor the marker), reserve the attempt, then publish the marker; TERM/INT/HUP
 handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
