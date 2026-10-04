@@ -448,6 +448,7 @@ def publish_review(arguments):
     review_counts(content)
     header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n'
     atomic('.ai/reviews/current.md', header + content)
+    bind_review(head, header + content)
 
 
 COUNTS = re.compile(r'^Finding counts:\s*BLOCKER=(\d+)\s+MAJOR=(\d+)\s+MINOR=(\d+)\s*$', re.M)
@@ -475,7 +476,7 @@ def review_counts(content):
             fail(f'Review lists {level} findings but counts {level}=0.')
         if count > 0 and not listed:
             fail(f'Review counts {level}={count} but lists none.')
-        if level != 'MINOR' and count and len(finding_ids(content, level)) != count:
+        if count and len(finding_ids(content, level)) != count:
             fail(f'Review counts {level}={count} but lists {len(finding_ids(content, level))} '
                  f'{level} finding IDs; each finding needs a stable ID such as M1.')
     return counts
@@ -488,6 +489,9 @@ DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|
 def start_dispositions(arguments):
     """Host-written dispositions file bound to the current review's HEAD (Claude fills the rows)."""
     head = arguments[0]
+    existing = Path('.ai/reviews/dispositions.md')
+    if existing.exists() and re.search(r'^Review HEAD:\s*' + re.escape(head) + r'\s*$', existing.read_text(), re.M):
+        return  # Already bound to this review (e.g. resuming an interrupted triage).
     atomic('.ai/reviews/dispositions.md', f"""# Review dispositions (Claude)
 
 Review HEAD: {head}
@@ -502,7 +506,9 @@ explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
 
 
 def triage_check(arguments):
-    """Validate dispositions against the current review. Prints 'ok' or 'deferred'."""
+    """Validate dispositions against the current review. Prints 'accepted=N deferred=M'.
+    With --fresh (right after triage), accepted findings must point to open TODO tasks."""
+    fresh = '--fresh' in arguments
     review = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
     path = Path('.ai/reviews/dispositions.md')
@@ -513,8 +519,8 @@ def triage_check(arguments):
     if not bound or bound.group(1) != head.group(1):
         fail('Dispositions belong to a different review.')
     rows = {m.group(1): (m.group(2).lower(), m.group(3), m.group(4)) for m in DISPOSITION_ROW.finditer(text)}
-    task_ids = {t['id'] for t in tasks()}
-    deferred = False
+    queue = {t['id']: t['status'] for t in tasks()}
+    accepted = deferred = 0
     for level in ('BLOCKER', 'MAJOR'):
         for finding in finding_ids(review, level):
             if finding not in rows:
@@ -522,22 +528,45 @@ def triage_check(arguments):
             disposition, evidence, task_ref = rows[finding]
             if disposition == 'accepted':
                 refs = set(re.findall(r'T\d{3,}', task_ref))
-                if not refs or not refs <= task_ids:
+                if not refs or not refs <= set(queue):
                     fail(f'Accepted finding {finding} needs an existing fix task ID.')
+                if fresh and any(queue[ref] != 'TODO' for ref in refs):
+                    fail(f'Accepted finding {finding} must reference new TODO fix tasks, not finished ones.')
+                accepted += 1
             elif disposition == 'rejected':
                 if len(evidence.strip()) < 15:
                     fail(f'Rejected finding {finding} needs concrete evidence.')
             else:
-                deferred = True
-    print('deferred' if deferred else 'ok')
+                deferred += 1
+    print(f'accepted={accepted} deferred={deferred}')
+
+
+def binding_dir():
+    """Host-only store of published review digests, outside the checkout (agent sessions
+    get no write access there). Keyed by the repository's root commit and path."""
+    base = os.environ.get('AI_STATE_DIR') or os.path.join(
+        os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state'), 'ai-toolkit')
+    root = Path(git('rev-parse', '--show-toplevel').decode().strip())
+    key = hashlib.sha256(str(root).encode()).hexdigest()[:16]
+    return Path(base) / 'reviews' / key
+
+
+def bind_review(head, content):
+    directory = binding_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic(directory / f'{head}.sha256', hashlib.sha256(content.encode()).hexdigest() + '\n')
 
 
 def review_info(arguments):
-    """Print reviewed HEAD and finding counts of the current review: HEAD BLOCKER MAJOR MINOR."""
-    content = Path(arguments[0] if arguments else '.ai/reviews/current.md').read_text()
+    """Print reviewed HEAD and finding counts: HEAD BLOCKER MAJOR MINOR. The report must match
+    the digest the host recorded when ai-review published it."""
+    content = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', content)
     if not head:
         fail('Current review has no host evidence; it was not produced by ai-review.')
+    binding = binding_dir() / f'{head.group(1)}.sha256'
+    if not binding.exists() or binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        fail('Current review does not match the report ai-review published; it is invalid until Codex reviews again.')
     print(head.group(1), *review_counts(content))
 
 

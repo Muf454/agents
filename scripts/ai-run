@@ -144,7 +144,8 @@ if [[ "$triage" == yes ]]; then
   # Host-written dispositions file bound to this review; Claude fills in the rows.
   ai_helper start-dispositions "${reviewed%% *}"
   git add -- .ai/reviews/dispositions.md
-  git commit -m 'chore(ai): open review dispositions' >/dev/null
+  # Resuming an interrupted triage finds the file already bound and committed.
+  git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
   ai_guard_verify
   before=$(git rev-parse HEAD)
   prompt=$(cat .ai/prompts/triage.md)
@@ -159,7 +160,7 @@ if [[ "$triage" == yes ]]; then
   changed=$(git diff --name-only "$before" HEAD -- . ':!.ai/tasks.md' ':!.ai/reviews/dispositions.md' \
     ':!.ai/state.md' ':!.ai/handoff.md' ':!.ai/run-log.md' ':!.ai/current-plan.md')
   [[ -z "$changed" ]] || ai_die "Triage changed files outside workflow records: $(tr '\n' ' ' <<< "$changed")"
-  ai_helper triage-check >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
+  ai_helper triage-check --fresh >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
