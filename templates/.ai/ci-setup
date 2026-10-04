@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install what .ai/validate needs on a fresh CI machine (GitHub Actions, ubuntu-latest).
+# Example for an npm project:  npm ci
+# Keep it non-interactive. Secrets and production access do not belong here.
+printf '%s\n' 'No CI setup configured in .ai/ci-setup; installing nothing.'

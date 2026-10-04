@@ -163,6 +163,49 @@ Git hooks remain active and may consume additional time. Monitor your provider u
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
+## Pipeline contract (`ai-pipeline`)
+
+Stages, each resumable by rerunning: implement (`ai-run`) → validate if the stamp is
+stale → review (`ai-review`, then the review is committed as
+`chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
+`--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
+committed as `chore(ai): record review triage`) → implement the new tasks → review
+again. A review counts as current when only `.ai/reviews`, state, run log, and handoff
+changed since its recorded HEAD. Rounds are counted from those commit messages since
+the base, so no hidden state is needed.
+
+Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
+(`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
+row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
+deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
+`.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
+`.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
+runner compares its digest around every session (plus a deny rule). Published
+reviews need exactly one counts line that agrees with the listed finding IDs.
+On rerun, complete dispositions for the current review are reused, not re-triaged.
+
+Review provenance: when `ai-review` publishes a report it records the report's SHA-256
+outside the checkout (`${AI_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/ai-toolkit}/reviews/`,
+keyed by repository path and reviewed HEAD). Every consumer (`review-info`, triage, the
+pipeline's freshness check) verifies it, including on resume and after hooks; a report
+that doesn't match is invalid until Codex reviews again. Agent sessions get no write
+access there (only the project and an explicit `--knowledge-dir`). Accepted findings must
+reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new review;
+`unresolved` is derived from the final review each round. The gate is re-verified after
+every host commit and push; draft conversion of an existing PR is verified, not assumed.
+
+PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
+protected branches are refused earlier); `gh pr view` decides create vs. edit;
+`--base` is passed when the base is a local branch; draft when `--draft` or when
+significant findings remain after the round limit. The PR body is generated from the
+spec objective, task list, validation stamp, review counts/verdict, and the handoff's
+"Manual testing for the human" section. State becomes `ready_for_acceptance`.
+
+Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
+commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
+start, pauses, stops (with `.ai/local/last-error`), and the PR. Usage-limit pauses
+are described in the README; they never write tracked files.
+
 ## Review and fixes
 
 Review begins at a clean committed checkpoint with a complete queue and fresh successful

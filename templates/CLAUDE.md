@@ -62,6 +62,9 @@ When implementation is authorized, do not request approval between ordinary task
    git add -A/--all/. or secrets/logs. Never bypass hooks with --no-verify or -n.
 7. Continue to the next unblocked task. Completing one task is not a reason to stop.
 
+Keep `.ai/handoff.md` → "Manual testing for the human" current: `ai-pipeline` puts it
+into the pull request as the human's test instructions.
+
 The bounded runner may request ONE task per invocation. In that mode, checkpoint
 and return after that task: the runner launches a fresh session for the next task.
 Direct interactive sessions continue through the queue themselves.
@@ -99,7 +102,8 @@ acceptance steps, and set `Phase: ready_for_review`. This is not human acceptanc
 
 ## Independent review and fixes
 
-Read `.ai/reviews/current.md` and evaluate each finding against repository reality,
+Read `.ai/reviews/current.md` (never edit it; record decisions in
+`.ai/reviews/dispositions.md`) and evaluate each finding against repository reality,
 the spec, architecture, and tests. Do not blindly obey Codex. Add tasks for valid
 BLOCKER/MAJOR findings, record accepted/rejected/deferred dispositions and reasons,
 fix valid findings, and rerun checks. Keep findings and evidence intact. A rejection

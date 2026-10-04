@@ -5,11 +5,17 @@ application**. It installs Markdown instructions, persistent workflow records,
 prompts, and a few Linux-native scripts into an existing Git project.
 
 ```text
-Human requirements → Claude architecture/plan → Claude task queue
-  → Claude implementation + deterministic checks + Git checkpoints
-  → Codex independent review → Claude evaluates/fixes → checks
-  → human acceptance testing → human merge/deployment
+Human + Claude: requirements, architecture, task plan  →  human approves the plan
+  ai-pipeline (hands-off):
+    Claude implements task by task (checks + Git checkpoint each)
+    → full gate → Codex independent review → Claude triages + fixes (≤ N rounds)
+    → push feature branch → open/update pull request → phone notification
+  Human: test the PR (e.g. its preview deploy) → merge
 ```
+
+**The human's two touch points are the plan and the pull request.** Everything in
+between runs unattended, survives usage limits (it pauses until the reset), and
+never merges or deploys.
 
 Claude is the primary architect, planner, coder, debugger, and test author. Codex
 challenges the implementation and looks for missed requirements, bugs, regressions,
@@ -158,6 +164,89 @@ claude "$(cat .ai/prompts/implement.md)"
 
 Interactive Claude uses your normal permission configuration, so it may ask for
 commands not yet authorized. The bounded runner is the no-prompt unattended path.
+
+## Hands-off delivery: `ai-pipeline`
+
+After the plan is approved, validation is configured, and the plan is checkpointed
+on a feature branch, one command delivers it as a pull request:
+
+```bash
+tmux new -s my-app-ai
+.ai/bin/ai-pipeline --approved --base main --model sonnet
+```
+
+1. **Implement**: `ai-run` works through the queue (fresh Claude session per task,
+   gate after each task).
+2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
+   read-only review. The review must contain `Finding counts: BLOCKER=n MAJOR=n MINOR=n`.
+3. **Fix**: with BLOCKER/MAJOR findings, `ai-run --triage` has Claude record one
+   row per finding in `.ai/reviews/dispositions.md` (accepted with a fix task,
+   rejected with evidence, or deferred) and append fix tasks. Triage may only touch
+   workflow records; the host validates that every significant finding has a valid
+   disposition. The new tasks are implemented, and Codex reviews again. At most
+   `--max-fix-rounds` rounds (default 2). Codex's report is never edited by Claude:
+   the runner stops if any session changes `.ai/reviews/current.md`, and a report
+   whose counts disagree with its listed finding IDs is rejected.
+4. **Pull request**: pushes the feature branch (never with force; never `main`) and
+   opens or updates a PR with the summary, tasks, validation evidence, review result,
+   and the handoff's manual test steps. Unresolved or deferred significant findings
+   make it a **draft** (an existing PR is converted). The PR targets `--pr-base`,
+   inferred from `--base` when that is a local or `origin/` branch, otherwise
+   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
+
+Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
+redone, a review is reused while only workflow records changed since it, completed
+dispositions for that review are reused, validation is re-verified before
+publishing, and an existing PR is updated instead of duplicated. The pipeline holds
+the checkout lock for its whole run and re-verifies the gate after each of its own
+commits. `--no-pr` stops after the review;
+`--draft` always opens a draft. The pipeline keeps its own gate digest across steps.
+
+### Usage limits
+
+A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
+the reset time from the error (or wait `AI_LIMIT_RETRY`, default 1800 s), notify,
+sleep, and retry the same step. Total waiting per command is capped by
+`AI_LIMIT_MAX_WAIT` (default 28800 s); a weekly limit beyond that stops with a
+notification so you can rerun after the reset. Pauses are logged in the ignored
+`.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+
+### Models
+
+`--model NAME` (or `AI_MODEL`) picks the Claude model for implementation and triage.
+A task may override it with an optional line under its `Dependencies:` line, e.g.
+`Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
+stretch subscription limits.
+
+### Notifications
+
+Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$1`
+and can never break the workflow. For phone notifications, install the free ntfy app,
+subscribe to a hard-to-guess topic, and put this in
+`~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`; environment variables win):
+
+```bash
+AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>
+```
+
+### Claude as coordinator (remote use)
+
+When you drive everything through an interactive Claude Code session (for example
+from a phone via Remote Control), that session is the coordinator: plan with it,
+then ask it to start `ai-pipeline` in tmux, poll `.ai/bin/ai-status` and
+`.ai/local/pauses.log`, and relay results. Codex never needs a window or an
+approval: the review runs headless in a read-only sandbox. The interactive session
+uses your normal permissions; the unattended runner keeps its restricted ones.
+
+### CI on every pull request
+
+Setup installs `.github/workflows/ai-validate.yml`, which runs `.ai/ci-setup`
+(install dependencies, e.g. `npm ci`) and then `.ai/validate` on every PR and push
+to `main`, so the PR shows an independent green/red check. Add toolchain setup steps
+there if needed. Both files are protected like the rest of the gate. Hosting
+platforms such as Vercel add a preview deploy per PR, which is where you test.
 
 ## Optional project knowledge base
 
@@ -311,7 +400,8 @@ gh pr create
 # Inspect the PR/CI, then merge manually when satisfied.
 ```
 
-Nothing in this toolkit automatically pushes, merges, or deploys.
+Outside `ai-pipeline`, nothing in this toolkit pushes. `ai-pipeline` pushes only
+the feature branch and opens/updates a PR. Nothing ever merges or deploys.
 
 ## Components
 
@@ -321,7 +411,8 @@ Nothing in this toolkit automatically pushes, merges, or deploys.
 | `templates/AGENTS.md` | Independent Codex review contract |
 | `templates/docs/` | Project architecture, conventions, decision records |
 | `templates/.ai/` | Spec, plan, task queue, state, handoff, append-only run log, review |
-| `templates/.ai/prompts/` | Planning, implementation, recovery, review, review-fix prompts |
+| `templates/.ai/prompts/` | Planning, implementation, runner (one task), recovery, review, triage, review-fix prompts |
+| `templates/.github/workflows/ai-validate.yml`, `.ai/ci-setup` | CI running the same gate on every PR |
 | `.ai/validate` | Real project-specific deterministic gate (fails until configured) |
 | `.ai/permissions.allow`, `.claude/settings.json` | Inspected command permissions and deny rules |
 | `scripts/setup-project` | Non-overwriting bootstrap and simple ecosystem detection |
@@ -329,6 +420,7 @@ Nothing in this toolkit automatically pushes, merges, or deploys.
 | `scripts/ai-check` | Bounded full gate, logs, and content-bound evidence |
 | `scripts/ai-run` | Bounded fresh-session implementation loop and checkpoint checks |
 | `scripts/ai-review` | Revision-bound, read-only Codex review and report preservation |
+| `scripts/ai-pipeline` | Hands-off implement → review → triage/fix → PR → notify, resumable |
 | `scripts/lib/` | Small Bash helpers and standard-library Python Markdown/copy/evidence helpers |
 | `tests/` | Offline integration tests; mock CLI agents, no model calls |
 
@@ -352,9 +444,10 @@ project before trusting long unattended execution.
 ## Deliberately manual for now
 
 Requirements/critical decisions, approval of scope and permissions, acceptance,
-publishing/merge/deploy, and risky external actions. No parallel implementation
-agents, automatic review-fix ping-pong, auto-restart daemon, worktree manager, cost
-estimator, or automatic template upgrades. More automation can follow real usage.
+merge/deploy, and risky external actions. The review-fix loop is bounded and ends
+in a PR, never a merge. Not yet: Codex as fallback implementer while Claude is
+limited, parallel agents, auto-restart daemon, worktree manager, cost estimator,
+or automatic template upgrades. More automation can follow real usage.
 
 CLI behavior was checked against installed help and the official
 [Claude headless documentation](https://code.claude.com/docs/en/headless),

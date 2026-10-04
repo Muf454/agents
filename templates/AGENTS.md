@@ -15,13 +15,15 @@ issues, data consistency, races/concurrency, state management, poor error handli
 missing tests, and edge cases. Distinguish demonstrated defects from speculation.
 Identify pre-existing issues separately from introduced regressions.
 
-Write the review to `.ai/reviews/current.md` using the review template. Classify:
+Write the review to `.ai/reviews/current.md` using the review template, with the
+line `Finding counts: BLOCKER=<n> MAJOR=<n> MINOR=<n>` under the verdict. Classify:
 
 - BLOCKER: unsafe to proceed (e.g. exploitable security flaw, data loss, core scope absent).
 - MAJOR: significant correctness/requirement/regression gap requiring a fix.
 - MINOR: localized lower-impact issue or improvement.
 
-Each finding has a stable ID, problem, location (`path:line`), why it matters,
+Start each finding with its stable ID as a heading or bullet (e.g. `### M1 — ...`),
+then the problem, location (`path:line`), why it matters,
 evidence/reproduction where practical, and recommended direction. Record validation
 actually observed, commands not run, scope limitations, missing tests, security
 and architecture concerns, manual testing recommendations, and overall verdict.

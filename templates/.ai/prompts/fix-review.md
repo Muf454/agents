@@ -2,8 +2,9 @@
 
 Read CLAUDE.md, spec, plan, tasks, current state/handoff, and
 `.ai/reviews/current.md`. Inspect source/tests yourself. For each finding, record
-accepted/rejected/deferred plus evidence and reason in the review dispositions.
-Do not blindly obey Codex. Keep original findings intact.
+accepted/rejected/deferred plus evidence and reason in `.ai/reviews/dispositions.md`
+(create it with `python3 .ai/bin/lib/workflow.py start-dispositions <reviewed HEAD>`
+if absent). Do not blindly obey Codex. Never edit `.ai/reviews/current.md`.
 
 Add independently verifiable tasks for valid BLOCKER/MAJOR findings, with new IDs
 and any dependencies. Prioritize these before acceptance. Handle MINOR findings
