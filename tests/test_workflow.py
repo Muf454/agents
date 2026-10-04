@@ -963,6 +963,17 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertIn('-c model_reasoning_effort="high" --model gpt-test', call)
         self.tool('ai-review', '--plan', expected=1, AI_REVIEW_EFFORT='turbo')
 
+    def test_plan_review_stops_if_commit_hook_changes_reviewed_content(self):
+        self.ready()
+        hook = self.project / '.git/hooks/post-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git log -1 --format=%s | grep -q "record plan review" || exit 0\n'
+                        'echo hooked >> hook.txt && git add hook.txt && git commit -qm hook\n')
+        hook.chmod(0o755)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('reviewed content changed while recording the plan review', self.notifications())
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+
     def test_pipeline_stop_is_notified(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CLAUDE='error')

@@ -114,6 +114,9 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
     ai_guard_verify
     host_commit 'chore(ai): record plan review' .ai/reviews/plan.md
     plan_info=$(ai_helper plan-review-info) || stop 'plan review'
+    # A commit hook that changed reviewed content would make the verdict stale.
+    [[ "$plan_info" == current* ]] || \
+      { printf '%s\n' 'reviewed content changed while recording the plan review (commit hook?)' > .ai/local/last-error; stop 'plan review'; }
   fi
   read -r _ plan_blockers plan_majors _ <<< "$plan_info"
   if (( plan_blockers + plan_majors > 0 )); then
