@@ -285,16 +285,16 @@ class ToolkitTest(unittest.TestCase):
     def watchdog_phase(self, phase):
         (self.project / '.ai/state.md').write_text('Phase: ' + phase + '\n')
 
-    def watchdog_runner(self, project=None):
-        script = self.base / 'ai-run'
-        script.write_text('#!/usr/bin/env bash\nexec -a ai-run sleep 30\n')
+    def watchdog_runner(self, project=None, name='ai-run'):
+        script = self.base / name
+        script.write_text(f'#!/usr/bin/env bash\nexec -a {name} sleep 30\n')
         script.chmod(0o755)
         process = subprocess.Popen([str(script)], cwd=project or self.project, env=self.env)
         self.addCleanup(lambda: (process.terminate(), process.wait()) if process.poll() is None else None)
         # Wait for exec using the process command line rather than a timing guess.
         import time
         for _ in range(100):
-            if Path(f'/proc/{process.pid}/cmdline').read_bytes().startswith(b'ai-run\0'):
+            if Path(f'/proc/{process.pid}/cmdline').read_bytes().startswith(name.encode() + b'\0'):
                 break
             time.sleep(0.01)
         return process
@@ -320,6 +320,8 @@ class ToolkitTest(unittest.TestCase):
         import time
         self.setup_project()
         self.watchdog_runner()
+        fake = time.time() + 3600  # the runner has been alive for an hour
+        self.env['AI_WATCHDOG_NOW'] = str(fake)
         log = self.project / '.ai/run-log.md'
         old = time.time() - 3600
         os.utime(log, (old, old))
@@ -330,6 +332,7 @@ class ToolkitTest(unittest.TestCase):
         for name in ('pauses.log', 'claude-test.json', 'test-events.log'):
             activity = self.project / '.ai/local' / name
             activity.touch()
+            os.utime(activity, (fake, fake))
             self.watchdog()
             os.utime(activity, (old, old))
         self.watchdog(expected=1)
@@ -378,12 +381,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         import time
         self.setup_project()
         self.watchdog_runner()
+        self.env['AI_WATCHDOG_NOW'] = str(time.time() + 3600)
         old = time.time() - 3600
         os.utime(self.project / '.ai/run-log.md', (old, old))
         pauses = self.project / '.ai/local/pauses.log'
         pauses.parent.mkdir(exist_ok=True)
         start = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(old))
-        pauses.write_text(start + ' paused 7200s: Claude usage limit (resume ~Mon 12:00)\n')
+        pauses.write_text(start + ' paused 9000s: Claude usage limit (resume ~Mon 12:00)\n')
         os.utime(pauses, (old, old))
         self.watchdog()
         pauses.write_text(start + ' paused 60s: Claude usage limit (resume ~Mon 12:00)\n')
@@ -396,15 +400,42 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog_phase('ready_for_review')
         marker = self.project / '.ai/local/pipeline.active'
         marker.parent.mkdir(exist_ok=True)
-        marker.write_text('12345\n')
-        runner = self.watchdog_runner()
-        self.watchdog()
-        runner.kill()
-        runner.wait()
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        marker.write_text(f'{dead.pid}\n')
         self.watchdog(expected=1)
         self.watchdog(expected=1)
         self.assertEqual(self.notifications().count('gone without finishing'), 1)
         self.assertNotIn('stalled', self.notifications())
+
+    def test_watchdog_orphaned_child_does_not_hide_dead_pipeline(self):
+        self.setup_project()
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        self.watchdog_runner()  # its ai-run child
+        marker = self.project / '.ai/local/pipeline.active'
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text(f'{pipeline.pid}\n')
+        self.watchdog()
+        pipeline.kill()
+        pipeline.wait()
+        self.watchdog(expected=1)
+        self.assertIn('gone without finishing', self.notifications())
+        # A reused PID that started after the marker was written is not the pipeline.
+        os.utime(marker, (1, 1))
+        later = self.watchdog_runner(name='ai-pipeline')
+        marker.write_text(f'{later.pid}\n')
+        os.utime(marker, (1, 1))
+        self.watchdog(expected=1)
+
+    def test_watchdog_resumed_run_ignores_old_logs(self):
+        import time
+        self.setup_project()
+        old = time.time() - 7200
+        for path in (self.project / '.ai/run-log.md', self.project / '.ai'):
+            os.utime(path, (old, old))
+        self.watchdog_runner()
+        self.watchdog()  # just started: not hung despite 2-hour-old logs
+        self.assertEqual(self.notifications(), '')
 
     def test_watchdog_install_and_uninstall_timer(self):
         project = self.base / 'my 100% project'
