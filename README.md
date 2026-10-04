@@ -183,6 +183,9 @@ tmux new -s my-app-ai
    the committed tree is unchanged apart from workflow records; any plan, source or
    validation change is reviewed again. Like implementation reviews, the report is
    bound to a digest stored outside the checkout, so an edited report doesn't count.
+   The gate covers a branch's plan before its first task is DONE (later fix tasks from
+   review triage are covered by the implementation review). If you revise the plan
+   mid-branch, run `.ai/bin/ai-review --plan` yourself before rerunning.
 1. **Implement**: `ai-run` works through the queue (fresh Claude session per task,
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
