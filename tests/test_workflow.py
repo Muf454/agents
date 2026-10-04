@@ -929,6 +929,28 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
         self.helper('tasks', 'complete')
 
+    def test_plan_review_is_bound_and_tracks_the_whole_tree(self):
+        self.ready(task('T001', 'BLOCKED') + '\n' + task('T002'))
+        # A BLOCKED task doesn't lift the gate for the untouched rest of the queue.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        plans = lambda: (self.base / 'codex-plan-calls').read_text().count('call')
+        self.assertEqual(plans(), 1)
+        # A forged clean report (edited counts and findings) is not a review.
+        review = self.project / '.ai/reviews/plan.md'
+        forged = review.read_text().replace('MAJOR=1', 'MAJOR=0').replace('- P1: T001 has no test.', 'None.')
+        review.write_text(forged)
+        self.commit('forge plan review')
+        self.helper('plan-review-info', expected=1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major')
+        self.assertEqual(plans(), 2)
+        # Unchanged tree: the verdict is reused. A source-only change is reviewed again.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual(plans(), 2)
+        (self.project / 'src.txt').write_text('changed source\n')
+        self.commit('source change')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual(plans(), 3)
+
     def test_pipeline_plan_review_passes_and_reviews_use_effort(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_REVIEW_MODEL='gpt-test')

@@ -266,7 +266,8 @@ def main():
             save(state_file, json.dumps(record) + '\n')
             message = ' '.join(incidents[key] for key in fresh)
             if args.diagnose:
-                prompt = ('Diagnose this workflow incident read-only. Do not change files or run commands. '
+                prompt = ('Diagnose this workflow incident read-only: inspect files, but never modify, '
+                          'create or delete anything or run project code (tests, builds, git writes). '
                           'Inspect .ai/state.md, .ai/run-log.md and .ai/local logs as needed. '
                           'Start with a one-line summary, then evidence and suggested human recovery.\n' + message)
                 command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]

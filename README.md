@@ -175,12 +175,14 @@ tmux new -s my-app-ai
 .ai/bin/ai-pipeline --approved --base main --model sonnet
 ```
 
-0. **Plan review**: before any task starts, Codex reviews the spec, plan and tasks
+0. **Plan review**: until the first task is DONE, Codex reviews the spec, plan and tasks
    read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
    is committed as `.ai/reviews/plan.md`. BLOCKER/MAJOR findings stop the run with a
-   notification before any Claude usage is spent: revise the plan and rerun (a changed
-   plan is reviewed again), or pass `--skip-plan-review` to proceed anyway. A review
-   of the unchanged plan is reused.
+   notification before any Claude usage is spent: revise the plan and rerun, or pass
+   `--skip-plan-review` (on every rerun) to proceed anyway. The verdict is reused while
+   the committed tree is unchanged apart from workflow records; any plan, source or
+   validation change is reviewed again. Like implementation reviews, the report is
+   bound to a digest stored outside the checkout, so an edited report doesn't count.
 1. **Implement**: `ai-run` works through the queue (fresh Claude session per task,
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a

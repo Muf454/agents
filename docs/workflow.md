@@ -165,10 +165,11 @@ with the same care as other local transcripts.
 
 ## Pipeline contract (`ai-pipeline`)
 
-Stages, each resumable by rerunning: plan review (only while every task is TODO;
-`ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the spec, plan and
-task files, committed as `chore(ai): record plan review`; reused while that digest is
-unchanged; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
+Stages, each resumable by rerunning: plan review (only while no task is DONE;
+`ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
+minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
+host review store; committed as `chore(ai): record plan review`; reused while that digest is
+unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
 `--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
