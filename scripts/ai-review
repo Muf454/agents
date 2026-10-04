@@ -39,7 +39,7 @@ while true; do
   set +e
   timeout --signal=TERM --kill-after=10s "$limit" codex exec \
     --ignore-user-config -c 'approval_policy="never"' --sandbox read-only \
-    --output-last-message "$report" "$prompt" > "$events" 2>&1
+    --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
   code=$?
   set -e
   (( code != 0 )) || break
