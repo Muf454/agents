@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  printf '%s\n' 'Usage: ai-review --base REF [--timeout SECONDS]'
+  exit 0
+fi
+base=''; limit=1800
+while (( $# )); do
+  case "$1" in
+    --base) (( $# >= 2 )) || ai_die 'Missing base'; base=$2; shift 2 ;;
+    --timeout)
+      (( $# >= 2 )) || ai_die 'Missing timeout'
+      [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die 'Invalid timeout'
+      limit=$2; shift 2 ;;
+    *) ai_die "Unknown argument: $1" ;;
+  esac
+done
+[[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
+command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
+ai_root
+ai_lock
+exec 8>.ai/local/validation.lock
+flock -n 8 || ai_die 'Validation is running; finish it before review.'
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || ai_die 'Checkpoint all work before review.'
+ai_helper tasks check
+ai_helper tasks complete || ai_die 'Complete the task queue before final review.'
+ai_helper stamp verify
+base_sha=$(git rev-parse --verify "${base}^{commit}") || ai_die 'Invalid review base.'
+merge_base=$(git merge-base "$base_sha" HEAD) || ai_die 'Base has no shared history with HEAD.'
+head=$(git rev-parse HEAD)
+[[ "$merge_base" != "$head" ]] || ai_die 'Empty review range. Choose the pre-implementation base.'
+report=$(mktemp .ai/local/review-XXXXXXXX.md)
+events="${report%.md}.events.log"
+prompt=$(cat .ai/prompts/review.md)
+prompt+=$'\n\nREVIEW SCOPE: HEAD='
+prompt+="$head; supplied base=$base_sha; merge-base=$merge_base. Inspect git diff $merge_base..$head and actual source. Validation evidence: .ai/local/validation.json. Return the full Markdown review as the final response. Do not write project files or invoke network/MCP integrations."
+timeout --signal=TERM --kill-after=10s "$limit" codex exec \
+  --ignore-user-config -c 'approval_policy="never"' --sandbox read-only \
+  --output-last-message "$report" "$prompt" > "$events" 2>&1 || \
+  ai_die "Codex failed; prior review preserved. See $events."
+[[ -s "$report" ]] || ai_die "Codex produced no review; see $events."
+[[ "$(git rev-parse HEAD)" == "$head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
+  ai_die 'Checkout changed during review; report kept locally, not published as current.'
+ai_helper publish-review "$report" "$head" "$merge_base"
+printf 'Review saved to .ai/reviews/current.md (HEAD %s). Read it; Claude evaluates findings before fixing.\n' "$head"

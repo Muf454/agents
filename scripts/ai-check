@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+# This repository validates the toolkit; installed copies validate target projects.
+if [[ ! -d .ai && -d "$AI_BIN/../tests" ]]; then
+  cd -- "$AI_BIN/.."
+  while IFS= read -r -d '' file; do bash -n "$file"; done < <(
+    find scripts -type f \( -name 'ai-*' -o -name setup-project -o -name '*.sh' \) -print0
+  )
+  bash -n templates/.ai/validate
+  python3 -m unittest discover -s tests -v
+  exit
+fi
+ai_root
+[[ -f .ai/validate ]] || ai_die 'Missing .ai/validate.'
+exec 8>.ai/local/validation.lock
+flock -n 8 || ai_die 'Validation is already running.'
+log=$(mktemp .ai/local/check-XXXXXXXX.log)
+# Remove old evidence first: a failed/interrupted run cannot retain a green stamp.
+ai_helper stamp invalidate
+set +e
+timeout --signal=TERM --kill-after=10s "${AI_CHECK_TIMEOUT:-1800}" \
+  bash .ai/validate 2>&1 | tee "$log"
+codes=("${PIPESTATUS[@]}")
+set -e
+result=${codes[0]}
+if (( codes[1] != 0 )); then result=${codes[1]}; fi
+ai_helper stamp record "$result" "$log"
+exit "$result"

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+usage() {
+  cat <<'EOF'
+Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeout SECONDS]
+              [--knowledge-dir DIRECTORY]
+Run Claude on the approved plan, one recoverable task per fresh session.
+Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
+The human must inspect the plan, validation script, and permission allowlist first.
+EOF
+}
+sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
+while (( $# )); do
+  case "$1" in
+    --approved) approved=yes; shift ;;
+    --knowledge-dir)
+      (( $# >= 2 )) || ai_die 'Missing knowledge directory'
+      [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
+      knowledge_dir=$(cd -- "$2" && pwd -P)
+      shift 2 ;;
+    --sessions|--session-timeout|--run-timeout)
+      (( $# >= 2 )) || ai_die "Missing value for $1"
+      [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die "Invalid limit: $2"
+      case "$1" in
+        --sessions) sessions=$2 ;; --session-timeout) session_timeout=$2 ;;
+        --run-timeout) run_timeout=$2 ;;
+      esac
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; ai_die "Unknown argument: $1" ;;
+  esac
+done
+[[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
+command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
+ai_root
+ai_lock
+AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
+ai_branch
+git rev-parse --verify HEAD >/dev/null 2>&1 || ai_die 'Create an initial Git commit first.'
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+  ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+ai_helper tasks check
+# Authoritative baseline stays in shell memory, not an agent-editable file.
+AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
+readonly AI_APPROVED_GATE
+printf 'Approved workflow gate SHA-256: %s\n' "$AI_APPROVED_GATE"
+printf '%s\n' "$AI_APPROVED_GATE" > .ai/local/approved-gate.sha256
+knowledge_args=()
+if [[ -n "$knowledge_dir" ]]; then knowledge_args=(--add-dir "$knowledge_dir"); fi
+mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/permissions.allow)
+(( ${#allowed[@]} )) || ai_die 'Empty permission allowlist.'
+started=$SECONDS
+active_task=none
+finished=no
+on_exit() {
+  local code=$?
+  if [[ "$finished" != yes ]]; then
+    ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
+      'see local logs' 'No merge or deployment performed'
+  fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for (( iteration=1; iteration<=sessions+1; iteration++ )); do
+  ai_guard_verify
+  ai_branch
+  ai_helper tasks check
+  active_task=$(ai_helper tasks next)
+  if [[ "$active_task" == none ]]; then
+    if ! ai_helper tasks complete; then
+      ai_helper state blocked 'No runnable tasks; resolve blockers/dependencies'
+      ai_die 'Unfinished tasks exist but none can run. See .ai/tasks.md.'
+    fi
+    remaining=$(( run_timeout - (SECONDS - started) ))
+    (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
+    if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+      ai_guard_verify
+      ai_helper state blocked 'Final validation failed; inspect validation log'
+      ai_die 'Final validation failed; readiness is not established.'
+    fi
+    ai_guard_verify
+    ai_helper state ready_for_review 'Run independent Codex review, then human testing'
+    ai_log none 'queue complete; ready for independent review' PASS 'Human acceptance remains'
+    git add -- .ai/state.md .ai/run-log.md
+    git commit -m 'chore(ai): record review handoff' >/dev/null
+    ai_guard_verify
+    # The stamp excludes metadata so this bookkeeping does not invalidate it.
+    finished=yes
+    printf '%s\n' 'Tasks complete and validation passed. Review with Codex; test and merge manually.'
+    exit 0
+  fi
+  (( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun --approved to continue.'
+  remaining=$(( run_timeout - (SECONDS - started) ))
+  (( remaining > 0 )) || ai_die 'Run time limit reached; checkpoint and resume later.'
+  limit=$session_timeout
+  (( limit <= remaining )) || limit=$remaining
+  ai_helper state implementing "Resume/implement $active_task"
+  log=$(mktemp .ai/local/claude-XXXXXXXX.json)
+  errors="${log%.json}.stderr.log"
+  prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
+  prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
+  prompt+="$active_task"
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions.'
+  if [[ -n "$knowledge_dir" ]]; then
+    prompt+=$'\nProject knowledge base explicitly configured for this run: '
+    prompt+="$knowledge_dir"
+    prompt+=$'. Read/update relevant architecture and decisions there; human todos require human confirmation. Keep the operational queue/state/run log in .ai/ and Git. Do not relocate operational state to the knowledge base.'
+  fi
+  printf 'Session %s/%s: %s (limit %ss; log %s)\n' "$iteration" "$sessions" "$active_task" "$limit" "$log"
+  set +e
+  timeout --signal=TERM --kill-after=10s "$limit" claude -p \
+    --permission-mode dontAsk --output-format json \
+    --tools Read,Glob,Grep,Edit,Write,Bash --allowedTools "${allowed[@]}" \
+    --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+    "${knowledge_args[@]}" \
+    -- "$prompt" > "$log" 2> "$errors"
+  code=$?
+  set -e
+  ai_guard_verify
+  (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error). Preserve partial work; see $log and $errors."
+  ai_helper claude-result "$log" || ai_die 'Claude reported an error or denied tools; inspect logs.'
+  ai_branch
+  ai_helper tasks check
+  task_status=$(ai_helper tasks status "$active_task")
+  case "$task_status" in
+    DONE)
+      remaining=$(( run_timeout - (SECONDS - started) ))
+      (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
+      if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+        ai_guard_verify
+        ai_helper tasks set "$active_task" IN_PROGRESS
+        ai_helper state blocked "Validation failed after $active_task; inspect validation log"
+        ai_die "Validation failed; $active_task returned to IN_PROGRESS."
+      fi
+      ai_guard_verify
+      [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+        ai_die 'Claude left uncommitted work; inspect and checkpoint before continuing.'
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
+    BLOCKED)
+      [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+        ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
+      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result' ;;
+    *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
+  esac
+  ai_helper state implementing 'Continue queue; see task results for any blockers'
+  # Commit runner bookkeeping separately; never stage application files here.
+  git add -- .ai/state.md .ai/run-log.md
+  git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
+  ai_guard_verify
+done

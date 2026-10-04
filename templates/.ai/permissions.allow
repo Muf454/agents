@@ -1,0 +1,24 @@
+# Claude --allowedTools entries, one per line; human edits after inspecting tools.
+# dontAsk rejects unapproved tools; there are no mid-task approval prompts.
+# Add exact project commands as needed, e.g. Bash(npm run test *) AFTER inspection.
+# A command allowlist is not an OS sandbox; allowed scripts can run arbitrary code.
+# Edit/Write are constrained by the project's deny rules. Gate/tooling/prompts are
+# human-maintained and hashed at run approval. Stage explicit paths; never use
+# git add -A / --all / . or bypass commit hooks (--no-verify / -n).
+Read
+Glob
+Grep
+Edit
+Write
+Bash(git status)
+Bash(git diff)
+Bash(git log)
+Bash(git show)
+Bash(git status *)
+Bash(git diff *)
+Bash(git log *)
+Bash(git show *)
+Bash(git add *)
+Bash(git commit *)
+Bash(.ai/bin/ai-check)
+Bash(bash .ai/validate)

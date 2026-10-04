@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Replace this placeholder with the project's REAL deterministic validation gate.
+# Inspect .ai/validation-candidates.md and the actual package/tool configuration.
+# Include appropriate formatting checks, lint, type checking, unit/integration
+# tests, and build. Failures must propagate. No “|| true”, fake green, or test removal.
+# This script runs from the project root via .ai/bin/ai-check.
+printf '%s\n' 'Validation is not configured. Edit .ai/validate with real project checks.' >&2
+exit 78
