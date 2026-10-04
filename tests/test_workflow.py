@@ -427,6 +427,24 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         os.utime(marker, (1, 1))
         self.watchdog(expected=1)
 
+    def test_watchdog_finished_pipeline_is_not_a_crash(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('watchdog', ROOT / 'scripts/lib/watchdog.py')
+        watchdog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watchdog)
+        marker = self.base / 'pipeline.active'
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        marker.write_text(f'{dead.pid}\n')
+        self.assertTrue(watchdog.pipeline_died(marker))
+        snapshot = watchdog.marker_snapshot
+        def finishing(path):
+            result = snapshot(path)
+            path.unlink(missing_ok=True)  # the pipeline finishes mid-probe
+            return result
+        watchdog.marker_snapshot = finishing
+        self.assertEqual(watchdog.pipeline_died(marker), 0)
+
     def test_watchdog_resumed_run_ignores_old_logs(self):
         import time
         self.setup_project()
@@ -462,6 +480,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(list((self.config / 'systemd/user').iterdir()), [])
         self.assertIn('--user disable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
         self.watchdog('--install-timer', '--uninstall-timer', expected=2)
+        self.watchdog('--install-timer')
+        (self.mock_bin / 'systemctl').write_text('#!/usr/bin/env bash\n[[ "$2" != disable ]]\n')
+        self.watchdog('--uninstall-timer', expected=1)
+        self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
 
     def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
         self.setup_project()

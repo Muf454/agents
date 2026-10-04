@@ -76,17 +76,27 @@ def is_runner(args, names=('ai-run', 'ai-pipeline')):
     return any(Path(os.fsdecode(arg)).name in names for arg in args[:3] if arg)
 
 
-def pipeline_alive(marker):
-    """The marker's own ai-pipeline process is alive (children don't count)."""
+def marker_snapshot(marker):
+    """(pid, mtime ns) read from one open file, or None if absent/unreadable."""
     try:
-        pid = int(marker.read_text().split()[0])
-        written = marker.stat().st_mtime_ns
+        with marker.open() as file:
+            return int(file.read().split()[0]), os.fstat(file.fileno()).st_mtime_ns
     except (OSError, ValueError, IndexError):
-        return False
+        return None
+
+
+def pipeline_died(marker):
+    """mtime of a marker whose own ai-pipeline is gone, else 0 (children don't count)."""
+    snapshot = marker_snapshot(marker)
+    if not snapshot:
+        return 0
+    pid, written = snapshot
     found = process(pid)
     # A reused PID would have started after the marker was written.
-    return bool(found and is_runner(found[0], ('ai-pipeline',))
-                and start_ns(found[1]) <= written + 1_000_000_000)
+    if found and is_runner(found[0], ('ai-pipeline',)) and start_ns(found[1]) <= written + 1_000_000_000:
+        return 0
+    # A pipeline that just finished removes its marker: only an unchanged marker is a crash.
+    return written if marker_snapshot(marker) == snapshot else 0
 
 
 def paused_until(local):
@@ -124,7 +134,7 @@ def timer(root, args, install):
             sys.exit(f'systemctl --user {" ".join(command)} failed (exit {result.returncode})')
     if not install:
         if timer_unit.exists():
-            subprocess.run(['systemctl', '--user', 'disable', '--now', timer_unit.name])
+            systemctl('disable', '--now', timer_unit.name)  # exits before removing anything
         for unit in (service, timer_unit):
             unit.unlink(missing_ok=True)
         systemctl('daemon-reload')
@@ -222,8 +232,9 @@ def main():
         # controls (finish or ai_die), so a marker whose own process is gone means it was
         # killed, crashed or rebooted, even if an orphaned ai-run child still runs.
         marker = local / 'pipeline.active'
-        if mtime(marker) and not pipeline_alive(marker):
-            incidents['died:' + str(mtime(marker))] = (
+        died = pipeline_died(marker)
+        if died:
+            incidents['died:' + str(died)] = (
                 'Watchdog: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
         elif not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review'):
