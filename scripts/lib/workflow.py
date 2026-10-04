@@ -115,7 +115,7 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog',
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover',
                  'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     generated = '.ai/validation-candidates.md'
@@ -572,6 +572,10 @@ def bind_review(head, content):
 def review_info(arguments):
     """Print reviewed HEAD and finding counts: HEAD BLOCKER MAJOR MINOR. The report must match
     the digest the host recorded when ai-review published it."""
+    print(*review_info_values())
+
+
+def review_info_values():
     content = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', content)
     if not head:
@@ -579,7 +583,55 @@ def review_info(arguments):
     binding = binding_dir() / f'{head.group(1)}.sha256'
     if not binding.exists() or binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
         fail('Current review does not match the report ai-review published; it is invalid until Codex reviews again.')
-    print(head.group(1), *review_counts(content))
+    return (head.group(1), *review_counts(content))
+
+
+RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
+
+
+def recover_decision(arguments):
+    """Parse the recovery session's JSON verdict from Claude's --output-format json log.
+    Prints 'action<TAB>reason<TAB>human_action'; anything malformed becomes an escalation."""
+    try:
+        result = json.loads(Path(arguments[0]).read_text()).get('result') or ''
+        match = re.search(r'\{[^{}]*"action"[^{}]*\}', result, re.S)
+        decision = json.loads(match.group(0)) if match else {}
+    except (OSError, ValueError, AttributeError):
+        decision = {}
+    action = decision.get('action')
+    clean = lambda value, limit: ' '.join(str(value or '').split())[:limit]
+    if action not in RECOVER_ACTIONS:
+        print('escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+        return
+    print(f"{action}\t{clean(decision.get('reason'), 300)}\t{clean(decision.get('human_action'), 300)}")
+
+
+def finish_summary(arguments):
+    """The final notification: what was delivered and the human's todo list."""
+    url, reviews, unresolved = arguments[0], arguments[1], arguments[2] == '1'
+    blocks = tasks()
+    done = sum(task['status'] == 'DONE' for task in blocks)
+    handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
+    steps = [line for line in section(handoff, 'Manual testing for the human').splitlines()
+             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    extra = [re.sub(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?', '', line).strip()
+             for line in section(handoff, 'Human todos').splitlines()
+             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    extra = [item for item in extra if not NONE_TEXT.match(item)]
+    try:
+        _, blockers, majors, minors = review_info_values()
+        review = f'Codex review: BLOCKER {blockers}, MAJOR {majors}, MINOR {minors} ({reviews} round(s))'
+    except (ValueError, OSError):
+        review = f'Codex review rounds: {reviews}'
+    todos = []
+    if unresolved:
+        todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
+    todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
+    todos.append('Merge the PR')
+    todos += extra[:5]
+    lines = [f'🏁 FINISHED: all {done}/{len(blocks)} tasks done and validated. {review}.', f'PR: {url}', 'Your todos:']
+    lines += [f'{n}. {todo[:200]}' for n, todo in enumerate(todos, 1)]
+    print('\n'.join(lines))
 
 
 PLAN_REVIEW = Path('.ai/reviews/plan.md')
@@ -787,6 +839,10 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'recover-decision':
+        recover_decision(arguments)
+    elif command == 'finish-summary':
+        finish_summary(arguments)
     elif command == 'plan-digest':
         print(plan_digest())
     elif command == 'publish-plan-review':

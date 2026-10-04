@@ -6,8 +6,12 @@ ai_die() {
   printf 'Error: %s\n' "$*" >&2
   # Last error for the pipeline/notifications; best effort, never fatal.
   [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
-  # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
-  [[ -z "${AI_PIPELINE_MARKER:-}" ]] || rm -f -- "$AI_PIPELINE_MARKER"
+  if [[ -n "${AI_PIPELINE_MARKER:-}" ]]; then
+    # The pipeline shell itself is stopping for good: say so unless stop() already did.
+    [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
+    # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
+    rm -f -- "$AI_PIPELINE_MARKER"
+  fi
   exit 1
 }
 
@@ -19,7 +23,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -64,7 +68,7 @@ ai_limit_pause() {
   # Pauses go to an ignored local log: touching tracked files would dirty the checkpoint.
   [[ -d .ai/local ]] && printf '%s paused %ss: %s usage limit (resume ~%s)\n' \
     "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
-  ai_notify "Paused: $agent usage limit reached. Resuming around $until."
+  ai_notify "⏸ PAUSED: $agent usage limit reached. Resumes by itself around $until."
   ${AI_SLEEP:-sleep} "$wait"
   AI_WAITED=$(( AI_WAITED + wait ))
 }

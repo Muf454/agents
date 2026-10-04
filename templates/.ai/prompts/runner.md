@@ -16,7 +16,8 @@ caused. Update relevant docs/decisions (and the configured knowledge base, if
 any). Mark it DONE only when its acceptance criteria are met, with evidence in
 "Result / notes". Update `.ai/state.md` and `.ai/handoff.md` (keep "Manual testing
 for the human" current: concrete steps and expected results for the whole
-feature), append a concise `.ai/run-log.md` outcome, and commit with explicit
+feature; list actions only the human can take under "Human todos", or "None"),
+append a concise `.ai/run-log.md` outcome, and commit with explicit
 paths (`git add -- <files>`; never `-A`, `.`, `--no-verify`, or `-n`).
 
 Your shell starts in the project root. Never prefix commands with `cd` (the
