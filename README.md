@@ -175,6 +175,12 @@ tmux new -s my-app-ai
 .ai/bin/ai-pipeline --approved --base main --model sonnet
 ```
 
+0. **Plan review**: before any task starts, Codex reviews the spec, plan and tasks
+   read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
+   is committed as `.ai/reviews/plan.md`. BLOCKER/MAJOR findings stop the run with a
+   notification before any Claude usage is spent: revise the plan and rerun (a changed
+   plan is reviewed again), or pass `--skip-plan-review` to proceed anyway. A review
+   of the unchanged plan is reused.
 1. **Implement**: `ai-run` works through the queue (fresh Claude session per task,
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
@@ -219,13 +225,19 @@ A task may override it with an optional line under its `Dependencies:` line, e.g
 `Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
 stretch subscription limits.
 
+Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
+default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
+default **high**). Reviews are where a stronger model pays off most: findings caught
+there save Claude fix rounds.
+
 ### Notifications
 
 Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$1`
 and can never break the workflow. For phone notifications, install the free ntfy app,
 subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
-`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`; environment variables win):
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`;
+environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>
@@ -471,10 +483,12 @@ without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` wh
 Exit codes are 0 healthy, 1 incident (including already notified), 2 usage error.
 It never restarts or repairs the workflow.
 
-`--diagnose` opts into one headless Claude attempt per newly detected incident
-batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10 seconds kill
-grace). Only Read/Glob/Grep tools and project settings are enabled; MCP is disabled
-and stdin is `/dev/null`; `AI_MODEL` applies. The watchdog saves the response to
+`--diagnose` opts into one headless, read-only diagnosis per newly detected
+incident batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10
+seconds kill grace). By default Codex diagnoses (`codex exec --sandbox read-only`,
+medium effort), because Codex has its own limit while Claude's is shared with your
+interactive sessions. `--diagnosis-agent claude` uses Claude instead: Read/Glob/Grep
+only, project settings, MCP disabled, `AI_MODEL` applies. Stdin is `/dev/null`. The watchdog saves the response to
 ignored `.ai/local/diagnosis.md` and includes its first line in the notification.
 Inspect trusted project settings/hooks before opting in; tool restrictions are not
 an OS sandbox. Failed or interrupted attempts are not retried for that incident.

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
-  printf '%s\n' 'Usage: ai-review --base REF [--timeout SECONDS]'
+  cat <<'EOF'
+Usage: ai-review --base REF [--timeout SECONDS]   review the implementation
+       ai-review --plan [--timeout SECONDS]       review spec/plan/tasks before implementing
+Model/effort: AI_REVIEW_MODEL (default: Codex default), AI_REVIEW_EFFORT (default high).
+EOF
   exit 0
 fi
-base=''; limit=1800
+base=''; limit=1800; plan=no
 while (( $# )); do
   case "$1" in
+    --plan) plan=yes; shift ;;
     --base) (( $# >= 2 )) || ai_die 'Missing base'; base=$2; shift 2 ;;
     --timeout)
       (( $# >= 2 )) || ai_die 'Missing timeout'
@@ -15,10 +20,55 @@ while (( $# )); do
     *) ai_die "Unknown argument: $1" ;;
   esac
 done
-[[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
+if [[ "$plan" == no ]]; then
+  [[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
+fi
 command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
+ai_review_args
 ai_root
 ai_lock
+
+# Codex read-only run with usage-limit pauses. Sets $report; $1 is the prompt.
+codex_review() {
+  local prompt=$1 code reset start_head
+  start_head=$(git rev-parse HEAD)
+  report=$(mktemp .ai/local/review-XXXXXXXX.md)
+  events="${report%.md}.events.log"
+  while true; do
+    set +e
+    timeout --signal=TERM --kill-after=10s "$limit" codex exec \
+      --ignore-user-config -c 'approval_policy="never"' --sandbox read-only "${AI_REVIEW_ARGS[@]}" \
+      --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
+    code=$?
+    set -e
+    (( code != 0 )) || break
+    if (( code != 124 && code != 137 )) && reset=$(ai_helper limit-check "$events"); then
+      ai_limit_pause Codex "$reset"
+      [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
+        ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
+      continue
+    fi
+    ai_die "Codex failed; prior review preserved. See $events."
+  done
+  [[ -s "$report" ]] || ai_die "Codex produced no review; see $events."
+  [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    ai_die 'Checkout changed during review; report kept locally, not published as current.'
+}
+
+if [[ "$plan" == yes ]]; then
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || ai_die 'Commit the plan before reviewing it.'
+  ai_helper tasks check
+  [[ -f .ai/prompts/plan-review.md ]] || ai_die 'Missing .ai/prompts/plan-review.md; copy it from the toolkit templates.'
+  digest=$(ai_helper plan-digest)
+  prompt=$(cat .ai/prompts/plan-review.md)
+  prompt+=$'\n\nPLAN SCOPE: HEAD='
+  prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
+  codex_review "$prompt"
+  ai_helper publish-plan-review "$report" "$digest"
+  read -r _ blockers majors minors < <(ai_helper plan-review-info)
+  printf 'Plan review saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' "$blockers" "$majors" "$minors"
+  exit 0
+fi
 exec 8>.ai/local/validation.lock
 flock -n 8 || ai_die 'Validation is running; finish it before review.'
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || ai_die 'Checkpoint all work before review.'
@@ -29,31 +79,10 @@ base_sha=$(git rev-parse --verify "${base}^{commit}") || ai_die 'Invalid review 
 merge_base=$(git merge-base "$base_sha" HEAD) || ai_die 'Base has no shared history with HEAD.'
 head=$(git rev-parse HEAD)
 [[ "$merge_base" != "$head" ]] || ai_die 'Empty review range. Choose the pre-implementation base.'
-report=$(mktemp .ai/local/review-XXXXXXXX.md)
-events="${report%.md}.events.log"
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='
 prompt+="$head; supplied base=$base_sha; merge-base=$merge_base. Inspect git diff $merge_base..$head and actual source. Validation evidence: .ai/local/validation.json. Return the full Markdown review as the final response. Do not write project files or invoke network/MCP integrations."
-# A usage/rate-limit failure pauses until the reset and retries; other failures stop.
-while true; do
-  set +e
-  timeout --signal=TERM --kill-after=10s "$limit" codex exec \
-    --ignore-user-config -c 'approval_policy="never"' --sandbox read-only \
-    --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
-  code=$?
-  set -e
-  (( code != 0 )) || break
-  if (( code != 124 && code != 137 )) && reset=$(ai_helper limit-check "$events"); then
-    ai_limit_pause Codex "$reset"
-    [[ "$(git rev-parse HEAD)" == "$head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
-      ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
-    continue
-  fi
-  ai_die "Codex failed; prior review preserved. See $events."
-done
-[[ -s "$report" ]] || ai_die "Codex produced no review; see $events."
-[[ "$(git rev-parse HEAD)" == "$head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
-  ai_die 'Checkout changed during review; report kept locally, not published as current.'
+codex_review "$prompt"
 ai_helper publish-review "$report" "$head" "$merge_base"
 read -r _ blockers majors minors < <(ai_helper review-info)
 printf 'Review saved to .ai/reviews/current.md (HEAD %s): BLOCKER %s, MAJOR %s, MINOR %s. Claude evaluates findings before fixing.\n' \
