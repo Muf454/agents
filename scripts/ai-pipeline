@@ -168,6 +168,7 @@ if ! git remote get-url origin >/dev/null 2>&1; then
 fi
 git push -u origin "$branch" || { printf '%s\n' 'git push failed' > .ai/local/last-error; stop push; }
 ai_guard_verify  # push hooks run project code too
+ai_helper review-info >/dev/null || stop 'pull request (review integrity)'
 if ! command -v gh >/dev/null; then
   ai_notify "Branch $branch pushed. Install the GitHub CLI (gh) to open PRs automatically."
   exit 0

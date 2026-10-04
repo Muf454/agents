@@ -883,6 +883,16 @@ class ToolkitTest(unittest.TestCase):
         self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
         self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
 
+    def test_push_hook_cannot_alter_the_review_that_gets_published(self):
+        self.ready()
+        self.add_origin()
+        hook = self.project / '.git/hooks/pre-push'
+        hook.write_text('#!/usr/bin/env bash\nsed -i "s/no demonstrated findings/flawless/" .ai/reviews/current.md\n')
+        hook.chmod(0o755)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('does not match the report ai-review published', result.stderr)
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+
     def test_accepted_finding_must_point_to_a_new_fix_task(self):
         self.ready()
         self.add_origin()
