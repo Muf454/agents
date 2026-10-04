@@ -654,6 +654,13 @@ def pr_body(arguments):
     spec = Path('.ai/project-spec.md').read_text() if Path('.ai/project-spec.md').exists() else ''
     handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
     review = Path('.ai/reviews/current.md').read_text() if Path('.ai/reviews/current.md').exists() else ''
+    if review and 'Host evidence' in review:
+        # Never publish review claims that don't match what ai-review recorded.
+        head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
+        binding = binding_dir() / f'{head.group(1)}.sha256' if head else None
+        if not binding or not binding.exists() or \
+                binding.read_text().strip() != hashlib.sha256(review.encode()).hexdigest():
+            fail('Current review does not match the report ai-review published; refusing to publish it.')
     lines = []
     if unresolved:
         lines += ['> [!WARNING]', '> Draft: significant review findings remain after the automatic fix rounds.',
