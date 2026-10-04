@@ -12,7 +12,10 @@ untestable; tasks that are too big (more than a few files), mis-ordered or have
 wrong dependencies; wrong assumptions about the existing code; missing
 regression tests; security/authorization, data-integrity and concurrency risks
 the plan ignores; validation commands that would not catch a failure; scope
-creep beyond the spec.
+creep beyond the spec; a task whose `Model:` doesn't fit its risk (no line means the
+run default, usually sonnet): security, auth/RLS, concurrency/locking or destructive data
+migrations on anything below `opus` is a MAJOR finding; `opus` on mechanical work is a
+MINOR one (it wastes the shared Claude limit).
 
 BLOCKER: implementing as written would fail or cause harm. MAJOR: a real gap
 that would likely produce a wrong or untested result. MINOR: improvements.

@@ -262,6 +262,9 @@ notification so you can rerun after the reset. Pauses are logged in the ignored
 ### Models
 
 `--model NAME` (or `AI_MODEL`) picks the Claude model for implementation and triage.
+Planning assigns models by risk (haiku for mechanical, sonnet by default, opus for
+security, auth/RLS, concurrency, destructive migrations or tasks that failed before), and
+the Codex plan review flags a mismatch before any Claude usage.
 A task may override it with an optional line under its `Dependencies:` line, e.g.
 `Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
 stretch subscription limits.
