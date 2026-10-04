@@ -965,6 +965,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertIn('-c model_reasoning_effort="high" --model gpt-test', call)
         self.tool('ai-review', '--plan', expected=1, AI_REVIEW_EFFORT='turbo')
         self.tool('ai-review', '--plan')  # by hand: committed, checkout stays clean
+        self.tool('ai-review', '--plan')  # unchanged report: still succeeds
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
         self.assertIn('record plan review', self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout)
 
@@ -978,6 +979,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
         self.assertIn('reviewed content changed while recording the plan review', self.notifications())
         self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        # Run by hand, the same hook makes ai-review --plan fail instead of reporting success.
+        self.tool('ai-review', '--plan', expected=1)
+        self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
+
+    def test_progress_notifications_for_done_and_blocked_tasks(self):
+        title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')
+        self.ready(title_task + '\n' + task('T002'))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-first')
+        notes = self.notifications()
+        self.assertIn('Blocked: T001 Fix "$(touch pwned)" & `id`; rm -rf x (0/2 done)', notes)
+        self.assertIn('Done: T002 Verify T002 (1/2 done)', notes)
+        self.assertFalse((self.project / 'pwned').exists())
 
     def test_pipeline_stop_is_notified(self):
         self.ready()

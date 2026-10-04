@@ -68,7 +68,11 @@ if [[ "$plan" == yes ]]; then
   # Run by hand, record it like the pipeline does, so the checkout stays clean for ai-pipeline.
   if [[ -z "${AI_PIPELINE:-}" ]]; then
     git add -- .ai/reviews/plan.md
-    git commit -q -m 'chore(ai): record plan review' -- .ai/reviews/plan.md
+    git diff --cached --quiet -- .ai/reviews/plan.md || \
+      git commit -q -m 'chore(ai): record plan review' -- .ai/reviews/plan.md
+    # A commit hook that changed reviewed content would make the verdict stale.
+    [[ "$(ai_helper plan-review-info)" == current* && -z "$(git status --porcelain --untracked-files=all)" ]] || \
+      ai_die 'Reviewed content changed while recording the plan review (commit hook?); review again.'
   fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
   printf 'Plan review saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' "$blockers" "$majors" "$minors"
