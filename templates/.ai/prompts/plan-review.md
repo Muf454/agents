@@ -12,10 +12,11 @@ untestable; tasks that are too big (more than a few files), mis-ordered or have
 wrong dependencies; wrong assumptions about the existing code; missing
 regression tests; security/authorization, data-integrity and concurrency risks
 the plan ignores; validation commands that would not catch a failure; scope
-creep beyond the spec; a task whose `Model:` doesn't fit its risk (no line means the
-run default, usually sonnet): security, auth/RLS, concurrency/locking or destructive data
-migrations on anything below `opus` is a MAJOR finding; `opus` on mechanical work is a
-MINOR one (it wastes the shared Claude limit).
+creep beyond the spec; a task whose explicit `Model:` line doesn't fit its risk:
+security, auth/RLS, concurrency/locking or destructive data migrations with `haiku` or
+`sonnet` is a MAJOR finding; `opus` on mechanical work is a MINOR one (it wastes the
+shared Claude limit). A task without a `Model:` line runs on an unknown default: report
+it as MINOR ("specify the model"), never as MAJOR.
 
 BLOCKER: implementing as written would fail or cause harm. MAJOR: a real gap
 that would likely produce a wrong or untested result. MINOR: improvements.
