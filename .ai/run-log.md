@@ -24,3 +24,4 @@
 | 2026-10-05T11:05Z | claude | T010 | DONE: updated runner.md, triage.md "How to work here" with foreground/600000ms gate requirement; mirrored in README step 4 | tool_contract 3 OK; ai-check 149 OK | (this commit) | All 10 tasks complete; Phase ready_for_review |
 | 2026-10-05T11:04:22Z | runner | T010 | completed | PASS | 107b4aa | Claude checkpointed; continuing queue |
 | 2026-10-05T11:09:35Z | runner | none | queue complete; ready for independent review | PASS | a2c21c5 | Human acceptance remains |
+| 2026-10-05T11:15:56Z | runner | triage | review triaged into dispositions/tasks | n/a | a3c9040 | Fix tasks run next |
