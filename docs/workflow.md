@@ -190,6 +190,23 @@ verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks
 optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
+Triage completion (one counted round, even across stops and crashes): before each triage
+the pipeline records `stage = {name: triage, start_head, review_digest}` in the run
+manifest (`run-manifest stage-set`; a human restart on the same branch carries it over).
+Every pipeline start and resume completes an open stage first (`complete_stage`), before
+the clean-tree check, plan review or implementation: `stage-verify` requires the review
+binding (verified report whose SHA-256 equals `review_digest`) and that committed,
+uncommitted and untracked changes since `start_head` are only triage records
+(`triage-scope`). If a `chore(ai): record review triage` commit already exists after
+`start_head` (crash after the commit) the stage is closed without another count;
+otherwise `ai-run --triage --since start_head` records it. That is the one owner of the
+counted commit: when the dispositions are already complete and fresh it skips the Claude
+session and commits the leftover records with the round; it then re-checks the scope (a
+commit hook can't add source to the counted commit). `triage-check --fresh` must pass,
+then the stage is cleared. Every failed check is a `Triage stage …` stop, which
+`ai-recover` always escalates: nothing is implemented and nothing is counted. Incomplete
+dispositions with only bookkeeping leftovers rerun the triage session instead.
+
 Review provenance: when `ai-review` publishes a report it records the report's SHA-256
 outside the checkout (`${AI_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/ai-toolkit}/reviews/`,
 keyed by repository path and reviewed HEAD). Every consumer (`review-info`, triage, the
@@ -224,8 +241,12 @@ digest against the pipeline's in-memory approved digest and only then execs
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
-denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints);
-an EXIT trap guarantees one final ⛔ on unexpected exits; bookkeeping-only leftovers
+denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
+`Triage stage`);
+an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage in the
+manifest (also after a watchdog crash recovery) it never commits anything: changes since
+the stage start outside triage records escalate, otherwise it resumes without a Claude
+session and the pipeline completes the stage; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
 the decision counts only with a zero exit, a success envelope and exactly one valid

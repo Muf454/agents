@@ -598,8 +598,16 @@ def run_manifest(arguments):
             fail('Invalid gate digest.')
         path.parent.mkdir(parents=True, exist_ok=True)
         settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
-        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0,
-                                 'env': settings}) + '\n')
+        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings}
+        # An interrupted stage on this branch outlives a human restart: the pipeline
+        # completes (or escalates) it before anything else.
+        try:
+            old = json.loads(path.read_text())
+            if isinstance(old, dict) and old.get('branch') == branch and 'stage' in old:
+                data['stage'] = old['stage']
+        except (OSError, ValueError):
+            pass
+        atomic(path, json.dumps(data) + '\n')
         return
     try:
         data = json.loads(path.read_text())
@@ -630,8 +638,101 @@ def run_manifest(arguments):
     elif action == 'clear-attempts':
         data['attempts'] = 0
         atomic(path, json.dumps(data) + '\n')
+    elif action == 'stage-set':
+        # Recorded before the stage starts, bound to the verified review it works on.
+        name, start = arguments[1], arguments[2]
+        if name != 'triage' or not re.fullmatch(r'[0-9a-f]{40}', start):
+            fail('Invalid stage.')
+        review_info_values()
+        data['stage'] = {'name': name, 'start_head': start, 'review_digest': review_digest()}
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'stage':
+        # The open stage of this branch's run ('name start_head review_digest'), if any.
+        stage = data.get('stage')
+        if stage is None or data['branch'] != current_branch():
+            return
+        print(' '.join(stage_fields(stage)))
+    elif action == 'stage-clear':
+        data.pop('stage', None)
+        atomic(path, json.dumps(data) + '\n')
     else:
         fail('Unknown run-manifest action.')
+
+
+# Files a review triage may change: dispositions, the task queue and runner bookkeeping.
+TRIAGE_RECORDS = ('.ai/tasks.md', '.ai/reviews/dispositions.md', '.ai/current-plan.md',
+                  '.ai/state.md', '.ai/handoff.md', '.ai/run-log.md')
+TRIAGE_COMMIT = 'chore(ai): record review triage'
+
+
+def current_branch():
+    try:
+        return git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        return ''
+
+
+def review_digest():
+    return hashlib.sha256(Path('.ai/reviews/current.md').read_bytes()).hexdigest()
+
+
+def stage_fields(stage):
+    fields = [stage.get(key) if isinstance(stage, dict) else None
+              for key in ('name', 'start_head', 'review_digest')]
+    if fields[0] != 'triage' or not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
+            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
+        fail('Triage stage: the run manifest holds an invalid stage record.')
+    return fields
+
+
+def changed_since(start):
+    """Paths changed since START: committed, staged, unstaged and untracked (not ignored)."""
+    names = git('diff', '--name-only', '--no-renames', '-z', start).split(b'\0')
+    names += git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
+    return sorted({os.fsdecode(name) for name in names if name})
+
+
+def triage_scope(arguments):
+    """Since START, only triage records changed (committed or not)."""
+    start = arguments[0]
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
+    outside = [name for name in changed_since(start) if name not in TRIAGE_RECORDS]
+    if outside:
+        fail('Triage changed files outside workflow records: ' + ' '.join(outside[:8])
+             + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
+
+
+def stage_verify(arguments):
+    """Verify an open triage stage before it is completed. Prints 'committed' when its counted
+    commit already exists after start_head (close it without a second count), else 'pending'.
+    Any mismatch fails: the caller escalates without implementation or counting."""
+    path = binding_dir() / 'run.json'
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        fail('Triage stage: the run manifest is unreadable.')
+    if not isinstance(data, dict) or 'stage' not in data:
+        fail('Triage stage: no open stage in the run manifest.')
+    _, start, digest = stage_fields(data['stage'])
+    try:
+        review_info_values()
+    except ValueError as error:
+        fail(f'Triage stage: {error}')
+    if review_digest() != digest:
+        fail('Triage stage: the current review is not the one this triage started on.')
+    try:
+        triage_scope([start])
+    except ValueError as error:
+        fail(f'Triage stage: {error}')
+    subjects = git('log', '--format=%s', f'{start}..HEAD').decode().splitlines()
+    if TRIAGE_COMMIT not in subjects:
+        print('pending')
+        return
+    if git('status', '--porcelain', '--untracked-files=all').strip():
+        fail('Triage stage: uncommitted changes after the counted triage commit.')
+    print('committed')
 
 
 def bind_review(head, content):
@@ -972,6 +1073,10 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'triage-scope':
+        triage_scope(arguments)
+    elif command == 'stage-verify':
+        stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
     elif command == 'checkpoint-guard':

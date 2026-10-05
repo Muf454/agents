@@ -115,7 +115,7 @@ Gate: `.ai/bin/ai-check`.
 (pending)
 
 ## T004 — Triage completion protocol (recovery and crashes)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: opus
 
@@ -155,7 +155,21 @@ permissions; new tests are named with `triage_completion`; the output must say `
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. `run-manifest stage-set|stage|stage-clear` (stage carried over by a human
+restart on the same branch), `triage-scope`, `stage-verify` in scripts/lib/workflow.py.
+ai-pipeline: `complete_stage` runs before the clean-tree check on every start/resume and as
+the triage step itself; failed checks are `Triage stage …` stops (hard escalation in
+ai-recover). ai-run --triage: `--since`, leftovers limited to triage records, skips the
+session when dispositions are already complete, commits leftover records in the one counted
+commit, re-checks scope after it. ai-recover: open stage → scope check → rerun without a
+Claude decision or escalate; never commits. Evidence: `python3 -m unittest discover -s tests
+-k triage_completion` → Ran 7 tests, OK (normal round, 2026-10-05 uncommitted records,
+fix-round limit, crash after counted commit, watchdog-style crash recovery, source leftovers,
+hook in counted commit). `.ai/bin/ai-check` → Ran 117 tests, OK. Limitation: the crash test
+calls `ai-recover --stage 'crash …'` directly (what the watchdog launches via systemd-run).
+Decision: incomplete dispositions with only bookkeeping leftovers rerun the triage session
+(escalating would trap every human restart after e.g. a usage-limit stop); uncommitted
+incomplete triage records escalate.
 
 ## T005 — Publish invariants around every push
 Status: TODO

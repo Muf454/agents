@@ -215,7 +215,8 @@ tmux new -s my-app-ai
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed
-dispositions for that review are reused, validation is re-verified before
+dispositions for that review are reused, an interrupted triage is completed (counted
+once) before anything else, validation is re-verified before
 publishing, and an existing PR is updated instead of duplicated. The pipeline holds
 the checkout lock for its whole run and re-verifies the gate after each of its own
 commits. `--no-pr` stops after the review;
@@ -248,7 +249,11 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    3 times. Usage limits pause and resume.
 2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
    the same process. Hard rules escalate at once (gate, permissions, branch, review
-   integrity, plan-review findings, weekly limit, a changed gate digest). Otherwise a
+   integrity, plan-review findings, weekly limit, a changed gate digest). A stop during
+   **review triage** is never committed as leftover work: if only workflow records changed
+   since the triage started, `ai-recover` reruns and the pipeline first finishes that
+   triage (checks the review it belongs to, the scope and the dispositions, then records
+   the round exactly once); anything else escalates. Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or

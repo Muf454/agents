@@ -12,7 +12,8 @@ Hands-off delivery of an approved plan on a feature branch:
   -> push the feature branch and open/update a pull request -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
 (default: --base when it is a local or origin/ branch).
-The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume.
+The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
+an interrupted review triage is verified and recorded once before anything else.
 Usage limits pause and resume (see ai-run). Notifications use AI_NOTIFY_CMD.
 EOF
 }
@@ -71,7 +72,10 @@ if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   else ai_die "Cannot infer the PR target from --base $base; pass --pr-base BRANCH."
   fi
 fi
-[[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+# An interrupted stage of this branch's run (host-side manifest) is completed below, before
+# anything else; its leftovers are checked there. Otherwise start from a clean checkpoint.
+open_stage=$(ai_helper run-manifest stage 2>/dev/null || true)
+[[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all)" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
@@ -138,11 +142,44 @@ ensure_validated() {
     ai_guard_verify
   fi
 }
+triage_args=()
+for (( i=0; i<${#run_args[@]}; i+=2 )); do
+  case "${run_args[i]}" in --model|--knowledge-dir|--session-timeout) triage_args+=("${run_args[i]}" "${run_args[i+1]}") ;; esac
+done
+# A failed stage check always needs the human (ai-recover escalates "Triage stage" stops).
+stage_fail() {
+  printf 'Triage stage cannot be completed safely: %s\n' "${1#Error: }" > .ai/local/last-error
+  stop triage
+}
+# Completes the open triage stage exactly once, on every start, resume and triage round:
+# verify the review binding and that only workflow records changed since the stage started,
+# then close it if its counted commit exists, else record the round through ai-run --triage.
+complete_stage() {
+  local info state start
+  info=$(ai_helper run-manifest stage 2>&1) || stage_fail "$info"
+  [[ -n "$info" ]] || return 0
+  state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
+  if [[ "$state" != committed ]]; then
+    read -r _ start _ <<< "$info"
+    "$AI_BIN/ai-run" --approved --triage --since "$start" "${triage_args[@]}" || stop triage
+    ai_guard_verify
+    state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
+    [[ "$state" == committed ]] || stage_fail 'the triage round was not recorded.'
+  fi
+  state=$(ai_helper triage-check --fresh 2>&1) || stage_fail "$state"
+  ai_helper run-manifest stage-clear || stage_fail 'cannot clear the stage in the run manifest.'
+}
 
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
 else
   ai_notify "▶ STARTED on $branch."
+fi
+if [[ -n "$open_stage" ]]; then
+  step 'Completing the interrupted review triage'
+  complete_stage
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    stage_fail 'the checkout is not clean after completing the triage.'
 fi
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
@@ -197,12 +234,9 @@ while true; do
     break
   fi
   step "Review triage, round $(( fixes + 1 )) (Claude)"
-  triage_args=()
-  for (( i=0; i<${#run_args[@]}; i+=2 )); do
-    case "${run_args[i]}" in --model|--knowledge-dir|--session-timeout) triage_args+=("${run_args[i]}" "${run_args[i+1]}") ;; esac
-  done
-  "$AI_BIN/ai-run" --approved --triage "${triage_args[@]}" || stop triage
-  ai_guard_verify
+  # Recorded before triage starts, so a stop or crash anywhere in it resumes this stage.
+  ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
+  complete_stage
   verdict=$(ai_helper triage-check --fresh) || stop triage
   read -r accepted deferred <<< "${verdict//[a-z=]/ }"
   if (( accepted == 0 )); then

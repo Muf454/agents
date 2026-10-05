@@ -7,6 +7,8 @@ Bounded auto-recovery after ai-pipeline stopped (handed over by ai-pipeline itse
 started by ai-watchdog --recover after a crash). Hard rules first, then a read-only
 Claude session picks ONE action that this script carries out:
   rerun | commit_and_rerun (only if the full gate passes) | escalate (notify the human).
+An interrupted review triage (recorded in the run manifest) is never committed here: it
+reruns without a Claude session (the pipeline completes the stage) or escalates.
 Authority comes from the host-side run manifest written when the human started the run
 (approved gate digest, branch, arguments, attempt budget), never from checkout files.
 At most AI_RECOVER_MAX (default 2) attempts per human-started run. Gate files are never
@@ -40,6 +42,13 @@ escalate() {
   # Not ai_die: last-error keeps the original stop reason for the human and later runs.
   printf 'Error: escalated to the human: %s\n' "${1:-$reason}" >&2
   exit 1
+}
+
+resume() {
+  ai_notify "🔧 Recovered ($attempt/$max): $1 Resuming the pipeline."
+  rm -f .ai/local/last-error
+  trap - EXIT
+  exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"
 }
 
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
@@ -86,10 +95,24 @@ mapfile -d '' -t args < <(ai_helper run-manifest args)
 case "$reason" in
   *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
   *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
-  *'differs from the validated content'*)
+  *'differs from the validated content'*|*'Triage stage'*)
     escalate 'this kind of stop always needs a human.' 'inspect it, fix it, then rerun ai-pipeline.' ;;
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
+
+# An interrupted review triage (the stage is in the manifest, also after a crash): never
+# commit its leftovers here. Rerun: the pipeline verifies the stage and records the round
+# exactly once, or escalates. Leftovers outside workflow records escalate right away.
+open_stage=$(ai_helper run-manifest stage 2>/dev/null) || \
+  escalate 'the run manifest holds an invalid stage.' 'rerun ai-pipeline --approved by hand.'
+if [[ -n "$open_stage" ]]; then
+  read -r _ stage_start _ <<< "$open_stage"
+  scope=$(ai_helper triage-scope "$stage_start" 2>&1) || \
+    escalate "the interrupted triage left changes outside its scope (${scope#Error: }); nothing was committed." \
+      'inspect and discard them, then rerun ai-pipeline.'
+  ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage (review triage): $reason"
+  resume 'the resumed pipeline completes the interrupted review triage.'
+fi
 
 # A stop always leaves runner bookkeeping (run log, state, handoff) behind; record it.
 if [[ -n "$(git status --porcelain --untracked-files=all)" && \
@@ -149,7 +172,4 @@ Recovery: $why" || escalate 'the recovery commit failed (commit hook?).' 'inspec
       escalate "$why; but the checkout has uncommitted changes." 'inspect and commit or discard them, then rerun ai-pipeline.' ;;
   *) escalate "$why" "$human" ;;
 esac
-ai_notify "🔧 Recovered ($attempt/$max): $why Resuming the pipeline."
-rm -f .ai/local/last-error
-trap - EXIT
-exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"
+resume "$why"

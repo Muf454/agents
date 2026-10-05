@@ -72,6 +72,7 @@ if mode == 'limit-far':
                       'result':'Claude AI usage limit reached|' + str(int(time.time()) + 7 * 86400)}))
     sys.exit(1)
 if 'TRIAGE CONTRACT' in prompt:
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-calls', 'a') as f: f.write('call\n')
     tasks_file = pathlib.Path('.ai/tasks.md')
     text = tasks_file.read_text()
     review = pathlib.Path('.ai/reviews/dispositions.md')
@@ -100,8 +101,17 @@ if 'TRIAGE CONTRACT' in prompt:
         if mode == 'triage-touches-source':
             pathlib.Path('src.txt').write_text('not allowed in triage')
             paths.append('src.txt')
+        if mode == 'triage-no-commit-source':
+            pathlib.Path('src.txt').write_text('not allowed in triage')
         subprocess.run(['git','add','--',*paths],check=True)
-    subprocess.run(['git','commit','-qm','triage review'],check=True)
+    # The 2026-10-05 case: the session's own commit was denied; its records stay uncommitted.
+    if mode not in ('triage-no-commit', 'triage-no-commit-source'):
+        subprocess.run(['git','commit','-qm','triage review'],check=True)
+    if mode == 'triage-crash':
+        # The machine "restarts": ai-run (claude <- timeout <- ai-run) and the pipeline die at once.
+        runner = int(pathlib.Path(f'/proc/{os.getppid()}/stat').read_text().rsplit(')', 1)[1].split()[1])
+        os.kill(runner, 9)
+        os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 9)
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
 if mode in ('error-once', 'error-once-partial') and not pathlib.Path('.ai/local/mock-error-hit').exists():
@@ -1754,6 +1764,138 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
         self.assertNotIn('--draft', create[0])
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    # ---------------------------------------------------------------- triage completion (R1)
+    def subjects(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+
+    def triage_rounds(self):
+        return self.subjects().count('chore(ai): record review triage')
+
+    def triage_calls(self):
+        calls = self.base / 'triage-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def open_stage(self):
+        return self.helper('run-manifest', 'stage').stdout.strip()
+
+    def test_triage_completion_normal_round_counts_once(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_triage_completion_uncommitted_records_recover_into_one_round(self):
+        # 2026-10-05: the triage session's commit was denied, the run stopped, recovery resumed.
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
+                  MOCK_CODEX='major-once', MOCK_CLAUDE='triage-no-commit')
+        subjects = self.subjects()
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertFalse([s for s in subjects if 'recovery checkpoint' in s or 'record stop during' in s])
+        counted = self.run_cmd(['git', 'log', '--format=%H', '--grep', '^chore(ai): record review triage']).stdout.split()
+        files = self.run_cmd(['git', 'show', '--name-only', '--format=', counted[0]]).stdout.split()
+        self.assertIn('.ai/tasks.md', files)
+        self.assertIn('.ai/reviews/dispositions.md', files)
+        self.assertEqual(self.triage_calls(), 1)  # recorded, not triaged again
+        self.assertEqual(self.recovery_calls(), [])  # no Claude decision: the stage rules decide
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        notes = self.notifications()
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertEqual(self.open_stage(), '')
+
+    def test_triage_completion_respects_the_fix_round_limit(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '1', AI_AUTO_RECOVER='1',
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-no-commit')
+        self.assertEqual(self.triage_rounds(), 1)
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertIn('--draft', create[0])
+
+    def test_triage_completion_crash_after_counted_commit_does_not_count_twice(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        # The pipeline's triage child finished its counted commit; then the pipeline died.
+        self.tool('ai-run', '--approved', '--triage', '--since', head)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.open_stage().split()[:2], ['triage', head])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertIn('Completing the interrupted review triage', result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_triage_completion_watchdog_crash_recovery_completes_once(self):
+        self.ready()
+        crashed = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=None,
+                            AI_AUTO_RECOVER='1', MOCK_CODEX='major-once', MOCK_CLAUDE='triage-crash')
+        self.assertEqual(crashed.returncode, -9)
+        self.assertEqual(self.triage_rounds(), 0)
+        self.assertTrue(self.open_stage().startswith('triage '))
+        # What ai-watchdog --recover starts after a crash; the stage comes from the manifest.
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_CLAUDE='',
+                  MOCK_CODEX='major-once')
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('🏁 FINISHED', self.notifications())
+        self.assertEqual(self.open_stage(), '')
+
+    def test_triage_completion_source_leftovers_escalate_and_commit_nothing(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CODEX='major-once', MOCK_CLAUDE='triage-no-commit-source')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('outside its scope', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.triage_rounds(), 0)
+        self.assertIn('?? src.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        # A human restart verifies the same stage: still escalates, nothing committed or implemented.
+        sessions = (self.project / '.ai/local/mock-invocations').read_text().count('call')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Triage stage cannot be completed safely', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), sessions)
+        self.assertEqual(self.triage_rounds(), 0)
+
+    def test_triage_completion_hook_changing_source_in_counted_commit_escalates(self):
+        self.ready()
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -qx .ai/state.md || exit 0\n'
+                        'grep -q "^Phase: fixing_review" .ai/state.md || exit 0\n'
+                        'echo hooked > src.txt && git add src.txt\n')
+        hook.chmod(0o755)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CODEX='major-once')
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertIn('src.txt', self.run_cmd(['git', 'show', '--name-only', '--format=', 'HEAD']).stdout)
+        self.assertIn('Triage stage: the triage commit is out of scope', self.notifications())
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        # Resume (human restart): escalates again, no implementation, no second count.
+        sessions = (self.project / '.ai/local/mock-invocations').read_text().count('call')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX='major-once')
+        self.assertIn('Triage stage cannot be completed safely', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), sessions)
 
 
 if __name__ == '__main__':
