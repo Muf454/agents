@@ -477,3 +477,122 @@ it times out rather than ending without a checkpoint. Mirrored in README.md step
 remain identical in runner and triage (verified by test). Evidence: `python3 -m unittest
 discover -s tests -k tool_contract` → Ran 3 tests, OK. `.ai/bin/ai-check` → Ran 149 tests, OK.
 All acceptance criteria met.
+
+## T011 — Re-check: extra answers fail closed (review M1)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+Review finding M1: an answer set containing any unknown/extra entry must not withdraw anything.
+
+### Implementation notes
+`parse_recheck` in scripts/lib/workflow.py currently logs and ignores answers for unknown ids,
+so an all-withdrawn response plus an extra `M9` still withdraws everything. Validate the whole
+answer set first: any unknown id, non-object entry or non-string id makes EVERY requested
+finding upheld (note says why). Keep the existing per-finding duplicate/malformed handling.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py (recheck_command tests), docs if they describe parsing
+
+### Acceptance criteria
+- Regression test (named `recheck_command`): requested M1, M2, both withdrawn plus an extra
+  `M9` answer → both upheld; same with a malformed extra entry (e.g. a bare string).
+- The existing "extra" test is changed so it no longer masks the bug (extra added to an
+  otherwise valid, fully withdrawn response).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k recheck_command` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
+
+## T012 — Upgrade apply: all-or-nothing activation with rollback (review M2)
+Status: TODO
+Dependencies: T011
+Model: opus
+
+### Goal
+Review finding M2: a write failure part-way through `setup-project --upgrade --apply` must not
+leave a mixed-version runtime.
+
+### Implementation notes
+In the apply loop of scripts/lib/workflow.py (~line 208), snapshot the current bytes/mode (or
+absence) of every file in the change set before replacing anything; on any exception restore
+all already-replaced files (remove newly created ones), leave the stamp unwritten, report the
+failure and exit non-zero. Prefer staging each new file next to its target and renaming, so a
+single failure never leaves a half-written file. Rollback errors must be reported, not hidden.
+
+### Likely affected modules
+scripts/lib/workflow.py (install_bytes / upgrade apply), tests/test_workflow.py
+
+### Acceptance criteria
+- Regression test (named `toolkit_upgrade`): inject an `OSError` into the install of a LATER
+  file; afterwards every installed file equals its pre-upgrade content (created files are
+  gone), the stamp is unchanged, and the exit status is non-zero. Successful apply and
+  existing `toolkit_upgrade` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k toolkit_upgrade` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
+
+## T013 — Source `scripts/ai-task` executable (review N1)
+Status: TODO
+Dependencies: T010
+Model: haiku
+
+### Goal
+Review finding N1: Git mode of scripts/ai-task is 100644.
+
+### Implementation notes
+`git update-index --chmod=+x scripts/ai-task` plus `chmod +x` (if the run's permissions deny
+both, record the exact denied command and leave it as the human todo already in the handoff).
+Add a test asserting every file in scripts/ that has a shebang is executable.
+
+### Likely affected modules
+scripts/ai-task, tests
+
+### Acceptance criteria
+- Test named `script_modes`: all shebang scripts directly under scripts/ are executable;
+  `git ls-tree HEAD scripts/ai-task` shows 100755 after the checkpoint.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k script_modes` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
+
+## T014 — PR body carries the flow-chart declaration (review N2)
+Status: TODO
+Dependencies: T010
+Model: sonnet
+
+### Goal
+Review finding N2: AGENTS.md/T009 require "Flow chart updated" in this change's PR description,
+but `pr_body` only copies the handoff's "Manual testing for the human" section.
+
+### Implementation notes
+Add an optional handoff section `## Flow chart` (one line: "Flow chart updated" or "Flow
+unchanged") which `pr_body` copies into the description (e.g. under Summary) when present.
+Add that section to this repo's `.ai/handoff.md` with "Flow chart updated: R1/R2/R3 audited,
+vault agents-flow.md updated 2026-10-05." Update the templates' handoff if it has a section
+list, and docs/workflow.md briefly.
+
+### Likely affected modules
+scripts/lib/workflow.py (pr_body), templates/.ai/handoff.md, .ai/handoff.md, docs/workflow.md, tests
+
+### Acceptance criteria
+- Test named `pr_body_flow`: a handoff with the section → generated body contains it; without
+  → body unchanged. Generated body for this repo contains "Flow chart updated".
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k pr_body_flow` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
