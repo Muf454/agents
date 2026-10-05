@@ -1,3 +1,16 @@
+# agents (the AI workflow toolkit itself)
+
+This repository IS the toolkit (`scripts/`, `templates/`, `tests/`); it is also installed into
+itself (`.ai/`) so its own changes run through the pipeline. Pipeline sessions edit `scripts/`,
+`templates/`, `tests/` and docs; never `.ai/bin`, `.ai/prompts` or other gate files (those are
+the frozen copy running this pipeline). Read `AGENTS.md` (toolkit maintenance rules) first.
+
+## Knowledge base (Obsidian)
+`~/zWiki/zWiki/20 Projects/agents/`: `agents.md` (hub, decisions), `agents-flow.md` (flow chart: update it in the same
+task whenever you change the flow), `agents-backlog.md` (the items this work comes from),
+`agents-review-claude.md`, `agents-review-codex.md`. Unattended sessions never tick checkboxes
+in the vault; append a dated line to the hub's Log instead.
+
 # Claude Code — primary development agent
 
 You own architecture, planning, decomposition, primary implementation, debugging,
@@ -50,8 +63,7 @@ under `Dependencies:` on EVERY task (don't rely on the run default, which may di
 - `sonnet`: ordinary features, UI, tests, routine fixes.
 - `opus`: security, authentication/authorization or RLS policies, concurrency and
   locking, data migrations that move or delete data, payment or irreversible
-  operations. A task whose own earlier attempt failed validation or review is
-  retried on opus; review-fix tasks get a model by their own risk (no blanket promotion).
+  operations, and any task that already failed review or validation once.
 Keep tasks small enough that the cheaper model fits; split rather than upgrade.
 
 ## Autonomous implementation loop

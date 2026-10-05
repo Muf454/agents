@@ -3,29 +3,22 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 usage() {
   cat <<'EOF'
 Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeout SECONDS]
-              [--model NAME] [--knowledge-dir DIRECTORY] [--triage [--since COMMIT]]
+              [--model NAME] [--knowledge-dir DIRECTORY] [--triage]
 Run Claude on the approved plan, one recoverable task per fresh session.
 Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
 --model sets the Claude model (default: AI_MODEL or the CLI default); a task's
 optional "Model:" line overrides it. --triage runs one session that evaluates the
-current Codex review and turns accepted findings into new tasks (no implementation),
-then records the round in one "chore(ai): record review triage" commit. When the
-dispositions are already complete (an interrupted triage), it records the round
-without a new session. --since (ai-pipeline's stage start) bounds what triage may
-have changed: only workflow records, committed or not.
+current Codex review and turns accepted findings into new tasks (no implementation).
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
 The human must inspect the plan, validation script, and permission allowlist first.
 EOF
 }
 sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
-model=${AI_MODEL:-}; triage=no; since=''
+model=${AI_MODEL:-}; triage=no
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
     --triage) triage=yes; shift ;;
-    --since)
-      (( $# >= 2 )) && [[ "$2" =~ ^[0-9a-f]{40}$ ]] || ai_die 'Missing or invalid --since commit'
-      since=$2; shift 2 ;;
     --model)
       (( $# >= 2 )) || ai_die 'Missing model name'
       model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
@@ -49,7 +42,6 @@ while (( $# )); do
   esac
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
-[[ -z "$since" || "$triage" == yes ]] || ai_die '--since only applies to --triage.'
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
 ai_lock
@@ -57,8 +49,7 @@ rm -f .ai/local/last-error
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
 ai_branch
 git rev-parse --verify HEAD >/dev/null 2>&1 || ai_die 'Create an initial Git commit first.'
-# Triage checks its own leftovers below (an interrupted triage may leave workflow records).
-[[ "$triage" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 ai_helper tasks check
 # Authoritative baseline stays in shell memory, not an agent-editable file.
@@ -151,54 +142,31 @@ if [[ "$triage" == yes ]]; then
   [[ -f .ai/reviews/current.md ]] || ai_die 'No review to triage.'
   reviewed=$(ai_helper review-info) || ai_die 'Current review was not produced by ai-review.'
   active_task=triage
-  since=${since:-$(git rev-parse HEAD)}
-  # Triage may only touch workflow records (committed or not), never source, tests, or the gate.
-  triage_scope() {
-    local error
-    error=$(ai_helper triage-scope "$since" 2>&1) || ai_die "${1}${error#Error: }"
-  }
-  triage_scope 'Triage stage: '
-  if ai_helper triage-check --fresh >/dev/null 2>&1; then
-    # An interrupted triage whose dispositions are complete: record the round, no new session.
-    printf '%s\n' 'Triage dispositions are already complete; recording the round.'
-  else
-    [[ -z "$(dirty_beyond_records)" ]] || \
-      ai_die 'Triage stage: incomplete triage records are uncommitted; inspect them before continuing.'
-    # Host-written dispositions file bound to this review; Claude fills in the rows.
-    ai_helper start-dispositions "${reviewed%% *}"
-    git add -- .ai/reviews/dispositions.md
-    # Resuming an interrupted triage finds the file already bound and committed.
-    git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
-    ai_guard_verify
-    prompt=$(cat .ai/prompts/triage.md)
-    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
-    prompt+=$(knowledge_prompt)
-    claude_session "$prompt" "$model"
-    ai_branch
-    [[ -z "$(dirty_beyond_records)" ]] || \
-      ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
-  fi
+  # Host-written dispositions file bound to this review; Claude fills in the rows.
+  ai_helper start-dispositions "${reviewed%% *}"
+  git add -- .ai/reviews/dispositions.md
+  # Resuming an interrupted triage finds the file already bound and committed.
+  git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
+  ai_guard_verify
+  before=$(git rev-parse HEAD)
+  prompt=$(cat .ai/prompts/triage.md)
+  prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+  prompt+=$(knowledge_prompt)
+  claude_session "$prompt" "$model"
+  ai_branch
   ai_helper tasks check
-  triage_scope ''
+  [[ -z "$(dirty_beyond_records)" ]] || \
+    ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
+  # Triage may only touch workflow records, never source, tests, or the gate.
+  changed=$(git diff --name-only "$before" HEAD -- . ':!.ai/tasks.md' ':!.ai/reviews/dispositions.md' \
+    ':!.ai/state.md' ':!.ai/handoff.md' ':!.ai/run-log.md' ':!.ai/current-plan.md')
+  [[ -z "$changed" ]] || ai_die "Triage changed files outside workflow records: $(tr '\n' ' ' <<< "$changed")"
   ai_helper triage-check --fresh >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
-  # The one counted commit of this round, including leftovers of an interrupted triage.
-  records=()
-  for record in .ai/tasks.md .ai/reviews/dispositions.md .ai/current-plan.md .ai/state.md .ai/run-log.md .ai/handoff.md; do
-    if [[ -e "$record" ]]; then records+=("$record"); fi
-  done
-  git add -- "${records[@]}"
-  # Always the host's own commit (empty if the session committed everything, or after a crash
-  # between this commit and its host record): an agent commit's subject never counts.
-  git commit --allow-empty -m 'chore(ai): record review triage' >/dev/null
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m 'chore(ai): record review triage' >/dev/null
   ai_guard_verify
-  # The host record of this round is what the pipeline's fix round limit counts.
-  ai_helper fix-rounds record HEAD || ai_die 'Cannot record the fix round in the host state directory.'
-  # A commit hook must not have slipped anything else into the counted commit.
-  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
-    ai_die 'Triage stage: changes were left after the triage commit (commit hook?).'
-  triage_scope 'Triage stage: the triage commit is out of scope (commit hook?): '
   finished=yes
   printf '%s\n' 'Triage complete.'
   exit 0
@@ -245,7 +213,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Your shell already starts in the project root: never prefix commands with cd (permission rules check every part of a compound command, and a denied git commit stops the whole run); run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
   claude_session "$prompt" "${task_model:-$model}"

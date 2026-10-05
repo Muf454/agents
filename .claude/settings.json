@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git reset --hard *)",
+      "Bash(git commit --no-verify)",
+      "Bash(git commit -n)",
+      "Bash(git commit --no-verify *)",
+      "Bash(git commit -n *)",
+      "Bash(git commit * --no-verify *)",
+      "Bash(git commit * -n *)",
+      "Bash(git commit * --no-verify)",
+      "Bash(git commit * -n)",
+      "Edit(.ai/bin/**)",
+      "Write(.ai/bin/**)",
+      "Edit(.ai/validate)",
+      "Write(.ai/validate)",
+      "Edit(.ai/prompts/**)",
+      "Write(.ai/prompts/**)",
+      "Edit(.ai/permissions.allow)",
+      "Write(.ai/permissions.allow)",
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)",
+      "Edit(.ai/ci-setup)",
+      "Write(.ai/ci-setup)",
+      "Edit(.github/workflows/ai-validate.yml)",
+      "Write(.github/workflows/ai-validate.yml)",
+      "Edit(.ai/reviews/current.md)",
+      "Write(.ai/reviews/current.md)"
+    ]
+  }
+}

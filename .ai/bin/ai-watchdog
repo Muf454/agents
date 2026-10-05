@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+# The helper validates the checkout and holds its own lock, independent of runners.
+exec python3 -I "$AI_BIN/lib/watchdog.py" "$@"

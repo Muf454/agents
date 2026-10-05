@@ -96,192 +96,11 @@ def candidates(root):
     return '\n'.join(lines) + '\n'
 
 
-STAMP_FILE = '.ai/toolkit-version'
-TOOLKIT_GROUPS = (('runtime', '.ai/bin/'), ('prompts', '.ai/prompts/'))
-
-
-def file_sha(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def toolkit_owned(relative):
-    return any(relative.startswith(prefix) for _, prefix in TOOLKIT_GROUPS)
-
-
-def read_stamp(root):
-    """Return (stamp, problem). A missing or malformed stamp is a legacy install."""
-    path = root / STAMP_FILE
-    if not path.exists():
-        return {'files': {}, 'templates': {}}, 'missing'
-    try:
-        data = json.loads(path.read_text())
-        files, templates = data.get('files', {}), data.get('templates', {})
-        if not isinstance(files, dict) or not isinstance(templates, dict) or not all(
-                isinstance(v, str) for v in [*files.values(), *templates.values()]):
-            raise ValueError('bad shape')
-        return {'commit': data.get('toolkit_commit', 'unknown'), 'files': files, 'templates': templates}, None
-    except (ValueError, AttributeError, OSError):
-        return {'files': {}, 'templates': {}}, 'malformed'
-
-
-def stamp_text(toolkit, stamp):
-    try:
-        commit = git('rev-parse', 'HEAD', cwd=toolkit).decode().strip() or 'unknown'
-    except (subprocess.CalledProcessError, OSError):
-        commit = 'unknown'
-    return json.dumps({'toolkit_commit': commit, 'files': dict(sorted(stamp['files'].items())),
-                       'templates': dict(sorted(stamp['templates'].items()))}, indent=2) + '\n'
-
-
-def write_stamp(root, toolkit, stamp):
-    text = stamp_text(toolkit, stamp)
-    path = root / STAMP_FILE
-    if not path.exists() or path.read_text() != text:
-        atomic(path, text)
-
-
-def install_bytes(target, data, mode):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as file:
-        temp = Path(file.name)
-        file.write(data)
-    try:
-        temp.chmod(mode)
-        os.replace(temp, target)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
-def activate(root, files):
-    """Install every (relative, data, mode) or none of them.
-
-    Each new file is staged next to its target before anything is replaced, then renamed into
-    place. On any failure the replaced files get their previous bytes and mode back, created
-    files and directories are removed, and the error is raised with any rollback problems."""
-    previous, staged, done, made = {}, {}, [], []
-    try:
-        for relative, data, mode in files:
-            target = root / relative
-            previous[relative] = ((target.read_bytes(), target.stat().st_mode & 0o7777)
-                                  if target.exists() else None)
-            missing = [p for p in [target.parent, *target.parent.parents] if not p.exists()]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            made += missing  # deepest first
-            with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.upgrade-', delete=False) as file:
-                staged[relative] = Path(file.name)
-                file.write(data)
-            staged[relative].chmod(mode)
-        for relative, _, _ in files:
-            os.replace(staged[relative], root / relative)
-            del staged[relative]
-            done.append(relative)
-    except Exception as error:
-        problems = []
-        for relative in reversed(done):
-            try:
-                if previous[relative] is None:
-                    (root / relative).unlink()
-                else:
-                    install_bytes(root / relative, *previous[relative])
-            except OSError as undo:
-                problems.append(f'{relative}: {undo}')
-        for temp in staged.values():
-            temp.unlink(missing_ok=True)
-        for directory in sorted(made, key=lambda p: len(p.parts), reverse=True):
-            try:
-                directory.rmdir()
-            except OSError as undo:
-                problems.append(f'{directory.relative_to(root)}: {undo}')
-        if problems:
-            fail(f'Upgrade failed ({error}) and ROLLBACK FAILED, the install may be mixed: '
-                 + '; '.join(problems))
-        fail(f'Upgrade failed ({error}); every file was restored and {STAMP_FILE} is unchanged.')
-
-
-def file_mode(relative):
-    return 0o755 if relative.startswith('.ai/bin/') or relative in ('.ai/validate', '.ai/ci-setup') else 0o644
-
-
-def upgrade(root, toolkit, copies, apply, force):
-    if not (root / '.ai').is_dir():
-        fail('No .ai directory: run setup-project (without --upgrade) first.')
-    destinations = [*copies, STAMP_FILE]
-    safe_paths(root, destinations)
-    for relative in copies:
-        if (root / relative).exists() and not (root / relative).is_file():
-            fail(f'Expected a regular file: {relative}')
-    stamp, problem = read_stamp(root)
-    if problem:
-        print(f'WARNING: {STAMP_FILE} is {problem} (legacy install): every differing toolkit-owned '
-              'file counts as locally edited, so --force is needed to replace it.')
-    plan = []  # (action, relative, group)
-    baselines = {}
-    for group, prefix in TOOLKIT_GROUPS:
-        for relative in (r for r in copies if r.startswith(prefix)):
-            new = file_sha(copies[relative].read_bytes())
-            target = root / relative
-            if not target.exists():
-                plan.append(('CREATE', relative, group))
-            elif file_sha(target.read_bytes()) == new:
-                baselines[relative] = new
-                plan.append(('OK', relative, group))
-            elif stamp['files'].get(relative) == file_sha(target.read_bytes()):
-                plan.append(('REPLACE', relative, group))
-            else:
-                plan.append(('EDITED', relative, group))
-    for action, relative, _ in plan:
-        if action != 'OK':
-            print({'EDITED': 'EDITED (locally changed; needs --force) '}.get(action, action + ' ') + relative)
-    for relative, source in copies.items():
-        if toolkit_owned(relative):
-            continue
-        target = root / relative
-        new = file_sha(source.read_bytes())
-        if not target.exists():
-            print(f'ADVICE {relative} is missing: run setup-project (without --upgrade) to create it')
-        elif file_sha(target.read_bytes()) != new and stamp['templates'].get(relative) != new:
-            print(f'ADVICE {relative} is project-owned and differs from the current template: '
-                  f'compare with {source} and merge by hand')
-    edited = [relative for action, relative, _ in plan if action == 'EDITED']
-    changes = [(a, r) for a, r, _ in plan if a in ('CREATE', 'REPLACE') or (a == 'EDITED' and force)]
-    if edited and not force:
-        print('Refusing to upgrade: these toolkit files were edited locally (or have no baseline):')
-        for relative in edited:
-            print(f'  - {relative}')
-        print('Reconcile them (or rerun with --force to overwrite them). Nothing was changed.')
-        if apply:
-            raise SystemExit(1)
-        return
-    if not apply:
-        print(f'Plan only: {len(changes)} file(s) would change. Rerun with --upgrade --apply to apply.')
-        return
-    files = []
-    for relative, source in copies.items():
-        if toolkit_owned(relative) and any(r == relative for _, r in changes):
-            files.append((relative, source.read_bytes(), file_mode(relative)))
-            baselines[relative] = file_sha(files[-1][1])
-    stamp['files'].update(baselines)
-    text = stamp_text(toolkit, stamp)
-    if not (root / STAMP_FILE).exists() or (root / STAMP_FILE).read_text() != text:
-        files.append((STAMP_FILE, text.encode(), 0o644))
-    activate(root, files)  # all or nothing, the stamp last
-    print(f'Upgraded {len(changes)} file(s); {STAMP_FILE} updated.')
-    if any(r.startswith('.ai/bin/') for _, r in changes):
-        print('Reinstall the watchdog timer so it uses the new scripts: '
-              '.ai/bin/ai-watchdog --install-timer --diagnose --recover')
-
-
 def setup(arguments):
     parser = argparse.ArgumentParser(description='Copy templates without overwriting existing files.')
     parser.add_argument('project', type=Path)
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--upgrade', action='store_true',
-                        help='plan an upgrade of toolkit-owned files (.ai/bin, .ai/prompts); changes nothing')
-    parser.add_argument('--apply', action='store_true', help='with --upgrade: apply the plan')
-    parser.add_argument('--force', action='store_true', help='with --upgrade --apply: overwrite locally edited files')
     args = parser.parse_args(arguments)
-    if (args.apply or args.force) and not args.upgrade:
-        fail('--apply and --force only make sense with --upgrade.')
     root = args.project.expanduser().resolve()
     if not root.is_dir():
         fail('Target directory must exist. Create it and run git init first.')
@@ -296,13 +115,11 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover',
                  'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
-    if args.upgrade:
-        return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
     generated = '.ai/validation-candidates.md'
-    destinations = list(copies) + [generated, '.gitignore', '.ai/local', STAMP_FILE]
+    destinations = list(copies) + [generated, '.gitignore', '.ai/local']
     safe_paths(root, destinations)
     for relative in copies:
         if (root / relative).exists() and not (root / relative).is_file():
@@ -338,8 +155,6 @@ def setup(arguments):
         print(('APPEND ' if ignore_file.exists() else 'CREATE ') + '.gitignore (local logs/settings ignored)')
     if args.dry_run:
         return
-    created = False
-    stamp, _ = read_stamp(root)  # baselines are only ever written for files this run creates
     for relative, source in copies.items():
         target = root / relative
         if target.exists():
@@ -348,8 +163,6 @@ def setup(arguments):
         # Exclusive creation protects existing files even if setup is repeated.
         with target.open('xb') as file:
             file.write(source.read_bytes())
-        stamp['files' if toolkit_owned(relative) else 'templates'][relative] = file_sha(source.read_bytes())
-        created = True
         target.chmod(0o755 if relative.startswith('.ai/bin/') or relative in ('.ai/validate', '.ai/ci-setup') else 0o644)
         if relative == '.ai/state.md':
             text = target.read_text().replace('Project: unset', f'Project: {root.name}')
@@ -366,8 +179,6 @@ def setup(arguments):
     if missing:
         with ignore_file.open('a') as file:
             file.write(('\n' if existing and not existing.endswith('\n') else '') + '\n'.join(missing) + '\n')
-    if created or not (root / STAMP_FILE).exists():  # a no-op repeat must not move the recorded commit
-        write_stamp(root, toolkit, stamp)
     print('Installed. Existing files were preserved: reconcile KEEP entries manually before running.')
 
 
@@ -472,15 +283,12 @@ def task_command(arguments):
             fail(f'Unknown task: {arguments[1]}')
         done = sum(t['status'] == 'DONE' for t in blocks)
         print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
-    elif action in ('status', 'show', 'set'):
+    elif action in ('status', 'set'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
             fail(f'Unknown task: {arguments[1]}')
         if action == 'status':
             print(task['status'])
-        elif action == 'show':
-            print(f"{task['id']} {task['title']}\nStatus: {task['status']}\n"
-                  f"Model: {task['model'] or 'default'}\nDependencies: {task['dependencies']}")
         else:
             if arguments[2] not in ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'):
                 fail('Invalid task status.')
@@ -787,25 +595,8 @@ def run_manifest(arguments):
             fail('Invalid gate digest.')
         path.parent.mkdir(parents=True, exist_ok=True)
         settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
-        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings}
-        # Stages live per branch (stage_path), so a run on another branch neither drops nor
-        # inherits them, and one on the same branch completes it first. A legacy stage
-        # inside run.json moves to its branch's file.
-        try:
-            old = json.loads(path.read_text())
-        except (OSError, ValueError):
-            old = None
-        if isinstance(old, dict) and 'stage' in old and isinstance(old.get('branch'), str) \
-                and not stage_path(old['branch']).exists():
-            atomic(stage_path(old['branch']), json.dumps({'branch': old['branch'], 'stage': old['stage']}) + '\n')
-        atomic(path, json.dumps(data) + '\n')
-        return
-    if action == 'stage':
-        # The open stage of the current branch ('name start_head review_digest'), if any.
-        # Read before any run is recorded, too: the pipeline checks it before `start`.
-        stage = load_stage(current_branch())
-        if stage is not None:
-            print(' '.join(stage_fields(stage)))
+        atomic(path, json.dumps({'gate': gate, 'branch': branch, 'args': args, 'attempts': 0,
+                                 'env': settings}) + '\n')
         return
     try:
         data = json.loads(path.read_text())
@@ -836,127 +627,8 @@ def run_manifest(arguments):
     elif action == 'clear-attempts':
         data['attempts'] = 0
         atomic(path, json.dumps(data) + '\n')
-    elif action == 'stage-set':
-        # Recorded before the stage starts, bound to the verified review it works on.
-        name, start = arguments[1], arguments[2]
-        if name != 'triage' or not re.fullmatch(r'[0-9a-f]{40}', start):
-            fail('Invalid stage.')
-        review_info_values()
-        branch = current_branch()
-        if not branch:
-            fail('Invalid stage: detached HEAD.')
-        stage = {'name': name, 'start_head': start, 'review_digest': review_digest()}
-        atomic(stage_path(branch), json.dumps({'branch': branch, 'stage': stage}) + '\n')
-    elif action == 'stage-clear':
-        branch = current_branch()
-        if branch:
-            stage_path(branch).unlink(missing_ok=True)
-        if 'stage' in data and data['branch'] == branch:
-            data.pop('stage')
-            atomic(path, json.dumps(data) + '\n')
     else:
         fail('Unknown run-manifest action.')
-
-
-# Files a review triage may change: dispositions, the task queue and runner bookkeeping.
-TRIAGE_RECORDS = ('.ai/tasks.md', '.ai/reviews/dispositions.md', '.ai/current-plan.md',
-                  '.ai/state.md', '.ai/handoff.md', '.ai/run-log.md')
-TRIAGE_COMMIT = 'chore(ai): record review triage'
-
-
-def current_branch():
-    try:
-        return git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
-    except subprocess.CalledProcessError:
-        return ''
-
-
-def stage_path(branch):
-    """Host-side file holding BRANCH's open stage, beside the run manifest."""
-    return binding_dir() / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
-
-
-def load_stage(branch):
-    """BRANCH's open stage record, or None. Unreadable or foreign data fails closed."""
-    if not branch:
-        return None
-    path = stage_path(branch)
-    try:
-        data = json.loads(path.read_text())
-    except FileNotFoundError:
-        # A legacy stage inside run.json (until `start` moves it to its branch's file).
-        try:
-            data = json.loads((binding_dir() / 'run.json').read_text())
-        except (OSError, ValueError):
-            return None
-        if isinstance(data, dict) and data.get('branch') == branch and 'stage' in data:
-            return data['stage']
-        return None
-    except (OSError, ValueError):
-        fail(f'Triage stage: the stage record {path} is unreadable.')
-    if not isinstance(data, dict) or data.get('branch') != branch or 'stage' not in data:
-        fail(f'Triage stage: the stage record {path} does not belong to this branch.')
-    return data['stage']
-
-
-def review_digest():
-    return hashlib.sha256(Path('.ai/reviews/current.md').read_bytes()).hexdigest()
-
-
-def stage_fields(stage):
-    fields = [stage.get(key) if isinstance(stage, dict) else None
-              for key in ('name', 'start_head', 'review_digest')]
-    if fields[0] != 'triage' or not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
-            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
-        fail('Triage stage: the stage record is invalid.')
-    return fields
-
-
-def changed_since(start):
-    """Paths changed since START: committed, staged, unstaged and untracked (not ignored)."""
-    names = git('diff', '--name-only', '--no-renames', '-z', start).split(b'\0')
-    names += git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
-    return sorted({os.fsdecode(name) for name in names if name})
-
-
-def triage_scope(arguments):
-    """Since START, only triage records changed (committed or not)."""
-    start = arguments[0]
-    if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
-                      stderr=subprocess.DEVNULL).returncode != 0:
-        fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
-    outside = [name for name in changed_since(start) if name not in TRIAGE_RECORDS]
-    if outside:
-        fail('Triage changed files outside workflow records: ' + ' '.join(outside[:8])
-             + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
-
-
-def stage_verify(arguments):
-    """Verify an open triage stage before it is completed. Prints 'committed' when its counted
-    commit already exists after start_head (close it without a second count), else 'pending'.
-    Any mismatch fails: the caller escalates without implementation or counting."""
-    stage = load_stage(current_branch())
-    if stage is None:
-        fail('Triage stage: no open stage for this branch.')
-    _, start, digest = stage_fields(stage)
-    try:
-        review_info_values()
-    except ValueError as error:
-        fail(f'Triage stage: {error}')
-    if review_digest() != digest:
-        fail('Triage stage: the current review is not the one this triage started on.')
-    try:
-        triage_scope([start])
-    except ValueError as error:
-        fail(f'Triage stage: {error}')
-    # Only a host-recorded triage commit closes the stage; a commit subject alone never does.
-    commits = git('log', '--format=%H', f'{start}..HEAD').decode().split()
-    if not set(commits) & set(fix_round_records() or []):
-        print('pending')
-        return
-    if git('status', '--porcelain', '--untracked-files=all').strip():
-        fail('Triage stage: uncommitted changes after the counted triage commit.')
-    print('committed')
 
 
 def bind_review(head, content):
@@ -982,395 +654,10 @@ def review_info_values():
     return (head.group(1), *review_counts(content))
 
 
-RECHECK = Path('.ai/reviews/recheck.md')
-# Since the reviewed commit a re-check allows only workflow records (pending accepted fix
-# tasks included): the code Codex re-checks must still be the code it reviewed.
-RECHECK_RECORDS = TRIAGE_RECORDS + ('.ai/reviews/current.md', '.ai/reviews/recheck.md', '.ai/reviews/disputes.md')
-RECHECK_HEADER = re.compile(r'\A<!-- Host evidence: re-check of review ([0-9a-f]{64}); rejected rows '
-                            r'([0-9a-f]{64}); reviewed HEAD ([0-9a-f]{7,40}); saved [^;>]*\. -->\n')
-RECHECK_VERDICTS = ('withdrawn', 'upheld')
-
-
-def rejected_rows():
-    """Rejected BLOCKER/MAJOR findings of the current, verified review as (id, level, evidence),
-    from dispositions bound to that review. Returns (review head, rows)."""
-    head = review_info_values()[0]
-    path = Path('.ai/reviews/dispositions.md')
-    text = path.read_text() if path.exists() else ''
-    bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
-    if not bound or bound.group(1) != head:
-        fail('No dispositions for the current review.')
-    review = Path('.ai/reviews/current.md').read_text()
-    rows = {}
-    for match in DISPOSITION_ROW.finditer(text):
-        if match.group(1) in rows:
-            fail(f'Finding {match.group(1)} has more than one disposition.')
-        rows[match.group(1)] = (match.group(2).lower(), match.group(3))
-    rejected = [(finding, level, rows[finding][1])
-                for level in ('BLOCKER', 'MAJOR') for finding in finding_ids(review, level)
-                if finding in rows and rows[finding][0] == 'rejected']
-    return head, rejected
-
-
-def rows_digest(rows):
-    """sha256 of the rejected rows the re-check answers: ids and Claude's evidence."""
-    canonical = json.dumps([[finding, evidence] for finding, _, evidence in rows],
-                           ensure_ascii=False, separators=(',', ':'))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def recheck_preflight():
-    """The re-check's own preconditions. Returns (head, review digest, rows digest, rows)."""
-    head, rows = rejected_rows()
-    if not rows:
-        fail('Re-check: the current review has no rejected BLOCKER/MAJOR finding.')
-    full = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
-    if subprocess.run(['git', 'merge-base', '--is-ancestor', full, 'HEAD'],
-                      stderr=subprocess.DEVNULL).returncode != 0:
-        fail(f'Re-check: the reviewed commit {head[:12]} is not an ancestor of HEAD.')
-    outside = [name for name in changed_since(full) if name not in RECHECK_RECORDS]
-    if outside:
-        fail('Re-check: the code changed since the reviewed commit: ' + ' '.join(outside[:8])
-             + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
-    return head, review_digest(), rows_digest(rows), rows
-
-
-def recheck_prepare(arguments):
-    """Print 'head review_digest rows_digest', then one 'ID<TAB>LEVEL<TAB>evidence' line per
-    rejected finding (for the Codex prompt)."""
-    head, digest, rows_hash, rows = recheck_preflight()
-    print(head, digest, rows_hash)
-    for finding, level, evidence in rows:
-        print(f"{finding}\t{level}\t{' '.join(evidence.split())}")
-
-
-def parse_recheck(text, ids):
-    """Codex's answer -> {id: (verdict, reason)} for exactly IDS. The answer must be one JSON
-    object {"answers": [{"id", "verdict", "reason"}, ...]}; anything missing, duplicated,
-    malformed counts as upheld (a re-check can only withdraw explicitly). An answer for an
-    unknown finding, or an entry that is not an object with a string id, makes the whole answer
-    set untrustworthy: every finding then counts as upheld."""
-    answers = {finding: ('upheld', 'no valid answer (counted as upheld)') for finding in ids}
-    notes = []
-    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
-    try:
-        data = json.loads(text, object_pairs_hook=_no_duplicate_keys)
-    except ValueError:
-        data = None
-    if not isinstance(data, dict) or set(data) != {'answers'} or not isinstance(data['answers'], list):
-        return answers, ['the answer was not one JSON object {"answers": [...]}; every finding counts as upheld']
-    stray = [entry.get('id') if isinstance(entry, dict) else entry for entry in data['answers']
-             if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or entry['id'] not in answers]
-    if stray:
-        reason = 'the answer set had an unknown or malformed entry (counted as upheld)'
-        return ({finding: ('upheld', reason) for finding in ids},
-                [f'answer for an unknown finding or malformed entry: {str(item)[:40]!r}' for item in stray]
-                + ['the answer set had unknown or malformed entries; every finding counts as upheld'])
-    seen = {}
-    for entry in data['answers']:
-        finding = entry['id']
-        seen[finding] = seen.get(finding, 0) + 1
-        valid = (set(entry) == {'id', 'verdict', 'reason'} and entry['verdict'] in RECHECK_VERDICTS
-                 and isinstance(entry['reason'], str) and entry['reason'].strip())
-        if not valid:
-            notes.append(f'{finding}: malformed answer (counted as upheld)')
-            answers[finding] = ('upheld', 'malformed answer (counted as upheld)')
-        elif seen[finding] == 1:
-            answers[finding] = (entry['verdict'], ' '.join(entry['reason'].split())[:1000])
-    for finding, count in seen.items():
-        if count > 1:
-            notes.append(f'{finding}: {count} answers (counted as upheld)')
-            answers[finding] = ('upheld', 'duplicate answers (counted as upheld)')
-    for finding in ids:
-        if finding not in seen:
-            notes.append(f'{finding}: no answer (counted as upheld)')
-    return answers, notes
-
-
-def publish_recheck(arguments):
-    """Save Codex's re-check as .ai/reviews/recheck.md, bound to the review, the rejected rows
-    and the reviewed HEAD it answered; the report digest goes to host state."""
-    source, head, digest, rows_hash = arguments
-    *current, rows = recheck_preflight()
-    if tuple(current) != (head, digest, rows_hash):
-        fail('Re-check: the review or the rejected rows changed during the re-check; run it again.')
-    answers, notes = parse_recheck(Path(source).read_text(), [finding for finding, _, _ in rows])
-    cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
-    lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
-             f'reviewed HEAD {head}; saved {now()}. -->', '',
-             '# Re-check of rejected findings (Codex)', '',
-             f'Review digest: {digest}', f'Rejected rows digest: {rows_hash}', f'Reviewed HEAD: {head}', '',
-             '| Finding | Level | Answer | Claude\'s evidence | Codex\'s reason |', '| --- | --- | --- | --- | --- |']
-    for finding, level, evidence in rows:
-        verdict, reason = answers[finding]
-        lines.append(f'| {finding} | {level} | {verdict} | {cell(evidence)} | {cell(reason)} |')
-    lines += ['', '## Parsing notes', '']
-    lines += [f'- {note}' for note in notes] or ['None.']
-    machine = json.dumps({finding: {'verdict': answers[finding][0], 'reason': answers[finding][1]}
-                          for finding, _, _ in rows}, ensure_ascii=False, sort_keys=True)
-    lines += ['', '## Answers (machine-readable)', '', '```json', machine, '```', '']
-    content = '\n'.join(lines)
-    atomic(RECHECK, content)
-    directory = binding_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    atomic(directory / f'recheck-{digest}.sha256', hashlib.sha256(content.encode()).hexdigest() + '\n')
-
-
-def recheck_values():
-    """Verify .ai/reviews/recheck.md against host state and the current review/dispositions.
-    Returns (head, review digest, rows digest, {id: (verdict, reason)})."""
-    if not RECHECK.exists():
-        fail('No re-check report.')
-    content = RECHECK.read_text()
-    header = RECHECK_HEADER.match(content)
-    if not header:
-        fail('Re-check report has no host evidence; it was not produced by ai-review --recheck.')
-    digest, rows_hash, head = header.groups()
-    binding = binding_dir() / f'recheck-{digest}.sha256'
-    if not binding.exists() or binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
-        fail('Re-check report does not match the one ai-review --recheck published.')
-    if review_digest() != digest or review_info_values()[0] != head:
-        fail('Re-check report belongs to another review.')
-    _, rows = rejected_rows()
-    if rows_digest(rows) != rows_hash:
-        fail('Re-check report answers different rejection evidence; run the re-check again.')
-    block = re.search(r'^## Answers \(machine-readable\)\s*```json\n(.*?)\n```', content, re.M | re.S)
-    answers = json.loads(block.group(1)) if block else None
-    if not isinstance(answers, dict) or set(answers) != {finding for finding, _, _ in rows}:
-        fail('Re-check report answers do not cover the rejected findings.')
-    return head, digest, rows_hash, {finding: (value['verdict'], value['reason']) for finding, value in answers.items()}
-
-
-def recheck_verify(arguments):
-    """Print one 'ID<TAB>withdrawn|upheld<TAB>reason' line per rejected finding of a verified,
-    current re-check; fail when the report is missing, stale or tampered."""
-    *_, answers = recheck_values()
-    for finding, (verdict, reason) in answers.items():
-        print(f'{finding}\t{verdict}\t{reason}')
-
-
-def recheck_status(arguments):
-    """'none' (no verified review with rejected BLOCKER/MAJOR in dispositions bound to it),
-    'pending' (rejected findings without a verified, current re-check) or 'verified'."""
-    try:
-        head = review_info_values()[0]
-    except (ValueError, OSError):
-        print('none')  # no verified review: it is replaced before anything relies on it
-        return
-    path = Path('.ai/reviews/dispositions.md')
-    bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', path.read_text(), re.M) if path.exists() else None
-    if not bound or bound.group(1) != head:
-        print('none')  # not triaged yet
-        return
-    _, rows = rejected_rows()
-    if not rows:
-        print('none')
-        return
-    try:
-        recheck_values()
-    except ValueError:
-        print('pending')
-        return
-    print('verified')
-
-
-DISPUTES = Path('.ai/reviews/disputes.md')
-DISPUTE_FIELDS = ('review_digest', 'finding', 'level', 'finding_text', 'evidence', 'answer', 'date')
-
-
-def disputes_store():
-    """Host-side dispute records of the current branch (append-only; agents can't write here)."""
-    branch = current_branch()
-    if not branch:
-        fail('Disputed findings need a branch (detached HEAD).')
-    return binding_dir() / f'disputes-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
-
-
-def fix_rounds_store():
-    """Host-side record of this branch's counted triage rounds (commit hashes written by the
-    host triage commit), so agent-chosen commit subjects never change the fix round budget."""
-    branch = current_branch()
-    if not branch:
-        fail('Fix rounds need a branch (detached HEAD).')
-    return binding_dir() / f'fix-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
-
-
-def fix_round_records():
-    path = fix_rounds_store()
-    if not path.exists():
-        return None
-    try:
-        records = json.loads(path.read_text())
-    except ValueError:
-        records = None
-    if not isinstance(records, list) or not all(
-            isinstance(r, str) and re.fullmatch(r'[0-9a-f]{40,64}', r) for r in records):
-        fail('The host fix round records are unreadable; inspect them before continuing.')
-    return records
-
-
-def write_fix_rounds(records):
-    path = fix_rounds_store()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic(path, json.dumps(records, indent=2) + '\n')
-
-
-def fix_rounds(arguments):
-    """record COMMIT: the host triage commit of one round. init BASE: a branch without a host
-    record (legacy) starts from its commits whose subject is exactly the host subject; later
-    commits, whatever their subject, never count. count BASE: recorded rounds in BASE..HEAD."""
-    action = arguments[0]
-    if action == 'record':
-        commit = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
-        if git('log', '-1', '--format=%s', commit).decode().strip() != TRIAGE_COMMIT:
-            fail(f'{commit} is not a host triage commit.')
-        records = fix_round_records() or []
-        if commit not in records:
-            write_fix_rounds(records + [commit])
-        return
-    if action not in ('init', 'count'):
-        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE')
-    base = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
-    history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
-    records = fix_round_records()
-    if records is None:
-        records = [line.split(' ', 1)[0] for line in reversed(history)
-                   if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
-        write_fix_rounds(records)
-    if action == 'count':
-        reachable = {line.split(' ', 1)[0] for line in history}
-        print(sum(1 for record in records if record in reachable))
-
-
-def dispute_records():
-    path = disputes_store()
-    if not path.exists():
-        return []
-    try:
-        records = json.loads(path.read_text())
-    except ValueError:
-        records = None
-    if not isinstance(records, list) or not all(
-            isinstance(r, dict) and set(r) == set(DISPUTE_FIELDS) and all(isinstance(r[k], str) for k in DISPUTE_FIELDS)
-            for r in records):
-        fail('The host dispute records are unreadable; inspect them before publishing.')
-    return records
-
-
-def inherited_disputes():
-    """The dispute file as it is at the merge-base with the run's base (AI_DISPUTES_BASE, set by
-    ai-pipeline), or None. Those records came from an earlier PR the human resolved and merged:
-    historical, never active on this branch. Without a base nothing is inherited (fails closed)."""
-    base = os.environ.get('AI_DISPUTES_BASE')
-    if not base:
-        return None
-    try:
-        merge_base = git('merge-base', base, 'HEAD').decode().strip()
-    except subprocess.CalledProcessError:
-        fail(f'No merge-base of {base} and HEAD for the inherited dispute records.')
-    try:
-        return git('cat-file', 'blob', f'{merge_base}:{DISPUTES}').decode()
-    except subprocess.CalledProcessError:
-        return None
-
-
-def render_disputes(records, inherited=None):
-    """The file for RECORDS (this branch's host records). Inherited content stays verbatim on
-    top and this branch's records follow it, numbered on from the inherited ones."""
-    if inherited is None:
-        lines = ['# Disputed findings', '',
-                 '<!-- Host-written by ai-pipeline from host state; append-only. Never edit: a changed file',
-                 'fails verification. A dispute is never resolved automatically; the human resolves it',
-                 'at the pull request. -->', '']
-        offset = 0
-    else:
-        lines = [inherited.rstrip('\n'), '',
-                 '<!-- Recorded on a later branch; the records above were merged before it. -->', '']
-        offset = len(re.findall(r'^## D\d+ — ', inherited, re.M))
-    for number, record in enumerate(records, offset + 1):
-        lines += [f"## D{number} — {record['finding']} ({record['level']})", '',
-                  f"- Review digest: {record['review_digest']}",
-                  f"- Recorded: {record['date']}",
-                  f"- Original finding: {record['finding_text']}",
-                  f"- Claude's evidence: {record['evidence']}",
-                  f"- Codex's answer: {record['answer']}", '']
-    return '\n'.join(lines)
-
-
-def expected_disputes(records, inherited):
-    """Exact expected file: the inherited copy (or none) until this branch records a dispute."""
-    return render_disputes(records, inherited) if records else inherited
-
-
-def disputes_values():
-    """Verified dispute records active on this branch: the file must be exactly the inherited
-    copy plus what the host recorded here. Inherited records are not returned."""
-    records = dispute_records()
-    actual = DISPUTES.read_text() if DISPUTES.exists() else None
-    if actual != expected_disputes(records, inherited_disputes()):
-        fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
-             'restore it from Git (records are append-only and never edited).')
-    return records
-
-
-def disputes_verify(arguments):
-    """Print the number of verified dispute records; fail when the file was edited or removed."""
-    print(len(disputes_values()))
-
-
-def finding_text(review, level, finding):
-    """The finding's own text from the review (its heading or bullet up to the next finding)."""
-    body = section(review, f'{level} findings')
-    starts = [(match.start(), match.group(1)) for match in FINDING_ID.finditer(body)]
-    for number, (start, name) in enumerate(starts):
-        if name == finding:
-            end = starts[number + 1][0] if number + 1 < len(starts) else len(body)
-            return ' '.join(body[start:end].split())[:1500]
-    return '(not found in the review)'
-
-
-def disputes_record(arguments):
-    """Append a dispute record for every upheld answer of the verified, current re-check that
-    has none yet (keyed by review digest + finding id), then rewrite the file from host state.
-    The file may lag behind host state (an interrupted earlier write) but never differ from it.
-    Prints the number of records added."""
-    records = dispute_records()
-    inherited = inherited_disputes()
-    actual = DISPUTES.read_text() if DISPUTES.exists() else None
-    prefixes = [expected_disputes(records[:count], inherited) for count in range(len(records) + 1)]
-    if actual not in prefixes:
-        fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
-             'restore it from Git (records are append-only and never edited).')
-    _, digest, _, answers = recheck_values()
-    _, rows = rejected_rows()
-    review = Path('.ai/reviews/current.md').read_text()
-    known = {(record['review_digest'], record['finding']) for record in records}
-    # An inherited re-check of a merged PR's review was recorded (and resolved) there.
-    known |= {(digest, finding) for finding, digest in re.findall(
-        r'^## D\d+ — (\S+) \(\w+\)\n\n- Review digest: ([0-9a-f]+)$', inherited or '', re.M)}
-    added = []
-    for finding, level, evidence in rows:
-        verdict, reason = answers[finding]
-        if verdict != 'upheld' or (digest, finding) in known:
-            continue
-        added.append({'review_digest': digest, 'finding': finding, 'level': level,
-                      'finding_text': finding_text(review, level, finding),
-                      'evidence': ' '.join(evidence.split()), 'answer': ' '.join(reason.split()),
-                      'date': now()})
-    records += added
-    if added:
-        path = disputes_store()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
-    if records:
-        atomic(DISPUTES, render_disputes(records, inherited))
-    print(len(added))
-
-
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
-RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
-                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
+RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_AUTO_RECOVER',
+                'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
 
 
 def _no_duplicate_keys(pairs):
@@ -1465,12 +752,6 @@ def finish_summary(arguments):
     except (ValueError, OSError):
         review = f'Codex review rounds: {reviews}'
     todos = []
-    try:
-        disputes = len(disputes_values())
-    except (ValueError, OSError):
-        disputes = 0
-    if disputes:
-        todos.append(f'Resolve {disputes} disputed finding(s) at the PR (Codex upheld what Claude rejected)')
     if unresolved:
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
     todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
@@ -1617,25 +898,11 @@ def pr_body(arguments):
                 binding.read_text().strip() != hashlib.sha256(review.encode()).hexdigest():
             fail('Current review does not match the report ai-review published; refusing to publish it.')
     lines = []
-    disputes = disputes_values()  # never publish dispute records the host didn't write
-    if disputes:
-        lines += ['## Disputed findings', '',
-                  f'> [!CAUTION]\n> Draft: Codex upheld {len(disputes)} finding(s) Claude rejected. '
-                  'Resolve each one here before testing and merging; the pipeline never resolves them.', '']
-        for record in disputes:
-            lines += [f"- **{record['finding']}** ({record['level']}, review {record['review_digest'][:12]}): "
-                      f"{record['finding_text']}",
-                      f"  - Claude's reason: {record['evidence']}",
-                      f"  - Codex's answer: {record['answer']}"]
-        lines += ['', 'Records: `.ai/reviews/disputes.md`.', '']
     if unresolved:
         lines += ['> [!WARNING]', '> Draft: significant review findings remain after the automatic fix rounds.',
                   '> See "Independent review" below before testing.', '']
     objective = section(spec, 'Objective')
     lines += ['## Summary', '', objective or 'See `.ai/project-spec.md`.', '']
-    flow = section(handoff, 'Flow chart')
-    if flow:
-        lines += [flow, '']
     lines += ['## Tasks', '']
     for task in tasks():
         mark = {'DONE': 'x'}.get(task['status'], ' ')
@@ -1702,24 +969,6 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
-    elif command == 'recheck-prepare':
-        recheck_prepare(arguments)
-    elif command == 'publish-recheck':
-        publish_recheck(arguments)
-    elif command == 'recheck-verify':
-        recheck_verify(arguments)
-    elif command == 'recheck-status':
-        recheck_status(arguments)
-    elif command == 'disputes-record':
-        disputes_record(arguments)
-    elif command == 'disputes-verify':
-        disputes_verify(arguments)
-    elif command == 'fix-rounds':
-        fix_rounds(arguments)
-    elif command == 'triage-scope':
-        triage_scope(arguments)
-    elif command == 'stage-verify':
-        stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
     elif command == 'checkpoint-guard':

@@ -8,14 +8,11 @@ Usage: ai-pipeline --approved [--base REF] [--pr-base BRANCH] [--max-fix-rounds 
                     --model NAME --knowledge-dir DIR]
 Hands-off delivery of an approved plan on a feature branch:
   Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
-  -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
-  BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
-  -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
+  -> Claude triage + fix tasks (at most N rounds, default 2) -> review again
+  -> push the feature branch and open/update a pull request -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
 (default: --base when it is a local or origin/ branch).
-The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
-an interrupted review triage is verified and recorded once, and pending re-checks of
-rejected findings run, before anything else.
+The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume.
 Usage limits pause and resume (see ai-run). Notifications use AI_NOTIFY_CMD.
 EOF
 }
@@ -67,8 +64,6 @@ finish() {
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
 base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
-# A dispute file unchanged since the merge-base was merged by the human: historical, not active.
-export AI_DISPUTES_BASE=$base_sha
 if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   # The PR must target the branch the review compared against; never guess.
   if git show-ref --verify --quiet "refs/heads/$base"; then pr_base=$base
@@ -76,13 +71,7 @@ if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   else ai_die "Cannot infer the PR target from --base $base; pass --pr-base BRANCH."
   fi
 fi
-# An interrupted stage of this branch (host-side, per branch, so runs on other branches
-# neither drop nor inherit it) is completed below, before anything else; its leftovers are
-# checked there. An uncommitted re-check report (a stop before its host commit) is verified
-# and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
-open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
-[[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
-    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md')" ]] || \
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
@@ -100,8 +89,6 @@ else
 fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
-# Fix rounds are counted from host state, never from commit subjects agents can choose.
-ai_helper fix-rounds init "$base_sha" || ai_die 'Cannot record the fix rounds in the host state directory.'
 
 stop() {
   local stage=$1 reason
@@ -117,6 +104,15 @@ stop() {
   AI_STOP_NOTIFIED=1
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
+}
+# Pushes hit transient network/auth hiccups; retry before treating it as a stop.
+push() {
+  local try
+  for try in 1 2 3; do
+    git push "$@" && return 0
+    (( try == 3 )) || ${AI_SLEEP:-sleep} $(( try * 20 ))
+  done
+  return 1
 }
 step() { printf '\n== %s ==\n' "$*"; }
 count_commits() { git log --oneline "$base_sha..HEAD" --grep="$1" | wc -l; }
@@ -135,41 +131,6 @@ review_current() {
   git merge-base --is-ancestor "$base_sha" "$reviewed" 2>/dev/null || return 1
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
-# Publish invariants: what gets published is exactly what was reviewed and validated.
-# Checked after host commits on the publish path, before every push attempt and after
-# each push (commit and push hooks run project code); any failure stops.
-publish_ready() {
-  local why=''
-  ai_guard_verify
-  if ! why=$(ai_helper review-info 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-review integrity check failed}
-  elif ! why=$(ai_helper disputes-verify 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-dispute records do not verify}
-  elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
-  elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
-  elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
-  elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
-  else return 0
-  fi
-  printf 'Publish check failed at %s: %s\n' "$1" "${why%.}" > .ai/local/last-error
-  stop "$1"
-}
-# Pushes hit transient network/auth hiccups; retry before treating it as a stop.
-# Usage: push STAGE FAILURE-MESSAGE git-push-args...; afterwards origin's branch is HEAD.
-push() {
-  local stage=$1 failed=$2 try remote; shift 2
-  for try in 1 2 3; do
-    publish_ready "$stage"
-    git push "$@" && break
-    if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
-    ${AI_SLEEP:-sleep} $(( try * 20 ))
-  done
-  publish_ready "$stage"
-  remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
-  [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
-    printf 'Publish check failed after %s: origin %s is %s, not HEAD %s (push hook?)\n' \
-      "$stage" "$branch" "${remote:-missing}" "$(git rev-parse --short HEAD)" > .ai/local/last-error
-    stop "$stage"
-  }
-}
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
     step 'Validation'
@@ -177,83 +138,12 @@ ensure_validated() {
     ai_guard_verify
   fi
 }
-triage_args=()
-for (( i=0; i<${#run_args[@]}; i+=2 )); do
-  case "${run_args[i]}" in --model|--knowledge-dir|--session-timeout) triage_args+=("${run_args[i]}" "${run_args[i+1]}") ;; esac
-done
-# A failed stage check always needs the human (ai-recover escalates "Triage stage" stops).
-stage_fail() {
-  printf 'Triage stage cannot be completed safely: %s\n' "${1#Error: }" > .ai/local/last-error
-  stop triage
-}
-# Completes the open triage stage exactly once, on every start, resume and triage round:
-# verify the review binding and that only workflow records changed since the stage started,
-# then close it if its counted commit exists, else record the round through ai-run --triage.
-complete_stage() {
-  local info state start
-  info=$(ai_helper run-manifest stage 2>&1) || stage_fail "$info"
-  [[ -n "$info" ]] || return 0
-  state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
-  if [[ "$state" != committed ]]; then
-    read -r _ start _ <<< "$info"
-    "$AI_BIN/ai-run" --approved --triage --since "$start" "${triage_args[@]}" || stop triage
-    ai_guard_verify
-    state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
-    [[ "$state" == committed ]] || stage_fail 'the triage round was not recorded.'
-  fi
-  state=$(ai_helper triage-check --fresh 2>&1) || stage_fail "$state"
-  ai_helper run-manifest stage-clear || stage_fail 'cannot clear the stage in the run manifest.'
-}
-recheck_fail() {
-  printf 'Re-check of rejected findings: %s\n' "${1#Error: }" > .ai/local/last-error
-  stop 're-check'
-}
-# Disputed findings (after every triage and on every start/resume, before any task runs or
-# the review is replaced): rejected BLOCKER/MAJOR without a verified, current re-check get
-# one; every upheld answer gets its append-only dispute record, committed with the re-check
-# report in one host commit. Rerunning it adds nothing twice.
-reconcile_disputes() {
-  local status added paths=() file
-  status=$(ai_helper recheck-status 2>&1) || recheck_fail "$status"
-  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all)" ]]; then
-    recheck_fail 'uncommitted .ai/reviews/recheck.md or disputes.md that do not verify; inspect them.'
-  fi
-  [[ "$status" != none ]] || return 0
-  if [[ "$status" == pending ]]; then
-    step 'Re-check of rejected findings (Codex)'
-    "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
-    ai_guard_verify
-  fi
-  added=$(ai_helper disputes-record 2>&1) || recheck_fail "$added"
-  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md; do
-    [[ -z "$(git status --porcelain --untracked-files=all -- "$file")" ]] || paths+=("$file")
-  done
-  if (( ${#paths[@]} )); then
-    if [[ " ${paths[*]} " == *recheck.md* ]]; then
-      host_commit 'chore(ai): record review re-check' "${paths[@]}"
-    else
-      host_commit 'chore(ai): record disputed findings' "${paths[@]}"
-    fi
-  fi
-  # A commit hook must not have changed the re-check, the records or anything else.
-  [[ "$(ai_helper recheck-status 2>/dev/null)" == verified ]] || recheck_fail 'the re-check no longer verifies after its commit (commit hook?).'
-  status=$(ai_helper disputes-verify 2>&1) || recheck_fail "$status"
-  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || recheck_fail 'the checkout is not clean after recording it.'
-  if (( added > 0 )); then printf 'Recorded %s disputed finding(s); the PR will be a draft.\n' "$added"; fi
-}
 
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
 else
   ai_notify "▶ STARTED on $branch."
 fi
-if [[ -n "$open_stage" ]]; then
-  step 'Completing the interrupted review triage'
-  complete_stage
-  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
-    stage_fail 'the checkout is not clean after completing the triage.'
-fi
-reconcile_disputes
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
   if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
@@ -300,18 +190,20 @@ while true; do
     printf 'Findings already triaged (%s) and the review is still current.\n' "$verdict"
     break
   fi
-  fixes=$(ai_helper fix-rounds count "$base_sha") || stop review
+  fixes=$(count_commits '^chore(ai): record review triage')
   if (( fixes >= max_fix_rounds )); then
     unresolved=1
     printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
     break
   fi
   step "Review triage, round $(( fixes + 1 )) (Claude)"
-  # Recorded before triage starts, so a stop or crash anywhere in it resumes this stage.
-  ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
-  complete_stage
+  triage_args=()
+  for (( i=0; i<${#run_args[@]}; i+=2 )); do
+    case "${run_args[i]}" in --model|--knowledge-dir|--session-timeout) triage_args+=("${run_args[i]}" "${run_args[i+1]}") ;; esac
+  done
+  "$AI_BIN/ai-run" --approved --triage "${triage_args[@]}" || stop triage
+  ai_guard_verify
   verdict=$(ai_helper triage-check --fresh) || stop triage
-  reconcile_disputes
   read -r accepted deferred <<< "${verdict//[a-z=]/ }"
   if (( accepted == 0 )); then
     # Every significant finding was rejected (with evidence) or deferred.
@@ -324,12 +216,9 @@ done
 ai_guard_verify
 ensure_validated
 reviews=$(count_commits '^chore(ai): record independent review')
-publish_ready 'pull request preparation'
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || stop 'pull request preparation'
 if [[ "$open_pr" != yes ]]; then
-  disputes=$(ai_helper disputes-verify) || stop 'pull request preparation'
-  disputed=''
-  if (( disputes > 0 )); then disputed=" and resolve $disputes disputed finding(s) (.ai/reviews/disputes.md)"; fi
-  ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally$disputed."
+  ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally."
   printf '%s\n' 'Pipeline complete (no PR requested).'
   finish
 fi
@@ -339,7 +228,9 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   printf '%s\n' "No 'origin' remote; branch is ready locally."
   finish
 fi
-push push 'git push failed (3 tries)' -u origin "$branch"
+push -u origin "$branch" || { printf '%s\n' 'git push failed (3 tries)' > .ai/local/last-error; stop push; }
+ai_guard_verify  # push hooks run project code too
+ai_helper review-info >/dev/null || stop 'pull request (review integrity)'
 if ! command -v gh >/dev/null; then
   ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
   finish
@@ -347,10 +238,8 @@ fi
 title=$(ai_helper pr-title)
 body=$(mktemp .ai/local/pr-XXXXXXXX.md)
 ai_helper pr-body "$reviews" "$unresolved" > "$body"
-disputes=$(ai_helper disputes-verify) || stop 'pull request'
 make_draft=no
-# A recorded dispute keeps the PR a draft for good; only the human resolves it.
-if [[ "$draft" == yes || "$unresolved" == 1 || "$disputes" != 0 ]]; then make_draft=yes; fi
+if [[ "$draft" == yes || "$unresolved" == 1 ]]; then make_draft=yes; fi
 if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" ]]; then
   gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
   if [[ "$make_draft" == yes && "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" != true ]]; then
@@ -367,7 +256,10 @@ fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'
 host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md
-push 'final push' "PR is open at $url, but pushing the final handoff commit failed" origin "$branch"
+if ! push origin "$branch" >/dev/null 2>&1 || ! ai_guard_verify; then
+  printf '%s\n' "PR is open at $url, but pushing the final handoff commit failed" > .ai/local/last-error
+  stop 'final push'
+fi
 ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
 finish

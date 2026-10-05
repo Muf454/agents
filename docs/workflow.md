@@ -90,7 +90,16 @@ permission/settings files. Existing project settings need those rules merged.
 
 Claude's runner uses `dontAsk` and explicit `.ai/permissions.allow` entries. It loads
 project settings and disables MCP integrations for that invocation. Necessary commands
-outside the allowlist become denials; inspect the log and adjust permissions yourself.
+outside the allowlist become denials. Denials are logged and the run continues
+(`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
+and the run stops there. Inspect the log and adjust permissions yourself.
+
+| Mode | May do | May not do |
+| --- | --- | --- |
+| Interactive Claude | Your normal permissions (may ask); whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run | One task per fresh `dontAsk` session; gate reruns; bookkeeping and validated-leftover commits | Change the gate, push, open PRs, merge, deploy |
+| ai-pipeline | `ai-run` plus reviews, triage, pushing the feature branch, opening/updating the PR, `ai-recover` | Force-push, push `main`, merge, deploy |
+| ai-watchdog | Probe, notify, read-only diagnosis, `--recover` via `ai-recover` | Restart or repair anything itself |
 Default entries support reading/editing, Git inspection/staging/local commits, and
 the canonical validation gate. Add normal builds/tests/dependency commands as needed.
 Installed Claude project deny rules are preserved if already present, so reconcile
@@ -128,8 +137,9 @@ alternate argument arrangements, Git configuration/environment, indirect shell
 commands, and bulk staging are not exhaustively prevented. Inspect checkpoint
 diffs and don't treat deny patterns as a complete Git policy enforcement mechanism.
 
-The runner never stages application files itself. Claude commits selected task work;
-the runner commits only state/run-log bookkeeping, preserving normal Git hooks. A
+Claude commits selected task work. Automatic checkpoints stage the session's output except
+secret-looking files (the runner's commit of validated leftovers; see "Checkpoint scope"
+below); bookkeeping is committed separately, preserving normal Git hooks. A
 failed hook, absent Git identity, or dirty checkpoint stops the run. The two tools use
 a kernel checkout lock, but direct CLI sessions do not: don't mutate a checkout while
 another agent is using it. Git doesn't protect uncommitted changes from power loss;
@@ -141,12 +151,13 @@ commits. Human required: meaningful external/irreversible risk, protected-branch
 deployment/production changes, cloud resource deletion, destructive production SQL,
 credential rotation/revocation, remote publishing, shared-history rewrites, security
 policy changes, and final acceptance. Never push secrets, suppress failures, or weaken
-security to get a pass. The toolkit does not invoke `git push`, `git merge`, or deployment.
+security to get a pass. Only `ai-pipeline` pushes: the pipeline pushes the feature branch
+and opens the pull request (never force, never `main`). Nothing merges or deploys.
 
 ## Interruption, limits, and recovery
 
-tmux handles terminal closure. A reboot, timeout, rate limit, network failure, permission
-denial, or crash can stop a session. Logs and partial changes remain on disk; completed
+tmux handles terminal closure. A reboot, timeout, rate limit, network failure,
+or crash can stop a session. Logs and partial changes remain on disk; completed
 commits remain in Git. A fresh resume reads instructions/spec/plan/tasks/state/handoff,
 recent logs, history, and diffs. There is no dependency on provider-specific conversation
 IDs, so model changes, days-long gaps, or temporary Codex debugging are recoverable.
@@ -157,8 +168,10 @@ automatically. If tools crashed mid-state-write, atomic helper writes reduce cor
 but agent-written Markdown still needs inspection. Invalid records fail explicitly.
 
 Limits bound new agent invocations and validation execution. GNU timeout terminates a
-timed-out command, with a 10-second forced termination grace. No automatic retry of
-provider failures, infinite loop, boot startup, or monetary spending guarantee is added.
+timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
+the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
+`AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
+stops and crashes. No infinite loop, boot startup, or monetary spending guarantee is added.
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
@@ -172,11 +185,17 @@ host review store; committed as `chore(ai): record plan review`; reused while th
 unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
-`--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
+`--max-fix-rounds` fix rounds are recorded: triage (`ai-run --triage`,
 committed as `chore(ai): record review triage`) → implement the new tasks → review
 again. A review counts as current when only `.ai/reviews`, state, run log, and handoff
-changed since its recorded HEAD. Rounds are counted from those commit messages since
-the base, so no hidden state is needed.
+changed since its recorded HEAD. Rounds are counted from host state, never from commit
+subjects (agents choose their own): `ai-run --triage` always makes its own counted commit
+(empty if needed) and records its hash in the host store (`fix-rounds record`, a file per
+branch next to the review bindings); `fix-rounds count BASE` counts recorded commits in
+`BASE..HEAD`, so the count survives recovery and human restarts of the same branch and
+another branch starts at zero. A branch without a host record (legacy) is initialised once
+at pipeline start (`fix-rounds init`, before any session) from commits whose subject is
+exactly `chore(ai): record review triage`.
 
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
@@ -190,6 +209,27 @@ verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks
 optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
+Triage completion (one counted round, even across stops and crashes): before each triage
+the pipeline records `stage = {name: triage, start_head, review_digest}` per branch in
+the host state directory (`stage-<branch hash>.json` beside `run.json`; `run-manifest
+stage-set`, `stage` and `stage-clear` act on the current branch). A run on another branch
+neither drops nor inherits it; a restart on the same branch completes it. An unreadable or
+foreign stage record stops the pipeline before anything runs; a legacy stage inside
+`run.json` still counts for its branch and moves to that branch's file on the next start.
+Every pipeline start and resume completes an open stage first (`complete_stage`), before
+the clean-tree check, plan review or implementation: `stage-verify` requires the review
+binding (verified report whose SHA-256 equals `review_digest`) and that committed,
+uncommitted and untracked changes since `start_head` are only triage records
+(`triage-scope`). If a host-recorded triage commit already exists after `start_head`
+(crash after the commit) the stage is closed without another count;
+otherwise `ai-run --triage --since start_head` records it. That is the one owner of the
+counted commit: when the dispositions are already complete and fresh it skips the Claude
+session and commits the leftover records with the round; it then re-checks the scope (a
+commit hook can't add source to the counted commit). `triage-check --fresh` must pass,
+then the stage is cleared. Every failed check is a `Triage stage …` stop, which
+`ai-recover` always escalates: nothing is implemented and nothing is counted. Incomplete
+dispositions with only bookkeeping leftovers rerun the triage session instead.
+
 Review provenance: when `ai-review` publishes a report it records the report's SHA-256
 outside the checkout (`${AI_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/ai-toolkit}/reviews/`,
 keyed by repository path and reviewed HEAD). Every consumer (`review-info`, triage, the
@@ -200,12 +240,71 @@ reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new r
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.
 
+Re-check of rejected findings (`ai-review --recheck`): its own preflight needs a clean
+tree, a verified review, dispositions bound to it, at least one rejected BLOCKER/MAJOR,
+the reviewed commit an ancestor of HEAD and only workflow records changed since it
+(triage records plus `.ai/reviews/{current,recheck,disputes}.md`; pending accepted fix
+tasks are fine). Codex (read-only, `AI_REVIEW_MODEL` at `AI_RECHECK_EFFORT`, default
+medium, prompt `.ai/prompts/recheck.md`) gets the rejected IDs with Claude's evidence and
+must answer one JSON object `{"answers": [{"id", "verdict": "withdrawn|upheld", "reason"}]}`.
+Parsing is strict: anything missing, duplicated, extra or malformed counts as upheld, and
+an answer for an unknown ID (or an entry that is not an object with a string `id`) makes
+every requested finding upheld, so no extra entry can ride along with withdrawals.
+The host re-runs the preflight, writes `.ai/reviews/recheck.md` with the binding (review
+digest, sha256 of the rejected rows' IDs and evidence, reviewed HEAD) and stores the
+report's SHA-256 as `recheck-<review digest>.sha256` in the host review store.
+`recheck-verify` fails for a missing or edited report, another review, or changed
+rejection evidence. Run by hand, the report is committed as `chore(ai): record review re-check`.
+
+Disputed findings (`reconcile_disputes` in `ai-pipeline`): right after every triage, and on
+every start/resume before any task runs or the review is replaced, `recheck-status` says
+`none` (no verified review, dispositions not bound to it, or no rejected BLOCKER/MAJOR),
+`pending` (no verified, current re-check) or `verified`. Pending runs `ai-review --recheck`.
+Then `disputes-record` appends a record for every upheld answer that has none yet (key:
+review digest + finding id; fields: review digest, finding id and level, the original
+finding text from the review, Claude's evidence, Codex's answer, date) to the branch's
+host store (`disputes-<branch hash>.json` next to the review bindings) and rewrites
+`.ai/reviews/disputes.md` from it. Report and records go into ONE host commit
+(`chore(ai): record review re-check`; `chore(ai): record disputed findings` when only a
+missing record was added). The file may lag behind the host store (an interrupted write)
+but never differ from it; `disputes-verify` (also part of `publish_ready`) requires an
+exact match, so an edited or removed file stops publishing. A start may find only an
+uncommitted `recheck.md`/`disputes.md` (a stop before the host commit): it is verified and
+committed by the reconciliation; anything else must be clean. Lifetime rule: a recorded
+dispute is never resolved automatically (not by later fixes, a clean review or a
+restart). While any record exists the PR is a draft, its body starts with "Disputed
+findings" (id, original finding, Claude's reason, Codex's answer), and the FINISHED todo
+list asks the human to resolve them at the PR.
+
+Inherited disputes (T016): merging the PR is the human's resolution, and the tracked file
+then reaches later branches whose host store is empty. `ai-pipeline` exports
+`AI_DISPUTES_BASE=<base sha>`; the file exactly as it is at `git merge-base <base> HEAD`
+is historical. The expected file is that inherited copy (or none) while the branch has no
+records, else the inherited copy verbatim, a marker comment, then this branch's records
+numbered on (D3, D4, ...). Only this branch's records count: they alone make the PR a
+draft, appear in the PR body and the FINISHED todos. Any other content (an edited or
+removed inherited part, an edited new record) fails as before. A merged review's upheld
+answers that the inherited file already records (review digest + finding id) are not
+recorded again on the new branch. Without `AI_DISPUTES_BASE` (a helper run by hand)
+nothing is inherited. Limitation: reusing a branch name whose host records were already
+merged fails verification (its old records sit both in the inherited copy and the store).
+
+Publish invariants (`publish_ready`): before the PR stage, before every push attempt
+(retries included) and after every push, the review must verify and be current for HEAD
+(only workflow records changed since the reviewed commit), the validation stamp must be
+current, the tree clean (untracked files too) and all tasks DONE; after each push
+`git ls-remote origin refs/heads/<branch>` must equal HEAD. Any failure stops (before PR
+creation and before any FINISHED notification); a hook can't slip unreviewed or
+unpushed content into the PR.
+
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when
-significant findings remain after the round limit. The PR body is generated from the
+significant findings remain after the round limit, or while any dispute is recorded. The
+PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
-"Manual testing for the human" section. State becomes `ready_for_acceptance`.
+"Manual testing for the human" section. An optional handoff section `## Flow chart` (one
+line: "Flow chart updated" or "Flow unchanged") is copied under Summary. State becomes `ready_for_acceptance`.
 
 Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
@@ -224,8 +323,12 @@ digest against the pipeline's in-memory approved digest and only then execs
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
-denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints);
-an EXIT trap guarantees one final ⛔ on unexpected exits; bookkeeping-only leftovers
+denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
+`Triage stage`);
+an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage for the
+branch (also after a watchdog crash recovery) it never commits anything: changes since
+the stage start outside triage records escalate, otherwise it resumes without a Claude
+session and the pipeline completes the stage; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
 the decision counts only with a zero exit, a success envelope and exactly one valid

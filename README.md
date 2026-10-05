@@ -56,6 +56,32 @@ If a KEEP file contains different guidance, reconcile it with the toolkit templa
 manually. Re-running setup fills missing files; it does **not** upgrade existing
 copies. Symlinked workflow destinations are rejected before copying.
 
+### Upgrading an installed project
+
+Setup records `.ai/toolkit-version` (JSON): the toolkit commit (or `"unknown"`) and, for
+each toolkit-owned file (`.ai/bin/**`, `.ai/prompts/**`), the sha256 of the version the
+toolkit installed. Plain setup only adds baselines for files it creates; it never blesses a
+kept file.
+
+```bash
+~/Projects/agents/scripts/setup-project --upgrade "$PWD"          # plan only, changes nothing
+~/Projects/agents/scripts/setup-project --upgrade --apply "$PWD"  # apply
+```
+
+The plan lists `REPLACE` (outdated, unedited), `CREATE` (missing in this project, e.g.
+`.ai/bin/ai-task` or `.ai/prompts/recheck.md` in older installs), `EDITED` (differs from its
+baseline) and `ADVICE` for project-owned files (`CLAUDE.md`, `.ai/validate`,
+`.ai/permissions.allow`, ...), which are never touched. The scripts call each other and the
+shared helper, so the runtime is upgraded as one group, all or nothing: if any toolkit file is
+locally edited the apply refuses before changing anything and lists the files; reconcile them
+or pass `--force` to overwrite. The apply itself is all or nothing too: every new file is
+staged next to its target before anything is replaced, and if a write fails part-way the
+already-replaced files get their previous bytes and mode back, created files are removed,
+`.ai/toolkit-version` is left unchanged and the command exits non-zero (a failed rollback is
+reported as such). A missing or malformed stamp (legacy install) treats every
+differing toolkit file as edited. After an upgrade, reinstall the watchdog timer
+(`.ai/bin/ai-watchdog --install-timer ...`). Make the upgrade its own PR.
+
 **Existing projects: KEEP does not mean the workflow instructions were merged.**
 Setup warns when an existing CLAUDE.md or AGENTS.md lacks the toolkit's key
 sections/markers. Merge the relevant guidance before planning or unattended work;
@@ -101,7 +127,16 @@ Before leaving an implementation session unattended:
 3. Add necessary local commands to `.ai/permissions.allow` after inspecting them.
    Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
-4. Run `.ai/bin/ai-check`. Record/fix any baseline failures rather than suppressing them.
+   The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
+   commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
+   redirects, pipes and chains into commands that aren't allowed, so these can't write
+   files, but they **can read files outside the project** (for example `cat ~/.ssh/...`).
+   Keep secrets out of reach of the runner's user. `sed`, `rg` and `find` are left out
+   on purpose: they write or execute through their own flags (`sed -i`, `rg --pre`,
+   `find -exec`/`-delete`).
+4. Run `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout` set to 600000 ms;
+   never run it in the background or poll it. Record/fix any baseline failures rather than
+   suppressing them.
 5. Checkpoint the approved plan, validation, permissions, and task queue on the feature branch.
 
 For example, in a project that really defines these package scripts:
@@ -132,9 +167,10 @@ For the recoverable bounded runner, start from a clean committed feature branch:
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
 operations. There are no approval prompts between normal tasks. Claude's `dontAsk`
-mode rejects unapproved tools, and the runner stops on reported permission denials
-so you can adjust policy deliberately. This can block a legitimate command if it
-wasn't allowed; a short supervised trial before an overnight run is useful.
+mode rejects unapproved tools. Denials are logged and the run continues: each one goes to
+`.ai/local/denials.log` with a note on stderr, and the runner still requires a real
+DONE/BLOCKED checkpoint, so a session that cannot work around a denial stops there. Adjust
+the policy deliberately afterwards. A short supervised trial before an overnight run is useful.
 
 At approval, the runner hashes `.ai/validate`, all `.ai/bin/` and `.ai/prompts/`
 contents, the permission allowlist, and project Claude settings. It keeps the
@@ -149,7 +185,7 @@ results, marks DONE, and commits. The runner reruns the full gate, verifies a cl
 checkpoint, records its own small state/log checkpoint, then starts the next session.
 BLOCKED tasks can be bypassed only by independent tasks with satisfied dependencies.
 
-No-progress, malformed state, CLI errors, denied permissions, timeouts, validation
+No-progress, malformed state, CLI errors, timeouts, validation
 failure, an unexpected branch change, or uncommitted work stop the runner. A task
 marked DONE whose post-task validation fails is restored to IN_PROGRESS. Session
 limits are deliberate boundaries; rerun the same command to continue after inspection.
@@ -164,6 +200,15 @@ claude "$(cat .ai/prompts/implement.md)"
 
 Interactive Claude uses your normal permission configuration, so it may ask for
 commands not yet authorized. The bounded runner is the no-prompt unattended path.
+
+### Modes
+
+| Mode | Started by | May do | May not do |
+| --- | --- | --- | --- |
+| Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
+| ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
+| ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
 
 ## Hands-off delivery: `ai-pipeline`
 
@@ -195,20 +240,30 @@ tmux new -s my-app-ai
    rejected with evidence, or deferred) and append fix tasks. Triage may only touch
    workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
-   `--max-fix-rounds` rounds (default 2). Codex's report is never edited by Claude:
+   `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
+   from commit messages). Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
    whose counts disagree with its listed finding IDs is rejected.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
-   make it a **draft** (an existing PR is converted). The PR targets `--pr-base`,
+   make it a **draft** (an existing PR is converted). So does any recorded
+   **disputed finding** (a BLOCKER/MAJOR Claude rejected and Codex upheld on re-check):
+   the PR body then starts with a "Disputed findings" section, and you resolve them at
+   the PR; the pipeline never resolves a dispute itself. Once you merge that PR, its
+   disputes are history: a later branch inherits the unchanged file without a draft,
+   and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   Before every push attempt and after every push it re-checks that the review is
+   current for HEAD, validation is current, the tree is clean and all tasks are DONE,
+   and that origin's branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed
-dispositions for that review are reused, validation is re-verified before
+dispositions for that review are reused, an interrupted triage is completed (counted
+once) before anything else, validation is re-verified before
 publishing, and an existing PR is updated instead of duplicated. The pipeline holds
 the checkout lock for its whole run and re-verifies the gate after each of its own
 commits. `--no-pr` stops after the review;
@@ -235,13 +290,18 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
 
 1. **Rules, no AI.** A task Claude finished and the full gate validated but Claude left
    uncommitted is committed by the runner (the gate verified unchanged). Sessions start
-   from a clean tree, so new files are that session's own output: it stages everything
-   git doesn't ignore, lists the new files in the notification, and stops instead if a new
-   file looks like a secret (`.env*`, `*.pem`, `*.key`, SSH keys, `*credentials*`, ...). Pushes retry
+   from a clean tree, so new files are that session's own output. Automatic checkpoints stage
+   the session's output except secret-looking files (everything git doesn't ignore), list
+   the new files in the notification, and stop instead if a new file looks like a secret
+   (`.env*`, `*.pem`, `*.key`, SSH keys, `*credentials*`, ...). Pushes retry
    3 times. Usage limits pause and resume.
 2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
    the same process. Hard rules escalate at once (gate, permissions, branch, review
-   integrity, plan-review findings, weekly limit, a changed gate digest). Otherwise a
+   integrity, plan-review findings, weekly limit, a changed gate digest). A stop during
+   **review triage** is never committed as leftover work: if only workflow records changed
+   since the triage started, `ai-recover` reruns and the pipeline first finishes that
+   triage (checks the review it belongs to, the scope and the dispositions, then records
+   the round exactly once); anything else escalates. Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or
@@ -276,7 +336,8 @@ stretch subscription limits.
 Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
 default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
 default **high**). Reviews are where a stronger model pays off most: findings caught
-there save Claude fix rounds.
+there save Claude fix rounds. The narrower re-check of rejected findings
+(`ai-review --recheck`) uses `AI_RECHECK_EFFORT` (default **medium**).
 
 ### Notifications
 
@@ -284,7 +345,7 @@ Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$
 and can never break the workflow. For phone notifications, install the free ntfy app,
 subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
-`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`;
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`;
 environment variables win):
 
 ```bash
@@ -442,6 +503,19 @@ After fixes, run `.ai/bin/ai-check` and another `.ai/bin/ai-review --base main` 
 appropriate. Commit the previous report/dispositions before replacing it so history
 retains the discussion. Review output is an artifact, not merge authorization.
 
+When Claude rejected a BLOCKER/MAJOR finding, commit the dispositions and run
+`.ai/bin/ai-review --recheck`: Codex (read-only, `AI_RECHECK_EFFORT`, default medium)
+re-checks only the rejected findings against Claude's evidence and answers `withdrawn`
+or `upheld` per finding; a missing, duplicate or malformed answer counts as upheld, and an
+answer for an unknown finding makes every finding upheld.
+It refuses unless the review verifies and only workflow records changed since the
+reviewed commit (pending fix tasks are fine). The host writes `.ai/reviews/recheck.md`,
+bound to the review, the rejected rows (IDs and evidence) and the reviewed HEAD;
+`python3 .ai/bin/lib/workflow.py recheck-verify` prints its verified answers.
+`ai-pipeline` runs this re-check itself right after every triage (and on every start
+or resume, before any task runs) and records each upheld finding as a durable dispute
+in `.ai/reviews/disputes.md` (host-written, append-only, verified before publishing).
+
 ## Human acceptance testing and finish
 
 Read the handoff and review, inspect `git diff main...HEAD` (or your saved base),
@@ -460,8 +534,8 @@ gh pr create
 # Inspect the PR/CI, then merge manually when satisfied.
 ```
 
-Outside `ai-pipeline`, nothing in this toolkit pushes. `ai-pipeline` pushes only
-the feature branch and opens/updates a PR. Nothing ever merges or deploys.
+Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the feature branch and opens the pull request
+(updating it on reruns), and nothing else. Nothing ever merges or deploys.
 
 ## Components
 

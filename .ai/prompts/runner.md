@@ -36,19 +36,3 @@ decision/permission is needed, mark the task BLOCKED with evidence and the exact
 blocker, commit, and return. Never weaken validation, change the runner,
 permissions, prompts, or branch, or invent success. Then stop: the runner validates
 your checkpoint and continues the queue.
-
-## How to work here
-
-- Read with Read, Grep and Glob. Change files with Edit and Write: no heredoc, `sed -i` or
-  redirect edits (`>`, `>>`, `tee`).
-- Run plain commands, and never prefix commands with `cd`: the shell already starts in the
-  project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout`
-  set to 600000 ms; never run it in the background or poll it. If it still times out, mark
-  the task BLOCKED with the evidence instead of ending without a checkpoint. When the task
-  names its own targeted test command, run that command as written.
-- Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
-- Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
-  it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
-- Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).
-  Append dated progress lines to the project's log file instead (e.g., "2026-10-05 — T003 complete").

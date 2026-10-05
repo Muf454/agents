@@ -24,8 +24,7 @@ under `Dependencies:` on EVERY task (don't rely on the run default, which may di
 - `sonnet`: ordinary features, UI, tests, routine fixes.
 - `opus`: security, authentication/authorization or RLS policies, concurrency and
   locking, data migrations that move or delete data, payment or irreversible
-  operations. A task whose own earlier attempt failed validation or review is
-  retried on opus; review-fix tasks get a model by their own risk (no blanket promotion).
+  operations, and any task that already failed review or validation once.
 Keep tasks small enough that the cheaper model fits; split rather than upgrade.
 
 Update compact state and handoff for the next session. Do NOT start implementation

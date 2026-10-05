@@ -15,9 +15,8 @@ the plan ignores; validation commands that would not catch a failure; scope
 creep beyond the spec; a task whose explicit `Model:` line doesn't fit its risk:
 security, auth/RLS, concurrency/locking or destructive data migrations with `haiku` or
 `sonnet` is a MAJOR finding; `opus` on mechanical work is a MINOR one (it wastes the
-shared Claude limit); a task whose own failed attempt is marked for retry with
-`haiku` or `sonnet` when it should be `opus` is a MAJOR finding. A task without a
-`Model:` line runs on an unknown default: report it as MINOR ("specify the model"), never as MAJOR.
+shared Claude limit). A task without a `Model:` line runs on an unknown default: report
+it as MINOR ("specify the model"), never as MAJOR.
 
 BLOCKER: implementing as written would fail or cause harm. MAJOR: a real gap
 that would likely produce a wrong or untested result. MINOR: improvements.

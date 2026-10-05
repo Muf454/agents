@@ -5,11 +5,6 @@
 # Edit/Write are constrained by the project's deny rules. Gate/tooling/prompts are
 # human-maintained and hashed at run approval. Stage explicit paths; never use
 # git add -A / --all / . or bypass commit hooks (--no-verify / -n).
-# Claude Code denies redirects, pipes and chains into commands that aren't allowed
-# (verified live 2026-10-05), so `cat x > y` or `ls; curl ...` stay blocked. The
-# read-only commands below can still READ files outside the project. Deliberately
-# absent: sed, rg and find, which write or execute through their own flags
-# (sed -i / w / e, rg --pre, find -exec / -delete) that no redirect check stops.
 Read
 Glob
 Grep
@@ -25,8 +20,14 @@ Bash(git log *)
 Bash(git show *)
 Bash(git add *)
 Bash(git commit *)
-Bash(git rm *)
-Bash(git mv *)
+Bash(.ai/bin/ai-check)
+Bash(bash .ai/validate)
+# Toolkit checks
+Bash(python3 -m unittest *)
+Bash(bash -n *)
+# Read-only shell (approved 2026-10-05). Claude Code denies redirects, pipes and chains into
+# commands that aren't allowed (verified live). No sed/rg/find: they can write or execute via
+# their own flags (sed -i, sed w/e, rg --pre, find -exec). Tracked-file moves/deletes via git.
 Bash(ls)
 Bash(ls *)
 Bash(grep *)
@@ -35,6 +36,5 @@ Bash(head *)
 Bash(tail *)
 Bash(wc *)
 Bash(echo *)
-Bash(.ai/bin/ai-task *)
-Bash(.ai/bin/ai-check)
-Bash(bash .ai/validate)
+Bash(git rm *)
+Bash(git mv *)

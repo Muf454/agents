@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+/.ai/local/
+/.claude/settings.local.json

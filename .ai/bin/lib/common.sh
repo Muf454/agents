@@ -34,7 +34,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -45,11 +45,9 @@ ai_config
 
 # Codex review model/effort: reviews are where a stronger model pays off most.
 # AI_REVIEW_MODEL (default: Codex's own default) and AI_REVIEW_EFFORT (default high).
-# Optional arguments name another effort setting and its default (re-check: AI_RECHECK_EFFORT medium).
 ai_review_args() {
-  local setting=${1:-AI_REVIEW_EFFORT} effort
-  effort=${!setting:-${2:-high}}
-  [[ "$effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid $setting: $effort"
+  local effort=${AI_REVIEW_EFFORT:-high}
+  [[ "$effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_REVIEW_EFFORT: $effort"
   AI_REVIEW_ARGS=(-c "model_reasoning_effort=\"$effort\"")
   if [[ -n "${AI_REVIEW_MODEL:-}" ]]; then
     [[ "$AI_REVIEW_MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || ai_die "Invalid AI_REVIEW_MODEL: $AI_REVIEW_MODEL"

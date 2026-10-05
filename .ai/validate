@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The toolkit's own gate: shell syntax of every script and template, then the full test suite.
+while IFS= read -r -d '' file; do bash -n "$file"; done < <(
+  find scripts -type f \( -name 'ai-*' -o -name setup-project -o -name '*.sh' \) -print0
+)
+for file in templates/.ai/validate templates/.ai/ci-setup; do bash -n "$file"; done
+python3 -m unittest discover -s tests
