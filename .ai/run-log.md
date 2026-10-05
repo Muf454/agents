@@ -12,3 +12,4 @@
 | 2026-10-05T08:15Z | claude | T004 | DONE: triage stage in run manifest; complete_stage on every start/resume; ai-run --triage --since records the round once; ai-recover never commits triage leftovers | triage_completion 7 OK; ai-check 117 OK | (this commit) | Vault flow chart + hub log updated |
 | 2026-10-05T08:05:44Z | runner | T004 | completed | PASS | 31724e5 | Claude checkpointed; continuing queue |
 | 2026-10-05T08:30Z | claude | T005 | DONE: publish_ready before PR stage, before every push attempt and after every push; remote branch head must equal HEAD | publish_ready 5 OK; ai-check 122 OK | (this commit) | Vault flow chart + hub log updated |
+| 2026-10-05T08:16:09Z | runner | T005 | completed | PASS | 80bd93b | Claude checkpointed; continuing queue |
