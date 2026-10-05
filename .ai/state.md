@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: feature/flow-hardening
-Phase: ready_for_acceptance
+Branch: feature/evidence-or01-or02
+Phase: planning (approved by human-delegate 2026-10-05)
 Current task: none
-Last completed task: T017
-Tasks complete: 17
-Tasks remaining: 0
-Last validation: PASS at 2026-10-05T15:23:38Z
+Last completed task: none
+Tasks complete: 0
+Tasks remaining: 5
+Last validation: PASS at 2026-10-05 (baseline before planning, see handoff)
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/11
-Last updated: 2026-10-05T15:29:15Z
+Next action: run pipeline (ai-pipeline --approved --base master --knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents")
+Last updated: 2026-10-05
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
