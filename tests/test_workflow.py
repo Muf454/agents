@@ -862,6 +862,27 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.run_cmd([ai_task, 'show', 'T009'], expected=1)
         self.run_cmd([ai_task, 'bogus'], expected=2)
 
+    def test_template_rules_b6_model_selection_in_claude_and_plan(self):
+        for name in ('CLAUDE.md', '.ai/prompts/plan.md'):
+            with self.subTest(file=name):
+                text = (ROOT / 'templates' / name).read_text()
+                self.assertIn('A task whose own earlier attempt failed validation or review', text)
+                self.assertIn('review-fix tasks get a model by their own risk', text)
+                self.assertNotIn('any task that already failed review or validation once', text)
+
+    def test_template_rules_b6_model_in_plan_review(self):
+        text = (ROOT / 'templates/.ai/prompts/plan-review.md').read_text()
+        self.assertIn('a task whose own failed attempt is marked for retry', text)
+        self.assertIn('is a MAJOR finding', text)
+
+    def test_template_rules_r6_human_todo_in_runner_and_triage(self):
+        for name in ('runner', 'triage'):
+            with self.subTest(prompt=name):
+                section = self.prompt_section(name)
+                self.assertIn('Never tick or untick checkboxes', section)
+                self.assertIn('knowledge base', section)
+                self.assertIn('Append dated progress', section)
+
     def test_permissions_template_allows_read_only_shell_and_task_helper(self):
         entries = self.permissions_template_entries()
         for entry in ('Bash(ls)', 'Bash(ls *)', 'Bash(grep *)', 'Bash(cat *)', 'Bash(head *)',

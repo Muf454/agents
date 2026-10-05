@@ -36,3 +36,5 @@ handoff/state with explicit paths, then return.
 - Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
   it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
+- Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).
+  Append dated progress lines to the project's log file instead (e.g., "2026-10-05 — T003 complete").
