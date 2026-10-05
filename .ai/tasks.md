@@ -233,10 +233,9 @@ current re-check → run `ai-review --recheck` and checkpoint its artifacts firs
 evidence, Codex's answer, date), digest-bound in host state like the reviews; records are
 only ever appended. Lifetime rule (simple on purpose): a recorded dispute is never resolved
 automatically, not by later fixes or a clean later review. While any record exists, the PR
-is a draft and the body starts with "Disputed findings" listing every record; Zack resolves
-them at the PR. pr-body starts with a
-"Disputed findings" section (id, Claude's reason, Codex's answer) whenever any is upheld;
-the PR is a draft. Update the vault flow chart (the re-check step) and `updated:`.
+is a draft and the body starts with "Disputed findings" listing every record (id, original
+finding, Claude's reason, Codex's answer); Zack resolves them at the PR. Update the vault
+flow chart (the re-check step) and its `updated:` date.
 
 ### Likely affected modules
 scripts/ai-pipeline, scripts/lib/workflow.py (pr-body), tests, vault agents-flow.md
