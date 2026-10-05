@@ -43,3 +43,4 @@
 | 2026-10-05T15:10Z | claude | T017 | DONE: triage stage stored per branch (`stage-<branch hash>.json` in host state); another branch's start neither drops nor inherits it; unreadable record stops ai-pipeline at start (review M4) | stage_per_branch 4 OK; related 32 OK; ai-check 168 OK | (this commit) | Legacy run.json stage migrated on start; docs + vault flow/hub log updated |
 | 2026-10-05T15:17:05Z | runner | T017 | completed | PASS | 229830d | Claude checkpointed; continuing queue |
 | 2026-10-05T15:23:38Z | runner | none | queue complete; ready for independent review | PASS | 75be82d | Human acceptance remains |
+| 2026-10-05T15:29:15Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/11 | PASS | ddaae9d | Human acceptance and merge remain |
