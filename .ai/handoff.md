@@ -1,30 +1,17 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet; workflow templates only.
+Toolkit self-installed. Plan for batch 1 (T001–T007) from the vault backlog.
 
-## What remains?
-Specify and plan the actual project.
-
-## What changed?
-
-## Deviations from the plan
-
-## Validation run
-<!-- Commands, results, timestamp, tested revision; never fabricated. -->
-
-## What currently fails?
-The validation entry point is unconfigured and deliberately exits nonzero.
-
-## Assumptions
+## Validation
+`.ai/validate`: shell syntax + full test suite.
 
 ## Manual testing for the human
-<!-- Concrete steps and expected results; include failure/edge cases. -->
+1. Read the PR's summary of each item; the tests cover behaviour (mocked agents).
+2. After merging: `setup-project --upgrade ~/Projects/raid-planner` shows a sensible preview.
 
 ## Human todos
-<!-- Actions only the human can take (decisions, credentials, manual setup, content
-checks), one bullet each, or "None". The final notification lists them. -->
 None.
 
 ## Next action
-Describe the desired project or feature to Claude using the planning prompt.
+Run ai-pipeline.
