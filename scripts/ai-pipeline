@@ -109,15 +109,6 @@ stop() {
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
 }
-# Pushes hit transient network/auth hiccups; retry before treating it as a stop.
-push() {
-  local try
-  for try in 1 2 3; do
-    git push "$@" && return 0
-    (( try == 3 )) || ${AI_SLEEP:-sleep} $(( try * 20 ))
-  done
-  return 1
-}
 step() { printf '\n== %s ==\n' "$*"; }
 count_commits() { git log --oneline "$base_sha..HEAD" --grep="$1" | wc -l; }
 # Commit host records, then re-verify before any project-local helper runs again
@@ -134,6 +125,40 @@ review_current() {
   reviewed=${info%% *}
   git merge-base --is-ancestor "$base_sha" "$reviewed" 2>/dev/null || return 1
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
+}
+# Publish invariants: what gets published is exactly what was reviewed and validated.
+# Checked after host commits on the publish path, before every push attempt and after
+# each push (commit and push hooks run project code); any failure stops.
+publish_ready() {
+  local why=''
+  ai_guard_verify
+  if ! why=$(ai_helper review-info 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-review integrity check failed}
+  elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
+  elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
+  elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
+  elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
+  else return 0
+  fi
+  printf 'Publish check failed at %s: %s\n' "$1" "${why%.}" > .ai/local/last-error
+  stop "$1"
+}
+# Pushes hit transient network/auth hiccups; retry before treating it as a stop.
+# Usage: push STAGE FAILURE-MESSAGE git-push-args...; afterwards origin's branch is HEAD.
+push() {
+  local stage=$1 failed=$2 try remote; shift 2
+  for try in 1 2 3; do
+    publish_ready "$stage"
+    git push "$@" && break
+    if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
+    ${AI_SLEEP:-sleep} $(( try * 20 ))
+  done
+  publish_ready "$stage"
+  remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
+  [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
+    printf 'Publish check failed after %s: origin %s is %s, not HEAD %s (push hook?)\n' \
+      "$stage" "$branch" "${remote:-missing}" "$(git rev-parse --short HEAD)" > .ai/local/last-error
+    stop "$stage"
+  }
 }
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
@@ -250,7 +275,7 @@ done
 ai_guard_verify
 ensure_validated
 reviews=$(count_commits '^chore(ai): record independent review')
-[[ -z "$(git status --porcelain --untracked-files=all)" ]] || stop 'pull request preparation'
+publish_ready 'pull request preparation'
 if [[ "$open_pr" != yes ]]; then
   ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally."
   printf '%s\n' 'Pipeline complete (no PR requested).'
@@ -262,9 +287,7 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   printf '%s\n' "No 'origin' remote; branch is ready locally."
   finish
 fi
-push -u origin "$branch" || { printf '%s\n' 'git push failed (3 tries)' > .ai/local/last-error; stop push; }
-ai_guard_verify  # push hooks run project code too
-ai_helper review-info >/dev/null || stop 'pull request (review integrity)'
+push push 'git push failed (3 tries)' -u origin "$branch"
 if ! command -v gh >/dev/null; then
   ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
   finish
@@ -290,10 +313,7 @@ fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'
 host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md
-if ! push origin "$branch" >/dev/null 2>&1 || ! ai_guard_verify; then
-  printf '%s\n' "PR is open at $url, but pushing the final handoff commit failed" > .ai/local/last-error
-  stop 'final push'
-fi
+push 'final push' "PR is open at $url, but pushing the final handoff commit failed" origin "$branch"
 ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
 finish

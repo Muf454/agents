@@ -217,6 +217,14 @@ reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new r
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.
 
+Publish invariants (`publish_ready`): before the PR stage, before every push attempt
+(retries included) and after every push, the review must verify and be current for HEAD
+(only workflow records changed since the reviewed commit), the validation stamp must be
+current, the tree clean (untracked files too) and all tasks DONE; after each push
+`git ls-remote origin refs/heads/<branch>` must equal HEAD. Any failure stops (before PR
+creation and before any FINISHED notification); a hook can't slip unreviewed or
+unpushed content into the PR.
+
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when

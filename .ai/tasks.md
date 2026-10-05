@@ -172,7 +172,7 @@ Decision: incomplete dispositions with only bookkeeping leftovers rerun the tria
 incomplete triage records escalate.
 
 ## T005 — Publish invariants around every push
-Status: TODO
+Status: DONE
 Dependencies: T004
 Model: opus
 
@@ -204,7 +204,19 @@ permissions; new tests are named with `publish_ready`; the output must say `Ran 
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+`publish_ready STAGE` in scripts/ai-pipeline: gate verify, review-info binding, clean tree
+(untracked too), `tasks complete`, `review_current`, `stamp verify`; failure writes
+"Publish check failed at STAGE: …" and calls `stop`. Runs before the PR stage (replaces the
+plain clean-tree check), before each push attempt inside `push`'s retry loop, and after each
+push, followed by `git ls-remote origin refs/heads/<branch>` == HEAD (exact ref match via
+awk). The final push goes through the same `push` (its output is no longer silenced so stop
+messages reach stderr). Evidence: `python3 -m unittest discover -s tests -k publish_ready`
+→ Ran 5 tests, OK (commit hook review→stop before push; final-push hook dirty→stop; failed
+push changing checkout→stop before retry, one sleep; pre-push workflow-only commit→remote
+≠ HEAD, no PR, no FINISHED; normal path remote == final HEAD). `.ai/bin/ai-check` → Ran 122
+tests, OK. docs/workflow.md, README, vault flow chart + hub log updated. ai-recover
+unchanged: publish stops follow the normal recovery rules (review-integrity messages still
+escalate).
 
 ## T006 — Disputed findings: the re-check command and its binding
 Status: TODO

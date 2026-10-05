@@ -211,6 +211,9 @@ tmux new -s my-app-ai
    make it a **draft** (an existing PR is converted). The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   Before every push attempt and after every push it re-checks that the review is
+   current for HEAD, validation is current, the tree is clean and all tasks are DONE,
+   and that origin's branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't

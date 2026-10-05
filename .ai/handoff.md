@@ -23,6 +23,12 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   it once via `ai-run --triage --since`. ai-recover never commits triage leftovers: it reruns
   without a Claude decision or escalates. Failed checks are `Triage stage …` stops that
   always escalate. Vault flow chart updated.
+- T005: publish invariants (R2). `ai-pipeline`'s `publish_ready` (review verifies and is
+  current for HEAD, validation stamp current, clean tree incl. untracked, all tasks DONE)
+  runs before the PR stage, before every push attempt (inside the retry loop) and after
+  every push; after each push origin's `refs/heads/<branch>` must equal HEAD. Failures go
+  through `stop`, before PR creation and before any FINISHED notification. The final push
+  now shows git's output (it was silenced). Vault flow chart updated.
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -44,9 +50,15 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
    interrupted review triage", `git log --oneline | grep -c 'record review triage'` is 1,
    and there is no "recovery checkpoint" commit. If you add an uncommitted `src.txt` before
    the rerun, it stops with "Triage stage cannot be completed safely" and commits nothing.
+6. Publish checks: in a scratch project with a bare `origin`, add a `.git/hooks/pre-push`
+   that commits a one-line change to `.ai/run-log.md` once (guard with a marker file). Run
+   `ai-pipeline --approved`: it stops with "Publish check failed after push: origin
+   <branch> is …, not HEAD …", no PR is created, and there is no FINISHED notification.
+   Without the hook, the run finishes and `git ls-remote origin <branch>` equals
+   `git rev-parse HEAD`.
 
 ## Human todos
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Runner continues with T005 (publish invariants around every push).
+Runner continues with T006 (disputed findings: the re-check command).

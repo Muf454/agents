@@ -4,12 +4,12 @@ Project: agents
 Branch: feature/flow-hardening
 Phase: implementing
 Current task: none
-Last completed task: T004
-Tasks complete: 4
-Tasks remaining: 5
+Last completed task: T005
+Tasks complete: 5
+Tasks remaining: 4
 Last validation: PASS at 2026-10-05T08:05:44Z
 Blocked: no
-Next action: Continue queue; see task results for any blockers
+Next action: Implement T006
 Last updated: 2026-10-05T08:05:44Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

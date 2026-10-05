@@ -1682,6 +1682,71 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('⛔ STOPPED, needs you', self.notifications())
         self.assertIn('final handoff commit failed', self.notifications())
 
+    # ---------------------------------------------------------------- publish invariants (R2)
+    def hook(self, name, body):
+        hook = self.project / '.git/hooks' / name
+        hook.write_text('#!/usr/bin/env bash\n' + body)
+        hook.chmod(0o755)
+
+    def remote_head(self, origin):
+        return subprocess.run(['git', '--git-dir', str(origin), 'rev-parse', '--verify', '--quiet',
+                               'refs/heads/feature/test'], capture_output=True, text=True).stdout.strip()
+
+    def test_publish_ready_commit_hook_changing_source_while_recording_review_stops_before_push(self):
+        self.ready()
+        origin = self.add_origin()
+        self.hook('post-commit', '[[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]] || exit 0\n'
+                                 'echo sneaky > app.py; git add app.py; git commit -qm "hook: unreviewed source"\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed at pull request preparation: the review is not current', result.stderr)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_publish_ready_final_push_hook_leaving_uncommitted_source_stops(self):
+        self.ready()
+        self.add_origin()
+        self.hook('pre-push', '[[ "$(git log -1 --format=%s)" == "chore(ai): record pull request" ]] || exit 0\n'
+                              'echo sneaky > app.py\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed at final push: the checkout is not clean', result.stderr)
+        self.assertIn('⛔ STOPPED, needs you', self.notifications())
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_publish_ready_failed_push_that_changes_checkout_stops_before_retry(self):
+        self.ready()
+        origin = self.add_origin()
+        self.hook('pre-push', 'echo sneaky > untracked.txt\nexit 1\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed at push: the checkout is not clean', result.stderr)
+        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20'])  # one retry wait, no 2nd push
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+
+    def test_publish_ready_push_hook_adding_workflow_commit_stops_before_pr(self):
+        self.ready()
+        origin = self.add_origin()
+        marker = self.base / 'hooked'
+        self.hook('pre-push', f'[[ -e "{marker}" ]] && exit 0\ntouch "{marker}"\n'
+                              'echo "| hook |" >> .ai/run-log.md; git commit -qm "hook: log only" -- .ai/run-log.md\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertNotEqual(self.remote_head(origin), head)
+        self.assertIn('Publish check failed after push: origin feature/test is', result.stderr)
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_publish_ready_normal_path_remote_equals_final_head(self):
+        self.ready()
+        origin = self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.assertEqual(self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout.strip(), 'chore(ai): record pull request')
+        self.assertEqual(self.remote_head(origin), head)
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+        self.assertIn('🏁 FINISHED', self.notifications())
+
     # ---------------------------------------------------------------- follow-up review fixes
     def test_forged_committed_review_is_rejected_on_resume_and_reviewed_again(self):
         self.ready()
