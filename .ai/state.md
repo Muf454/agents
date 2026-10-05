@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T007
 Tasks complete: 7
 Tasks remaining: 2
-Last validation: PASS at 2026-10-05T10:10:49Z
+Last validation: PASS at 2026-10-05T10:16:05Z
 Blocked: no
-Next action: Implement T008 (toolkit version stamp and setup --upgrade)
-Last updated: 2026-10-05T10:10:49Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-05T10:16:05Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
