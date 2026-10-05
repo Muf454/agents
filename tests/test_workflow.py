@@ -108,6 +108,8 @@ if mode in ('error-once', 'error-once-partial') and not pathlib.Path('.ai/local/
     pathlib.Path('.ai/local/mock-error-hit').touch()
     if mode == 'error-once-partial':
         pathlib.Path('partial.txt').write_text('finished work the session never committed')
+        if os.environ.get('MOCK_EXTRA_FILE'):
+            pathlib.Path(os.environ['MOCK_EXTRA_FILE']).write_text('not in the plan')
     print(json.dumps({'type':'result','subtype':'error','is_error':True}))
     sys.exit(0)
 if mode in ('error-once', 'error-once-partial'):
@@ -150,7 +152,9 @@ if mode not in ('no-progress', 'bad-format'):
             target.write_text('#!/usr/bin/env bash\nexit 0\n')
         else:
             target.write_text('modified by agent\n')
-    if mode != 'dirty':
+    if mode == 'dirty-secret':
+        pathlib.Path('deploy.pem').write_text('-----BEGIN PRIVATE KEY-----')
+    if mode not in ('dirty', 'dirty-secret'):
         subprocess.run(['git','add','--','.ai/tasks.md','.ai/state.md',task_id+'.txt','.ai/validate'],check=True)
         if mode == 'tamper':
             subprocess.run(['git','add','--',os.environ['MOCK_TAMPER_PATH']],check=True)
@@ -884,6 +888,54 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('checkpoint T001 (validated; the session did not commit)',
                       self.run_cmd(['git', 'log', '--format=%s']).stdout)
         self.assertIn("Claude didn't commit its validated work", self.notifications())
+        self.assertIn('New files: T001.txt', self.notifications())
+
+    def test_runner_checkpoint_never_commits_secret_looking_files(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty-secret')
+        self.assertIn('secret-looking files', (self.project / '.ai/local/last-error').read_text())
+        tracked = self.run_cmd(['git', 'ls-files']).stdout
+        self.assertNotIn('deploy.pem', tracked)
+        self.assertNotIn('T001.txt', tracked)
+        self.assertEqual(self.run_cmd(['git', 'diff', '--cached', '--name-only']).stdout.strip(), '')
+
+    def test_recovery_never_commits_secret_looking_files(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun',
+                  MOCK_EXTRA_FILE='.env.production')
+        self.assertIn('leftovers include secret-looking files', self.notifications())
+        self.assertNotIn('.env.production', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+
+    def test_checkpoint_guard_catches_secret_names_however_they_were_added(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        (self.project / 'plain.txt').write_text('x')
+        self.commit('plain')
+        (self.project / 'nested').mkdir()
+        for name in ('nested/.envrc', '.environment', 'notes.txt'):
+            (self.project / name).write_text('x')
+        self.run_cmd(['git', 'mv', 'plain.txt', 'api.key'])  # rename destination
+        self.run_cmd(['git', 'add', '--all', '--', '.'])
+        result = self.helper('checkpoint-guard', expected=1)
+        for name in ('nested/.envrc', '.environment', 'api.key'):
+            self.assertIn(name, result.stderr)
+        self.assertNotIn('notes.txt', result.stderr)
+        self.run_cmd(['git', 'reset', '-q', '--hard'])
+        self.run_cmd(['git', 'clean', '-qfd'])
+        (self.project / 'ok.txt').write_text('x')
+        self.run_cmd(['git', 'add', '--all', '--', '.'])
+        self.assertIn('ok.txt', self.helper('checkpoint-guard').stdout)
+
+    def test_review_with_a_renamed_optional_section_is_accepted(self):
+        report = self.base / 'renamed.md'
+        report.write_text('# Review\nOverall verdict: fine\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+                          '## BLOCKER findings\nNone.\n## MAJOR findings\nNone.\n## MINOR findings\nNone.\n'
+                          '## Missing coverage and limitations\nx\n')
+        self.setup_project()
+        self.run_cmd(['python3', str(HELPER), 'publish-review', str(report), 'a' * 40, 'b' * 40])
+        self.assertIn('Missing coverage and limitations', (self.project / '.ai/reviews/current.md').read_text())
 
     def test_runner_dirty_output_failing_validation_is_not_committed(self):
         self.ready()
@@ -1161,7 +1213,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
     def test_recovery_commits_validated_leftovers_then_resumes(self):
-        self.ready()
+        self.ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n'))
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
                   MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun')
         self.assertIn('partial.txt', self.run_cmd(['git', 'ls-files']).stdout)

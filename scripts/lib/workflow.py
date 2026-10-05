@@ -448,12 +448,32 @@ def claude_result(path, check_only=False):
         print(f'Note: {len(denials)} denied tool call(s) logged in .ai/local/denials.log', file=sys.stderr)
 
 
+SECRET_PATTERNS = ('.env*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
+                   'id_ed25519*', 'id_ecdsa*', '*.kdbx', '*credentials*', '*secret*', '.npmrc', '.netrc')
+
+
+def checkpoint_guard(arguments):
+    """Run after an automatic checkpoint staged everything git doesn't ignore. Fails if a
+    newly added file (added, copied or renamed into place) looks like a secret; otherwise
+    prints the new files for the notification. Sessions start from a clean tree, so new
+    files are that session's own output (Codex and the human review them before merge)."""
+    import fnmatch
+    staged = git('diff', '--cached', '--name-only', '-z', '--no-renames', '--diff-filter=A').split(b'\0')
+    names = [os.fsdecode(raw) for raw in staged if raw]
+    secrets = [name for name in names
+               if any(fnmatch.fnmatch(Path(name).name.lower(), pattern) for pattern in SECRET_PATTERNS)]
+    if secrets:
+        fail('Secret-looking new files, not committed: ' + ', '.join(secrets[:10]))
+    print(', '.join(names[:8]) + (f' (+{len(names) - 8} more)' if len(names) > 8 else ''))
+
+
 def publish_review(arguments):
     source, head, base = arguments
     content = Path(source).read_text()
+    # Only what the pipeline relies on is mandatory; the other sections are requested by the
+    # prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
     required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
-                '## MINOR findings', '## Missing test coverage', '## Security concerns',
-                '## Architecture concerns', '## Manual testing recommendations')
+                '## MINOR findings')
     for field in required:
         if field not in content:
             fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
@@ -951,6 +971,8 @@ def main():
         review_info(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'checkpoint-guard':
+        checkpoint_guard(arguments)
     elif command == 'committed-matches-worktree':
         committed_matches_worktree(arguments)
     elif command == 'recover-decision':
