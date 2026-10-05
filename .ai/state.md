@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: feature/flow-hardening
-Phase: implementing
+Phase: ready_for_review
 Current task: none
 Last completed task: T015
 Tasks complete: 15
 Tasks remaining: 0
-Last validation: PASS at 2026-10-05T12:49:23Z
+Last validation: PASS at 2026-10-05T12:55:23Z
 Blocked: no
-Next action: Continue queue; see task results for any blockers
-Last updated: 2026-10-05T12:49:23Z
+Next action: Run independent Codex review, then human testing
+Last updated: 2026-10-05T12:55:23Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
