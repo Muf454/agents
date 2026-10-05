@@ -1,29 +1,28 @@
-<!-- Host evidence: HEAD 3eb87051e6bf02ad37fbef16e45cbea9f1e6722b; merge-base 662507102d51112163819c8a0bbc06706347c49a; saved 2026-10-05T12:23:29Z. -->
+<!-- Host evidence: HEAD fe6b8f4f664323dc7288f8cf795044b308b62a22; merge-base 662507102d51112163819c8a0bbc06706347c49a; saved 2026-10-05T13:00:09Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED — two branch-lifecycle defects and one stale handoff issue remain.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
+Overall verdict: CHANGES REQUIRED — two branch-lifecycle defects remain.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
 
-Reviewed HEAD: `3eb87051e6bf02ad37fbef16e45cbea9f1e6722b`  
+Reviewed HEAD: `fe6b8f4f664323dc7288f8cf795044b308b62a22`
 Supplied base / merge-base: `662507102d51112163819c8a0bbc06706347c49a`
 
 Inspected AGENTS.md, specification, plan, tasks, state, handoff, relevant documentation, Git history and scoped diff, affected source/tests, validation evidence, and the vault flow chart. The checkout was clean.
 
-The previous review’s M1, M2, N1, and N2 have corresponding source fixes and regression coverage. They are not counted again. The findings below concern this change; no separate pre-existing defect is counted.
+T015 implements host-recorded fix-round accounting and has relevant regression coverage. No additional defect was demonstrated in that change. Earlier findings M3 and M4 remain reproducible and retain their IDs. N3’s obsolete human todo and next action have been corrected. The findings below concern changes introduced within the supplied review range; no separate pre-existing defect is counted.
 
 Validation observed/run:
 
-- Stored validation reports **PASS** for the reviewed HEAD at `2026-10-05T12:15:02Z`; its log records **154 tests passed**.
-- Read-only validation-stamp verification passed.
-- Three documentation tests passed.
-- Directly ran two parser regression methods and the script-executability method without their writable fixture setup; all passed.
-- Bash syntax checks passed for 12 files; Python AST checks passed for three files.
-- `git diff --check` passed.
-- Ran in-memory reproductions using the actual dispute and run-manifest helpers.
-- Generated the PR body and finish summary read-only.
+- Stored validation reports **PASS** at `2026-10-05T12:55:23Z`, recorded at `2162f6fd782cb3fc6d044ca96cc3f4570db8c9ee`; its log records **161 tests passed**.
+- Read-only validation-stamp verification passed at reviewed HEAD.
+- **12 read-only tests passed**, covering documentation, tool contracts, model/todo rules, permissions entries, re-check parsing, and script executability. Writable integration fixtures were deliberately omitted.
+- Bash syntax checks passed for **13 files**; Python AST checks passed for **three files**.
+- Both findings reproduced using the actual helpers with in-memory storage.
+- Read-only PR-body and finish-summary generation confirmed the flow-chart declaration and removal of the obsolete executable-bit todo.
+- `git diff --check` reported trailing whitespace in `.ai/reviews/current.md:8`, an existing review artifact.
 
-Limitations: The full `./scripts/ai-check` gate and integration suite were not rerun because they create repositories, logs, locks, and evidence. Branch-lifecycle reproductions mocked filesystem storage; complete pipeline scenarios remain to be exercised in an isolated writable checkout. No project files were written and no network/MCP integrations were invoked. Live providers, GitHub, systemd, and physical upgrade failures were not exercised. The flow chart contains R1/R2/R3 and `updated: 2026-10-05`; its same-session update history cannot be established from the repository diff.
+Limitations: The full `./scripts/ai-check` gate and integration suite were not rerun because they write repositories, locks, logs, and evidence. The reproductions demonstrate helper behavior; complete branch-transition pipeline scenarios were not executed. Live providers, GitHub, systemd, and physical upgrade failures were not exercised. The vault flow chart includes R1/R2/R3 and T015 with `updated: 2026-10-05`; same-session update history cannot be established from the repository diff. No files were written and no network/MCP integrations were invoked.
 
 ## BLOCKER findings
 
@@ -33,79 +32,71 @@ None found in the inspected scope.
 
 ### M3 — Inherited dispute records block subsequent feature branches
 
-**Location:** `scripts/lib/workflow.py:1146`, `scripts/lib/workflow.py:1184`; consumer: `scripts/ai-pipeline:141`.
+**Location:** `scripts/lib/workflow.py:1147`, `scripts/lib/workflow.py:1241`; consumer: `scripts/ai-pipeline:143`.
 
-**Problem:** The host dispute store is keyed by the current branch, but `.ai/reviews/disputes.md` is a tracked file inherited by later branches. A new branch has no matching host store, so an authentic inherited file fails verification.
+**Problem:** Dispute authority is stored per branch, but `.ai/reviews/disputes.md` is tracked and inherited by subsequent branches. A new branch has no corresponding host records, so an unchanged, authentic inherited file fails verification.
 
-**Impact:** After the human resolves a disputed PR and merges it, a subsequent feature branch carrying its workflow records cannot complete dispute reconciliation or publishing. The error recommends restoring the file from Git, which preserves the same mismatch.
+**Impact:** After the human resolves and merges a disputed PR, a subsequent feature branch carrying that file cannot finish publishing. Depending on its review state, it stops during dispute reconciliation or the publish check. The suggested remedy—restoring the file from Git—preserves the mismatch.
 
-**Evidence:** An in-memory reproduction using the actual helpers verified one record on `feature/first`. With unchanged Markdown and `current_branch()` changed to `feature/next`, verification failed with:
+**Evidence:** Using the actual `disputes_store`, `render_disputes`, and `disputes_verify` helpers with in-memory storage:
+
+1. One authentic record verified on `feature/first`.
+2. With unchanged dispute Markdown, switching the branch identity to `feature/next` failed with:
 
 > `.ai/reviews/disputes.md does not match the dispute records the host wrote`
 
-This follows directly from the new branch returning an empty record list while the inherited Markdown remains present.
+The new branch’s absent host store returns an empty record list, while verification requires the tracked file to be absent for that list.
 
-**Recommended direction:** Distinguish immutable historical records from disputes active for the current PR. Preserve origin information and verification, and provide an explicit human-controlled archival transition if needed. Do not automatically resolve disputes within the active PR.
+**Recommended direction:** Distinguish historical disputes from disputes active for the current PR. Preserve provenance and integrity, and define a human-controlled archival transition where necessary. Keep active-PR disputes durable without making their inherited artifact block unrelated branches.
 
-### M4 — Starting another branch’s pipeline erases interrupted triage recovery state
+### M4 — Another branch’s pipeline erases interrupted triage recovery state
 
-**Location:** `scripts/lib/workflow.py:782`, `scripts/lib/workflow.py:795`; consumers: `scripts/ai-pipeline:81`, `scripts/ai-pipeline:246`.
+**Location:** `scripts/lib/workflow.py:782`, `scripts/lib/workflow.py:795`; consumers: `scripts/ai-pipeline:81`, `scripts/ai-pipeline:248`, `scripts/ai-pipeline:277`.
 
-**Requirement:** R1 requires resumed triage to enforce its original scope, verify fresh dispositions, and count the round exactly once before implementation continues.
+**Requirement:** R1 requires resumed triage to enforce its original scope, verify fresh dispositions, and count the round exactly once before implementation continues. T015 also requires preserving that completion protocol.
 
-**Problem:** All branches in a checkout share one `run.json`. Starting a run on another branch overwrites that manifest and retains an interrupted stage only when the previous manifest names the same branch.
+**Problem:** Every branch in a checkout shares `run.json`. Starting another branch’s pipeline overwrites it; an interrupted stage survives only when the immediately preceding manifest names the same branch.
 
-**Impact:** Returning to the original branch loses its triage start HEAD and review digest. If triage already committed dispositions and new TODO tasks but stopped before the counted commit, the pipeline can implement those tasks without completing or counting that round. Its original scope check is also skipped.
+**Impact:** Returning to the original branch loses its triage start HEAD and review digest. If triage committed dispositions and new TODO tasks before interruption, the checkout can be clean. Startup then skips `complete_stage` and proceeds to implementation, bypassing the original scope/freshness checks and leaving that round uncounted.
 
-**Evidence:** Using the actual `run_manifest` helper with in-memory storage:
+**Evidence:** An in-memory reproduction using the actual `run_manifest` helper:
 
-1. Started `feature/first` and supplied an open triage stage.
+1. Started `feature/first` and recorded an open triage stage.
 2. Confirmed `run-manifest stage` returned that stage.
 3. Started `feature/next`, then restarted `feature/first`.
 4. Confirmed `run-manifest stage` returned empty.
 
-The pipeline calls `complete_stage` on startup only when that query is populated.
+The source calls `complete_stage` only when that query is populated, then runs pending tasks. T015’s per-branch fix-round records do not preserve the lost stage.
 
-**Recommended direction:** Preserve interrupted manifests per branch, or refuse to overwrite an open stage belonging to another branch until the human explicitly reconciles it. Add a regression covering committed triage records without the counted commit across this branch transition.
+**Recommended direction:** Preserve interrupted manifests per branch, or refuse to overwrite another branch’s open stage until the human explicitly reconciles it. Add an integration regression covering committed triage records without the counted commit across this branch transition.
 
 ## MINOR findings
 
-### N3 — The finish notification requests an already-completed executable-bit fix
-
-**Location:** `.ai/handoff.md:129`, `.ai/handoff.md:132`; consumer: `scripts/lib/workflow.py:1332`.
-
-**Problem:** The handoff still asks the human to make `scripts/ai-task` executable and lists T013 as the next action, although the reviewed HEAD contains that fix.
-
-**Impact:** The generated FINISHED notification gives the human obsolete work and contradicts the completed task queue.
-
-**Evidence:** Git records `scripts/ai-task` as `100755`; the executable-mode check passes. Read-only `finish-summary` generation nevertheless includes:
-
-> Run `chmod +x scripts/ai-task` (and commit the mode)
-
-**Recommended direction:** Refresh the handoff’s implementation summary, human todos, and next action to match the reviewed revision.
+None found in the inspected scope.
 
 ## Missing test coverage
 
-- An authentic dispute file inherited by a subsequent feature branch after human resolution and merge.
-- Switching away from interrupted triage, starting another branch’s pipeline, and returning before the original round was counted.
-- Final delivery instructions remaining consistent with completed handoff tasks.
+- A dispute file inherited by a subsequent feature branch after human resolution and merge.
+- Starting another branch’s pipeline while the original branch has interrupted triage, then returning before its round was counted.
 
-Existing tests cover same-branch restarts and dispute durability through later reviews, but do not cover these branch transitions.
+The inspected tests cover same-branch recovery/restarts, dispute persistence through later reviews, and per-branch completed-round counts. They do not cover these lifecycle transitions.
 
 ## Security concerns
 
-No exploitable security defect was demonstrated in the inspected changes. M4 can bypass the intended triage scope verification after its host stage record is lost. The previous parser issue is fixed; the inspected integrity checks and allowlists do not establish complete isolation.
+No exploitable security defect was demonstrated in the inspected changes. M4 bypasses intended triage scope verification after its authoritative stage record is lost. The inspected permission and integrity checks do not establish complete isolation.
 
 ## Architecture concerns
 
-M3 combines branch-specific authoritative storage with a shared tracked artifact. M4 stores resumable branch state in a single overwriteable checkout manifest. Both need explicit lifecycle handling. The inspected upgrade rollback addresses the prior compatibility finding without adding dependencies.
+M3 combines branch-specific authoritative storage with an inherited tracked artifact. M4 places resumable branch state in one overwriteable checkout manifest. Both need explicit lifecycle handling.
+
+T015’s host-recorded accounting addresses the observed commit-subject counting problem, but does not resolve M4.
 
 ## Manual testing recommendations
 
 In an isolated writable checkout:
 
-- Resolve and merge a disputed PR, then start a new feature carrying its workflow records and verify normal delivery.
-- Interrupt triage after its dispositions/tasks commit but before its counted commit; run another branch’s pipeline, return, and verify scope enforcement and exactly one counted round.
-- Confirm the final PR body, draft status, and notification todos after refreshing the handoff.
+- Resolve and merge a disputed PR, create a subsequent feature branch carrying its workflow records, and verify normal delivery.
+- Interrupt triage after its dispositions/tasks commit but before its counted commit. Start another branch’s pipeline, return, and verify original scope checks, fresh dispositions, and exactly one counted round before implementation.
+- Run `./scripts/ai-check` after the fixes and retain validation evidence for the resulting revision.
 
 This review does not constitute human acceptance.
