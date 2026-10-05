@@ -20,3 +20,4 @@
 | 2026-10-05T10:16:18Z | runner | T008 | stopped (exit 1); inspect state/diff before resuming | see local logs | 370caec | No merge or deployment performed |
 | 2026-10-05T10:21:11Z | runner | T008 | stopped (exit 1); inspect state/diff before resuming | see local logs | 9b9399a | No merge or deployment performed |
 | 2026-10-05T10:55Z | claude | T009 | DONE: README/docs/workflow.md corrected, Modes table, docs_consistency tests; vault flow chart + hub log updated | docs_consistency 3 OK; ai-check 149 OK | (this commit) | PR body must say "Flow chart updated" |
+| 2026-10-05T10:52:02Z | runner | T009 | completed | PASS | d4607bc | Claude checkpointed; continuing queue |
