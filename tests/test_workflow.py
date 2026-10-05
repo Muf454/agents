@@ -908,6 +908,26 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('.env.production', self.run_cmd(['git', 'ls-files']).stdout)
         self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
 
+    def test_checkpoint_guard_catches_secret_names_however_they_were_added(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        (self.project / 'plain.txt').write_text('x')
+        self.commit('plain')
+        (self.project / 'nested').mkdir()
+        for name in ('nested/.envrc', '.environment', 'notes.txt'):
+            (self.project / name).write_text('x')
+        self.run_cmd(['git', 'mv', 'plain.txt', 'api.key'])  # rename destination
+        self.run_cmd(['git', 'add', '--all', '--', '.'])
+        result = self.helper('checkpoint-guard', expected=1)
+        for name in ('nested/.envrc', '.environment', 'api.key'):
+            self.assertIn(name, result.stderr)
+        self.assertNotIn('notes.txt', result.stderr)
+        self.run_cmd(['git', 'reset', '-q', '--hard'])
+        self.run_cmd(['git', 'clean', '-qfd'])
+        (self.project / 'ok.txt').write_text('x')
+        self.run_cmd(['git', 'add', '--all', '--', '.'])
+        self.assertIn('ok.txt', self.helper('checkpoint-guard').stdout)
+
     def test_review_with_a_renamed_optional_section_is_accepted(self):
         report = self.base / 'renamed.md'
         report.write_text('# Review\nOverall verdict: fine\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'

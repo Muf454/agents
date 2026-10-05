@@ -448,7 +448,7 @@ def claude_result(path, check_only=False):
         print(f'Note: {len(denials)} denied tool call(s) logged in .ai/local/denials.log', file=sys.stderr)
 
 
-SECRET_PATTERNS = ('.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
+SECRET_PATTERNS = ('.env*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
                    'id_ed25519*', 'id_ecdsa*', '*.kdbx', '*credentials*', '*secret*', '.npmrc', '.netrc')
 
 
