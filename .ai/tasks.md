@@ -677,3 +677,76 @@ an interrupted triage). `-k fix_round_count`: Ran 7 tests OK; with `-k triage_co
 14 OK. Gate: see run log. Docs: docs/workflow.md, README; vault hub log + flow note.
 Limitation: `ai-run --triage` run by hand on a legacy branch outside the pipeline creates the
 record without the legacy scan (the pipeline always initialises first).
+
+## T016 — Inherited dispute records must not block later branches (review M3)
+Status: TODO
+Dependencies: T015
+Model: opus
+
+### Goal
+Review finding M3: after a disputed PR is resolved and merged, `.ai/reviews/disputes.md` is
+inherited by the next feature branch, whose host store has no records, so
+`disputes-verify` fails and publishing stops.
+
+### Implementation notes
+Separate historical disputes from disputes active on the current branch, keeping integrity
+and provenance. Suggested design: a file that is byte-identical to its version at the
+merge-base with the base branch (i.e. already merged by the human) and has no host records
+for this branch is historical: it verifies, is not listed in the PR body or FINISHED todos
+and does not force a draft. New upheld answers on this branch are appended as records as
+today; define how the rendered file then relates to the inherited content (verification
+must still reject any edit of either part). Any file that differs from the merge-base copy
+and from the host records still fails. Check `disputes-record`, `disputes-values`,
+`pr-body`, `finish-summary` and `publish_ready`. Update docs/workflow.md, README and the vault
+flow chart if the lifecycle is described there.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-pipeline, tests, docs/workflow.md, README.md, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `disputes_lifecycle`: a branch created after a merged disputed PR (inherited,
+  unchanged file, no host records) publishes a normal non-draft PR without listing the old
+  disputes; editing the inherited file still fails; a new upheld dispute on the later branch
+  is recorded, drafts the PR and lists only the new dispute; existing `disputed_findings`
+  tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k disputes_lifecycle` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
+
+## T017 — Keep interrupted triage stage per branch (review M4)
+Status: TODO
+Dependencies: T016
+Model: opus
+
+### Goal
+Review finding M4: starting another branch's pipeline overwrites the shared `run.json` and
+erases an interrupted triage stage of the original branch, so on return the completion
+protocol (scope, freshness, counted round) is skipped.
+
+### Implementation notes
+In `run_manifest` (scripts/lib/workflow.py) keep the stage per branch (e.g. a separate
+`stage-<branch hash>.json` in `binding_dir()` or a per-branch map), so `start` for another
+branch neither drops nor inherits it, and `stage`, `stage-set`, `stage-clear` act on the
+current branch's stage. Keep the same-branch carry-over on human restart. Keep failing
+closed on unreadable data. Check ai-pipeline:81 and the ai-recover/watchdog readers of the stage.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests, docs/workflow.md
+
+### Acceptance criteria
+- Tests named `stage_per_branch`: open triage stage on branch A, pipeline started on B, back on
+  A → stage still returned and B has none; integration: triage dispositions and TODO tasks
+  committed but not counted, B run in between, restart A → scope/freshness verified and the
+  round counted exactly once before any implementation; existing `triage_completion` and
+  `fix_round_count` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k stage_per_branch` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)

@@ -140,4 +140,5 @@ Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
 None.
 
 ## Next action
-All tasks done; independent review of T015 next.
+Review of T015 triaged: M3 and M4 accepted. Implement T016 (inherited disputes), then T017
+(per-branch triage stage); then rerun the gate and request a fresh review.
