@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID>
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+ai_root
+case "${1:-}" in
+  set) [[ $# -eq 3 ]] || { echo 'Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>' >&2; exit 2; }
+       ai_helper tasks set "$2" "$3" ;;
+  show) [[ $# -eq 2 ]] || { echo 'Usage: ai-task show <ID>' >&2; exit 2; }
+        ai_helper tasks show "$2" ;;
+  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID>' >&2; exit 2 ;;
+esac

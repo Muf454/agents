@@ -49,7 +49,7 @@ if 'RECOVERY CONTRACT' in prompt:
                       'result': json.dumps(decision)}))
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
-assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with cd' in prompt
+assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -823,6 +823,44 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def permissions_template_entries(self):
         text = (ROOT / 'templates/.ai/permissions.allow').read_text()
         return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+
+    def prompt_section(self, name):
+        text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()
+        self.assertIn('\n## How to work here\n', text)
+        return text.split('\n## How to work here\n', 1)[1]
+
+    def test_tool_contract_section_is_shared_by_prompts(self):
+        runner = self.prompt_section('runner')
+        self.assertEqual(runner, self.prompt_section('triage'))
+        self.assertIn('.ai/bin/ai-task', runner)
+        self.assertIn('never prefix commands with `cd`', runner)
+        self.assertIn('never prefix commands with `cd`', self.prompt_section('recover'))
+        self.assertNotIn('never prefix commands with cd (', (ROOT / 'scripts/ai-run').read_text())
+
+    def test_tool_contract_setup_installs_ai_task(self):
+        self.setup_project()
+        self.assertTrue((self.project / '.ai/bin/ai-task').is_file())
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-task', os.X_OK))
+
+    def test_tool_contract_ai_task_set_and_show(self):
+        self.setup_project()
+        (self.project / '.ai/tasks.md').write_text(
+            task('T001', 'DONE').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet')
+            + task('T002', 'TODO', 'T001'))
+        ai_task = str(self.project / '.ai/bin/ai-task')
+        shown = self.run_cmd([ai_task, 'show', 'T001']).stdout
+        for text in ('Status: DONE', 'Model: sonnet', 'Dependencies: none'):
+            self.assertIn(text, shown)
+        shown = self.run_cmd([ai_task, 'show', 'T002']).stdout
+        for text in ('Status: TODO', 'Dependencies: T001'):
+            self.assertIn(text, shown)
+        self.run_cmd([ai_task, 'set', 'T002', 'IN_PROGRESS'])
+        self.assertIn('Status: IN_PROGRESS', self.run_cmd([ai_task, 'show', 'T002']).stdout)
+        self.assertIn('Status: DONE', self.run_cmd([ai_task, 'show', 'T001']).stdout)
+        self.run_cmd([ai_task, 'set', 'T002', 'FINISHED'], expected=1)
+        self.run_cmd([ai_task, 'set', 'T009', 'DONE'], expected=1)
+        self.run_cmd([ai_task, 'show', 'T009'], expected=1)
+        self.run_cmd([ai_task, 'bogus'], expected=2)
 
     def test_permissions_template_allows_read_only_shell_and_task_helper(self):
         entries = self.permissions_template_entries()

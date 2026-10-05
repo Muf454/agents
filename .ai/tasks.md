@@ -45,7 +45,7 @@ by the gate: the fixture inherited `AI_PIPELINE`/`AI_LOCK_HELD` from the pipelin
 session, which made 4 notification/plan-review tests fail; setUp now drops both.
 
 ## T002 — Shared tool contract and the ai-task command
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: sonnet
 
@@ -77,7 +77,14 @@ permissions; new tests are named with `tool_contract`; the output must say `Ran 
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+Done 2026-10-05. "How to work here" section appended to runner.md and triage.md (identical)
+and recover.md (read-only rules only). `scripts/ai-task` (`set`, `show`; usage errors exit 2)
+over the existing `tasks` helper, which gained `show` (id/title, status, model, dependencies);
+setup's copy list includes ai-task (installed 0755). ai-run's RUNNER CONTRACT now points to the
+section. The mock Claude's prompt assertion follows the new wording (`cd` in backticks).
+Tests `test_tool_contract_*` (3). Targeted: `Ran 3 tests ... OK`. Gate: 107 tests OK.
+Limitation: `chmod +x scripts/ai-task` was denied in this run, so the source file is 0644
+(human todo); installed copies are 0755 via setup.
 
 ## T003 — Model rule and human-todo rule in templates
 Status: TODO

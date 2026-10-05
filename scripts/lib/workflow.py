@@ -115,7 +115,7 @@ def setup(arguments):
     if not template_root.is_dir():
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
-    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover',
+    for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
                  'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     generated = '.ai/validation-candidates.md'
@@ -283,12 +283,15 @@ def task_command(arguments):
             fail(f'Unknown task: {arguments[1]}')
         done = sum(t['status'] == 'DONE' for t in blocks)
         print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
-    elif action in ('status', 'set'):
+    elif action in ('status', 'show', 'set'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
             fail(f'Unknown task: {arguments[1]}')
         if action == 'status':
             print(task['status'])
+        elif action == 'show':
+            print(f"{task['id']} {task['title']}\nStatus: {task['status']}\n"
+                  f"Model: {task['model'] or 'default'}\nDependencies: {task['dependencies']}")
         else:
             if arguments[2] not in ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'):
                 fail('Invalid task status.')

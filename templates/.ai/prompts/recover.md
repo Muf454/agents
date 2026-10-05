@@ -23,3 +23,9 @@ wrong resume costs more than a ping to the human.
 
 Return ONLY this JSON as your final message (no prose before or after):
 {"action": "rerun|commit_and_rerun|escalate", "reason": "<one sentence: what happened>", "human_action": "<for escalate: the concrete next step for the human; otherwise empty>"}
+
+## How to work here
+
+- Read with Read, Grep and Glob. You are read-only: do not edit files or run changing commands.
+- Run plain commands, and never prefix commands with `cd`: the shell already starts in the
+  project root.
