@@ -1932,6 +1932,111 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('🏁 FINISHED', self.notifications())
         self.assertEqual(self.open_stage(), '')
 
+    # ---------------------------------------------------------------- stage per branch (T017)
+    def start_run(self, branch):
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, branch, '--approved', '--base', 'main', '--no-pr')
+
+    def test_stage_per_branch_survives_a_run_on_another_branch(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.start_run('feature/test')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        stage = self.open_stage()
+        self.assertEqual(stage.split()[:2], ['triage', head])
+        # Another branch's run neither drops nor inherits it, and clearing there leaves it alone.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.start_run('other')
+        self.assertEqual(self.open_stage(), '')
+        self.helper('run-manifest', 'stage-clear')
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        self.assertEqual(self.open_stage(), stage)
+        # A human restart on the same branch carries it over.
+        self.start_run('feature/test')
+        self.assertEqual(self.open_stage(), stage)
+        self.helper('run-manifest', 'stage-clear')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_stage_per_branch_legacy_manifest_stage_moves_to_its_branch(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.start_run('feature/test')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        stage = self.open_stage()
+        # Rewrite it in the old format: the stage inside run.json, no per-branch file.
+        state = self.base / 'host-state'
+        stage_file = next(state.rglob('stage-*.json'))
+        manifest = next(state.rglob('run.json'))
+        data = json.loads(manifest.read_text())
+        data['stage'] = json.loads(stage_file.read_text())['stage']
+        manifest.write_text(json.dumps(data))
+        stage_file.unlink()
+        self.assertEqual(self.open_stage(), stage)
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.start_run('other')
+        self.assertEqual(self.open_stage(), '')
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        self.assertEqual(self.open_stage(), stage)
+
+    def test_stage_per_branch_unreadable_record_fails_closed(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.start_run('feature/test')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        next((self.base / 'host-state').rglob('stage-*.json')).write_text('{not json')
+        self.assertIn('is unreadable', self.helper('run-manifest', 'stage', expected=1).stderr)
+        self.helper('stage-verify', expected=1)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn("Cannot read this branch's triage stage", result.stderr)
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+
+    def test_stage_per_branch_interrupted_triage_completes_after_another_branch_run(self):
+        # Review M4: a run on branch B in between erased branch A's interrupted triage, so
+        # restarting A skipped scope/freshness checks and never counted the round.
+        self.ready()
+        crashed = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=None,
+                            MOCK_CODEX='major-once', MOCK_CLAUDE='triage-crash')
+        self.assertEqual(crashed.returncode, -9)
+        stage = self.open_stage()
+        self.assertTrue(stage.startswith('triage '))
+        start = stage.split()[1]
+        self.assertEqual(self.fix_rounds(), 0)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        (self.project / '.ai/local/pipeline.active').unlink(missing_ok=True)
+        # The human runs the pipeline on another branch in between.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other', 'main'])
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=None)
+        self.assertEqual(self.helper('run-manifest', 'branch').stdout.strip(), 'other')
+        self.assertEqual(self.open_stage(), '')
+        self.run_cmd(['git', 'switch', '-q', '-f', 'feature/test'])
+        self.assertEqual(self.open_stage(), stage)
+        # Restart A: the stage is verified and counted once, before any implementation.
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertIn('Completing the interrupted review triage', result.stdout)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.fix_rounds(), 1)
+        counted = self.run_cmd(['git', 'log', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.split()
+        self.assertEqual(len(counted), 1)
+        changed = self.run_cmd(['git', 'diff', '--name-only', start, counted[0]]).stdout.split()
+        self.assertTrue(set(changed) <= {'.ai/tasks.md', '.ai/reviews/dispositions.md', '.ai/current-plan.md',
+                                          '.ai/state.md', '.ai/handoff.md', '.ai/run-log.md'}, changed)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.open_stage(), '')
+
     # ---------------------------------------------------------------- fix round count (T015)
     def fix_rounds(self):
         return int(self.helper('fix-rounds', 'count', 'main').stdout.strip())

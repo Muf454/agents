@@ -730,7 +730,7 @@ README, vault agents-flow.md. Limitation: reusing a branch name whose host recor
 already merged fails verification (documented).
 
 ## T017 — Keep interrupted triage stage per branch (review M4)
-Status: TODO
+Status: DONE
 Dependencies: T016
 Model: opus
 
@@ -761,4 +761,16 @@ Targeted: `python3 -m unittest discover -s tests -k stage_per_branch` (output mu
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. The stage lives in `binding_dir()/stage-<sha256(branch)[:16]>.json` as
+`{branch, stage}`; `run-manifest start` no longer touches it (a legacy `stage` inside `run.json`
+is moved to its branch's file), `stage` reads the current branch's record (also before any
+manifest exists), `stage-set`/`stage-clear`/`stage-verify` act on the current branch. An
+unreadable or foreign record fails closed: `ai-pipeline` now stops at start with "Cannot read
+this branch's triage stage" (it used to swallow the error), `ai-recover` escalates.
+Evidence: `-k stage_per_branch` Ran 4 tests OK (per-branch survival + same-branch restart,
+legacy migration, unreadable record fails closed, integration: crash after the triage
+commit, pipeline on `other`, restart A → "Completing the interrupted review triage", round
+counted once, `start..counted` touches only triage records, T002 DONE afterwards);
+`-k stage_per_branch -k triage_completion -k fix_round_count -k recover -k manifest` Ran 32 OK;
+`.ai/bin/ai-check` Ran 168 tests OK. Limitation: a stage file of a deleted branch stays on the
+host; a new branch with the same name inherits it and escalates (start_head not an ancestor).

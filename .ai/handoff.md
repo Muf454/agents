@@ -81,6 +81,11 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   appended after the verbatim inherited part (numbered on); only they count. Any edit of
   either part fails. Inherited upheld answers are not re-recorded. Limitation: reusing a
   branch name whose records were already merged fails verification.
+- T017 (review M4): the open triage stage is stored per branch in the host state directory
+  (`stage-<branch hash>.json` beside `run.json`), so starting the pipeline on another branch
+  neither drops nor inherits it; back on the branch, the restart verifies and counts it once
+  before any implementation. Unreadable stage records stop `ai-pipeline` at start. A legacy
+  stage inside `run.json` still counts and moves to its branch's file on the next start.
 
 ## Flow chart
 Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
@@ -149,10 +154,20 @@ Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
    stops ("disputes.md does not match"). On a fresh branch where Codex upholds a new
    rejection, the file keeps the inherited part verbatim and appends `D2`; the PR is a draft
    listing only the new dispute.
+11. Triage stage per branch (T017, review M4): in a scratch project, start `ai-pipeline
+   --approved` on branch A against a review with a MAJOR finding and kill it during "Review
+   triage" after the triage session committed. Switch to a new branch B and run `ai-pipeline
+   --approved` there (any outcome); `python3 .ai/bin/lib/workflow.py run-manifest stage`
+   prints nothing on B. Switch back to A: the same command prints `triage <sha> <digest>`;
+   rerun `ai-pipeline --approved`: it prints "Completing the interrupted review triage",
+   `git log --oneline | grep -c 'record review triage$'` is 1 and that commit comes before
+   any implementation commit. Write `{not json` into A's `stage-*.json` under
+   `~/.local/state/ai-toolkit/reviews/*/`: the pipeline stops with "Cannot read this
+   branch's triage stage".
 
 ## Human todos
 None.
 
 ## Next action
-T016 done (inherited disputes). Implement T017 (per-branch triage stage); then rerun the
-gate and request a fresh review.
+All tasks DONE (T017 per-branch triage stage). Rerun the gate and request a fresh
+independent review.

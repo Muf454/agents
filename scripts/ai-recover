@@ -100,11 +100,11 @@ case "$reason" in
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
 
-# An interrupted review triage (the stage is in the manifest, also after a crash): never
-# commit its leftovers here. Rerun: the pipeline verifies the stage and records the round
-# exactly once, or escalates. Leftovers outside workflow records escalate right away.
+# An interrupted review triage (this branch's host-side stage record, also after a crash):
+# never commit its leftovers here. Rerun: the pipeline verifies the stage and records the
+# round exactly once, or escalates. Leftovers outside workflow records escalate right away.
 open_stage=$(ai_helper run-manifest stage 2>/dev/null) || \
-  escalate 'the run manifest holds an invalid stage.' 'rerun ai-pipeline --approved by hand.'
+  escalate 'the triage stage record is unreadable or invalid.' 'rerun ai-pipeline --approved by hand.'
 if [[ -n "$open_stage" ]]; then
   read -r _ stage_start _ <<< "$open_stage"
   scope=$(ai_helper triage-scope "$stage_start" 2>&1) || \

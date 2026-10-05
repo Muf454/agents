@@ -210,8 +210,12 @@ optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
 Triage completion (one counted round, even across stops and crashes): before each triage
-the pipeline records `stage = {name: triage, start_head, review_digest}` in the run
-manifest (`run-manifest stage-set`; a human restart on the same branch carries it over).
+the pipeline records `stage = {name: triage, start_head, review_digest}` per branch in
+the host state directory (`stage-<branch hash>.json` beside `run.json`; `run-manifest
+stage-set`, `stage` and `stage-clear` act on the current branch). A run on another branch
+neither drops nor inherits it; a restart on the same branch completes it. An unreadable or
+foreign stage record stops the pipeline before anything runs; a legacy stage inside
+`run.json` still counts for its branch and moves to that branch's file on the next start.
 Every pipeline start and resume completes an open stage first (`complete_stage`), before
 the clean-tree check, plan review or implementation: `stage-verify` requires the review
 binding (verified report whose SHA-256 equals `review_digest`) and that committed,
@@ -321,8 +325,8 @@ reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human s
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
 `Triage stage`);
-an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage in the
-manifest (also after a watchdog crash recovery) it never commits anything: changes since
+an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage for the
+branch (also after a watchdog crash recovery) it never commits anything: changes since
 the stage start outside triage records escalate, otherwise it resumes without a Claude
 session and the pipeline completes the stage; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one

@@ -76,11 +76,11 @@ if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   else ai_die "Cannot infer the PR target from --base $base; pass --pr-base BRANCH."
   fi
 fi
-# An interrupted stage of this branch's run (host-side manifest) is completed below, before
-# anything else; its leftovers are checked there. An uncommitted re-check report (a stop
-# before its host commit) is verified and committed by the dispute reconciliation below.
-# Otherwise start from a clean checkpoint.
-open_stage=$(ai_helper run-manifest stage 2>/dev/null || true)
+# An interrupted stage of this branch (host-side, per branch, so runs on other branches
+# neither drop nor inherit it) is completed below, before anything else; its leftovers are
+# checked there. An uncommitted re-check report (a stop before its host commit) is verified
+# and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
+open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'

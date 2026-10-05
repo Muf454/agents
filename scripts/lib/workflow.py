@@ -788,15 +788,24 @@ def run_manifest(arguments):
         path.parent.mkdir(parents=True, exist_ok=True)
         settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
         data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings}
-        # An interrupted stage on this branch outlives a human restart: the pipeline
-        # completes (or escalates) it before anything else.
+        # Stages live per branch (stage_path), so a run on another branch neither drops nor
+        # inherits them, and one on the same branch completes it first. A legacy stage
+        # inside run.json moves to its branch's file.
         try:
             old = json.loads(path.read_text())
-            if isinstance(old, dict) and old.get('branch') == branch and 'stage' in old:
-                data['stage'] = old['stage']
         except (OSError, ValueError):
-            pass
+            old = None
+        if isinstance(old, dict) and 'stage' in old and isinstance(old.get('branch'), str) \
+                and not stage_path(old['branch']).exists():
+            atomic(stage_path(old['branch']), json.dumps({'branch': old['branch'], 'stage': old['stage']}) + '\n')
         atomic(path, json.dumps(data) + '\n')
+        return
+    if action == 'stage':
+        # The open stage of the current branch ('name start_head review_digest'), if any.
+        # Read before any run is recorded, too: the pipeline checks it before `start`.
+        stage = load_stage(current_branch())
+        if stage is not None:
+            print(' '.join(stage_fields(stage)))
         return
     try:
         data = json.loads(path.read_text())
@@ -833,17 +842,18 @@ def run_manifest(arguments):
         if name != 'triage' or not re.fullmatch(r'[0-9a-f]{40}', start):
             fail('Invalid stage.')
         review_info_values()
-        data['stage'] = {'name': name, 'start_head': start, 'review_digest': review_digest()}
-        atomic(path, json.dumps(data) + '\n')
-    elif action == 'stage':
-        # The open stage of this branch's run ('name start_head review_digest'), if any.
-        stage = data.get('stage')
-        if stage is None or data['branch'] != current_branch():
-            return
-        print(' '.join(stage_fields(stage)))
+        branch = current_branch()
+        if not branch:
+            fail('Invalid stage: detached HEAD.')
+        stage = {'name': name, 'start_head': start, 'review_digest': review_digest()}
+        atomic(stage_path(branch), json.dumps({'branch': branch, 'stage': stage}) + '\n')
     elif action == 'stage-clear':
-        data.pop('stage', None)
-        atomic(path, json.dumps(data) + '\n')
+        branch = current_branch()
+        if branch:
+            stage_path(branch).unlink(missing_ok=True)
+        if 'stage' in data and data['branch'] == branch:
+            data.pop('stage')
+            atomic(path, json.dumps(data) + '\n')
     else:
         fail('Unknown run-manifest action.')
 
@@ -861,6 +871,34 @@ def current_branch():
         return ''
 
 
+def stage_path(branch):
+    """Host-side file holding BRANCH's open stage, beside the run manifest."""
+    return binding_dir() / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def load_stage(branch):
+    """BRANCH's open stage record, or None. Unreadable or foreign data fails closed."""
+    if not branch:
+        return None
+    path = stage_path(branch)
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        # A legacy stage inside run.json (until `start` moves it to its branch's file).
+        try:
+            data = json.loads((binding_dir() / 'run.json').read_text())
+        except (OSError, ValueError):
+            return None
+        if isinstance(data, dict) and data.get('branch') == branch and 'stage' in data:
+            return data['stage']
+        return None
+    except (OSError, ValueError):
+        fail(f'Triage stage: the stage record {path} is unreadable.')
+    if not isinstance(data, dict) or data.get('branch') != branch or 'stage' not in data:
+        fail(f'Triage stage: the stage record {path} does not belong to this branch.')
+    return data['stage']
+
+
 def review_digest():
     return hashlib.sha256(Path('.ai/reviews/current.md').read_bytes()).hexdigest()
 
@@ -870,7 +908,7 @@ def stage_fields(stage):
               for key in ('name', 'start_head', 'review_digest')]
     if fields[0] != 'triage' or not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
             or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
-        fail('Triage stage: the run manifest holds an invalid stage record.')
+        fail('Triage stage: the stage record is invalid.')
     return fields
 
 
@@ -897,14 +935,10 @@ def stage_verify(arguments):
     """Verify an open triage stage before it is completed. Prints 'committed' when its counted
     commit already exists after start_head (close it without a second count), else 'pending'.
     Any mismatch fails: the caller escalates without implementation or counting."""
-    path = binding_dir() / 'run.json'
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        fail('Triage stage: the run manifest is unreadable.')
-    if not isinstance(data, dict) or 'stage' not in data:
-        fail('Triage stage: no open stage in the run manifest.')
-    _, start, digest = stage_fields(data['stage'])
+    stage = load_stage(current_branch())
+    if stage is None:
+        fail('Triage stage: no open stage for this branch.')
+    _, start, digest = stage_fields(stage)
     try:
         review_info_values()
     except ValueError as error:
