@@ -26,3 +26,4 @@
 | 2026-10-05T11:09:35Z | runner | none | queue complete; ready for independent review | PASS | a2c21c5 | Human acceptance remains |
 | 2026-10-05T11:15:56Z | runner | triage | review triaged into dispositions/tasks | n/a | a3c9040 | Fix tasks run next |
 | 2026-10-05T11:21:42Z | claude | T011 | DONE: parse_recheck fails closed on any unknown/malformed entry (review M1); regression test + docs | recheck_command 7 OK; ai-check 150 OK | (this commit) | git stash denied, so the new test could not be run against the pre-fix code |
+| 2026-10-05T11:27:38Z | runner | T011 | completed | PASS | fb71c88 | Claude checkpointed; continuing queue |
