@@ -9,7 +9,7 @@ Tasks complete: 7
 Tasks remaining: 2
 Last validation: PASS at 2026-10-05T10:16:05Z
 Blocked: no
-Next action: Continue queue; see task results for any blockers
+Next action: Resume/implement T008
 Last updated: 2026-10-05T10:16:05Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
