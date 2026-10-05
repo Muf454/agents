@@ -101,5 +101,11 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 ## Human todos
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
+- T010: Updated shared "How to work here" section to explicitly require running `.ai/bin/ai-check`
+  in the foreground with Bash tool timeout set to 600000 ms; never in the background or via
+  polling. If it times out, mark the task BLOCKED rather than ending without checkpoint.
+  Same requirement mirrored in README.md step 4. Test suite confirms sections are identical
+  in runner and triage prompts.
+
 ## Next action
-Runner continues with T010 (tool contract: run the gate in the foreground).
+All tasks complete. Feature ready for review.

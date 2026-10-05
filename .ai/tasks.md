@@ -443,7 +443,7 @@ Modes table to both. Vault flow chart audited (R1, R2, R3 present, `updated:` 20
 given a note on logged denials. Evidence: `docs_consistency` 3 OK; gate result in run log.
 
 ## T010 — Tool contract: run the long gate in the foreground
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: haiku
 
@@ -470,4 +470,10 @@ permissions; the output must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. Updated "How to work here" section in templates/.ai/prompts/runner.md and
+triage.md to explicitly require running `.ai/bin/ai-check` in the foreground with 600000 ms
+timeout, never in the background or with polling. Added instruction to mark task BLOCKED if
+it times out rather than ending without a checkpoint. Mirrored in README.md step 4. Sections
+remain identical in runner and triage (verified by test). Evidence: `python3 -m unittest
+discover -s tests -k tool_contract` → Ran 3 tests, OK. `.ai/bin/ai-check` → Ran 149 tests, OK.
+All acceptance criteria met.

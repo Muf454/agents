@@ -130,7 +130,9 @@ Before leaving an implementation session unattended:
    Keep secrets out of reach of the runner's user. `sed`, `rg` and `find` are left out
    on purpose: they write or execute through their own flags (`sed -i`, `rg --pre`,
    `find -exec`/`-delete`).
-4. Run `.ai/bin/ai-check`. Record/fix any baseline failures rather than suppressing them.
+4. Run `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout` set to 600000 ms;
+   never run it in the background or poll it. Record/fix any baseline failures rather than
+   suppressing them.
 5. Checkpoint the approved plan, validation, permissions, and task queue on the feature branch.
 
 For example, in a project that really defines these package scripts:
