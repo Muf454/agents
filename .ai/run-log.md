@@ -14,3 +14,4 @@
 | 2026-10-05T08:30Z | claude | T005 | DONE: publish_ready before PR stage, before every push attempt and after every push; remote branch head must equal HEAD | publish_ready 5 OK; ai-check 122 OK | (this commit) | Vault flow chart + hub log updated |
 | 2026-10-05T08:16:09Z | runner | T005 | completed | PASS | 80bd93b | Claude checkpointed; continuing queue |
 | 2026-10-05T08:45Z | claude | T006 | DONE: ai-review --recheck with own preflight, strict JSON parsing (missing/dup/extra/malformed → upheld), host-written recheck.md bound to review/rows/HEAD, recheck-verify; AI_RECHECK_EFFORT run setting | recheck_command 6 OK; ai-check 128 OK | (this commit) | .ai/bin/ai-task not in frozen copy (denied); status edited directly. Flow unchanged until T007 |
+| 2026-10-05T09:53:53Z | runner | T006 | completed | PASS | 4a74fbf | Claude checkpointed; continuing queue |
