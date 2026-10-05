@@ -228,7 +228,12 @@ R3 (integration) of `.ai/project-spec.md`; plan review P3.
 Right after every triage, AND on every pipeline start/resume BEFORE any task runs or the
 implementation review is replaced (regardless of task completion), ai-pipeline reconciles
 pending re-checks: rejected BLOCKER/MAJOR in the current dispositions without a verified,
-current re-check → run `ai-review --recheck` and checkpoint its artifacts first. Every UPHELD answer becomes a durable dispute record in
+current re-check → run `ai-review --recheck`. The re-check report and the dispute records for
+its upheld answers are written and committed together in ONE host commit (no window between
+them). Reconciliation also verifies, for an already verified re-check, that every upheld
+answer has its record (keyed by review digest + finding id) and appends any missing one
+exactly once, before implementation or review replacement. Every UPHELD answer becomes a
+durable dispute record in
 `.ai/reviews/disputes.md` (review digest, finding id, original finding text, Claude's
 evidence, Codex's answer, date), digest-bound in host state like the reviews; records are
 only ever appended. Lifetime rule (simple on purpose): a recorded dispute is never resolved
@@ -249,6 +254,9 @@ scripts/ai-pipeline, scripts/lib/workflow.py (pr-body), tests, vault agents-flow
   interrupted after a mixed triage but before the re-check → the resume re-checks the
   ORIGINAL rejected findings first, then implements the accepted fixes, and an upheld
   dispute survives a later clean review into a draft PR.
+- Interrupted after a re-check report exists but its dispute record is missing (simulated by
+  removing the record) → the resume adds the record exactly once before any task runs, and
+  the dispute reaches the draft PR; re-running reconciliation doesn't duplicate records.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k disputed_findings` (allowed by this run's
