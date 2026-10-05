@@ -87,7 +87,7 @@ Limitation: `chmod +x scripts/ai-task` was denied in this run, so the source fil
 (human todo); installed copies are 0755 via setup.
 
 ## T003 — Model rule and human-todo rule in templates
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: haiku
 
