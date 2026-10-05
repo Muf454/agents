@@ -2,7 +2,7 @@
 
 Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. Never edit
 `.ai/bin`, `.ai/prompts` or other gate files. This run is started with
-`--knowledge-dir "~/zWiki/zWiki/20 Projects/agents"` so the vault flow chart can be updated.
+`--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the vault flow chart can be updated.
 
 ## T001 — Permissions template: approved read-only shell, git rm/mv, ai-task
 Status: TODO
@@ -13,12 +13,13 @@ Model: opus
 Permission part of B1/E1 (security policy, hence opus).
 
 ### Implementation notes
-templates/.ai/permissions.allow: add `Bash(ls)`, `Bash(ls *)`, `Bash(grep *)`, `Bash(rg *)`,
-`Bash(cat *)`, `Bash(head *)`, `Bash(tail *)`, `Bash(wc *)`, `Bash(sed -n *)`, `Bash(echo *)`,
-`Bash(git rm *)`, `Bash(git mv *)`, `Bash(.ai/bin/ai-task *)`, with a comment: Claude Code
-denies redirects, pipes and chains into commands that are not allowed (verified live on
-2026-10-05). Document in README (permissions section) the residual risk: read-only commands
-can read files outside the project.
+templates/.ai/permissions.allow: add `Bash(ls)`, `Bash(ls *)`, `Bash(grep *)`, `Bash(cat *)`,
+`Bash(head *)`, `Bash(tail *)`, `Bash(wc *)`, `Bash(echo *)`, `Bash(git rm *)`, `Bash(git mv *)`,
+`Bash(.ai/bin/ai-task *)`. Deliberately NOT sed, rg or find: they write or execute through
+their own flags (sed -i / w / e, rg --pre, find -exec/-delete), which no redirect check stops
+(plan review P10). Comment in the file: Claude Code denies redirects, pipes and chains into
+commands that aren't allowed (verified live 2026-10-05). README (permissions section):
+document the actual residual capability: these commands can READ files outside the project.
 
 ### Likely affected modules
 templates/.ai/permissions.allow, README.md (permissions), tests
@@ -26,11 +27,12 @@ templates/.ai/permissions.allow, README.md (permissions), tests
 ### Acceptance criteria
 - Tests named `permissions_template`: the new entries exist; NONE of these appear:
   network (curl, wget, ssh, scp), installs (npm install, npm i, pip install), `git push`,
-  `git reset --hard`, `rm `, `sed -i`, `find`, `chmod`, `sudo`.
+  `git reset --hard`, `rm `, `sed`, `rg`, `find`, `xargs`, `chmod`, `sudo`, `bash -c`, `python`.
 
 ### Validation
-`python3 -m unittest discover -s tests -k permissions_template` (new tests are named with `permissions_template` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k permissions_template` (allowed by this run's
+permissions; new tests are named with `permissions_template`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -46,8 +48,9 @@ Contract part of B1/E1.
 ### Implementation notes
 Identical "How to work here" section in templates/.ai/prompts/runner.md, triage.md and
 recover.md (recover is read-only: only the reading rules): Read/Grep/Glob for reading,
-Edit/Write for changes (no heredoc/sed edits), plain commands without `cd`, run checks only
-as `.ai/bin/ai-check`, `git rm`/`git mv` for tracked files, `.ai/bin/ai-task` for task status.
+Edit/Write for changes (no heredoc/sed edits), plain commands without `cd`, run the full gate as
+`.ai/bin/ai-check` (no redirects or `; echo`), and the task's own targeted test command when
+it names one, `git rm`/`git mv` for tracked files, `.ai/bin/ai-task` for task status.
 New `scripts/ai-task`: `set T003 IN_PROGRESS|DONE|BLOCKED|TODO` (existing helper) and
 `show T003` (prints status, model, dependencies); add it to setup's copy list. ai-run's
 contract strings refer to the section instead of repeating rules.
@@ -62,8 +65,9 @@ templates/.ai/prompts/{runner,triage,recover}.md, scripts/ai-task, scripts/lib/w
   `show` prints status, model and dependencies.
 
 ### Validation
-`python3 -m unittest discover -s tests -k tool_contract` (new tests are named with `tool_contract` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k tool_contract` (allowed by this run's
+permissions; new tests are named with `tool_contract`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -89,8 +93,9 @@ templates/CLAUDE.md, templates/.ai/prompts/{plan,plan-review,runner,triage}.md, 
   review or validation once" wording is gone; the R6 rule is in runner and triage.
 
 ### Validation
-`python3 -m unittest discover -s tests -k template_rules` (new tests are named with `template_rules` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k template_rules` (allowed by this run's
+permissions; new tests are named with `template_rules`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -128,8 +133,9 @@ stage), tests, vault agents-flow.md
   committed; the fix-round limit still holds.
 
 ### Validation
-`python3 -m unittest discover -s tests -k triage_completion` (new tests are named with `triage_completion` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k triage_completion` (allowed by this run's
+permissions; new tests are named with `triage_completion`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -159,8 +165,9 @@ scripts/ai-pipeline, tests
   still opens the PR.
 
 ### Validation
-`python3 -m unittest discover -s tests -k publish_ready` (new tests are named with `publish_ready` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k publish_ready` (allowed by this run's
+permissions; new tests are named with `publish_ready`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -197,8 +204,9 @@ templates/.ai/prompts/recheck.md, tests (mock codex modes)
   `AI_RECHECK_EFFORT` survives recovery like the other settings.
 
 ### Validation
-`python3 -m unittest discover -s tests -k recheck_command` (new tests are named with `recheck_command` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k recheck_command` (allowed by this run's
+permissions; new tests are named with `recheck_command`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -229,8 +237,9 @@ scripts/ai-pipeline, scripts/lib/workflow.py (pr-body), tests, vault agents-flow
   runs; no rejected BLOCKER/MAJOR → no re-check call.
 
 ### Validation
-`python3 -m unittest discover -s tests -k disputed_findings` (new tests are named with `disputed_findings` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k disputed_findings` (allowed by this run's
+permissions; new tests are named with `disputed_findings`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -251,9 +260,12 @@ baseline of a preserved (kept) file. `setup-project --upgrade PATH` prints the p
 nothing; `--upgrade --apply PATH` replaces toolkit-owned files (`.ai/bin/**`,
 `.ai/prompts/**`) whose current hash equals their baseline, keeps locally edited ones
 (warning; replaced only with `--force`), keeps the old baseline for kept files, writes new
-baselines for replaced ones, and reminds to reinstall the watchdog timer. Missing or
-malformed stamp (legacy install): every differing toolkit-owned file counts as locally
-edited (needs `--force`), identical ones get baselines. README: upgrades are their own PR.
+baselines for replaced ones, and reminds to reinstall the watchdog timer. A toolkit-owned
+file missing in the project is CREATED (preview shows CREATE; executable mode kept; path and
+symlink checks as in setup; baseline recorded); this is how `.ai/bin/ai-task` and
+`.ai/prompts/recheck.md` reach older installs. Missing or malformed stamp (legacy install):
+every differing existing toolkit-owned file counts as locally edited (needs `--force`),
+identical ones get baselines, missing ones are created. README: upgrades are their own PR.
 
 ### Likely affected modules
 scripts/setup-project, scripts/lib/workflow.py, README.md, tests
@@ -263,11 +275,13 @@ scripts/setup-project, scripts/lib/workflow.py, README.md, tests
   A→B upgrade replaces an outdated file and keeps .ai/validate and permissions; a local
   edit is kept and reported, replaced with --force; repeated setup after a local edit
   doesn't bless it; two consecutive applies are stable; a legacy install needs --force for
-  differing files.
+  differing files; upgrading an older inventory without ai-task and recheck.md creates both,
+  and the installed `ai-task show` then works.
 
 ### Validation
-`python3 -m unittest discover -s tests -k toolkit_upgrade` (new tests are named with `toolkit_upgrade` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k toolkit_upgrade` (allowed by this run's
+permissions; new tests are named with `toolkit_upgrade`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)
@@ -296,8 +310,9 @@ README.md, docs/workflow.md, tests
   provider retries" (case-insensitive), or lack a "Modes" table heading.
 
 ### Validation
-`python3 -m unittest discover -s tests -k docs_consistency` (new tests are named with `docs_consistency` and the
-output must say `Ran N tests` with N ≥ 1), then `.ai/bin/ai-check`.
+Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (allowed by this run's
+permissions; new tests are named with `docs_consistency`; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
 (pending)

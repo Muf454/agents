@@ -25,17 +25,16 @@ Bash(bash .ai/validate)
 # Toolkit checks
 Bash(python3 -m unittest *)
 Bash(bash -n *)
-# Read-only shell (approved 2026-10-05; Claude Code denies redirects/pipes/chains into
-# commands that aren't allowed, verified in a live test) and tracked-file moves/deletes.
+# Read-only shell (approved 2026-10-05). Claude Code denies redirects, pipes and chains into
+# commands that aren't allowed (verified live). No sed/rg/find: they can write or execute via
+# their own flags (sed -i, sed w/e, rg --pre, find -exec). Tracked-file moves/deletes via git.
 Bash(ls)
 Bash(ls *)
 Bash(grep *)
-Bash(rg *)
 Bash(cat *)
 Bash(head *)
 Bash(tail *)
 Bash(wc *)
-Bash(sed -n *)
 Bash(echo *)
 Bash(git rm *)
 Bash(git mv *)
