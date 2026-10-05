@@ -37,3 +37,4 @@
 | 2026-10-05T13:10Z | claude | T015 | DONE: fix rounds counted from per-branch host store (`fix-rounds record/init/count`); ai-run records its own (allow-empty) triage commit; stage-verify closes only on a recorded commit | fix_round_count 7 OK; ai-check 161 OK | (this commit) | Docs + vault hub log/flow note updated; stale chmod human todo removed (3eb8705) |
 | 2026-10-05T12:49:23Z | runner | T015 | completed | PASS | ff53138 | Claude checkpointed; continuing queue |
 | 2026-10-05T12:55:23Z | runner | none | queue complete; ready for independent review | PASS | 2162f6f | Human acceptance remains |
+| 2026-10-05T13:00:58Z | runner | triage | review triaged into dispositions/tasks | n/a | 303e87d | Fix tasks run next |
