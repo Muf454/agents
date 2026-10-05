@@ -1,0 +1,27 @@
+{
+  "toolkit_commit": "7b0c4334bac93fb673777e01029770aa8b278db0",
+  "files": {
+    ".ai/bin/ai-check": "1f1b6d9c909831572bf23546049a7ee9f1426dcc083806935c229fe87ea6fc6f",
+    ".ai/bin/ai-pipeline": "87b5a78ab1fcba2dbb22820d2ab5a27949c7d850527ce68ac955cd211a01e52f",
+    ".ai/bin/ai-recover": "58418028b224937c9cfbfe92c927f92ae66ad9098eebe411e70934ab40d0b1d8",
+    ".ai/bin/ai-review": "18ddfe62537c3746fef1931b425d31d0814d8f14f555fe811df07ec0d3ed4e3c",
+    ".ai/bin/ai-run": "b510438131cd462ec877957f15e2cdf4ac40eb0187cdfcc283865f7e3caf60aa",
+    ".ai/bin/ai-status": "07bd62deee5b616543597c4b025ffa1eae03594c1241ac7eefd46826bf225839",
+    ".ai/bin/ai-task": "ddf1d23a93e245d43a34632fa1a3eee320ddf0c0aec8c6e76990cbd4a4bca449",
+    ".ai/bin/ai-watchdog": "bbdc7dea49750deb3727ea6ccf7e668ca2cae119f014c67eb90ad51b57801177",
+    ".ai/bin/lib/common.sh": "b2cfffcfba770131fd7c64d8886ec6e752b8ce2f5a4dcc955f1b9bc77d6ac7e5",
+    ".ai/bin/lib/watchdog.py": "76d2182fd6ee6280cd3577af4bb4f591e42d841f2d963f76e1b24989bacba5d3",
+    ".ai/bin/lib/workflow.py": "6fd1bc473583e575c79615a56b0345071b181064435b08b22c9258e0eeef0382",
+    ".ai/prompts/fix-review.md": "2f7ec5b7f923ab98c2dfd2ab504eaba4d498a2d5bd5dbc42757c25010dc4c9d5",
+    ".ai/prompts/implement.md": "2251ee7e086d01c7cfd5eb80bfce4990e37f69798fe3bf07d41e3efac69c303e",
+    ".ai/prompts/plan-review.md": "4a9817c628a6635b83ce86c875944513acc6cd2e03209ea3f89048beafbf27b0",
+    ".ai/prompts/plan.md": "d493b66ddc9a88b1aa6ed39ace7f2043bebeecbeab5a38b5c2fba38d064987ea",
+    ".ai/prompts/recheck.md": "57a2e44d0f14c0bf2dac6d1d77379fdc17fa5cd6d94d5c02c72f2500b062f49f",
+    ".ai/prompts/recover.md": "76316752dddfb1ca50e3042d55d09a6679f61342755bbe1cce15410d9ad77975",
+    ".ai/prompts/resume.md": "d05c3a641c2a2a305d6fdd95b58192468a6d40922582e330ffe146d1353dce2c",
+    ".ai/prompts/review.md": "9a4676fe0bd67f41ae42a694548ae9aaad2b570699c4d08e63c559edc0d36115",
+    ".ai/prompts/runner.md": "c8d05556055ced5d8c87c7773c1b718863710668802c384cd9b63437888b5022",
+    ".ai/prompts/triage.md": "3e0314e1d8924a3afaad28c7e98efb9f4ca7a48ffad84c0ea0e136e444446f15"
+  },
+  "templates": {}
+}
