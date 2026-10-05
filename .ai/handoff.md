@@ -11,6 +11,11 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   installed by setup; ai-run's contract refers to the section. `scripts/ai-task` could not be
   chmod'ed in this session (denied): setup installs it as 0755, but the source file is 0644
   in Git until the human runs `chmod +x scripts/ai-task`.
+- T003: B6 model rule (retry failed attempts on opus; review-fix tasks use their own risk
+  criterion, no blanket promotion) in templates/CLAUDE.md, templates/.ai/prompts/plan.md, and
+  plan-review.md. R6 human-todo rule (never tick/untick knowledge-base checkboxes; append
+  dated progress to project log) in runner.md and triage.md. Tests verify new wording and
+  absence of old wording.
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -31,4 +36,4 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Runner continues with T003 (model rule and human-todo rule in templates).
+Runner continues with T004 (triage completion protocol for recovery and crashes).
