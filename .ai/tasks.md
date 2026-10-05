@@ -626,3 +626,40 @@ section (body otherwise identical), and this repo's handoff yields "Flow chart u
 Evidence: `-k pr_body_flow` → Ran 2 tests, OK. `.ai/bin/ai-check` → Ran 154 tests, 1 failure:
 `script_modes` for `scripts/ai-task` (0644), the pre-existing T013 blocker (needs human
 `chmod +x`); no other failures.
+
+## T015 — Count fix rounds from host state, not commit messages
+Status: TODO
+Dependencies: T014
+Model: opus
+
+### Goal
+Observed 2026-10-05 in this run: the triage SESSION committed "chore(ai): record review triage
+dispositions", which matches `count_commits '^chore(ai): record review triage'` in ai-pipeline,
+so one real round counted as two and the run stopped at the fix-round limit after one round
+(draft PR #11). Agent-chosen commit messages must never influence a gate budget.
+
+### Implementation notes
+Record each counted triage round in host state (outside the checkout, like the review
+bindings), keyed by checkout + branch, written by the same code path that creates the counted
+`chore(ai): record review triage` commit (T004), including the commit hash. `ai-pipeline`
+reads the count from there. It persists across recovery AND human restarts of the same branch
+(like today's git-history count) and never trusts commit subjects alone. Legacy branches with
+no host record: fall back to counting only commits whose subject is EXACTLY the host subject,
+and record them. Keep T004's triage completion protocol intact.
+
+### Likely affected modules
+scripts/ai-pipeline, scripts/ai-run, scripts/lib/workflow.py, tests
+
+### Acceptance criteria
+- Tests named `fix_round_count`: an agent commit whose subject starts with (or equals) the host
+  triage subject does not change the count; one real round counts once; the count survives a
+  recovery resume and a human restart on the same branch; another branch starts at zero;
+  the round limit still produces a draft PR when reached.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k fix_round_count` (the output must say
+`Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)
