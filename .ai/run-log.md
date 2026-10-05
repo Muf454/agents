@@ -10,3 +10,4 @@
 | 2026-10-05T10:18Z | runner | T003 | completed | PASS | f0ecd26 | Claude checkpointed; continuing queue |
 | 2026-10-05T07:49:55Z | runner | T003 | completed | PASS | f54f695 | Claude checkpointed; continuing queue |
 | 2026-10-05T08:15Z | claude | T004 | DONE: triage stage in run manifest; complete_stage on every start/resume; ai-run --triage --since records the round once; ai-recover never commits triage leftovers | triage_completion 7 OK; ai-check 117 OK | (this commit) | Vault flow chart + hub log updated |
+| 2026-10-05T08:05:44Z | runner | T004 | completed | PASS | 31724e5 | Claude checkpointed; continuing queue |
