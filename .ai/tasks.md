@@ -112,11 +112,13 @@ R1 of `.ai/project-spec.md`; plan review P1.
 One owner for the counted commit: ai-run --triage (as today) creates `chore(ai): record review
 triage`. Before triage, ai-pipeline stores `stage = {name: triage, start_head, review_digest}`
 in the run manifest. A shared reconciliation step runs on EVERY pipeline start and resume
-(human or recovery) BEFORE the manifest is reset or implementation starts: if a triage stage
-is open and a counted triage commit for that review exists after start_head, mark it
-complete (crash after commit, before clearing); otherwise complete it once (paths changed
-since start_head ⊆ triage-allowed records, `triage-check --fresh`, then the counted commit
-through the same ai-run code path). ai-recover never commits triage-stage leftovers
+(human or recovery) BEFORE the manifest is reset or implementation starts. In BOTH paths it first
+verifies: the review binding (stage review_digest = current verified review), committed AND
+uncommitted changes since start_head ⊆ triage-allowed records, and `triage-check --fresh`.
+Then: if a counted triage commit for that review already exists after start_head, close the
+stage without a second count (crash after commit, before clearing); otherwise create the
+counted commit once through the same ai-run code path. Any failed verification escalates
+without implementation and without counting. ai-recover never commits triage-stage leftovers
 generically: it reruns (reconciliation completes the stage) or escalates; watchdog crash
 recovery reads the stage from the manifest. Update the vault flow chart
 (agents-flow.md, "When something goes wrong") and its `updated:` date in this task.
@@ -130,7 +132,8 @@ stage), tests, vault agents-flow.md
   (triage records left uncommitted) → stop → recovery → exactly one counted round; crash
   after the counted commit but before clearing → no second count; watchdog crash recovery
   during triage completes it once; leftovers touching source → escalation, nothing
-  committed; the fix-round limit still holds.
+  committed; the counted commit exists but a hook changed source in it → resume escalates,
+  no implementation, no second count; the fix-round limit still holds.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k triage_completion` (allowed by this run's
@@ -221,9 +224,14 @@ R3 (integration) of `.ai/project-spec.md`; plan review P3.
 
 ### Implementation notes
 After every triage, AND when resuming with completed dispositions (the early-exit path),
-ai-pipeline derives the dispute state from verified evidence: rejected BLOCKER/MAJOR without
-a verified, current re-check → run `ai-review --recheck`; any upheld → unresolved. Don't reset
-the dispute state between rounds except from re-verified evidence. pr-body starts with a
+ai-pipeline checks: rejected BLOCKER/MAJOR without a verified, current re-check → run
+`ai-review --recheck`. Every UPHELD answer becomes a durable dispute record in
+`.ai/reviews/disputes.md` (review digest, finding id, original finding text, Claude's
+evidence, Codex's answer, date), digest-bound in host state like the reviews; records are
+only ever appended. Lifetime rule (simple on purpose): a recorded dispute is never resolved
+automatically, not by later fixes or a clean later review. While any record exists, the PR
+is a draft and the body starts with "Disputed findings" listing every record; Zack resolves
+them at the PR. pr-body starts with a
 "Disputed findings" section (id, Claude's reason, Codex's answer) whenever any is upheld;
 the PR is a draft. Update the vault flow chart (the re-check step) and `updated:`.
 
@@ -232,9 +240,10 @@ scripts/ai-pipeline, scripts/lib/workflow.py (pr-body), tests, vault agents-flow
 
 ### Acceptance criteria
 - Tests named `disputed_findings`: all withdrawn → normal PR; one upheld → draft with the
-  section on top; mixed accepted + rejected findings → re-check runs right after triage and
-  the accepted fixes proceed; resume with completed dispositions but no re-check → re-check
-  runs; no rejected BLOCKER/MAJOR → no re-check call.
+  section on top; mixed accepted + rejected (one upheld) → re-check runs right after triage,
+  the accepted fixes proceed, a later clean review and a restart still end in a draft PR
+  listing the dispute; resume with completed dispositions but no re-check → re-check runs;
+  a tampered disputes file fails verification; no rejected BLOCKER/MAJOR → no re-check call.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k disputed_findings` (allowed by this run's
@@ -305,9 +314,15 @@ today's `updated:` and shows R1 and R3.
 README.md, docs/workflow.md, tests
 
 ### Acceptance criteria
-- Tests named `docs_consistency` fail if README.md or docs/workflow.md contain any of:
-  "never stages application files", "never invokes push", "stops on denied", "no automatic
-  provider retries" (case-insensitive), or lack a "Modes" table heading.
+- Tests named `docs_consistency` (case-insensitive) fail if README.md or docs/workflow.md
+  contain: "never stages application files", "does not invoke `git push`", "never invokes
+  push", a sentence listing denied permissions among reasons a run stops, or "no automatic
+  provider retries"; and require: a "Modes" table with rows for interactive Claude, ai-run,
+  ai-pipeline and ai-watchdog; sentences stating that denials are logged and the run
+  continues, that automatic checkpoints stage the session's output except secret-looking
+  files, that the pipeline pushes the branch and opens the PR, and that usage limits pause
+  and resume. Read the actual docs first and extend the forbidden list to every wrong
+  sentence you find.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (allowed by this run's

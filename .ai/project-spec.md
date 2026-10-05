@@ -7,10 +7,13 @@ observed in real runs or found by both reviews.
 ## Requirements
 - **B1/E1 Shared tool contract**: one identical "How to work here" section in the runner,
   triage and recovery prompt templates: Read/Grep/Glob for reading files, Edit/Write for
-  changes (no heredoc/sed edits), plain commands without `cd`, run checks only as
-  `.ai/bin/ai-check`, `git rm`/`git mv` for tracked files, `.ai/bin/ai-task` to change a task
-  status. Template `permissions.allow` adds the approved read-only shell commands (ls, grep,
-  rg, cat, head, tail, wc, sed -n, echo), `git rm`, `git mv` and `.ai/bin/ai-task *`. New
+  changes (no heredoc/sed edits), plain commands without `cd`, `git rm`/`git mv` for tracked
+  files, `.ai/bin/ai-task` to change a task
+  status; recovery gets the reading rules only (it is read-only). Checks: the full gate via
+  `.ai/bin/ai-check` plus a task's own targeted test command when it names one. Template
+  `permissions.allow` adds the approved read-only shell commands (ls, grep, cat, head, tail,
+  wc, echo; NOT sed, rg or find, which can write or execute through flags), `git rm`,
+  `git mv` and `.ai/bin/ai-task *`. New
   script `ai-task` (`ai-task set T003 IN_PROGRESS|DONE|BLOCKED|TODO`, `ai-task show T003`)
   wrapping the existing task helper; setup installs it.
 - **B6 Model rule**: templates say: choose each task's model by its own risk (haiku
@@ -30,9 +33,10 @@ observed in real runs or found by both reviews.
   the remote branch head equals local HEAD.
 - **R3 Disputed findings**: when triage rejects any BLOCKER/MAJOR, Codex re-checks only
   those findings against Claude's evidence (`ai-review --recheck`, read-only, medium effort
-  by default). Per finding: `withdrawn` or `upheld`. Any upheld finding makes the PR a draft
-  whose body starts with a "Disputed findings" section (finding, Claude's reason, Codex's
-  answer). The re-check report is host-written and digest-bound like other reviews.
+  by default). Per finding: `withdrawn` or `upheld`. Any upheld finding is recorded as a durable dispute (never auto-resolved) and makes the PR
+  a draft whose body starts with a "Disputed findings" section (finding, Claude's reason,
+  Codex's answer); Zack resolves disputes at the PR. Re-check reports and dispute records are
+  host-written and digest-bound like other reviews.
 - **R4/R5 Toolkit version + upgrade**: setup writes `.ai/toolkit-version` (toolkit commit
   and per-file SHA-256 of installed toolkit-owned files). `setup-project --upgrade PATH`
   previews, `--upgrade --apply PATH` replaces toolkit-owned files (`.ai/bin/**`,
