@@ -5,7 +5,7 @@ Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. N
 `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the vault flow chart can be updated.
 
 ## T001 — Permissions template: approved read-only shell, git rm/mv, ai-task
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -35,7 +35,14 @@ permissions; new tests are named with `permissions_template`; the output must sa
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+Done 2026-10-05. templates/.ai/permissions.allow gains the 11 entries plus a comment on
+redirect/pipe denial, outside-project reads and why sed/rg/find are absent; README planning
+step 3 documents the residual read capability. Tests `test_permissions_template_*` (2):
+required entries present, no unrestricted Bash, no forbidden program/phrase (bare `rm` is
+checked as a program, so `git rm` is allowed; `bash .ai/validate` stays, `bash -c` is banned).
+Targeted: `Ran 2 tests ... OK`. Gate: 104 tests OK. Also fixed a test-hermeticity bug found
+by the gate: the fixture inherited `AI_PIPELINE`/`AI_LOCK_HELD` from the pipeline running this
+session, which made 4 notification/plan-review tests fail; setUp now drops both.
 
 ## T002 — Shared tool contract and the ai-task command
 Status: TODO

@@ -101,6 +101,13 @@ Before leaving an implementation session unattended:
 3. Add necessary local commands to `.ai/permissions.allow` after inspecting them.
    Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
+   The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
+   commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
+   redirects, pipes and chains into commands that aren't allowed, so these can't write
+   files, but they **can read files outside the project** (for example `cat ~/.ssh/...`).
+   Keep secrets out of reach of the runner's user. `sed`, `rg` and `find` are left out
+   on purpose: they write or execute through their own flags (`sed -i`, `rg --pre`,
+   `find -exec`/`-delete`).
 4. Run `.ai/bin/ai-check`. Record/fix any baseline failures rather than suppressing them.
 5. Checkpoint the approved plan, validation, permissions, and task queue on the feature branch.
 

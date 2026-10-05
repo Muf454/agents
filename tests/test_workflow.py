@@ -275,6 +275,8 @@ class ToolkitTest(unittest.TestCase):
         self.project = self.base / 'project with spaces'
         self.project.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        for name in ('AI_PIPELINE', 'AI_LOCK_HELD'):  # set when the gate runs inside a pipeline
+            self.env.pop(name, None)
         self.run_cmd(['git', 'init', '-b', 'main'])
         self.run_cmd(['git', 'config', 'user.name', 'Toolkit Test'])
         self.run_cmd(['git', 'config', 'user.email', 'toolkit-test@example.invalid'])
@@ -817,6 +819,31 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for command in ('git commit --no-verify *', 'git commit -n *',
                         'git commit * --no-verify', 'git commit * -n'):
             self.assertIn(f'Bash({command})', deny)
+
+    def permissions_template_entries(self):
+        text = (ROOT / 'templates/.ai/permissions.allow').read_text()
+        return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+
+    def test_permissions_template_allows_read_only_shell_and_task_helper(self):
+        entries = self.permissions_template_entries()
+        for entry in ('Bash(ls)', 'Bash(ls *)', 'Bash(grep *)', 'Bash(cat *)', 'Bash(head *)',
+                      'Bash(tail *)', 'Bash(wc *)', 'Bash(echo *)', 'Bash(git rm *)',
+                      'Bash(git mv *)', 'Bash(.ai/bin/ai-task *)'):
+            self.assertIn(entry, entries)
+        self.assertNotIn('Bash', entries)
+        self.assertNotIn('Bash(*)', entries)
+
+    def test_permissions_template_excludes_network_installs_and_writers(self):
+        commands = [entry[5:-1] for entry in self.permissions_template_entries() if entry.startswith('Bash(')]
+        self.assertTrue(commands)
+        programs = ('curl', 'wget', 'ssh', 'scp', 'rm', 'sed', 'rg', 'find', 'xargs', 'chmod',
+                    'sudo', 'sh', 'python', 'python3')
+        phrases = ('npm install', 'npm i ', 'pip install', 'git push', 'git reset --hard', 'bash -c')
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertNotIn(command.split()[0], programs)
+                for phrase in phrases:
+                    self.assertNotIn(phrase, command + ' ')
 
     def test_runner_detects_even_committed_gate_changes_before_untrusted_helpers(self):
         self.ready()
