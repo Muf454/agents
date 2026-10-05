@@ -634,3 +634,7 @@ user config). Notification
 settings come from the user config described above. Existing projects need the new
 `ai-watchdog` and `lib/watchdog.py` copied into `.ai/bin/` deliberately, because setup
 preserves existing files.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Third-party code may only be added with its license, retained notices and a note of the upstream source and changes (none so far; OpenRig ideas are reimplemented, not copied).
