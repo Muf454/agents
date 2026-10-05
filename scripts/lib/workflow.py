@@ -958,7 +958,9 @@ def recheck_prepare(arguments):
 def parse_recheck(text, ids):
     """Codex's answer -> {id: (verdict, reason)} for exactly IDS. The answer must be one JSON
     object {"answers": [{"id", "verdict", "reason"}, ...]}; anything missing, duplicated,
-    extra or malformed counts as upheld (a re-check can only withdraw explicitly)."""
+    malformed counts as upheld (a re-check can only withdraw explicitly). An answer for an
+    unknown finding, or an entry that is not an object with a string id, makes the whole answer
+    set untrustworthy: every finding then counts as upheld."""
     answers = {finding: ('upheld', 'no valid answer (counted as upheld)') for finding in ids}
     notes = []
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
@@ -968,12 +970,16 @@ def parse_recheck(text, ids):
         data = None
     if not isinstance(data, dict) or set(data) != {'answers'} or not isinstance(data['answers'], list):
         return answers, ['the answer was not one JSON object {"answers": [...]}; every finding counts as upheld']
+    stray = [entry.get('id') if isinstance(entry, dict) else entry for entry in data['answers']
+             if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or entry['id'] not in answers]
+    if stray:
+        reason = 'the answer set had an unknown or malformed entry (counted as upheld)'
+        return ({finding: ('upheld', reason) for finding in ids},
+                [f'answer for an unknown finding or malformed entry: {str(item)[:40]!r}' for item in stray]
+                + ['the answer set had unknown or malformed entries; every finding counts as upheld'])
     seen = {}
     for entry in data['answers']:
-        finding = entry.get('id') if isinstance(entry, dict) else None
-        if not isinstance(finding, str) or finding not in answers:
-            notes.append(f'ignored an answer for an unknown finding: {str(finding)[:40]!r}')
-            continue
+        finding = entry['id']
         seen[finding] = seen.get(finding, 0) + 1
         valid = (set(entry) == {'id', 'verdict', 'reason'} and entry['verdict'] in RECHECK_VERDICTS
                  and isinstance(entry['reason'], str) and entry['reason'].strip())

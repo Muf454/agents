@@ -52,6 +52,14 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   sentences removed. `docs_consistency` tests guard them. Flow chart updated (note on
   logged denials; audited against R1, R2, R3 and this batch). PR description must say
   "Flow chart updated".
+- T010: Updated shared "How to work here" section to explicitly require running `.ai/bin/ai-check`
+  in the foreground with Bash tool timeout set to 600000 ms; never in the background or via
+  polling. If it times out, mark the task BLOCKED rather than ending without checkpoint.
+  Same requirement mirrored in README.md step 4. Test suite confirms sections are identical
+  in runner and triage prompts.
+- T011 (review M1): `parse_recheck` validates the whole answer set first; any answer for an
+  unknown id or any malformed entry (non-object, missing/non-string id) makes every requested
+  finding upheld, so an extra entry can no longer ride along with withdrawals.
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -87,6 +95,10 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
    Edit the evidence in the dispositions: `recheck-verify` now fails ("different rejection
    evidence"). Commit a source change and rerun `--recheck`: refused ("code changed since
    the reviewed commit") without calling Codex.
+   Review fix M1 (T011): with a mocked/hand-written Codex answer that withdraws every
+   rejected finding but also contains an answer for an unknown id (e.g. `M9`) or a bare
+   string entry, the report shows every finding `upheld` and the parsing notes say
+   "every finding counts as upheld".
 8. Disputed findings: in a scratch project with a bare `origin` and `gh`, run
    `ai-pipeline --approved` on a change where Codex reports a MAJOR finding that Claude
    rejects. "Re-check of rejected findings (Codex)" runs right after the triage. If Codex
@@ -101,11 +113,5 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 ## Human todos
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
-- T010: Updated shared "How to work here" section to explicitly require running `.ai/bin/ai-check`
-  in the foreground with Bash tool timeout set to 600000 ms; never in the background or via
-  polling. If it times out, mark the task BLOCKED rather than ending without checkpoint.
-  Same requirement mirrored in README.md step 4. Test suite confirms sections are identical
-  in runner and triage prompts.
-
 ## Next action
-All tasks complete. Feature ready for review.
+Review fixes: T012 (upgrade apply rollback, M2) next, then the remaining fix tasks; then review again.

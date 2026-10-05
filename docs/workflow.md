@@ -237,7 +237,9 @@ the reviewed commit an ancestor of HEAD and only workflow records changed since 
 tasks are fine). Codex (read-only, `AI_REVIEW_MODEL` at `AI_RECHECK_EFFORT`, default
 medium, prompt `.ai/prompts/recheck.md`) gets the rejected IDs with Claude's evidence and
 must answer one JSON object `{"answers": [{"id", "verdict": "withdrawn|upheld", "reason"}]}`.
-Parsing is strict: anything missing, duplicated, extra or malformed counts as upheld.
+Parsing is strict: anything missing, duplicated, extra or malformed counts as upheld, and
+an answer for an unknown ID (or an entry that is not an object with a string `id`) makes
+every requested finding upheld, so no extra entry can ride along with withdrawals.
 The host re-runs the preflight, writes `.ai/reviews/recheck.md` with the binding (review
 digest, sha256 of the rejected rows' IDs and evidence, reviewed HEAD) and stores the
 report's SHA-256 as `recheck-<review digest>.sha256` in the host review store.

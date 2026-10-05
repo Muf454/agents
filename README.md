@@ -499,7 +499,8 @@ retains the discussion. Review output is an artifact, not merge authorization.
 When Claude rejected a BLOCKER/MAJOR finding, commit the dispositions and run
 `.ai/bin/ai-review --recheck`: Codex (read-only, `AI_RECHECK_EFFORT`, default medium)
 re-checks only the rejected findings against Claude's evidence and answers `withdrawn`
-or `upheld` per finding; a missing, duplicate, extra or malformed answer counts as upheld.
+or `upheld` per finding; a missing, duplicate or malformed answer counts as upheld, and an
+answer for an unknown finding makes every finding upheld.
 It refuses unless the review verifies and only workflow records changed since the
 reviewed commit (pending fix tasks are fine). The host writes `.ai/reviews/recheck.md`,
 bound to the review, the rejected rows (IDs and evidence) and the reviewed HEAD;

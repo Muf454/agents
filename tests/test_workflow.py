@@ -2025,7 +2025,6 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         cases = {
             'missing': {'answers': [entry('M1')]},
             'duplicate': {'answers': [entry('M1'), entry('M2'), entry('M2')]},
-            'extra': {'answers': [entry('M1'), entry('M2', verdict='upheld'), entry('M9')]},
             'malformed': {'answers': [entry('M1'), entry('M2', verdict='maybe')]},
             'extra-key': {'answers': [entry('M1'), entry('M2', note='x')]},
         }
@@ -2044,6 +2043,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 answers, notes = wf.parse_recheck(text, ids)
                 self.assertEqual({verdict for verdict, _ in answers.values()}, {'upheld'})
                 self.assertTrue(notes)
+
+    def test_recheck_command_extra_or_stray_entry_upholds_every_finding(self):
+        # Review M1: a fully withdrawn answer set plus anything unknown must withdraw nothing.
+        wf = self.recheck_module()
+        ids = ['M1', 'M2']
+        entry = lambda finding: dict(id=finding, verdict='withdrawn', reason='ok')
+        self.assertEqual({v for v, _ in wf.parse_recheck(json.dumps({'answers': [entry('M1'), entry('M2')]}),
+                                                         ids)[0].values()}, {'withdrawn'})
+        for name, extra in {'unknown id': entry('M9'), 'bare string': 'M9', 'number': 7, 'list': ['M1'],
+                            'id not a string': dict(entry('M1'), id=1), 'no id': {'verdict': 'withdrawn'}}.items():
+            with self.subTest(name):
+                answers, notes = wf.parse_recheck(json.dumps({'answers': [entry('M1'), entry('M2'), extra]}), ids)
+                self.assertEqual(answers, {f: ('upheld', answers[f][1]) for f in ids})
+                self.assertIn('unknown or malformed', answers['M1'][1])
+                self.assertTrue(any('every finding counts as upheld' in note for note in notes))
 
     def test_recheck_command_binding_rejects_other_review_changed_evidence_and_tampering(self):
         self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',

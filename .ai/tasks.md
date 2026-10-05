@@ -479,7 +479,7 @@ discover -s tests -k tool_contract` → Ran 3 tests, OK. `.ai/bin/ai-check` → 
 All acceptance criteria met.
 
 ## T011 — Re-check: extra answers fail closed (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -506,7 +506,18 @@ Targeted: `python3 -m unittest discover -s tests -k recheck_command` (output mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+`parse_recheck` now validates the whole answer set before using any entry: an answer for an
+unknown id, a non-object entry, or a missing/non-string id returns every requested finding
+as upheld (reason "the answer set had an unknown or malformed entry", one note per stray entry
+plus a summary note). Per-finding duplicate/malformed handling unchanged. The masking `extra`
+subcase was removed from the generic test; new `test_recheck_command_extra_or_stray_entry_upholds_every_finding`
+adds an unknown `M9`, bare string, number, list, non-string id and id-less object to an
+otherwise valid fully withdrawn M1+M2 answer → both upheld (control without extra → both
+withdrawn). The old code ignored such entries, so it withdrew both. docs/workflow.md and
+README updated. The template prompt `recheck.md` still says "extra … counts as upheld", which
+stays accurate, so it is unchanged.
+Evidence: `-k recheck_command` Ran 7 tests OK; `.ai/bin/ai-check` Ran 150 tests OK.
+Limitation: I couldn't run the new test against the pre-fix code because `git stash` was denied.
 
 ## T012 — Upgrade apply: all-or-nothing activation with rollback (review M2)
 Status: TODO
