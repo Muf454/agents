@@ -272,6 +272,19 @@ restart). While any record exists the PR is a draft, its body starts with "Dispu
 findings" (id, original finding, Claude's reason, Codex's answer), and the FINISHED todo
 list asks the human to resolve them at the PR.
 
+Inherited disputes (T016): merging the PR is the human's resolution, and the tracked file
+then reaches later branches whose host store is empty. `ai-pipeline` exports
+`AI_DISPUTES_BASE=<base sha>`; the file exactly as it is at `git merge-base <base> HEAD`
+is historical. The expected file is that inherited copy (or none) while the branch has no
+records, else the inherited copy verbatim, a marker comment, then this branch's records
+numbered on (D3, D4, ...). Only this branch's records count: they alone make the PR a
+draft, appear in the PR body and the FINISHED todos. Any other content (an edited or
+removed inherited part, an edited new record) fails as before. A merged review's upheld
+answers that the inherited file already records (review digest + finding id) are not
+recorded again on the new branch. Without `AI_DISPUTES_BASE` (a helper run by hand)
+nothing is inherited. Limitation: reusing a branch name whose host records were already
+merged fails verification (its old records sit both in the inherited copy and the store).
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push, the review must verify and be current for HEAD
 (only workflow records changed since the reviewed commit), the validation stamp must be

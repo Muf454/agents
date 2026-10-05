@@ -250,7 +250,9 @@ tmux new -s my-app-ai
    make it a **draft** (an existing PR is converted). So does any recorded
    **disputed finding** (a BLOCKER/MAJOR Claude rejected and Codex upheld on re-check):
    the PR body then starts with a "Disputed findings" section, and you resolve them at
-   the PR; the pipeline never resolves a dispute itself. The PR targets `--pr-base`,
+   the PR; the pipeline never resolves a dispute itself. Once you merge that PR, its
+   disputes are history: a later branch inherits the unchanged file without a draft,
+   and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every push attempt and after every push it re-checks that the review is

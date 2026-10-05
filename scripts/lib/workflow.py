@@ -1223,12 +1223,37 @@ def dispute_records():
     return records
 
 
-def render_disputes(records):
-    lines = ['# Disputed findings', '',
-             '<!-- Host-written by ai-pipeline from host state; append-only. Never edit: a changed file',
-             'fails verification. A dispute is never resolved automatically; the human resolves it',
-             'at the pull request. -->', '']
-    for number, record in enumerate(records, 1):
+def inherited_disputes():
+    """The dispute file as it is at the merge-base with the run's base (AI_DISPUTES_BASE, set by
+    ai-pipeline), or None. Those records came from an earlier PR the human resolved and merged:
+    historical, never active on this branch. Without a base nothing is inherited (fails closed)."""
+    base = os.environ.get('AI_DISPUTES_BASE')
+    if not base:
+        return None
+    try:
+        merge_base = git('merge-base', base, 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        fail(f'No merge-base of {base} and HEAD for the inherited dispute records.')
+    try:
+        return git('cat-file', 'blob', f'{merge_base}:{DISPUTES}').decode()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def render_disputes(records, inherited=None):
+    """The file for RECORDS (this branch's host records). Inherited content stays verbatim on
+    top and this branch's records follow it, numbered on from the inherited ones."""
+    if inherited is None:
+        lines = ['# Disputed findings', '',
+                 '<!-- Host-written by ai-pipeline from host state; append-only. Never edit: a changed file',
+                 'fails verification. A dispute is never resolved automatically; the human resolves it',
+                 'at the pull request. -->', '']
+        offset = 0
+    else:
+        lines = [inherited.rstrip('\n'), '',
+                 '<!-- Recorded on a later branch; the records above were merged before it. -->', '']
+        offset = len(re.findall(r'^## D\d+ — ', inherited, re.M))
+    for number, record in enumerate(records, offset + 1):
         lines += [f"## D{number} — {record['finding']} ({record['level']})", '',
                   f"- Review digest: {record['review_digest']}",
                   f"- Recorded: {record['date']}",
@@ -1238,11 +1263,17 @@ def render_disputes(records):
     return '\n'.join(lines)
 
 
+def expected_disputes(records, inherited):
+    """Exact expected file: the inherited copy (or none) until this branch records a dispute."""
+    return render_disputes(records, inherited) if records else inherited
+
+
 def disputes_values():
-    """Verified dispute records: the file must be exactly what the host recorded."""
+    """Verified dispute records active on this branch: the file must be exactly the inherited
+    copy plus what the host recorded here. Inherited records are not returned."""
     records = dispute_records()
     actual = DISPUTES.read_text() if DISPUTES.exists() else None
-    if actual != (render_disputes(records) if records else None):
+    if actual != expected_disputes(records, inherited_disputes()):
         fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
              'restore it from Git (records are append-only and never edited).')
     return records
@@ -1270,8 +1301,9 @@ def disputes_record(arguments):
     The file may lag behind host state (an interrupted earlier write) but never differ from it.
     Prints the number of records added."""
     records = dispute_records()
+    inherited = inherited_disputes()
     actual = DISPUTES.read_text() if DISPUTES.exists() else None
-    prefixes = [None] + [render_disputes(records[:count]) for count in range(1, len(records) + 1)]
+    prefixes = [expected_disputes(records[:count], inherited) for count in range(len(records) + 1)]
     if actual not in prefixes:
         fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
              'restore it from Git (records are append-only and never edited).')
@@ -1279,6 +1311,9 @@ def disputes_record(arguments):
     _, rows = rejected_rows()
     review = Path('.ai/reviews/current.md').read_text()
     known = {(record['review_digest'], record['finding']) for record in records}
+    # An inherited re-check of a merged PR's review was recorded (and resolved) there.
+    known |= {(digest, finding) for finding, digest in re.findall(
+        r'^## D\d+ — (\S+) \(\w+\)\n\n- Review digest: ([0-9a-f]+)$', inherited or '', re.M)}
     added = []
     for finding, level, evidence in rows:
         verdict, reason = answers[finding]
@@ -1294,7 +1329,7 @@ def disputes_record(arguments):
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
     if records:
-        atomic(DISPUTES, render_disputes(records))
+        atomic(DISPUTES, render_disputes(records, inherited))
     print(len(added))
 
 

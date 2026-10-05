@@ -67,6 +67,8 @@ finish() {
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
 base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
+# A dispute file unchanged since the merge-base was merged by the human: historical, not active.
+export AI_DISPUTES_BASE=$base_sha
 if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   # The PR must target the branch the review compared against; never guess.
   if git show-ref --verify --quiet "refs/heads/$base"; then pr_base=$base

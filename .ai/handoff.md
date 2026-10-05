@@ -75,6 +75,12 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   host store (`fix-rounds record`); `ai-pipeline` counts recorded commits in base..HEAD
   (`fix-rounds count`), and the triage stage closes only on a recorded commit. Legacy
   branches are initialised once at pipeline start from exact-subject commits.
+- T016 (review M3): a dispute file inherited unchanged from the merge-base with the run's base
+  (`AI_DISPUTES_BASE`, exported by `ai-pipeline`) is historical: it verifies with an empty
+  host store, is not listed, and does not draft the PR. New records on the branch are
+  appended after the verbatim inherited part (numbered on); only they count. Any edit of
+  either part fails. Inherited upheld answers are not re-recorded. Limitation: reusing a
+  branch name whose records were already merged fails verification.
 
 ## Flow chart
 Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
@@ -135,10 +141,18 @@ Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
    against a review that keeps a MAJOR finding: two triage rounds run (not one), then the PR
    is a draft. `python3 .ai/bin/lib/workflow.py fix-rounds count main` prints 2. Rerun with
    `--max-fix-rounds 3`: exactly one more round. On a new branch from main it prints 0.
+10. Inherited disputes (T016, review M3): after step 8's disputed PR, merge it into `main`
+   locally, create `feature/next` from `main`, add a task and run `ai-pipeline --approved
+   --base main`: it publishes a normal (not draft) PR without a "Disputed findings" section,
+   and `disputes.md` is unchanged. `AI_DISPUTES_BASE=main python3 .ai/bin/lib/workflow.py
+   disputes-verify` prints 0. Edit a word in the inherited `disputes.md`, commit, rerun: it
+   stops ("disputes.md does not match"). On a fresh branch where Codex upholds a new
+   rejection, the file keeps the inherited part verbatim and appends `D2`; the PR is a draft
+   listing only the new dispute.
 
 ## Human todos
 None.
 
 ## Next action
-Review of T015 triaged: M3 and M4 accepted. Implement T016 (inherited disputes), then T017
-(per-branch triage stage); then rerun the gate and request a fresh review.
+T016 done (inherited disputes). Implement T017 (per-branch triage stage); then rerun the
+gate and request a fresh review.

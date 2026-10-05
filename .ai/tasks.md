@@ -679,7 +679,7 @@ Limitation: `ai-run --triage` run by hand on a legacy branch outside the pipelin
 record without the legacy scan (the pipeline always initialises first).
 
 ## T016 — Inherited dispute records must not block later branches (review M3)
-Status: TODO
+Status: DONE
 Dependencies: T015
 Model: opus
 
@@ -715,7 +715,19 @@ Targeted: `python3 -m unittest discover -s tests -k disputes_lifecycle` (output 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. `inherited_disputes()` reads `.ai/reviews/disputes.md` at
+`git merge-base $AI_DISPUTES_BASE HEAD` (ai-pipeline exports the base sha; unset = nothing
+inherited, fails closed). Expected file = inherited copy while the branch has no records,
+else inherited verbatim + marker comment + this branch's records numbered on.
+`disputes_values` returns only this branch's records, so `pr-body`, `finish-summary`, the
+draft decision and `publish_ready` ignore historical ones; `disputes-record` accepts the
+inherited prefix and skips upheld answers already in the inherited file (review digest +
+finding). Evidence: `-k disputes_lifecycle` Ran 3 tests OK (inherited file → normal PR,
+no section, file unchanged; edited/removed inherited file fails and stops publishing; new
+upheld dispute → D2 appended, draft, PR lists only it, edits of either part fail);
+`-k disputed_findings` Ran 9 OK; `.ai/bin/ai-check` Ran 164 tests OK. Docs: workflow.md,
+README, vault agents-flow.md. Limitation: reusing a branch name whose host records were
+already merged fails verification (documented).
 
 ## T017 — Keep interrupted triage stage per branch (review M4)
 Status: TODO

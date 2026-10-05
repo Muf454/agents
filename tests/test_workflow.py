@@ -293,7 +293,8 @@ class ToolkitTest(unittest.TestCase):
         self.project = self.base / 'project with spaces'
         self.project.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
-        for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST'):
+        for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
+                     'AI_DISPUTES_BASE'):
             # set when the gate runs inside a pipeline (or one resumed by ai-recover)
             self.env.pop(name, None)
         self.run_cmd(['git', 'init', '-b', 'main'])
@@ -2413,6 +2414,79 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / 'src.txt').write_text('stray')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
         self.assertIn('Start from a clean checkpoint', result.stderr)
+
+    # --- disputes_lifecycle: a merged PR's dispute file is inherited by later branches ---
+
+    def merged_dispute_then_next_branch(self):
+        """feature/test records one upheld dispute and the human merges it into main; then a
+        new branch with its own task starts from main, inheriting the dispute file."""
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once',
+                  MOCK_CLAUDE='triage-reject')
+        self.assertEqual(self.disputes(), 1)
+        self.run_cmd(['git', 'switch', '-q', 'main'])
+        self.run_cmd(['git', 'merge', '-q', '--no-ff', '-m', 'merge feature/test', 'feature/test'])
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/next'])
+        tasks = self.project / '.ai/tasks.md'
+        tasks.write_text(tasks.read_text().rstrip('\n') + '\n\n' + task('T002'))
+        self.commit('plan T002')
+        (self.base / 'codex-calls').unlink()
+        self.add_origin()
+        return (self.project / '.ai/reviews/disputes.md').read_text()
+
+    def disputes_from(self, base, expected=0):
+        return self.run_cmd(['python3', str(HELPER), 'disputes-verify'], expected=expected,
+                            env=dict(self.env, AI_DISPUTES_BASE=base))
+
+    def test_disputes_lifecycle_inherited_unchanged_file_publishes_a_normal_pr(self):
+        inherited = self.merged_dispute_then_next_branch()
+        self.assertEqual(self.disputes_from('main').stdout.strip(), '0')
+        # Without a base nothing is inherited: the branch's (empty) host records don't match.
+        self.helper('disputes-verify', expected=1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertNotIn('--draft', self.created_prs()[0])
+        self.assertNotIn('Disputed findings', self.pr_body_text())
+        self.assertNotIn('disputed finding', self.notifications().splitlines()[-1])
+        self.assertEqual((self.project / '.ai/reviews/disputes.md').read_text(), inherited)
+        self.assertEqual(self.subjects().count('chore(ai): record disputed findings'), 0)
+
+    def test_disputes_lifecycle_edited_inherited_file_fails(self):
+        inherited = self.merged_dispute_then_next_branch()
+        disputes = self.project / '.ai/reviews/disputes.md'
+        disputes.write_text(inherited.replace('still broken', 'withdrawn after all'))
+        self.commit('edit the inherited dispute')
+        self.assertIn('does not match the dispute records', self.disputes_from('main', expected=1).stderr)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('disputes.md does not match', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.created_prs(), [])
+        # Removing it is an edit too.
+        self.run_cmd(['git', 'rm', '-q', '--', '.ai/reviews/disputes.md'])
+        self.run_cmd(['git', 'commit', '-qm', 'drop the inherited dispute'])
+        self.disputes_from('main', expected=1)
+
+    def test_disputes_lifecycle_new_dispute_on_later_branch_drafts_and_lists_only_it(self):
+        inherited = self.merged_dispute_then_next_branch()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once',
+                  MOCK_CLAUDE='triage-reject', MOCK_RECHECK=json.dumps(
+                      {'answers': [{'id': 'M1', 'verdict': 'upheld', 'reason': 'still broken on next'}]}))
+        self.assertEqual(self.disputes_from('main').stdout.strip(), '1')
+        text = (self.project / '.ai/reviews/disputes.md').read_text()
+        self.assertTrue(text.startswith(inherited.rstrip('\n')), text)
+        self.assertIn('## D2 — M1 (MAJOR)', text[len(inherited):])
+        self.assertIn('still broken on next', text[len(inherited):])
+        self.assertIn('--draft', self.created_prs()[0])
+        body = self.pr_body_text()
+        self.assertIn('Codex upheld 1 finding(s)', body)
+        self.assertEqual(body.count('**M1** (MAJOR'), 1)
+        self.assertIn("Codex's answer: still broken on next", body)
+        self.assertNotIn("Codex's answer: still broken\n", body)
+        # Editing either part still fails.
+        for edit in (text.replace('still broken\n', 'gone\n', 1), text.replace('still broken on next', 'gone')):
+            (self.project / '.ai/reviews/disputes.md').write_text(edit)
+            self.disputes_from('main', expected=1)
+        (self.project / '.ai/reviews/disputes.md').write_text(text)
+        self.assertEqual(self.disputes_from('main').stdout.strip(), '1')
 
     # --- toolkit_upgrade: version stamp and setup-project --upgrade ---
 
