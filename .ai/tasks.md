@@ -164,8 +164,10 @@ scripts/ai-pipeline, tests
 ### Acceptance criteria
 - Tests named `publish_ready`: a commit hook changing source while recording the review
   stops before push; a pre-push hook leaving an UNcommitted source change on the final push
-  stops; a failed push that changes the checkout before the retry stops; the normal path
-  still opens the PR.
+  stops; a failed push that changes the checkout before the retry stops; a pre-push hook
+  that adds a workflow-only commit (checkout clean, everything else fine) makes the remote
+  `refs/heads/<branch>` differ from HEAD → stop before PR creation and before any FINISHED
+  notification; the normal path opens the PR and the remote ref equals final HEAD exactly.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k publish_ready` (allowed by this run's
@@ -223,9 +225,10 @@ Model: opus
 R3 (integration) of `.ai/project-spec.md`; plan review P3.
 
 ### Implementation notes
-After every triage, AND when resuming with completed dispositions (the early-exit path),
-ai-pipeline checks: rejected BLOCKER/MAJOR without a verified, current re-check → run
-`ai-review --recheck`. Every UPHELD answer becomes a durable dispute record in
+Right after every triage, AND on every pipeline start/resume BEFORE any task runs or the
+implementation review is replaced (regardless of task completion), ai-pipeline reconciles
+pending re-checks: rejected BLOCKER/MAJOR in the current dispositions without a verified,
+current re-check → run `ai-review --recheck` and checkpoint its artifacts first. Every UPHELD answer becomes a durable dispute record in
 `.ai/reviews/disputes.md` (review digest, finding id, original finding text, Claude's
 evidence, Codex's answer, date), digest-bound in host state like the reviews; records are
 only ever appended. Lifetime rule (simple on purpose): a recorded dispute is never resolved
@@ -243,7 +246,10 @@ scripts/ai-pipeline, scripts/lib/workflow.py (pr-body), tests, vault agents-flow
   section on top; mixed accepted + rejected (one upheld) → re-check runs right after triage,
   the accepted fixes proceed, a later clean review and a restart still end in a draft PR
   listing the dispute; resume with completed dispositions but no re-check → re-check runs;
-  a tampered disputes file fails verification; no rejected BLOCKER/MAJOR → no re-check call.
+  a tampered disputes file fails verification; no rejected BLOCKER/MAJOR → no re-check call;
+  interrupted after a mixed triage but before the re-check → the resume re-checks the
+  ORIGINAL rejected findings first, then implements the accepted fixes, and an upheld
+  dispute survives a later clean review into a draft PR.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k disputed_findings` (allowed by this run's
