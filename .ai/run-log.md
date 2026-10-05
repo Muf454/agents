@@ -39,3 +39,4 @@
 | 2026-10-05T12:55:23Z | runner | none | queue complete; ready for independent review | PASS | 2162f6f | Human acceptance remains |
 | 2026-10-05T13:00:58Z | runner | triage | review triaged into dispositions/tasks | n/a | 303e87d | Fix tasks run next |
 | 2026-10-05T13:40Z | claude | T016 | DONE: dispute file unchanged since merge-base with the run base (`AI_DISPUTES_BASE`) is historical; branch records appended after it and alone count (review M3) | disputes_lifecycle 3 OK; disputed_findings 9 OK; ai-check 164 OK | (this commit) | Docs + vault flow/hub log updated; branch-name reuse limitation documented |
+| 2026-10-05T14:58:10Z | runner | T016 | completed | PASS | cb69c94 | Claude checkpointed; continuing queue |
