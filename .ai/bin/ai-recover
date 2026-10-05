@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+usage() {
+  cat <<'EOF'
+Usage: ai-recover --stage STAGE
+Bounded auto-recovery after ai-pipeline stopped (handed over by ai-pipeline itself, or
+started by ai-watchdog --recover after a crash). Hard rules first, then a read-only
+Claude session picks ONE action that this script carries out:
+  rerun | commit_and_rerun (only if the full gate passes) | escalate (notify the human).
+Authority comes from the host-side run manifest written when the human started the run
+(approved gate digest, branch, arguments, attempt budget), never from checkout files.
+At most AI_RECOVER_MAX (default 2) attempts per human-started run. Gate files are never
+changed: a changed gate always escalates. Disable with AI_AUTO_RECOVER=0.
+EOF
+}
+stage=''
+while (( $# )); do
+  case "$1" in
+    --stage) (( $# >= 2 )) || ai_die 'Missing stage'; stage=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; ai_die "Unknown argument: $1" ;;
+  esac
+done
+[[ -n "$stage" ]] || ai_die 'Supply --stage.'
+ai_root
+# The lock first: a rejected second process must not touch the live run's marker.
+AI_LOCK_QUIET=1 ai_lock
+export AI_LOCK_HELD=$$
+branch=$(git symbolic-ref --quiet --short HEAD || printf 'detached HEAD')
+reason=$(tr '\n' ' ' < .ai/local/last-error 2>/dev/null || true)
+reason=${reason:-unknown (no last-error recorded)}
+
+escalate() {
+  AI_STOP_NOTIFIED=1
+  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}"
+  printf '%s\n' "$reason" > .ai/local/last-error
+  touch .ai/local/last-error.notified 2>/dev/null || true
+  # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.
+  rm -f .ai/local/pipeline.active
+  # Not ai_die: last-error keeps the original stop reason for the human and later runs.
+  printf 'Error: escalated to the human: %s\n' "${1:-$reason}" >&2
+  exit 1
+}
+
+approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
+  escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
+# Reserve the attempt before anything that can be interrupted, then publish the marker:
+# a kill in between can never produce an uncounted retry.
+attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || \
+  escalate 'the run manifest is unreadable.' 'rerun ai-pipeline --approved by hand.'
+# Restore the approved run's settings (notifications, budgets, models); settings the run
+# didn't have fall back to their defaults instead of inheriting this environment's.
+unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT
+while IFS= read -r -d '' setting; do
+  case "${setting%%=*}" in
+    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT)
+      export "$setting" ;;
+  esac
+done < <(ai_helper run-manifest env)
+# Any unexpected exit (set -e, kill, Ctrl-C) still tells the human, exactly once.
+on_exit() {
+  local code=$?
+  if (( code != 0 )) && [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
+    ai_notify "⛔ STOPPED, needs you: auto-recovery failed unexpectedly (exit $code) during $stage. Inspect the checkout, then rerun ai-pipeline."
+    touch .ai/local/last-error.notified 2>/dev/null || true
+    ai_drop_marker
+  fi
+}
+trap on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+# Handlers first, then the marker. Liveness contract: this process stands in for ai-pipeline until it resumes.
+AI_PIPELINE_MARKER=.ai/local/pipeline.active
+printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
+max=${AI_RECOVER_MAX:-2}
+[[ "$max" =~ ^[0-9]$ ]] || max=2
+[[ "${AI_AUTO_RECOVER:-1}" != 0 ]] || escalate 'auto-recovery is off (AI_AUTO_RECOVER=0).' 'fix the cause, then rerun ai-pipeline.'
+current_gate=$(ai_guard_digest) || escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'
+[[ "$current_gate" == "$approved_gate" ]] || \
+  escalate 'gate files changed since you approved the run.' 'review the change and rerun ai-pipeline --approved yourself.'
+[[ "$branch" == "$(ai_helper run-manifest branch)" ]] || \
+  escalate "the checkout is on $branch, not the approved run's branch." 'switch back or rerun ai-pipeline --approved yourself.'
+mapfile -d '' -t args < <(ai_helper run-manifest args)
+# Hard rules: never let an AI talk the workflow past its own gate, policy or integrity checks.
+case "$reason" in
+  *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
+  *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
+  *'differs from the validated content'*)
+    escalate 'this kind of stop always needs a human.' 'inspect it, fix it, then rerun ai-pipeline.' ;;
+esac
+(( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
+
+# A stop always leaves runner bookkeeping (run log, state, handoff) behind; record it.
+if [[ -n "$(git status --porcelain --untracked-files=all)" && \
+      -z "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md')" ]]; then
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -q -m "chore(ai): record stop during $stage" || escalate 'recording the stop failed (commit hook?).' 'inspect the checkout.'
+  [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed after recording the stop (hook?).' 'inspect the diff.'
+fi
+[[ -f .ai/prompts/recover.md ]] || escalate 'missing .ai/prompts/recover.md.' 'copy it from the toolkit templates.'
+command -v claude >/dev/null || escalate 'claude is not installed.' 'rerun ai-pipeline by hand.'
+ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage: $reason"
+prompt=$(cat .ai/prompts/recover.md)
+prompt+=$'\n\nRECOVERY CONTRACT. Context:\n'
+prompt+="Branch: $branch. Stopped during: $stage. Recorded reason: $reason. Recovery attempt $attempt of $max."
+prompt+=$'\nUncommitted changes (git status --short):\n'
+prompt+="$(git status --short --untracked-files=all | sed -n '1,40p')"
+prompt+=$'\nLast run-log entries:\n'
+prompt+="$(tail -n 8 .ai/run-log.md 2>/dev/null)"
+prompt+=$'\nQueue:\n'
+prompt+="$("$AI_BIN/ai-status" 2>&1 | sed -n '1,20p')"
+log=$(mktemp .ai/local/recover-XXXXXXXX.json)
+model_args=()
+if [[ -n "${AI_MODEL:-}" ]]; then model_args=(--model "$AI_MODEL"); fi
+set +e
+timeout --signal=TERM --kill-after=10s "${AI_RECOVER_TIMEOUT:-300}" claude -p \
+  --permission-mode dontAsk --output-format json --tools Read,Glob,Grep --allowedTools Read,Glob,Grep \
+  --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' "${model_args[@]}" \
+  -- "$prompt" < /dev/null > "$log" 2> "${log%.json}.stderr.log"
+claude_code=$?
+set -e
+IFS=$'\t' read -r action why human < <(ai_helper recover-decision "$log" "$claude_code")
+printf 'Recovery decision: %s (%s)\n' "$action" "$why"
+# The session is read-only, but re-check before acting on its advice.
+[[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during recovery.' 'inspect the diff.'
+
+case "$action" in
+  commit_and_rerun)
+    [[ -n "$(git status --porcelain --untracked-files=all)" ]] || escalate "$why (nothing to commit)" "$human"
+    "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
+    [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during validation.' 'inspect the diff.'
+    git add --all -- .
+    if ! new_files=$(ai_helper checkpoint-guard); then
+      git reset -q
+      escalate "$why; but the leftovers include secret-looking files." 'inspect the uncommitted files.'
+    fi
+    git commit -q -m "chore(ai): recovery checkpoint (validated leftover work)
+
+Stopped during $stage: $reason
+Recovery: $why" || escalate 'the recovery commit failed (commit hook?).' 'inspect the checkout.'
+    [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed after the recovery commit (hook?).' 'inspect the diff.'
+    # A commit hook must not have slipped unvalidated content into the checkpoint.
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+      ai_helper committed-matches-worktree || \
+      escalate 'the recovery checkpoint differs from the validated content (commit hook?).' 'inspect the last commit.' ;;
+  rerun)
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+      escalate "$why; but the checkout has uncommitted changes." 'inspect and commit or discard them, then rerun ai-pipeline.' ;;
+  *) escalate "$why" "$human" ;;
+esac
+ai_notify "🔧 Recovered ($attempt/$max): $why Resuming the pipeline."
+rm -f .ai/local/last-error
+trap - EXIT
+exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"

@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+usage() {
+  cat <<'EOF'
+Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeout SECONDS]
+              [--model NAME] [--knowledge-dir DIRECTORY] [--triage]
+Run Claude on the approved plan, one recoverable task per fresh session.
+Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
+--model sets the Claude model (default: AI_MODEL or the CLI default); a task's
+optional "Model:" line overrides it. --triage runs one session that evaluates the
+current Codex review and turns accepted findings into new tasks (no implementation).
+Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
+The human must inspect the plan, validation script, and permission allowlist first.
+EOF
+}
+sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
+model=${AI_MODEL:-}; triage=no
+while (( $# )); do
+  case "$1" in
+    --approved) approved=yes; shift ;;
+    --triage) triage=yes; shift ;;
+    --model)
+      (( $# >= 2 )) || ai_die 'Missing model name'
+      model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
+      [[ "$2" =~ $model_pattern ]] || ai_die "Invalid model name: $2"
+      model=$2; shift 2 ;;
+    --knowledge-dir)
+      (( $# >= 2 )) || ai_die 'Missing knowledge directory'
+      [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
+      knowledge_dir=$(cd -- "$2" && pwd -P)
+      shift 2 ;;
+    --sessions|--session-timeout|--run-timeout)
+      (( $# >= 2 )) || ai_die "Missing value for $1"
+      [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die "Invalid limit: $2"
+      case "$1" in
+        --sessions) sessions=$2 ;; --session-timeout) session_timeout=$2 ;;
+        --run-timeout) run_timeout=$2 ;;
+      esac
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; ai_die "Unknown argument: $1" ;;
+  esac
+done
+[[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
+command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
+ai_root
+ai_lock
+rm -f .ai/local/last-error
+AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
+ai_branch
+git rev-parse --verify HEAD >/dev/null 2>&1 || ai_die 'Create an initial Git commit first.'
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+  ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+ai_helper tasks check
+# Authoritative baseline stays in shell memory, not an agent-editable file.
+AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
+readonly AI_APPROVED_GATE
+printf 'Approved workflow gate SHA-256: %s\n' "$AI_APPROVED_GATE"
+printf '%s\n' "$AI_APPROVED_GATE" > .ai/local/approved-gate.sha256
+knowledge_args=()
+if [[ -n "$knowledge_dir" ]]; then knowledge_args=(--add-dir "$knowledge_dir"); fi
+mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/permissions.allow)
+(( ${#allowed[@]} )) || ai_die 'Empty permission allowlist.'
+started=$SECONDS
+active_task=none
+finished=no
+on_exit() {
+  local code=$?
+  if [[ "$finished" != yes ]]; then
+    ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
+      'see local logs' 'No merge or deployment performed'
+    # Inside ai-pipeline the pipeline reports the stop itself.
+    [[ -n "${AI_PIPELINE:-}" ]] || \
+      ai_notify "⛔ STOPPED, needs you: runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+    [[ -n "${AI_PIPELINE:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
+  fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# The runner owns the bookkeeping records and commits leftovers in them; anything
+# else left uncommitted means the session didn't checkpoint its work.
+dirty_beyond_records() {
+  git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
+}
+
+review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
+
+remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
+
+knowledge_prompt() {
+  [[ -n "$knowledge_dir" ]] || return 0
+  printf '\nProject knowledge base explicitly configured for this run: %s. ' "$knowledge_dir"
+  printf 'Read/update relevant architecture and decisions there; human todos require human confirmation. '
+  printf 'Keep the operational queue/state/run log in .ai/ and Git. Do not relocate operational state to the knowledge base.\n'
+}
+
+# One fresh Claude session; a usage/rate-limit error pauses until the reset and retries.
+claude_session() {
+  local prompt=$1 session_model=$2 limit code reset log errors remaining review_before
+  local model_args=()
+  if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
+  while true; do
+    remaining=$(remaining_time)
+    (( remaining > 0 )) || ai_die 'Run time limit reached; checkpoint and resume later.'
+    limit=$session_timeout
+    (( limit <= remaining )) || limit=$remaining
+    log=$(mktemp .ai/local/claude-XXXXXXXX.json)
+    errors="${log%.json}.stderr.log"
+    review_before=$(review_digest)
+    printf 'Session: %s%s (limit %ss; log %s)\n' "$active_task" \
+      "${session_model:+ [model $session_model]}" "$limit" "$log"
+    set +e
+    timeout --signal=TERM --kill-after=10s "$limit" claude -p \
+      --permission-mode dontAsk --output-format json \
+      --tools Read,Glob,Grep,Edit,Write,Bash --allowedTools "${allowed[@]}" \
+      --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      "${model_args[@]}" "${knowledge_args[@]}" \
+      -- "$prompt" < /dev/null > "$log" 2> "$errors"
+    code=$?
+    set -e
+    ai_guard_verify
+    # The independent review is Codex's evidence; no Claude session may alter it.
+    [[ "$(review_digest)" == "$review_before" ]] || \
+      ai_die 'A Claude session modified .ai/reviews/current.md; inspect and restore the Codex report.'
+    if (( code != 124 && code != 137 )) && ! ai_helper claude-result "$log" --check-only 2>/dev/null; then
+      # Only a failed session is checked for limit messages (normal output may mention limits).
+      if reset=$(ai_helper limit-check "$log" "$errors"); then
+        ai_limit_pause Claude "$reset"
+        continue
+      fi
+    fi
+    (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error). Preserve partial work; see $log and $errors."
+    ai_helper claude-result "$log" || ai_die "Claude session failed or reported an error; see $log."
+    return 0
+  done
+}
+
+if [[ "$triage" == yes ]]; then
+  # Evaluate the current review into dispositions and new tasks. No implementation.
+  [[ -f .ai/reviews/current.md ]] || ai_die 'No review to triage.'
+  reviewed=$(ai_helper review-info) || ai_die 'Current review was not produced by ai-review.'
+  active_task=triage
+  # Host-written dispositions file bound to this review; Claude fills in the rows.
+  ai_helper start-dispositions "${reviewed%% *}"
+  git add -- .ai/reviews/dispositions.md
+  # Resuming an interrupted triage finds the file already bound and committed.
+  git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
+  ai_guard_verify
+  before=$(git rev-parse HEAD)
+  prompt=$(cat .ai/prompts/triage.md)
+  prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+  prompt+=$(knowledge_prompt)
+  claude_session "$prompt" "$model"
+  ai_branch
+  ai_helper tasks check
+  [[ -z "$(dirty_beyond_records)" ]] || \
+    ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
+  # Triage may only touch workflow records, never source, tests, or the gate.
+  changed=$(git diff --name-only "$before" HEAD -- . ':!.ai/tasks.md' ':!.ai/reviews/dispositions.md' \
+    ':!.ai/state.md' ':!.ai/handoff.md' ':!.ai/run-log.md' ':!.ai/current-plan.md')
+  [[ -z "$changed" ]] || ai_die "Triage changed files outside workflow records: $(tr '\n' ' ' <<< "$changed")"
+  ai_helper triage-check --fresh >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
+  ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
+  ai_helper state fixing_review 'Run the fix tasks, then review again'
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m 'chore(ai): record review triage' >/dev/null
+  ai_guard_verify
+  finished=yes
+  printf '%s\n' 'Triage complete.'
+  exit 0
+fi
+
+if [[ -f .ai/prompts/runner.md ]]; then
+  base_prompt=$(cat .ai/prompts/runner.md)
+else
+  base_prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
+fi
+
+for (( iteration=1; iteration<=sessions+1; iteration++ )); do
+  ai_guard_verify
+  ai_branch
+  ai_helper tasks check
+  active_task=$(ai_helper tasks next)
+  if [[ "$active_task" == none ]]; then
+    if ! ai_helper tasks complete; then
+      ai_helper state blocked 'No runnable tasks; resolve blockers/dependencies'
+      ai_die 'Unfinished tasks exist but none can run. See .ai/tasks.md.'
+    fi
+    remaining=$(remaining_time)
+    (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
+    if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+      ai_guard_verify
+      ai_helper state blocked 'Final validation failed; inspect validation log'
+      ai_die 'Final validation failed; readiness is not established.'
+    fi
+    ai_guard_verify
+    ai_helper state ready_for_review 'Run independent Codex review, then human testing'
+    ai_log none 'queue complete; ready for independent review' PASS 'Human acceptance remains'
+    git add -- .ai/state.md .ai/run-log.md
+    git commit -m 'chore(ai): record review handoff' >/dev/null
+    ai_guard_verify
+    # The stamp excludes metadata so this bookkeeping does not invalidate it.
+    finished=yes
+    [[ -n "${AI_PIPELINE:-}" ]] || ai_notify 'All tasks done and validated; ready for independent review.'
+    printf '%s\n' 'Tasks complete and validation passed. Review with Codex; test and merge manually.'
+    exit 0
+  fi
+  (( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun --approved to continue.'
+  ai_helper state implementing "Resume/implement $active_task"
+  task_model=$(ai_helper tasks model "$active_task")
+  prompt=$base_prompt
+  prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
+  prompt+="$active_task"
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Your shell already starts in the project root: never prefix commands with cd (permission rules check every part of a compound command, and a denied git commit stops the whole run); run git add -- <paths> and git commit as plain commands.'
+  prompt+=$(knowledge_prompt)
+  printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  claude_session "$prompt" "${task_model:-$model}"
+  ai_branch
+  ai_helper tasks check
+  task_status=$(ai_helper tasks status "$active_task")
+  case "$task_status" in
+    DONE)
+      remaining=$(remaining_time)
+      (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
+      if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+        ai_guard_verify
+        ai_helper tasks set "$active_task" IN_PROGRESS
+        ai_helper state blocked "Validation failed after $active_task; inspect validation log"
+        ai_die "Validation failed; $active_task returned to IN_PROGRESS."
+      fi
+      ai_guard_verify
+      if [[ -n "$(dirty_beyond_records)" ]]; then
+        # Tier-1 recovery: the session finished and the full gate just passed on exactly
+        # this content (gate files verified unchanged), but it didn't commit. Commit it.
+        # The session started from a clean tree, so everything new is its own output. Stage it
+        # all (git still skips ignored files), but never a secret-looking file.
+        git add --all -- .
+        if ! new_files=$(ai_helper checkpoint-guard); then
+          git reset -q
+          ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
+        fi
+        git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
+        ai_guard_verify
+        # A commit hook must not have slipped unvalidated content into that checkpoint.
+        [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+          ai_helper committed-matches-worktree || \
+          ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
+        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
+      fi
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
+      ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;
+    BLOCKED)
+      [[ -z "$(dirty_beyond_records)" ]] || \
+        ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
+      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
+      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
+    *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
+  esac
+  ai_helper state implementing 'Continue queue; see task results for any blockers'
+  # Commit runner bookkeeping separately; never stage application files here.
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
+  ai_guard_verify
+done

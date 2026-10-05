@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The toolkit needs only bash, git and python3 (preinstalled on ubuntu-latest).
+printf '%s\n' 'Nothing to install.'
