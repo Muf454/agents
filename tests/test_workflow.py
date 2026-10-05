@@ -96,7 +96,9 @@ if 'TRIAGE CONTRACT' in prompt:
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
         review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
-                             if mode == 'triage-mixed' else ''))
+                             if mode == 'triage-mixed' else '')
+                          + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
+                             if mode == 'triage-mixed-reject' else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
             pathlib.Path('src.txt').write_text('not allowed in triage')
@@ -196,6 +198,7 @@ if 'Diagnose this workflow incident' in args[-1]:
     sys.exit(0)
 if 'RECHECK SCOPE' in args[-1]:
     with open(state / 'codex-recheck-calls', 'a') as f: f.write(args[-1].split('RECHECK SCOPE')[1] + '\n')
+    if os.environ.get('MOCK_RECHECK_FAIL'): sys.exit(17)
     pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
         os.environ.get('MOCK_RECHECK', '{"answers": [{"id": "M1", "verdict": "upheld", "reason": "still broken"}]}'))
     sys.exit(0)
@@ -1180,10 +1183,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('1. Decide the unresolved review findings', self.notifications())
 
     def test_pipeline_rejected_findings_still_open_normal_pr(self):
+        # Rejected findings the re-check withdraws (R3; an upheld one would make it a draft).
         self.ready()
         self.add_origin()
         self.tool('ai-pipeline', '--approved', '--base', 'main',
-                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-reject')
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-reject',
+                  MOCK_RECHECK=json.dumps({'answers': [{'id': 'M1', 'verdict': 'withdrawn', 'reason': 'evidence holds'}]}))
         create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
         self.assertNotIn('--draft', create[0])
         self.assertIn('| M1 | rejected |', (self.project / '.ai/reviews/dispositions.md').read_text())
@@ -2110,6 +2115,201 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                      env=dict(env, MOCK_CLAUDE='error', AI_AUTO_RECOVER='0'), expected=1)
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertEqual(manifest['env']['AI_RECHECK_EFFORT'], 'xhigh')
+
+    # ---------------------------------------------------------------- R3: disputed findings in the pipeline
+    UPHELD_M2 = json.dumps({'answers': [{'id': 'M2', 'verdict': 'upheld', 'reason': 'the gate never runs that path'}]})
+
+    def recheck_calls(self):
+        calls = self.base / 'codex-recheck-calls'
+        return calls.read_text().split(': reviewed HEAD=')[1:] if calls.exists() else []
+
+    def created_prs(self):
+        return [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+
+    def pr_body_text(self):
+        return (self.base / 'gh.log.body.md').read_text()
+
+    def disputes(self):
+        return int(self.helper('disputes-verify').stdout)
+
+    def commit_files(self, subject):
+        sha = self.run_cmd(['git', 'log', '--format=%H', '--fixed-strings', '--grep', subject]).stdout.split()
+        self.assertEqual(len(sha), 1, subject)
+        return self.run_cmd(['git', 'show', '--name-only', '--format=', sha[0]]).stdout.split()
+
+    def assert_order(self, *subjects):
+        log = list(reversed(self.subjects()))
+        positions = [next(i for i, s in enumerate(log) if s.startswith(subject)) for subject in subjects]
+        self.assertEqual(positions, sorted(positions), log)
+
+    def test_disputed_findings_all_withdrawn_open_a_normal_pr(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once', MOCK_CLAUDE='triage-reject',
+                  MOCK_RECHECK=json.dumps({'answers': [{'id': 'M1', 'verdict': 'withdrawn', 'reason': 'evidence holds'}]}))
+        self.assertEqual(len(self.recheck_calls()), 1)
+        self.assertEqual(self.helper('recheck-verify').stdout, 'M1\twithdrawn\tevidence holds\n')
+        self.assertEqual(self.commit_files('chore(ai): record review re-check'), ['.ai/reviews/recheck.md'])
+        self.assertFalse((self.project / '.ai/reviews/disputes.md').exists())
+        self.assertEqual(self.disputes(), 0)
+        self.assertNotIn('--draft', self.created_prs()[0])
+        self.assertNotIn('Disputed findings', self.pr_body_text())
+
+    def test_disputed_findings_one_upheld_makes_a_draft_with_the_section_on_top(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once', MOCK_CLAUDE='triage-reject')
+        self.assertEqual(self.disputes(), 1)
+        # Report and record in ONE host commit.
+        self.assertEqual(sorted(self.commit_files('chore(ai): record review re-check')),
+                         ['.ai/reviews/disputes.md', '.ai/reviews/recheck.md'])
+        self.assertIn('--draft', self.created_prs()[0])
+        body = self.pr_body_text()
+        self.assertTrue(body.startswith('## Disputed findings\n'), body[:200])
+        top = body.split('## Summary')[0]
+        for text in ('**M1** (MAJOR', 'M1: fixture defect at T001.txt:1.',
+                     "Claude's reason: T001.txt is a fixture; the finding misreads it", "Codex's answer: still broken"):
+            self.assertIn(text, top)
+        self.assertIn('Resolve 1 disputed finding(s) at the PR', self.notifications())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+
+    def test_disputed_findings_mixed_triage_rechecks_then_fixes_and_survives_clean_review_and_restart(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='two-major-once',
+                  MOCK_CLAUDE='triage-mixed-reject', MOCK_RECHECK=self.UPHELD_M2)
+        # The re-check runs right after the triage, before the accepted fix is implemented.
+        self.assert_order('chore(ai): record review triage', 'chore(ai): record review re-check', 'implement T002')
+        self.assertEqual(len(self.recheck_calls()), 1)
+        self.assertIn('M2\tMAJOR\t', self.recheck_calls()[0])
+        self.assertNotIn('M1\tMAJOR\t', self.recheck_calls()[0])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])  # later clean review
+        self.assertIn('--draft', self.created_prs()[0])
+        self.assertTrue(self.pr_body_text().startswith('## Disputed findings\n'))
+        self.assertIn('**M2** (MAJOR', self.pr_body_text())
+        # A restart: the dispute is never resolved automatically; the existing PR stays a draft.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.assertTrue(self.pr_body_text().startswith('## Disputed findings\n'))
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(len(self.recheck_calls()), 1)
+
+    def test_disputed_findings_resume_with_dispositions_but_no_recheck_runs_it(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'])
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=json.dumps({'answers': [
+            {'id': 'M1', 'verdict': 'upheld', 'reason': 'still broken'},
+            {'id': 'M2', 'verdict': 'withdrawn', 'reason': 'the gate covers it'}]}))
+        self.assertIn('Re-check of rejected findings (Codex)', result.stdout)
+        self.assertEqual(len(self.recheck_calls()), 1)
+        self.assertEqual(self.triage_calls(), 0)
+        self.assertEqual(self.disputes(), 1)
+        self.assertIn('--draft', self.created_prs()[0])
+        body = self.pr_body_text()
+        self.assertIn('**M1** (MAJOR', body)
+        self.assertNotIn('**M2**', body)
+
+    def test_disputed_findings_tampered_file_fails_verification(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once',
+                  MOCK_CLAUDE='triage-reject')
+        self.assertIn('resolve 1 disputed finding(s)', self.notifications())
+        disputes = self.project / '.ai/reviews/disputes.md'
+        original = disputes.read_text()
+        disputes.write_text(original.replace('still broken', 'withdrawn after all'))
+        self.commit('edit the dispute')
+        self.assertIn('does not match the dispute records', self.helper('disputes-verify', expected=1).stderr)
+        self.assertIn('does not match the dispute records', self.helper('disputes-record', expected=1).stderr)
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('disputes.md does not match', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.created_prs(), [])
+        # Removed after a later review replaced the one it disputes: publishing stops too.
+        disputes.write_text(original)
+        self.commit('restore the dispute')
+        self.helper('disputes-verify')
+        self.run_cmd(['git', 'rm', '-q', '--', '.ai/reviews/disputes.md'])
+        self.run_cmd(['git', 'commit', '-qm', 'drop the dispute'])
+        self.tool('ai-review', '--base', 'main')
+        self.commit('record a clean review')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'none')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.created_prs(), [])
+
+    def test_disputed_findings_no_rejected_finding_makes_no_recheck_call(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertEqual(self.recheck_calls(), [])
+        self.assertFalse((self.base / 'codex-recheck-calls').exists())
+        self.assertFalse((self.project / '.ai/reviews/recheck.md').exists())
+        self.assertEqual(self.disputes(), 0)
+        self.assertFalse([s for s in self.subjects() if 're-check' in s or 'disputed' in s])
+
+    def test_disputed_findings_interrupted_before_recheck_rechecks_original_findings_first(self):
+        self.ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CODEX='two-major-once',
+                           MOCK_CLAUDE='triage-mixed-reject', MOCK_RECHECK_FAIL='1')
+        self.assertIn('Pipeline stopped during re-check', result.stderr)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=self.UPHELD_M2)
+        calls = self.recheck_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('M2\tMAJOR\tthe second defect is handled by the gate', calls[1])
+        self.assert_order('chore(ai): record review re-check', 'implement T002')
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+        self.assertIn('--draft', self.created_prs()[0])
+        self.assertTrue(self.pr_body_text().startswith('## Disputed findings\n'))
+        self.assertIn('**M2** (MAJOR', self.pr_body_text())
+
+    def test_disputed_findings_missing_record_after_recheck_is_added_once_before_any_task(self):
+        self.rejected_review(['| M1 | accepted | real defect | T002 |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'], fix_task=True)
+        # Interrupted after the re-check report exists, before its dispute record was written.
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=self.UPHELD_M2)
+        self.assertFalse((self.project / '.ai/reviews/disputes.md').exists())
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertEqual(len(self.recheck_calls()), 1)  # not re-checked again
+        self.assertEqual(self.commit_files('chore(ai): record disputed findings'), ['.ai/reviews/disputes.md'])
+        self.assert_order('chore(ai): record disputed findings', 'implement T002')
+        self.assertEqual(self.disputes(), 1)
+        self.assertIn('**M2** (MAJOR', self.pr_body_text())
+        self.assertIn('--draft', self.created_prs()[0])
+        # A restart never duplicates the record.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(self.subjects().count('chore(ai): record disputed findings'), 1)
+
+    def test_disputed_findings_uncommitted_recheck_report_is_committed_with_its_record(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | accepted | real defect | T001 |\n'])
+        # A stop between the pipeline's re-check and its host commit leaves the report uncommitted.
+        self.tool('ai-review', '--recheck', AI_PIPELINE='1')
+        self.assertIn('.ai/reviews/recheck.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertEqual(len(self.recheck_calls()), 1)
+        self.assertEqual(sorted(self.commit_files('chore(ai): record review re-check')),
+                         ['.ai/reviews/disputes.md', '.ai/reviews/recheck.md'])
+        self.assertEqual(self.disputes(), 1)
+        # Re-running reconciliation on the same verified re-check adds nothing.
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        self.assertEqual(self.helper('disputes-record').stdout.strip(), '0')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(self.run_cmd(['git', 'log', '--format=%s', head.strip() + '..HEAD']).stdout.count('re-check'), 0)
+        self.assertEqual(self.subjects().count('chore(ai): record disputed findings'), 0)
+        # Any other leftover still blocks the start.
+        (self.project / 'src.txt').write_text('stray')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Start from a clean checkpoint', result.stderr)
 
 
 if __name__ == '__main__':

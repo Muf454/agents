@@ -919,6 +919,133 @@ def recheck_verify(arguments):
         print(f'{finding}\t{verdict}\t{reason}')
 
 
+def recheck_status(arguments):
+    """'none' (no verified review with rejected BLOCKER/MAJOR in dispositions bound to it),
+    'pending' (rejected findings without a verified, current re-check) or 'verified'."""
+    try:
+        head = review_info_values()[0]
+    except (ValueError, OSError):
+        print('none')  # no verified review: it is replaced before anything relies on it
+        return
+    path = Path('.ai/reviews/dispositions.md')
+    bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', path.read_text(), re.M) if path.exists() else None
+    if not bound or bound.group(1) != head:
+        print('none')  # not triaged yet
+        return
+    _, rows = rejected_rows()
+    if not rows:
+        print('none')
+        return
+    try:
+        recheck_values()
+    except ValueError:
+        print('pending')
+        return
+    print('verified')
+
+
+DISPUTES = Path('.ai/reviews/disputes.md')
+DISPUTE_FIELDS = ('review_digest', 'finding', 'level', 'finding_text', 'evidence', 'answer', 'date')
+
+
+def disputes_store():
+    """Host-side dispute records of the current branch (append-only; agents can't write here)."""
+    branch = current_branch()
+    if not branch:
+        fail('Disputed findings need a branch (detached HEAD).')
+    return binding_dir() / f'disputes-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def dispute_records():
+    path = disputes_store()
+    if not path.exists():
+        return []
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and set(r) == set(DISPUTE_FIELDS) and all(isinstance(r[k], str) for k in DISPUTE_FIELDS)
+            for r in records):
+        fail('The host dispute records are unreadable; inspect them before publishing.')
+    return records
+
+
+def render_disputes(records):
+    lines = ['# Disputed findings', '',
+             '<!-- Host-written by ai-pipeline from host state; append-only. Never edit: a changed file',
+             'fails verification. A dispute is never resolved automatically; the human resolves it',
+             'at the pull request. -->', '']
+    for number, record in enumerate(records, 1):
+        lines += [f"## D{number} — {record['finding']} ({record['level']})", '',
+                  f"- Review digest: {record['review_digest']}",
+                  f"- Recorded: {record['date']}",
+                  f"- Original finding: {record['finding_text']}",
+                  f"- Claude's evidence: {record['evidence']}",
+                  f"- Codex's answer: {record['answer']}", '']
+    return '\n'.join(lines)
+
+
+def disputes_values():
+    """Verified dispute records: the file must be exactly what the host recorded."""
+    records = dispute_records()
+    actual = DISPUTES.read_text() if DISPUTES.exists() else None
+    if actual != (render_disputes(records) if records else None):
+        fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
+             'restore it from Git (records are append-only and never edited).')
+    return records
+
+
+def disputes_verify(arguments):
+    """Print the number of verified dispute records; fail when the file was edited or removed."""
+    print(len(disputes_values()))
+
+
+def finding_text(review, level, finding):
+    """The finding's own text from the review (its heading or bullet up to the next finding)."""
+    body = section(review, f'{level} findings')
+    starts = [(match.start(), match.group(1)) for match in FINDING_ID.finditer(body)]
+    for number, (start, name) in enumerate(starts):
+        if name == finding:
+            end = starts[number + 1][0] if number + 1 < len(starts) else len(body)
+            return ' '.join(body[start:end].split())[:1500]
+    return '(not found in the review)'
+
+
+def disputes_record(arguments):
+    """Append a dispute record for every upheld answer of the verified, current re-check that
+    has none yet (keyed by review digest + finding id), then rewrite the file from host state.
+    The file may lag behind host state (an interrupted earlier write) but never differ from it.
+    Prints the number of records added."""
+    records = dispute_records()
+    actual = DISPUTES.read_text() if DISPUTES.exists() else None
+    prefixes = [None] + [render_disputes(records[:count]) for count in range(1, len(records) + 1)]
+    if actual not in prefixes:
+        fail('.ai/reviews/disputes.md does not match the dispute records the host wrote; '
+             'restore it from Git (records are append-only and never edited).')
+    _, digest, _, answers = recheck_values()
+    _, rows = rejected_rows()
+    review = Path('.ai/reviews/current.md').read_text()
+    known = {(record['review_digest'], record['finding']) for record in records}
+    added = []
+    for finding, level, evidence in rows:
+        verdict, reason = answers[finding]
+        if verdict != 'upheld' or (digest, finding) in known:
+            continue
+        added.append({'review_digest': digest, 'finding': finding, 'level': level,
+                      'finding_text': finding_text(review, level, finding),
+                      'evidence': ' '.join(evidence.split()), 'answer': ' '.join(reason.split()),
+                      'date': now()})
+    records += added
+    if added:
+        path = disputes_store()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
+    if records:
+        atomic(DISPUTES, render_disputes(records))
+    print(len(added))
+
+
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
@@ -1017,6 +1144,12 @@ def finish_summary(arguments):
     except (ValueError, OSError):
         review = f'Codex review rounds: {reviews}'
     todos = []
+    try:
+        disputes = len(disputes_values())
+    except (ValueError, OSError):
+        disputes = 0
+    if disputes:
+        todos.append(f'Resolve {disputes} disputed finding(s) at the PR (Codex upheld what Claude rejected)')
     if unresolved:
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
     todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
@@ -1163,6 +1296,17 @@ def pr_body(arguments):
                 binding.read_text().strip() != hashlib.sha256(review.encode()).hexdigest():
             fail('Current review does not match the report ai-review published; refusing to publish it.')
     lines = []
+    disputes = disputes_values()  # never publish dispute records the host didn't write
+    if disputes:
+        lines += ['## Disputed findings', '',
+                  f'> [!CAUTION]\n> Draft: Codex upheld {len(disputes)} finding(s) Claude rejected. '
+                  'Resolve each one here before testing and merging; the pipeline never resolves them.', '']
+        for record in disputes:
+            lines += [f"- **{record['finding']}** ({record['level']}, review {record['review_digest'][:12]}): "
+                      f"{record['finding_text']}",
+                      f"  - Claude's reason: {record['evidence']}",
+                      f"  - Codex's answer: {record['answer']}"]
+        lines += ['', 'Records: `.ai/reviews/disputes.md`.', '']
     if unresolved:
         lines += ['> [!WARNING]', '> Draft: significant review findings remain after the automatic fix rounds.',
                   '> See "Independent review" below before testing.', '']
@@ -1240,6 +1384,12 @@ def main():
         publish_recheck(arguments)
     elif command == 'recheck-verify':
         recheck_verify(arguments)
+    elif command == 'recheck-status':
+        recheck_status(arguments)
+    elif command == 'disputes-record':
+        disputes_record(arguments)
+    elif command == 'disputes-verify':
+        disputes_verify(arguments)
     elif command == 'triage-scope':
         triage_scope(arguments)
     elif command == 'stage-verify':

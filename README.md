@@ -208,7 +208,10 @@ tmux new -s my-app-ai
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
-   make it a **draft** (an existing PR is converted). The PR targets `--pr-base`,
+   make it a **draft** (an existing PR is converted). So does any recorded
+   **disputed finding** (a BLOCKER/MAJOR Claude rejected and Codex upheld on re-check):
+   the PR body then starts with a "Disputed findings" section, and you resolve them at
+   the PR; the pipeline never resolves a dispute itself. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every push attempt and after every push it re-checks that the review is
@@ -466,6 +469,9 @@ It refuses unless the review verifies and only workflow records changed since th
 reviewed commit (pending fix tasks are fine). The host writes `.ai/reviews/recheck.md`,
 bound to the review, the rejected rows (IDs and evidence) and the reviewed HEAD;
 `python3 .ai/bin/lib/workflow.py recheck-verify` prints its verified answers.
+`ai-pipeline` runs this re-check itself right after every triage (and on every start
+or resume, before any task runs) and records each upheld finding as a durable dispute
+in `.ai/reviews/disputes.md` (host-written, append-only, verified before publishing).
 
 ## Human acceptance testing and finish
 

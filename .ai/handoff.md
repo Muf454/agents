@@ -37,6 +37,14 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   review digest + rejected-rows digest + reviewed HEAD, report hash in host state;
   `recheck-verify` checks it. `AI_RECHECK_EFFORT` is a run setting restored by ai-recover.
   Not yet called by ai-pipeline (T007).
+- T007: disputed findings in the pipeline (R3). `reconcile_disputes` runs right after
+  every triage and on every start/resume, before any task runs. It re-checks rejected
+  BLOCKER/MAJOR findings that have no verified re-check. Each upheld answer becomes an
+  append-only record in `.ai/reviews/disputes.md`, written from a per-branch host store and
+  committed with the re-check report in one host commit. `disputes-verify` is part of
+  `publish_ready`. A recorded dispute is never auto-resolved: the PR is a draft whose body
+  starts with "Disputed findings", and the FINISHED todos list them. The existing test
+  "rejected findings → normal PR" now supplies a withdrawn re-check answer.
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -72,9 +80,19 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
    Edit the evidence in the dispositions: `recheck-verify` now fails ("different rejection
    evidence"). Commit a source change and rerun `--recheck`: refused ("code changed since
    the reviewed commit") without calling Codex.
+8. Disputed findings: in a scratch project with a bare `origin` and `gh`, run
+   `ai-pipeline --approved` on a change where Codex reports a MAJOR finding that Claude
+   rejects. "Re-check of rejected findings (Codex)" runs right after the triage. If Codex
+   upholds it, `git show --stat HEAD~N` for `chore(ai): record review re-check` lists both
+   `.ai/reviews/recheck.md` and `.ai/reviews/disputes.md`. The PR is a draft, its description
+   starts with "Disputed findings" (finding, Claude's reason, Codex's answer), and the
+   FINISHED notification says "Resolve 1 disputed finding(s)". Rerunning the pipeline keeps
+   it a draft. Edit a word in `disputes.md`, commit, rerun: it stops ("disputes.md does not
+   match the dispute records") and does not touch the PR. If Codex withdraws the finding,
+   no `disputes.md` is created and the PR is a normal (ready) PR.
 
 ## Human todos
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Runner continues with T007 (disputed findings in the pipeline and the PR).
+Runner continues with T008 (toolkit version stamp and setup --upgrade).

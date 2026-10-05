@@ -8,12 +8,14 @@ Usage: ai-pipeline --approved [--base REF] [--pr-base BRANCH] [--max-fix-rounds 
                     --model NAME --knowledge-dir DIR]
 Hands-off delivery of an approved plan on a feature branch:
   Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
-  -> Claude triage + fix tasks (at most N rounds, default 2) -> review again
-  -> push the feature branch and open/update a pull request -> notify.
+  -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
+  BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
+  -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
 (default: --base when it is a local or origin/ branch).
 The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
-an interrupted review triage is verified and recorded once before anything else.
+an interrupted review triage is verified and recorded once, and pending re-checks of
+rejected findings run, before anything else.
 Usage limits pause and resume (see ai-run). Notifications use AI_NOTIFY_CMD.
 EOF
 }
@@ -73,9 +75,12 @@ if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
   fi
 fi
 # An interrupted stage of this branch's run (host-side manifest) is completed below, before
-# anything else; its leftovers are checked there. Otherwise start from a clean checkpoint.
+# anything else; its leftovers are checked there. An uncommitted re-check report (a stop
+# before its host commit) is verified and committed by the dispute reconciliation below.
+# Otherwise start from a clean checkpoint.
 open_stage=$(ai_helper run-manifest stage 2>/dev/null || true)
-[[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+[[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
+    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
@@ -133,6 +138,7 @@ publish_ready() {
   local why=''
   ai_guard_verify
   if ! why=$(ai_helper review-info 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-review integrity check failed}
+  elif ! why=$(ai_helper disputes-verify 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-dispute records do not verify}
   elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
   elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
   elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
@@ -194,6 +200,43 @@ complete_stage() {
   state=$(ai_helper triage-check --fresh 2>&1) || stage_fail "$state"
   ai_helper run-manifest stage-clear || stage_fail 'cannot clear the stage in the run manifest.'
 }
+recheck_fail() {
+  printf 'Re-check of rejected findings: %s\n' "${1#Error: }" > .ai/local/last-error
+  stop 're-check'
+}
+# Disputed findings (after every triage and on every start/resume, before any task runs or
+# the review is replaced): rejected BLOCKER/MAJOR without a verified, current re-check get
+# one; every upheld answer gets its append-only dispute record, committed with the re-check
+# report in one host commit. Rerunning it adds nothing twice.
+reconcile_disputes() {
+  local status added paths=() file
+  status=$(ai_helper recheck-status 2>&1) || recheck_fail "$status"
+  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    recheck_fail 'uncommitted .ai/reviews/recheck.md or disputes.md that do not verify; inspect them.'
+  fi
+  [[ "$status" != none ]] || return 0
+  if [[ "$status" == pending ]]; then
+    step 'Re-check of rejected findings (Codex)'
+    "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
+    ai_guard_verify
+  fi
+  added=$(ai_helper disputes-record 2>&1) || recheck_fail "$added"
+  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md; do
+    [[ -z "$(git status --porcelain --untracked-files=all -- "$file")" ]] || paths+=("$file")
+  done
+  if (( ${#paths[@]} )); then
+    if [[ " ${paths[*]} " == *recheck.md* ]]; then
+      host_commit 'chore(ai): record review re-check' "${paths[@]}"
+    else
+      host_commit 'chore(ai): record disputed findings' "${paths[@]}"
+    fi
+  fi
+  # A commit hook must not have changed the re-check, the records or anything else.
+  [[ "$(ai_helper recheck-status 2>/dev/null)" == verified ]] || recheck_fail 'the re-check no longer verifies after its commit (commit hook?).'
+  status=$(ai_helper disputes-verify 2>&1) || recheck_fail "$status"
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || recheck_fail 'the checkout is not clean after recording it.'
+  if (( added > 0 )); then printf 'Recorded %s disputed finding(s); the PR will be a draft.\n' "$added"; fi
+}
 
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
@@ -206,6 +249,7 @@ if [[ -n "$open_stage" ]]; then
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     stage_fail 'the checkout is not clean after completing the triage.'
 fi
+reconcile_disputes
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
   if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
@@ -263,6 +307,7 @@ while true; do
   ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
   complete_stage
   verdict=$(ai_helper triage-check --fresh) || stop triage
+  reconcile_disputes
   read -r accepted deferred <<< "${verdict//[a-z=]/ }"
   if (( accepted == 0 )); then
     # Every significant finding was rejected (with evidence) or deferred.
@@ -277,7 +322,10 @@ ensure_validated
 reviews=$(count_commits '^chore(ai): record independent review')
 publish_ready 'pull request preparation'
 if [[ "$open_pr" != yes ]]; then
-  ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally."
+  disputes=$(ai_helper disputes-verify) || stop 'pull request preparation'
+  disputed=''
+  if (( disputes > 0 )); then disputed=" and resolve $disputes disputed finding(s) (.ai/reviews/disputes.md)"; fi
+  ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally$disputed."
   printf '%s\n' 'Pipeline complete (no PR requested).'
   finish
 fi
@@ -295,8 +343,10 @@ fi
 title=$(ai_helper pr-title)
 body=$(mktemp .ai/local/pr-XXXXXXXX.md)
 ai_helper pr-body "$reviews" "$unresolved" > "$body"
+disputes=$(ai_helper disputes-verify) || stop 'pull request'
 make_draft=no
-if [[ "$draft" == yes || "$unresolved" == 1 ]]; then make_draft=yes; fi
+# A recorded dispute keeps the PR a draft for good; only the human resolves it.
+if [[ "$draft" == yes || "$unresolved" == 1 || "$disputes" != 0 ]]; then make_draft=yes; fi
 if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" ]]; then
   gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
   if [[ "$make_draft" == yes && "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" != true ]]; then

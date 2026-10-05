@@ -271,7 +271,7 @@ takes the setting name/default. Run by hand it commits `chore(ai): record review
 unchanged (the pipeline does not call the re-check until T007).
 
 ## T007 — Disputed findings in the pipeline and the PR
-Status: TODO
+Status: DONE
 Dependencies: T006
 Model: opus
 
@@ -318,7 +318,31 @@ permissions; new tests are named with `disputed_findings`; the output must say `
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. `ai-pipeline` `reconcile_disputes` runs after every triage (after
+`triage-check --fresh`) and on every start/resume (after completing an open triage stage,
+before plan review/implementation). New helpers in `workflow.py`: `recheck-status`
+(none/pending/verified), `disputes-record` (append-only, keyed by review digest + finding id,
+per-branch host store `disputes-<branch hash>.json`, file rewritten from it; a lagging file
+prefix is accepted, any other difference fails), `disputes-verify` (exact match; part of
+`publish_ready`). Report + records are one host commit (`chore(ai): record review re-check`,
+or `chore(ai): record disputed findings` when only a missing record is added). A start may
+find only an uncommitted `recheck.md`/`disputes.md`, which reconciliation verifies and
+commits. `pr-body` starts with "Disputed findings" (id, level, original finding, Claude's
+reason, Codex's answer); a recorded dispute forces a draft (also converts an existing PR);
+`finish-summary` and the no-PR notification list the disputes as a human todo.
+Evidence: `python3 -m unittest discover -s tests -k disputed_findings` → Ran 9 tests, OK
+(all withdrawn → normal PR; one upheld → draft with section on top and one commit holding
+report + record; mixed triage → re-check before `implement T002`, later clean review and a
+restart still draft; completed dispositions without re-check → re-check runs; tampered or
+removed file fails; no rejected finding → no re-check call; failed re-check then resume
+re-checks the original M2 before the fix; report without record → record added once before
+any task, no duplicates on restart; uncommitted report committed with its record).
+`.ai/bin/ai-check` → Ran 137 tests, OK. Changed existing test
+`test_pipeline_rejected_findings_still_open_normal_pr` to supply a withdrawn re-check
+answer: under R3 an upheld rejection drafts the PR, so the old premise no longer holds.
+Docs: README, docs/workflow.md. Vault: flow chart (re-check step) + hub log.
+Limitation: a dispute is only lost if someone edits the host store outside the checkout,
+which agent sessions cannot write.
 
 ## T008 — Toolkit version stamp and setup --upgrade
 Status: TODO

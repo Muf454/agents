@@ -231,6 +231,26 @@ report's SHA-256 as `recheck-<review digest>.sha256` in the host review store.
 `recheck-verify` fails for a missing or edited report, another review, or changed
 rejection evidence. Run by hand, the report is committed as `chore(ai): record review re-check`.
 
+Disputed findings (`reconcile_disputes` in `ai-pipeline`): right after every triage, and on
+every start/resume before any task runs or the review is replaced, `recheck-status` says
+`none` (no verified review, dispositions not bound to it, or no rejected BLOCKER/MAJOR),
+`pending` (no verified, current re-check) or `verified`. Pending runs `ai-review --recheck`.
+Then `disputes-record` appends a record for every upheld answer that has none yet (key:
+review digest + finding id; fields: review digest, finding id and level, the original
+finding text from the review, Claude's evidence, Codex's answer, date) to the branch's
+host store (`disputes-<branch hash>.json` next to the review bindings) and rewrites
+`.ai/reviews/disputes.md` from it. Report and records go into ONE host commit
+(`chore(ai): record review re-check`; `chore(ai): record disputed findings` when only a
+missing record was added). The file may lag behind the host store (an interrupted write)
+but never differ from it; `disputes-verify` (also part of `publish_ready`) requires an
+exact match, so an edited or removed file stops publishing. A start may find only an
+uncommitted `recheck.md`/`disputes.md` (a stop before the host commit): it is verified and
+committed by the reconciliation; anything else must be clean. Lifetime rule: a recorded
+dispute is never resolved automatically (not by later fixes, a clean review or a
+restart). While any record exists the PR is a draft, its body starts with "Disputed
+findings" (id, original finding, Claude's reason, Codex's answer), and the FINISHED todo
+list asks the human to resolve them at the PR.
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push, the review must verify and be current for HEAD
 (only workflow records changed since the reviewed commit), the validation stamp must be
@@ -242,7 +262,8 @@ unpushed content into the PR.
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when
-significant findings remain after the round limit. The PR body is generated from the
+significant findings remain after the round limit, or while any dispute is recorded. The
+PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
 "Manual testing for the human" section. State becomes `ready_for_acceptance`.
 
