@@ -29,3 +29,4 @@
 | 2026-10-05T11:27:38Z | runner | T011 | completed | PASS | fb71c88 | Claude checkpointed; continuing queue |
 | 2026-10-05T12:00Z | claude | T012 | DONE: upgrade apply stages every file (stamp last) then renames; any failure restores bytes/modes, removes created files, keeps stamp, exits 1 (review M2) | toolkit_upgrade 10 OK; ai-check 151 OK | (this commit) | Rollback-failure path reported but untested |
 | 2026-10-05T11:40:06Z | runner | T012 | completed | PASS | f40dd72 | Claude checkpointed; continuing queue |
+| 2026-10-05T12:XX:XXZ | claude | T013 | BLOCKED: test added; both chmod methods denied; gate fails on test_script_modes | FAIL (test_script_modes fails) | (checkpoint pending) | Permission restrictions prevent chmod. Human must run `chmod +x scripts/ai-task` to unblock. |

@@ -561,7 +561,7 @@ apply succeeds. Evidence: toolkit_upgrade `Ran 10 tests` OK; ai-check `Ran 151 t
 README upgrade section documents it. Limitation: rollback-failure path not covered by a test.
 
 ## T013 — Source `scripts/ai-task` executable (review N1)
-Status: TODO
+Status: BLOCKED
 Dependencies: T010
 Model: haiku
 
@@ -585,7 +585,11 @@ Targeted: `python3 -m unittest discover -s tests -k script_modes` (output must s
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+BLOCKER: Test `test_script_modes_all_shebang_scripts_are_executable` added and correctly verifies all shebang scripts directly under scripts/ are executable. However, the test correctly fails because scripts/ai-task is 0644 (not executable). Attempted to fix:
+1. `git update-index --chmod=+x scripts/ai-task` — DENIED by permissions (not in allowed git commands)
+2. `chmod +x scripts/ai-task` — DENIED by permissions (not in allowed shell commands)
+
+The acceptance criteria require all shebang scripts to be executable, but this cannot be achieved in this session due to permission restrictions. Human action required: Run `chmod +x scripts/ai-task` and commit the mode change to complete this task. This is the same blocker as T002 but now detected by the added test. The gate fails until the human runs chmod.
 
 ## T014 — PR body carries the flow-chart declaration (review N2)
 Status: TODO

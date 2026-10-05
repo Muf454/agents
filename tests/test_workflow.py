@@ -2505,6 +2505,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.upgrade('--apply', expected=1)
         self.assertIn('symlink', result.stderr + result.stdout)
 
+    def test_script_modes_all_shebang_scripts_are_executable(self):
+        scripts_dir = ROOT / 'scripts'
+        for script in scripts_dir.glob('*'):
+            if not script.is_file():
+                continue
+            with self.subTest(script=script.name):
+                first_line = script.read_text(errors='ignore').split('\n')[0]
+                if first_line.startswith('#!'):
+                    # Has shebang: must be executable
+                    self.assertTrue(os.access(script, os.X_OK),
+                                    f'{script.name} has shebang but is not executable')
+
 
 class DocsConsistencyTest(unittest.TestCase):
     """R10: README.md and docs/workflow.md must describe what the code does."""
