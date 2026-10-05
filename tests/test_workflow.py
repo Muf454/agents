@@ -194,6 +194,11 @@ if 'Diagnose this workflow incident' in args[-1]:
     path = pathlib.Path(args[args.index('--output-last-message')+1])
     path.write_text('Codex: the runner was killed.\nEvidence follows.')
     sys.exit(0)
+if 'RECHECK SCOPE' in args[-1]:
+    with open(state / 'codex-recheck-calls', 'a') as f: f.write(args[-1].split('RECHECK SCOPE')[1] + '\n')
+    pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
+        os.environ.get('MOCK_RECHECK', '{"answers": [{"id": "M1", "verdict": "upheld", "reason": "still broken"}]}'))
+    sys.exit(0)
 if 'PLAN SCOPE' in args[-1]:
     with open(state / 'codex-plan-calls', 'a') as f: f.write('call\n')
     major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
@@ -1961,6 +1966,150 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.triage_rounds(), 1)
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
         self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), sessions)
+
+    # ---------------------------------------------------------------- R3: disputed findings re-check
+    def rejected_review(self, rows, fix_task=False):
+        """A verified review with M1/M2 (MAJOR) and committed dispositions ROWS."""
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='two-major-once')
+        self.commit('record review')
+        head = self.helper('review-info').stdout.split()[0]
+        self.helper('start-dispositions', head)
+        dispositions = self.project / '.ai/reviews/dispositions.md'
+        dispositions.write_text(dispositions.read_text() + ''.join(rows))
+        if fix_task:
+            tasks = self.project / '.ai/tasks.md'
+            tasks.write_text(tasks.read_text().rstrip('\n') + '\n\n' + task('T002'))
+        self.commit('record triage')
+
+    def recheck_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('workflow', HELPER)
+        wf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf)
+        return wf
+
+    def test_recheck_command_parses_withdrawn_and_upheld(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'])
+        answer = json.dumps({'answers': [{'id': 'M1', 'verdict': 'withdrawn', 'reason': 'evidence holds'},
+                                         {'id': 'M2', 'verdict': 'upheld', 'reason': 'the gate does not | cover it'}]})
+        result = self.tool('ai-review', '--recheck', MOCK_RECHECK=answer)
+        self.assertIn('1 withdrawn, 1 upheld', result.stdout)
+        prompt = (self.base / 'codex-recheck-calls').read_text()
+        self.assertIn('M1\tMAJOR\tT001.txt is a fixture; the finding misreads it', prompt)
+        self.assertIn('model_reasoning_effort="medium"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
+        answers = self.helper('recheck-verify').stdout.splitlines()
+        self.assertEqual(answers, ['M1\twithdrawn\tevidence holds', 'M2\tupheld\tthe gate does not | cover it'])
+        # Hand-run: recorded in its own commit, checkout clean; the report carries its binding.
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        report = (self.project / '.ai/reviews/recheck.md').read_text()
+        self.assertIn('Rejected rows digest:', report)
+        self.assertIn('the gate does not \\| cover it', report)
+        # AI_RECHECK_EFFORT (not AI_REVIEW_EFFORT) sets the re-check effort.
+        self.tool('ai-review', '--recheck', AI_RECHECK_EFFORT='low', AI_REVIEW_EFFORT='xhigh')
+        self.assertIn('model_reasoning_effort="low"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
+        self.tool('ai-review', '--recheck', expected=1, AI_RECHECK_EFFORT='huge')
+
+    def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
+        wf = self.recheck_module()
+        ids = ['M1', 'M2']
+        entry = lambda finding, verdict='withdrawn', **extra: dict(id=finding, verdict=verdict, reason='ok', **extra)
+        cases = {
+            'missing': {'answers': [entry('M1')]},
+            'duplicate': {'answers': [entry('M1'), entry('M2'), entry('M2')]},
+            'extra': {'answers': [entry('M1'), entry('M2', verdict='upheld'), entry('M9')]},
+            'malformed': {'answers': [entry('M1'), entry('M2', verdict='maybe')]},
+            'extra-key': {'answers': [entry('M1'), entry('M2', note='x')]},
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                answers, notes = wf.parse_recheck(json.dumps(data), ids)
+                self.assertEqual(answers['M1'][0], 'withdrawn')
+                self.assertEqual(answers['M2'][0], 'upheld')
+                self.assertTrue(notes)
+        self.assertEqual(wf.parse_recheck('```json\n' + json.dumps({'answers': [entry('M1'), entry('M2')]}) + '\n```',
+                                          ids)[0]['M2'][0], 'withdrawn')
+        for text in ('M1 withdrawn', '{"answers": [], "extra": 1}', '{"answers": {}}',
+                     '{"answers": [], "answers": []}', json.dumps({'answers': [entry('M1'), entry('M2')]}) + ' trailing',
+                     json.dumps({'answers': [dict(entry('M1'), reason=' ')]})):
+            with self.subTest(text=text):
+                answers, notes = wf.parse_recheck(text, ids)
+                self.assertEqual({verdict for verdict, _ in answers.values()}, {'upheld'})
+                self.assertTrue(notes)
+
+    def test_recheck_command_binding_rejects_other_review_changed_evidence_and_tampering(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | accepted | real defect | T001 |\n'])
+        self.tool('ai-review', '--recheck')
+        self.helper('recheck-verify')
+        report = self.project / '.ai/reviews/recheck.md'
+        dispositions = self.project / '.ai/reviews/dispositions.md'
+        original_report, original_rows = report.read_text(), dispositions.read_text()
+        # Tampered report: a flipped answer no longer matches the host binding.
+        report.write_text(original_report.replace('"upheld"', '"withdrawn"').replace('| upheld |', '| withdrawn |'))
+        self.assertIn('does not match', self.helper('recheck-verify', expected=1).stderr)
+        report.write_text(original_report)
+        # Changed rejection evidence after the re-check.
+        dispositions.write_text(original_rows.replace('the finding misreads it', 'never mind'))
+        self.assertIn('different rejection evidence', self.helper('recheck-verify', expected=1).stderr)
+        dispositions.write_text(original_rows)
+        self.helper('recheck-verify')
+        # A report from another review: a new review of the same code replaces current.md.
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='two-major-once')
+        self.assertIn('another review', self.helper('recheck-verify', expected=1).stderr)
+        # A missing report fails too.
+        report.unlink()
+        self.helper('recheck-verify', expected=1)
+
+    def test_recheck_command_preflight_allows_pending_fix_tasks_but_not_code_changes(self):
+        self.rejected_review(['| M1 | accepted | real defect | T002 |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'], fix_task=True)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=json.dumps(
+            {'answers': [{'id': 'M2', 'verdict': 'withdrawn', 'reason': 'the gate covers it'}]}))
+        self.assertEqual(self.helper('recheck-verify').stdout, 'M2\twithdrawn\tthe gate covers it\n')
+        before = (self.base / 'codex-recheck-calls').read_text().count('reviewed HEAD=')
+        # Source changed since the reviewed commit: refused before Codex runs.
+        (self.project / 'src.txt').write_text('a fix')
+        self.commit('fix')
+        result = self.tool('ai-review', '--recheck', expected=1)
+        self.assertIn('code changed since the reviewed commit: src.txt', result.stderr)
+        self.assertEqual((self.base / 'codex-recheck-calls').read_text().count('reviewed HEAD='), before)
+
+    def test_recheck_command_needs_a_rejected_finding_and_a_verified_review(self):
+        self.rejected_review(['| M1 | accepted | real defect | T001 |\n', '| M2 | deferred | out of scope here | none |\n'])
+        self.assertIn('no rejected BLOCKER/MAJOR', self.tool('ai-review', '--recheck', expected=1).stderr)
+        current = self.project / '.ai/reviews/current.md'
+        current.write_text(current.read_text().replace('second defect', 'other defect'))
+        self.commit('edit review')
+        self.assertIn('does not match the report', self.tool('ai-review', '--recheck', expected=1).stderr)
+        self.assertFalse((self.base / 'codex-recheck-calls').exists())
+
+    def test_recheck_command_effort_survives_recovery_like_other_settings(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', AI_RECHECK_EFFORT='low',
+                  MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_RECHECK_EFFORT'], 'low')
+        wf = self.recheck_module()
+        self.assertIn('AI_RECHECK_EFFORT', wf.RUN_SETTINGS)
+        # ai-recover unsets and restores exactly the run settings; the user config reads it too.
+        recover = (ROOT / 'scripts/ai-recover').read_text()
+        unset = next(line for line in recover.splitlines() if line.startswith('unset AI_'))
+        self.assertEqual(set(unset.split()[1:]), set(wf.RUN_SETTINGS))
+        restore = next(line for line in recover.splitlines() if line.strip().startswith('AI_NOTIFY_CMD|'))
+        self.assertEqual(set(restore.strip().rstrip(')').split('|')), set(wf.RUN_SETTINGS))
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        (self.config / 'ai-toolkit/config').write_text('AI_RECHECK_EFFORT=xhigh\n')
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/second'])
+        env = {k: v for k, v in self.env.items() if k != 'AI_RECHECK_EFFORT'}
+        self.run_cmd([str(self.project / '.ai/bin/ai-pipeline'), '--approved', '--base', 'main', '--no-pr'],
+                     env=dict(env, MOCK_CLAUDE='error', AI_AUTO_RECOVER='0'), expected=1)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_RECHECK_EFFORT'], 'xhigh')
 
 
 if __name__ == '__main__':

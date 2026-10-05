@@ -29,6 +29,14 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   every push; after each push origin's `refs/heads/<branch>` must equal HEAD. Failures go
   through `stop`, before PR creation and before any FINISHED notification. The final push
   now shows git's output (it was silenced). Vault flow chart updated.
+- T006: `ai-review --recheck` (R3 command). Own preflight (verified review, bound
+  dispositions, ≥1 rejected BLOCKER/MAJOR, only workflow records changed since the reviewed
+  commit; pending fix tasks allowed). Codex (read-only, `AI_RECHECK_EFFORT`, default medium,
+  prompt `recheck.md`) answers one JSON object; strict parsing counts anything missing,
+  duplicate, extra or malformed as upheld. Host writes `.ai/reviews/recheck.md` bound to
+  review digest + rejected-rows digest + reviewed HEAD, report hash in host state;
+  `recheck-verify` checks it. `AI_RECHECK_EFFORT` is a run setting restored by ai-recover.
+  Not yet called by ai-pipeline (T007).
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -56,9 +64,17 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
    <branch> is …, not HEAD …", no PR is created, and there is no FINISHED notification.
    Without the hook, the run finishes and `git ls-remote origin <branch>` equals
    `git rev-parse HEAD`.
+7. Re-check: in a scratch project after an `ai-review` with a MAJOR finding, write a
+   `rejected` row with evidence in `.ai/reviews/dispositions.md`, commit, and run
+   `.ai/bin/ai-review --recheck`. It prints "Re-check saved to .ai/reviews/recheck.md:
+   N withdrawn, M upheld", commits `chore(ai): record review re-check`, and
+   `python3 .ai/bin/lib/workflow.py recheck-verify` prints one line per rejected finding.
+   Edit the evidence in the dispositions: `recheck-verify` now fails ("different rejection
+   evidence"). Commit a source change and rerun `--recheck`: refused ("code changed since
+   the reviewed commit") without calling Codex.
 
 ## Human todos
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Runner continues with T006 (disputed findings: the re-check command).
+Runner continues with T007 (disputed findings in the pipeline and the PR).

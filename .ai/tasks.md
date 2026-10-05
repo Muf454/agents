@@ -219,7 +219,7 @@ unchanged: publish stops follow the normal recovery rules (review-integrity mess
 escalate).
 
 ## T006 — Disputed findings: the re-check command and its binding
-Status: TODO
+Status: DONE
 Dependencies: T005
 Model: opus
 
@@ -255,7 +255,20 @@ permissions; new tests are named with `recheck_command`; the output must say `Ra
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. `ai-review --recheck` (scripts/ai-review) with its own preflight
+(`workflow.py recheck-prepare`: clean tree, verified review, bound dispositions, ≥1 rejected
+BLOCKER/MAJOR, reviewed commit ancestor of HEAD, only RECHECK_RECORDS changed since it).
+`parse_recheck` is strict (missing/duplicate/extra/malformed → upheld); `publish-recheck`
+re-runs the preflight, writes `.ai/reviews/recheck.md` (review digest, rows digest, reviewed
+HEAD, table + machine-readable answers) and stores `recheck-<review digest>.sha256` in host
+state; `recheck-verify` checks binding, review, rows and prints `ID\tverdict\treason`.
+Prompt `templates/.ai/prompts/recheck.md`. `AI_RECHECK_EFFORT` (default medium) in the
+user-config allowlist, RUN_SETTINGS and ai-recover's unset/restore list; `ai_review_args`
+takes the setting name/default. Run by hand it commits `chore(ai): record review re-check`
+(pipeline integration and the single report+disputes commit are T007). Evidence:
+`python3 -m unittest discover -s tests -k recheck_command` → Ran 6 tests, OK;
+`.ai/bin/ai-check` → Ran 128 tests, OK. README and docs/workflow.md updated; flow chart
+unchanged (the pipeline does not call the re-check until T007).
 
 ## T007 — Disputed findings in the pipeline and the PR
 Status: TODO

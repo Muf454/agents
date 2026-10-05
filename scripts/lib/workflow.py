@@ -758,10 +758,171 @@ def review_info_values():
     return (head.group(1), *review_counts(content))
 
 
+RECHECK = Path('.ai/reviews/recheck.md')
+# Since the reviewed commit a re-check allows only workflow records (pending accepted fix
+# tasks included): the code Codex re-checks must still be the code it reviewed.
+RECHECK_RECORDS = TRIAGE_RECORDS + ('.ai/reviews/current.md', '.ai/reviews/recheck.md', '.ai/reviews/disputes.md')
+RECHECK_HEADER = re.compile(r'\A<!-- Host evidence: re-check of review ([0-9a-f]{64}); rejected rows '
+                            r'([0-9a-f]{64}); reviewed HEAD ([0-9a-f]{7,40}); saved [^;>]*\. -->\n')
+RECHECK_VERDICTS = ('withdrawn', 'upheld')
+
+
+def rejected_rows():
+    """Rejected BLOCKER/MAJOR findings of the current, verified review as (id, level, evidence),
+    from dispositions bound to that review. Returns (review head, rows)."""
+    head = review_info_values()[0]
+    path = Path('.ai/reviews/dispositions.md')
+    text = path.read_text() if path.exists() else ''
+    bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
+    if not bound or bound.group(1) != head:
+        fail('No dispositions for the current review.')
+    review = Path('.ai/reviews/current.md').read_text()
+    rows = {}
+    for match in DISPOSITION_ROW.finditer(text):
+        if match.group(1) in rows:
+            fail(f'Finding {match.group(1)} has more than one disposition.')
+        rows[match.group(1)] = (match.group(2).lower(), match.group(3))
+    rejected = [(finding, level, rows[finding][1])
+                for level in ('BLOCKER', 'MAJOR') for finding in finding_ids(review, level)
+                if finding in rows and rows[finding][0] == 'rejected']
+    return head, rejected
+
+
+def rows_digest(rows):
+    """sha256 of the rejected rows the re-check answers: ids and Claude's evidence."""
+    canonical = json.dumps([[finding, evidence] for finding, _, evidence in rows],
+                           ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def recheck_preflight():
+    """The re-check's own preconditions. Returns (head, review digest, rows digest, rows)."""
+    head, rows = rejected_rows()
+    if not rows:
+        fail('Re-check: the current review has no rejected BLOCKER/MAJOR finding.')
+    full = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', full, 'HEAD'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'Re-check: the reviewed commit {head[:12]} is not an ancestor of HEAD.')
+    outside = [name for name in changed_since(full) if name not in RECHECK_RECORDS]
+    if outside:
+        fail('Re-check: the code changed since the reviewed commit: ' + ' '.join(outside[:8])
+             + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
+    return head, review_digest(), rows_digest(rows), rows
+
+
+def recheck_prepare(arguments):
+    """Print 'head review_digest rows_digest', then one 'ID<TAB>LEVEL<TAB>evidence' line per
+    rejected finding (for the Codex prompt)."""
+    head, digest, rows_hash, rows = recheck_preflight()
+    print(head, digest, rows_hash)
+    for finding, level, evidence in rows:
+        print(f"{finding}\t{level}\t{' '.join(evidence.split())}")
+
+
+def parse_recheck(text, ids):
+    """Codex's answer -> {id: (verdict, reason)} for exactly IDS. The answer must be one JSON
+    object {"answers": [{"id", "verdict", "reason"}, ...]}; anything missing, duplicated,
+    extra or malformed counts as upheld (a re-check can only withdraw explicitly)."""
+    answers = {finding: ('upheld', 'no valid answer (counted as upheld)') for finding in ids}
+    notes = []
+    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
+    try:
+        data = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or set(data) != {'answers'} or not isinstance(data['answers'], list):
+        return answers, ['the answer was not one JSON object {"answers": [...]}; every finding counts as upheld']
+    seen = {}
+    for entry in data['answers']:
+        finding = entry.get('id') if isinstance(entry, dict) else None
+        if not isinstance(finding, str) or finding not in answers:
+            notes.append(f'ignored an answer for an unknown finding: {str(finding)[:40]!r}')
+            continue
+        seen[finding] = seen.get(finding, 0) + 1
+        valid = (set(entry) == {'id', 'verdict', 'reason'} and entry['verdict'] in RECHECK_VERDICTS
+                 and isinstance(entry['reason'], str) and entry['reason'].strip())
+        if not valid:
+            notes.append(f'{finding}: malformed answer (counted as upheld)')
+            answers[finding] = ('upheld', 'malformed answer (counted as upheld)')
+        elif seen[finding] == 1:
+            answers[finding] = (entry['verdict'], ' '.join(entry['reason'].split())[:1000])
+    for finding, count in seen.items():
+        if count > 1:
+            notes.append(f'{finding}: {count} answers (counted as upheld)')
+            answers[finding] = ('upheld', 'duplicate answers (counted as upheld)')
+    for finding in ids:
+        if finding not in seen:
+            notes.append(f'{finding}: no answer (counted as upheld)')
+    return answers, notes
+
+
+def publish_recheck(arguments):
+    """Save Codex's re-check as .ai/reviews/recheck.md, bound to the review, the rejected rows
+    and the reviewed HEAD it answered; the report digest goes to host state."""
+    source, head, digest, rows_hash = arguments
+    *current, rows = recheck_preflight()
+    if tuple(current) != (head, digest, rows_hash):
+        fail('Re-check: the review or the rejected rows changed during the re-check; run it again.')
+    answers, notes = parse_recheck(Path(source).read_text(), [finding for finding, _, _ in rows])
+    cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
+    lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
+             f'reviewed HEAD {head}; saved {now()}. -->', '',
+             '# Re-check of rejected findings (Codex)', '',
+             f'Review digest: {digest}', f'Rejected rows digest: {rows_hash}', f'Reviewed HEAD: {head}', '',
+             '| Finding | Level | Answer | Claude\'s evidence | Codex\'s reason |', '| --- | --- | --- | --- | --- |']
+    for finding, level, evidence in rows:
+        verdict, reason = answers[finding]
+        lines.append(f'| {finding} | {level} | {verdict} | {cell(evidence)} | {cell(reason)} |')
+    lines += ['', '## Parsing notes', '']
+    lines += [f'- {note}' for note in notes] or ['None.']
+    machine = json.dumps({finding: {'verdict': answers[finding][0], 'reason': answers[finding][1]}
+                          for finding, _, _ in rows}, ensure_ascii=False, sort_keys=True)
+    lines += ['', '## Answers (machine-readable)', '', '```json', machine, '```', '']
+    content = '\n'.join(lines)
+    atomic(RECHECK, content)
+    directory = binding_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic(directory / f'recheck-{digest}.sha256', hashlib.sha256(content.encode()).hexdigest() + '\n')
+
+
+def recheck_values():
+    """Verify .ai/reviews/recheck.md against host state and the current review/dispositions.
+    Returns (head, review digest, rows digest, {id: (verdict, reason)})."""
+    if not RECHECK.exists():
+        fail('No re-check report.')
+    content = RECHECK.read_text()
+    header = RECHECK_HEADER.match(content)
+    if not header:
+        fail('Re-check report has no host evidence; it was not produced by ai-review --recheck.')
+    digest, rows_hash, head = header.groups()
+    binding = binding_dir() / f'recheck-{digest}.sha256'
+    if not binding.exists() or binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        fail('Re-check report does not match the one ai-review --recheck published.')
+    if review_digest() != digest or review_info_values()[0] != head:
+        fail('Re-check report belongs to another review.')
+    _, rows = rejected_rows()
+    if rows_digest(rows) != rows_hash:
+        fail('Re-check report answers different rejection evidence; run the re-check again.')
+    block = re.search(r'^## Answers \(machine-readable\)\s*```json\n(.*?)\n```', content, re.M | re.S)
+    answers = json.loads(block.group(1)) if block else None
+    if not isinstance(answers, dict) or set(answers) != {finding for finding, _, _ in rows}:
+        fail('Re-check report answers do not cover the rejected findings.')
+    return head, digest, rows_hash, {finding: (value['verdict'], value['reason']) for finding, value in answers.items()}
+
+
+def recheck_verify(arguments):
+    """Print one 'ID<TAB>withdrawn|upheld<TAB>reason' line per rejected finding of a verified,
+    current re-check; fail when the report is missing, stale or tampered."""
+    *_, answers = recheck_values()
+    for finding, (verdict, reason) in answers.items():
+        print(f'{finding}\t{verdict}\t{reason}')
+
+
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
-RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_AUTO_RECOVER',
-                'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
+RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
+                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
 
 
 def _no_duplicate_keys(pairs):
@@ -1073,6 +1234,12 @@ def main():
         triage_check(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'recheck-prepare':
+        recheck_prepare(arguments)
+    elif command == 'publish-recheck':
+        publish_recheck(arguments)
+    elif command == 'recheck-verify':
+        recheck_verify(arguments)
     elif command == 'triage-scope':
         triage_scope(arguments)
     elif command == 'stage-verify':

@@ -4,14 +4,18 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'EOF'
 Usage: ai-review --base REF [--timeout SECONDS]   review the implementation
        ai-review --plan [--timeout SECONDS]       review spec/plan/tasks before implementing
-Model/effort: AI_REVIEW_MODEL (default: Codex default), AI_REVIEW_EFFORT (default high).
+       ai-review --recheck [--timeout SECONDS]    Codex re-checks the BLOCKER/MAJOR findings
+                                                  Claude rejected (withdrawn or upheld each)
+Model/effort: AI_REVIEW_MODEL (default: Codex default), AI_REVIEW_EFFORT (default high);
+the re-check uses AI_RECHECK_EFFORT (default medium).
 EOF
   exit 0
 fi
-base=''; limit=1800; plan=no
+base=''; limit=1800; plan=no; recheck=no
 while (( $# )); do
   case "$1" in
     --plan) plan=yes; shift ;;
+    --recheck) recheck=yes; shift ;;
     --base) (( $# >= 2 )) || ai_die 'Missing base'; base=$2; shift 2 ;;
     --timeout)
       (( $# >= 2 )) || ai_die 'Missing timeout'
@@ -20,11 +24,12 @@ while (( $# )); do
     *) ai_die "Unknown argument: $1" ;;
   esac
 done
-if [[ "$plan" == no ]]; then
+[[ "$plan$recheck" != yesyes ]] || ai_die 'Choose --plan or --recheck, not both.'
+if [[ "$plan" == no && "$recheck" == no ]]; then
   [[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
 fi
 command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
-ai_review_args
+if [[ "$recheck" == yes ]]; then ai_review_args AI_RECHECK_EFFORT medium; else ai_review_args; fi
 ai_root
 ai_lock
 
@@ -76,6 +81,32 @@ if [[ "$plan" == yes ]]; then
   fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
   printf 'Plan review saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' "$blockers" "$majors" "$minors"
+  exit 0
+fi
+if [[ "$recheck" == yes ]]; then
+  # Own preflight: a verified review, the reviewed code unchanged except workflow records
+  # (pending accepted fix tasks are fine) and at least one rejected BLOCKER/MAJOR.
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || ai_die 'Commit the triage before the re-check.'
+  [[ -f .ai/prompts/recheck.md ]] || ai_die 'Missing .ai/prompts/recheck.md; copy it from the toolkit templates.'
+  prepared=$(ai_helper recheck-prepare) || ai_die 'Re-check preflight failed (see above).'
+  read -r head digest rows_hash <<< "${prepared%%$'\n'*}"
+  prompt=$(cat .ai/prompts/recheck.md)
+  prompt+=$'\n\nRECHECK SCOPE: reviewed HEAD='
+  prompt+="$head; review: .ai/reviews/current.md; dispositions: .ai/reviews/dispositions.md. Rejected findings (ID, level, Claude's evidence), one per line:"
+  prompt+=$'\n'"${prepared#*$'\n'}"
+  prompt+=$'\n\nReturn only the JSON object as the final response. Do not write project files or invoke network/MCP integrations.'
+  codex_review "$prompt"
+  ai_helper publish-recheck "$report" "$head" "$digest" "$rows_hash"
+  # Run by hand, record it like the plan review, so the checkout stays clean.
+  if [[ -z "${AI_PIPELINE:-}" ]]; then
+    git add -- .ai/reviews/recheck.md
+    git diff --cached --quiet -- .ai/reviews/recheck.md || \
+      git commit -q -m 'chore(ai): record review re-check' -- .ai/reviews/recheck.md
+  fi
+  answers=$(ai_helper recheck-verify) || ai_die 'Re-check report failed verification after saving it (commit hook?).'
+  upheld=$(grep -c $'\tupheld\t' <<< "$answers" || true)
+  withdrawn=$(grep -c $'\twithdrawn\t' <<< "$answers" || true)
+  printf 'Re-check saved to .ai/reviews/recheck.md: %s withdrawn, %s upheld.\n' "$withdrawn" "$upheld"
   exit 0
 fi
 exec 8>.ai/local/validation.lock

@@ -291,7 +291,8 @@ stretch subscription limits.
 Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
 default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
 default **high**). Reviews are where a stronger model pays off most: findings caught
-there save Claude fix rounds.
+there save Claude fix rounds. The narrower re-check of rejected findings
+(`ai-review --recheck`) uses `AI_RECHECK_EFFORT` (default **medium**).
 
 ### Notifications
 
@@ -299,7 +300,7 @@ Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$
 and can never break the workflow. For phone notifications, install the free ntfy app,
 subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
-`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`;
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`;
 environment variables win):
 
 ```bash
@@ -456,6 +457,15 @@ checkpoint the review/dispositions/plan, then run `.ai/bin/ai-run --approved` ag
 After fixes, run `.ai/bin/ai-check` and another `.ai/bin/ai-review --base main` when
 appropriate. Commit the previous report/dispositions before replacing it so history
 retains the discussion. Review output is an artifact, not merge authorization.
+
+When Claude rejected a BLOCKER/MAJOR finding, commit the dispositions and run
+`.ai/bin/ai-review --recheck`: Codex (read-only, `AI_RECHECK_EFFORT`, default medium)
+re-checks only the rejected findings against Claude's evidence and answers `withdrawn`
+or `upheld` per finding; a missing, duplicate, extra or malformed answer counts as upheld.
+It refuses unless the review verifies and only workflow records changed since the
+reviewed commit (pending fix tasks are fine). The host writes `.ai/reviews/recheck.md`,
+bound to the review, the rejected rows (IDs and evidence) and the reviewed HEAD;
+`python3 .ai/bin/lib/workflow.py recheck-verify` prints its verified answers.
 
 ## Human acceptance testing and finish
 

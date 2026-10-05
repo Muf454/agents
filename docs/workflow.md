@@ -217,6 +217,20 @@ reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new r
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.
 
+Re-check of rejected findings (`ai-review --recheck`): its own preflight needs a clean
+tree, a verified review, dispositions bound to it, at least one rejected BLOCKER/MAJOR,
+the reviewed commit an ancestor of HEAD and only workflow records changed since it
+(triage records plus `.ai/reviews/{current,recheck,disputes}.md`; pending accepted fix
+tasks are fine). Codex (read-only, `AI_REVIEW_MODEL` at `AI_RECHECK_EFFORT`, default
+medium, prompt `.ai/prompts/recheck.md`) gets the rejected IDs with Claude's evidence and
+must answer one JSON object `{"answers": [{"id", "verdict": "withdrawn|upheld", "reason"}]}`.
+Parsing is strict: anything missing, duplicated, extra or malformed counts as upheld.
+The host re-runs the preflight, writes `.ai/reviews/recheck.md` with the binding (review
+digest, sha256 of the rejected rows' IDs and evidence, reviewed HEAD) and stores the
+report's SHA-256 as `recheck-<review digest>.sha256` in the host review store.
+`recheck-verify` fails for a missing or edited report, another review, or changed
+rejection evidence. Run by hand, the report is committed as `chore(ai): record review re-check`.
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push, the review must verify and be current for HEAD
 (only workflow records changed since the reviewed commit), the validation stamp must be
