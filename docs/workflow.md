@@ -185,7 +185,9 @@ deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
-reviews need exactly one counts line that agrees with the listed finding IDs.
+reviews need exactly one counts line that agrees with the listed finding IDs, plus the
+verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks for are
+optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
 Review provenance: when `ai-review` publishes a report it records the report's SHA-256
@@ -248,7 +250,11 @@ handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-mat
 filters and staged mode changes). The recovery decision must be exactly one JSON object
 (optionally fenced); envelope and decision reject duplicate keys.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
-checks after the commit. The timer runs a host copy of `.ai/bin`
+checks after the commit. Checkpoint scope (`checkpoint-paths`): tracked changes, the
+runner records (state, run log, handoff) and untracked files matching the task's "Likely
+affected modules" (exact path, directory prefix or glob; never `.env*`); for recovery,
+the modules of every task in the approved queue. Anything else stops (tier 1) or
+escalates (recovery) without committing. The timer runs a host copy of `.ai/bin`
 (`$XDG_DATA_HOME/ai-toolkit/watchdog/<unit>/bin`, refreshed by `--install-timer`), so the
 code that verifies the gate before crash recovery isn't checkout code; it then launches the
 checkout's `ai-recover`. `ai-watchdog --recover` launches `ai-recover` via

@@ -234,14 +234,17 @@ steps from `.ai/handoff.md`, merging, and every item under the handoff's "Human 
 Stops are recovered in tiers, so a hiccup doesn't wait for you:
 
 1. **Rules, no AI.** A task Claude finished and the full gate validated but Claude left
-   uncommitted is committed by the runner (the gate verified unchanged). Pushes retry
+   uncommitted is committed by the runner (the gate verified unchanged). It stages only
+   tracked changes, the runner's records and new files the task lists under "Likely
+   affected modules"; any other new file stops the run for you to inspect. Pushes retry
    3 times. Usage limits pause and resume.
 2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
    the same process. Hard rules escalate at once (gate, permissions, branch, review
    integrity, plan-review findings, weekly limit, a changed gate digest). Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
-   gate passes on the leftovers), or `escalate`. Malformed answers escalate.
+   gate passes on the leftovers and every new file is planned by some task), or
+   `escalate`. Malformed answers escalate.
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
    pipeline was killed or the machine restarted.
 

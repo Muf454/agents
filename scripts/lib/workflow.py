@@ -448,12 +448,58 @@ def claude_result(path, check_only=False):
         print(f'Note: {len(denials)} denied tool call(s) logged in .ai/local/denials.log', file=sys.stderr)
 
 
+def _module_patterns(block):
+    """Path-like tokens from a task's 'Likely affected modules' section."""
+    lines, inside = [], False
+    for line in block['lines']:
+        if line.startswith('### '):
+            inside = line.strip() == '### Likely affected modules'
+        elif inside:
+            lines.append(line)
+    text = '\n'.join(lines)
+    tokens = re.split(r'[\s,;()]+', text.replace('`', ' '))
+    return [token.rstrip('.:') for token in tokens if '/' in token or '.' in token.strip('.')]
+
+
+def checkpoint_paths(arguments):
+    """Dirty paths an automatic checkpoint may stage (NUL-separated): tracked changes, plus
+    untracked files the approved plan names under 'Likely affected modules' (of the given
+    task, or of every task with --all-tasks). Anything else fails: the human decides."""
+    import fnmatch
+    blocks = tasks()
+    chosen = blocks if arguments[0] == '--all-tasks' else [t for t in blocks if t['id'] == arguments[0]]
+    if not chosen:
+        fail(f'Unknown task: {arguments[0]}')
+    patterns = [pattern for block in chosen for pattern in _module_patterns(block)]
+    status = git('status', '--porcelain', '-z', '--untracked-files=all', '--', '.',
+                 ':!.ai/state.md', ':!.ai/run-log.md', ':!.ai/handoff.md').split(b'\0')
+    allowed, rejected = [], []
+    entries = iter(status)
+    for entry in entries:
+        if not entry:
+            continue
+        code, name = entry[:2].decode(), os.fsdecode(entry[3:])
+        if code[0] in 'RC':
+            next(entries, None)  # rename/copy: the original path follows
+        if code == '??':
+            ok = any(name == p or name.startswith(p.rstrip('/') + '/') or fnmatch.fnmatch(name, p)
+                     for p in patterns)
+            if not ok or Path(name).name.startswith('.env'):
+                rejected.append(name)
+                continue
+        allowed.append(name)
+    if rejected:
+        fail('Uncommitted new files outside the planned modules: ' + ', '.join(rejected[:10]))
+    sys.stdout.write(''.join(name + '\0' for name in allowed))
+
+
 def publish_review(arguments):
     source, head, base = arguments
     content = Path(source).read_text()
+    # Only what the pipeline relies on is mandatory; the other sections are requested by the
+    # prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
     required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
-                '## MINOR findings', '## Missing test coverage', '## Security concerns',
-                '## Architecture concerns', '## Manual testing recommendations')
+                '## MINOR findings')
     for field in required:
         if field not in content:
             fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
@@ -951,6 +997,8 @@ def main():
         review_info(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'checkpoint-paths':
+        checkpoint_paths(arguments)
     elif command == 'committed-matches-worktree':
         committed_matches_worktree(arguments)
     elif command == 'recover-decision':

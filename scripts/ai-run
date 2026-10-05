@@ -234,7 +234,13 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       if [[ -n "$(dirty_beyond_records)" ]]; then
         # Tier-1 recovery: the session finished and the full gate just passed on exactly
         # this content (gate files verified unchanged), but it didn't commit. Commit it.
-        git add --all -- .
+        # Only tracked changes and new files the task plans for; anything else stops the run.
+        checkpoint_list=$(mktemp .ai/local/checkpoint-XXXXXXXX)
+        ai_helper checkpoint-paths "$active_task" > "$checkpoint_list" || \
+          ai_die "Claude left uncommitted work outside $active_task's planned modules; inspect it before continuing."
+        git add --pathspec-from-file="$checkpoint_list" --pathspec-file-nul
+        # The runner's own records belong in the checkpoint too (the content checks need a clean tree).
+        git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
         git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
         ai_guard_verify
         # A commit hook must not have slipped unvalidated content into that checkpoint.
