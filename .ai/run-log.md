@@ -41,3 +41,4 @@
 | 2026-10-05T13:40Z | claude | T016 | DONE: dispute file unchanged since merge-base with the run base (`AI_DISPUTES_BASE`) is historical; branch records appended after it and alone count (review M3) | disputes_lifecycle 3 OK; disputed_findings 9 OK; ai-check 164 OK | (this commit) | Docs + vault flow/hub log updated; branch-name reuse limitation documented |
 | 2026-10-05T14:58:10Z | runner | T016 | completed | PASS | cb69c94 | Claude checkpointed; continuing queue |
 | 2026-10-05T15:10Z | claude | T017 | DONE: triage stage stored per branch (`stage-<branch hash>.json` in host state); another branch's start neither drops nor inherits it; unreadable record stops ai-pipeline at start (review M4) | stage_per_branch 4 OK; related 32 OK; ai-check 168 OK | (this commit) | Legacy run.json stage migrated on start; docs + vault flow/hub log updated |
+| 2026-10-05T15:17:05Z | runner | T017 | completed | PASS | 229830d | Claude checkpointed; continuing queue |
