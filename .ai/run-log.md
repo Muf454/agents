@@ -28,3 +28,4 @@
 | 2026-10-05T11:21:42Z | claude | T011 | DONE: parse_recheck fails closed on any unknown/malformed entry (review M1); regression test + docs | recheck_command 7 OK; ai-check 150 OK | (this commit) | git stash denied, so the new test could not be run against the pre-fix code |
 | 2026-10-05T11:27:38Z | runner | T011 | completed | PASS | fb71c88 | Claude checkpointed; continuing queue |
 | 2026-10-05T12:00Z | claude | T012 | DONE: upgrade apply stages every file (stamp last) then renames; any failure restores bytes/modes, removes created files, keeps stamp, exits 1 (review M2) | toolkit_upgrade 10 OK; ai-check 151 OK | (this commit) | Rollback-failure path reported but untested |
+| 2026-10-05T11:40:06Z | runner | T012 | completed | PASS | f40dd72 | Claude checkpointed; continuing queue |
