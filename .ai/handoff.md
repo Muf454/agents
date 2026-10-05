@@ -45,6 +45,13 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
   `publish_ready`. A recorded dispute is never auto-resolved: the PR is a draft whose body
   starts with "Disputed findings", and the FINISHED todos list them. The existing test
   "rejected findings → normal PR" now supplies a withdrawn re-check answer.
+- T009: README.md and docs/workflow.md match the code (R10): denials are logged and the run
+  continues; automatic checkpoints stage the session's output except secret-looking files;
+  the pipeline pushes the feature branch and opens the pull request; usage limits pause and
+  resume; a Modes table (interactive Claude, ai-run, ai-pipeline, ai-watchdog). Wrong
+  sentences removed. `docs_consistency` tests guard them. Flow chart updated (note on
+  logged denials; audited against R1, R2, R3 and this batch). PR description must say
+  "Flow chart updated".
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -95,4 +102,4 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Runner continues with T008 (toolkit version stamp and setup --upgrade).
+Runner continues with T010 (tool contract: run the gate in the foreground).

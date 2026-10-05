@@ -161,9 +161,10 @@ For the recoverable bounded runner, start from a clean committed feature branch:
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
 operations. There are no approval prompts between normal tasks. Claude's `dontAsk`
-mode rejects unapproved tools, and the runner stops on reported permission denials
-so you can adjust policy deliberately. This can block a legitimate command if it
-wasn't allowed; a short supervised trial before an overnight run is useful.
+mode rejects unapproved tools. Denials are logged and the run continues: each one goes to
+`.ai/local/denials.log` with a note on stderr, and the runner still requires a real
+DONE/BLOCKED checkpoint, so a session that cannot work around a denial stops there. Adjust
+the policy deliberately afterwards. A short supervised trial before an overnight run is useful.
 
 At approval, the runner hashes `.ai/validate`, all `.ai/bin/` and `.ai/prompts/`
 contents, the permission allowlist, and project Claude settings. It keeps the
@@ -178,7 +179,7 @@ results, marks DONE, and commits. The runner reruns the full gate, verifies a cl
 checkpoint, records its own small state/log checkpoint, then starts the next session.
 BLOCKED tasks can be bypassed only by independent tasks with satisfied dependencies.
 
-No-progress, malformed state, CLI errors, denied permissions, timeouts, validation
+No-progress, malformed state, CLI errors, timeouts, validation
 failure, an unexpected branch change, or uncommitted work stop the runner. A task
 marked DONE whose post-task validation fails is restored to IN_PROGRESS. Session
 limits are deliberate boundaries; rerun the same command to continue after inspection.
@@ -193,6 +194,15 @@ claude "$(cat .ai/prompts/implement.md)"
 
 Interactive Claude uses your normal permission configuration, so it may ask for
 commands not yet authorized. The bounded runner is the no-prompt unattended path.
+
+### Modes
+
+| Mode | Started by | May do | May not do |
+| --- | --- | --- | --- |
+| Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
+| ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
+| ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
 
 ## Hands-off delivery: `ai-pipeline`
 
@@ -271,9 +281,10 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
 
 1. **Rules, no AI.** A task Claude finished and the full gate validated but Claude left
    uncommitted is committed by the runner (the gate verified unchanged). Sessions start
-   from a clean tree, so new files are that session's own output: it stages everything
-   git doesn't ignore, lists the new files in the notification, and stops instead if a new
-   file looks like a secret (`.env*`, `*.pem`, `*.key`, SSH keys, `*credentials*`, ...). Pushes retry
+   from a clean tree, so new files are that session's own output. Automatic checkpoints stage
+   the session's output except secret-looking files (everything git doesn't ignore), list
+   the new files in the notification, and stop instead if a new file looks like a secret
+   (`.env*`, `*.pem`, `*.key`, SSH keys, `*credentials*`, ...). Pushes retry
    3 times. Usage limits pause and resume.
 2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
    the same process. Hard rules escalate at once (gate, permissions, branch, review
@@ -513,8 +524,8 @@ gh pr create
 # Inspect the PR/CI, then merge manually when satisfied.
 ```
 
-Outside `ai-pipeline`, nothing in this toolkit pushes. `ai-pipeline` pushes only
-the feature branch and opens/updates a PR. Nothing ever merges or deploys.
+Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the feature branch and opens the pull request
+(updating it on reruns), and nothing else. Nothing ever merges or deploys.
 
 ## Components
 

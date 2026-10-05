@@ -2456,5 +2456,53 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('symlink', result.stderr + result.stdout)
 
 
+class DocsConsistencyTest(unittest.TestCase):
+    """R10: README.md and docs/workflow.md must describe what the code does."""
+
+    FILES = ('README.md', 'docs/workflow.md')
+
+    FORBIDDEN = (
+        'never stages application files',
+        'does not invoke `git push`',
+        'never invokes push',
+        'no automatic provider retries',
+        'no automatic retry of provider failures',
+        'stops on reported permission denials',
+        'denied permissions, timeouts',
+        'permission denial, or crash',
+    )
+
+    REQUIRED = (
+        'denials are logged and the run continues',
+        "automatic checkpoints stage the session's output except secret-looking files",
+        'the pipeline pushes the feature branch and opens the pull request',
+        'usage limits pause and resume',
+    )
+
+    def text(self, name):
+        return ' '.join((ROOT / name).read_text().lower().split())
+
+    def test_docs_consistency_no_wrong_sentences(self):
+        for name in self.FILES:
+            text = self.text(name)
+            for phrase in self.FORBIDDEN:
+                self.assertNotIn(' '.join(phrase.lower().split()), text, f'{name}: {phrase}')
+            self.assertNotRegex(text, r'(?:stop|stops|stopped)[^.]*\bdenied permissions?\b', name)
+
+    def test_docs_consistency_required_sentences(self):
+        for name in self.FILES:
+            text = self.text(name)
+            for phrase in self.REQUIRED:
+                self.assertIn(phrase, text, f'{name}: {phrase}')
+
+    def test_docs_consistency_modes_table(self):
+        for name in self.FILES:
+            raw = (ROOT / name).read_text()
+            self.assertRegex(raw, r'(?mi)^#+ Modes\b|^\| Mode \|', name)
+            rows = [line.lower() for line in raw.splitlines() if line.startswith('|')]
+            for mode in ('interactive claude', 'ai-run', 'ai-pipeline', 'ai-watchdog'):
+                self.assertTrue(any(row.startswith(f'| {mode} |') for row in rows), f'{name}: {mode}')
+
+
 if __name__ == '__main__':
     unittest.main()

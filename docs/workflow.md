@@ -90,7 +90,16 @@ permission/settings files. Existing project settings need those rules merged.
 
 Claude's runner uses `dontAsk` and explicit `.ai/permissions.allow` entries. It loads
 project settings and disables MCP integrations for that invocation. Necessary commands
-outside the allowlist become denials; inspect the log and adjust permissions yourself.
+outside the allowlist become denials. Denials are logged and the run continues
+(`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
+and the run stops there. Inspect the log and adjust permissions yourself.
+
+| Mode | May do | May not do |
+| --- | --- | --- |
+| Interactive Claude | Your normal permissions (may ask); whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run | One task per fresh `dontAsk` session; gate reruns; bookkeeping and validated-leftover commits | Change the gate, push, open PRs, merge, deploy |
+| ai-pipeline | `ai-run` plus reviews, triage, pushing the feature branch, opening/updating the PR, `ai-recover` | Force-push, push `main`, merge, deploy |
+| ai-watchdog | Probe, notify, read-only diagnosis, `--recover` via `ai-recover` | Restart or repair anything itself |
 Default entries support reading/editing, Git inspection/staging/local commits, and
 the canonical validation gate. Add normal builds/tests/dependency commands as needed.
 Installed Claude project deny rules are preserved if already present, so reconcile
@@ -128,8 +137,9 @@ alternate argument arrangements, Git configuration/environment, indirect shell
 commands, and bulk staging are not exhaustively prevented. Inspect checkpoint
 diffs and don't treat deny patterns as a complete Git policy enforcement mechanism.
 
-The runner never stages application files itself. Claude commits selected task work;
-the runner commits only state/run-log bookkeeping, preserving normal Git hooks. A
+Claude commits selected task work. Automatic checkpoints stage the session's output except
+secret-looking files (the runner's commit of validated leftovers; see "Checkpoint scope"
+below); bookkeeping is committed separately, preserving normal Git hooks. A
 failed hook, absent Git identity, or dirty checkpoint stops the run. The two tools use
 a kernel checkout lock, but direct CLI sessions do not: don't mutate a checkout while
 another agent is using it. Git doesn't protect uncommitted changes from power loss;
@@ -141,12 +151,13 @@ commits. Human required: meaningful external/irreversible risk, protected-branch
 deployment/production changes, cloud resource deletion, destructive production SQL,
 credential rotation/revocation, remote publishing, shared-history rewrites, security
 policy changes, and final acceptance. Never push secrets, suppress failures, or weaken
-security to get a pass. The toolkit does not invoke `git push`, `git merge`, or deployment.
+security to get a pass. Only `ai-pipeline` pushes: the pipeline pushes the feature branch
+and opens the pull request (never force, never `main`). Nothing merges or deploys.
 
 ## Interruption, limits, and recovery
 
-tmux handles terminal closure. A reboot, timeout, rate limit, network failure, permission
-denial, or crash can stop a session. Logs and partial changes remain on disk; completed
+tmux handles terminal closure. A reboot, timeout, rate limit, network failure,
+or crash can stop a session. Logs and partial changes remain on disk; completed
 commits remain in Git. A fresh resume reads instructions/spec/plan/tasks/state/handoff,
 recent logs, history, and diffs. There is no dependency on provider-specific conversation
 IDs, so model changes, days-long gaps, or temporary Codex debugging are recoverable.
@@ -157,8 +168,10 @@ automatically. If tools crashed mid-state-write, atomic helper writes reduce cor
 but agent-written Markdown still needs inspection. Invalid records fail explicitly.
 
 Limits bound new agent invocations and validation execution. GNU timeout terminates a
-timed-out command, with a 10-second forced termination grace. No automatic retry of
-provider failures, infinite loop, boot startup, or monetary spending guarantee is added.
+timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
+the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
+`AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
+stops and crashes. No infinite loop, boot startup, or monetary spending guarantee is added.
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.

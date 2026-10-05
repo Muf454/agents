@@ -399,7 +399,7 @@ and the CREATE path for ai-task/recheck.md), ran the full gate (PASS 2026-10-05T
 tests) and committed it. Root cause addressed in T010.
 
 ## T009 — Docs match the code
-Status: TODO
+Status: DONE
 Dependencies: T008
 Model: sonnet
 
@@ -436,7 +436,11 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 suite takes ~5 minutes; never background it).
 
 ### Result / notes
-(pending)
+Fixed wrong sentences in README.md (denials stop the runner; denied permissions as a stop
+reason) and docs/workflow.md (runner never stages application files; toolkit does not invoke
+`git push`; permission denial as stop; no automatic retry of provider failures). Added a
+Modes table to both. Vault flow chart audited (R1, R2, R3 present, `updated:` 2026-10-05) and
+given a note on logged denials. Evidence: `docs_consistency` 3 OK; gate result in run log.
 
 ## T010 — Tool contract: run the long gate in the foreground
 Status: TODO
