@@ -156,7 +156,8 @@ A `publish_ready` check in ai-pipeline: review current for HEAD, validation stam
 clean tree (incl. untracked), all tasks DONE. Run it after every host commit on the publish
 path, before EACH push attempt (inside the retry loop) and after each push (hooks ran),
 plus compare `git ls-remote origin <branch>` with HEAD after the push. Failures go
-through `stop`.
+through `stop`. Update the vault flow chart (publish checks, remote-HEAD verification) and
+its `updated:` date in this task.
 
 ### Likely affected modules
 scripts/ai-pipeline, tests
@@ -279,10 +280,13 @@ setup writes `.ai/toolkit-version` (JSON: toolkit commit or "unknown"; per toolk
 file the sha256 of the version the TOOLKIT installed). Ordinary setup never updates the
 baseline of a preserved (kept) file. `setup-project --upgrade PATH` prints the plan
 (replace / keep / advice for project-owned template changes / warning) and changes
-nothing; `--upgrade --apply PATH` replaces toolkit-owned files (`.ai/bin/**`,
-`.ai/prompts/**`) whose current hash equals their baseline, keeps locally edited ones
-(warning; replaced only with `--force`), keeps the old baseline for kept files, writes new
-baselines for replaced ones, and reminds to reinstall the watchdog timer. A toolkit-owned
+nothing; `--upgrade --apply PATH` upgrades the toolkit runtime (`.ai/bin/**`) as ONE compatible
+group, all or nothing (plan review P11: the scripts call each other and the shared helper):
+if any runtime file is locally edited (hash ≠ baseline), it refuses before changing anything
+and lists the files to reconcile, unless `--force`; otherwise it replaces/creates the whole
+group. Prompts (`.ai/prompts/**`) follow the same rule as their own group. It writes new
+baselines only for files it actually installed, and reminds to reinstall the watchdog
+timer. A toolkit-owned
 file missing in the project is CREATED (preview shows CREATE; executable mode kept; path and
 symlink checks as in setup; baseline recorded); this is how `.ai/bin/ai-task` and
 `.ai/prompts/recheck.md` reach older installs. Missing or malformed stamp (legacy install):
@@ -294,8 +298,10 @@ scripts/setup-project, scripts/lib/workflow.py, README.md, tests
 
 ### Acceptance criteria
 - Tests named `toolkit_upgrade`: fresh setup writes the stamp; preview changes nothing;
-  A→B upgrade replaces an outdated file and keeps .ai/validate and permissions; a local
-  edit is kept and reported, replaced with --force; repeated setup after a local edit
+  A→B upgrade replaces an outdated file and keeps .ai/validate and permissions; a locally
+  edited older `lib/workflow.py` makes a plain apply refuse with NO file changed (the old
+  install still passes `ai-status`), while `--force` installs the complete new group and an
+  installed pipeline smoke run (mock agents) passes; repeated setup after a local edit
   doesn't bless it; two consecutive applies are stable; a legacy install needs --force for
   differing files; upgrading an older inventory without ai-task and recheck.md creates both,
   and the installed `ai-task show` then works.
@@ -321,7 +327,9 @@ Fix in README.md and docs/workflow.md: denials are logged, not fatal; the runner
 recovery stage application files (with the secret guard); the pipeline pushes and opens
 PRs; provider-limit retries, recovery and the watchdog exist. Add a modes table (interactive
 Claude, ai-run, ai-pipeline, watchdog: what each may do). Check the vault flow chart has
-today's `updated:` and shows R1 and R3.
+today's `updated:` and shows R1, R2 and R3, and audit it against every changed step and
+default of this batch. The pipeline's PR description for this change must contain "Flow
+chart updated" (record it in the handoff so the PR body carries it).
 
 ### Likely affected modules
 README.md, docs/workflow.md, tests
