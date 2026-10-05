@@ -915,8 +915,9 @@ def stage_verify(arguments):
         triage_scope([start])
     except ValueError as error:
         fail(f'Triage stage: {error}')
-    subjects = git('log', '--format=%s', f'{start}..HEAD').decode().splitlines()
-    if TRIAGE_COMMIT not in subjects:
+    # Only a host-recorded triage commit closes the stage; a commit subject alone never does.
+    commits = git('log', '--format=%H', f'{start}..HEAD').decode().split()
+    if not set(commits) & set(fix_round_records() or []):
         print('pending')
         return
     if git('status', '--porcelain', '--untracked-files=all').strip():
@@ -1149,6 +1150,62 @@ def disputes_store():
     if not branch:
         fail('Disputed findings need a branch (detached HEAD).')
     return binding_dir() / f'disputes-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def fix_rounds_store():
+    """Host-side record of this branch's counted triage rounds (commit hashes written by the
+    host triage commit), so agent-chosen commit subjects never change the fix round budget."""
+    branch = current_branch()
+    if not branch:
+        fail('Fix rounds need a branch (detached HEAD).')
+    return binding_dir() / f'fix-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def fix_round_records():
+    path = fix_rounds_store()
+    if not path.exists():
+        return None
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    if not isinstance(records, list) or not all(
+            isinstance(r, str) and re.fullmatch(r'[0-9a-f]{40,64}', r) for r in records):
+        fail('The host fix round records are unreadable; inspect them before continuing.')
+    return records
+
+
+def write_fix_rounds(records):
+    path = fix_rounds_store()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic(path, json.dumps(records, indent=2) + '\n')
+
+
+def fix_rounds(arguments):
+    """record COMMIT: the host triage commit of one round. init BASE: a branch without a host
+    record (legacy) starts from its commits whose subject is exactly the host subject; later
+    commits, whatever their subject, never count. count BASE: recorded rounds in BASE..HEAD."""
+    action = arguments[0]
+    if action == 'record':
+        commit = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
+        if git('log', '-1', '--format=%s', commit).decode().strip() != TRIAGE_COMMIT:
+            fail(f'{commit} is not a host triage commit.')
+        records = fix_round_records() or []
+        if commit not in records:
+            write_fix_rounds(records + [commit])
+        return
+    if action not in ('init', 'count'):
+        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE')
+    base = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
+    history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
+    records = fix_round_records()
+    if records is None:
+        records = [line.split(' ', 1)[0] for line in reversed(history)
+                   if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
+        write_fix_rounds(records)
+    if action == 'count':
+        reachable = {line.split(' ', 1)[0] for line in history}
+        print(sum(1 for record in records if record in reachable))
 
 
 def dispute_records():
@@ -1588,6 +1645,8 @@ def main():
         disputes_record(arguments)
     elif command == 'disputes-verify':
         disputes_verify(arguments)
+    elif command == 'fix-rounds':
+        fix_rounds(arguments)
     elif command == 'triage-scope':
         triage_scope(arguments)
     elif command == 'stage-verify':

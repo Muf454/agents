@@ -628,7 +628,7 @@ Evidence: `-k pr_body_flow` → Ran 2 tests, OK. `.ai/bin/ai-check` → Ran 154 
 `chmod +x`); no other failures.
 
 ## T015 — Count fix rounds from host state, not commit messages
-Status: TODO
+Status: DONE
 Dependencies: T014
 Model: opus
 
@@ -662,4 +662,18 @@ Targeted: `python3 -m unittest discover -s tests -k fix_round_count` (the output
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. New helper `fix-rounds record COMMIT | init BASE | count BASE`
+(scripts/lib/workflow.py): per-branch JSON list of host triage commit hashes in
+`binding_dir()`. `ai-run --triage` makes its own counted commit (now `--allow-empty`, so it
+is always the host's commit, also after a crash between commit and record) and records it;
+`record` refuses a commit whose subject is not exactly the host subject. `ai-pipeline` runs
+`fix-rounds init` once at start (before any session; legacy branches start from
+exact-subject commits only) and counts with `fix-rounds count "$base_sha"` (recorded commits
+in base..HEAD). `stage-verify` closes a triage stage only on a recorded commit (it also matched
+subjects before). Tests: 7 `fix_round_count` tests (prefix and exact agent subjects with
+`--max-fix-rounds 2` → 2 rounds + draft PR; one round counts once and re-recording is a
+no-op; recovery resume; human restart; per-branch + legacy; agent exact subject cannot close
+an interrupted triage). `-k fix_round_count`: Ran 7 tests OK; with `-k triage_completion`:
+14 OK. Gate: see run log. Docs: docs/workflow.md, README; vault hub log + flow note.
+Limitation: `ai-run --triage` run by hand on a legacy branch outside the pipeline creates the
+record without the legacy scan (the pipeline always initialises first).

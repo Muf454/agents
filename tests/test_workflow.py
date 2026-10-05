@@ -108,7 +108,7 @@ if 'TRIAGE CONTRACT' in prompt:
         subprocess.run(['git','add','--',*paths],check=True)
     # The 2026-10-05 case: the session's own commit was denied; its records stay uncommitted.
     if mode not in ('triage-no-commit', 'triage-no-commit-source'):
-        subprocess.run(['git','commit','-qm','triage review'],check=True)
+        subprocess.run(['git','commit','-qm',os.environ.get('MOCK_TRIAGE_SUBJECT', 'triage review')],check=True)
     if mode == 'triage-crash':
         # The machine "restarts": ai-run (claude <- timeout <- ai-run) and the pipeline die at once.
         runner = int(pathlib.Path(f'/proc/{os.getppid()}/stat').read_text().rsplit(')', 1)[1].split()[1])
@@ -1930,6 +1930,94 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
         self.assertIn('🏁 FINISHED', self.notifications())
         self.assertEqual(self.open_stage(), '')
+
+    # ---------------------------------------------------------------- fix round count (T015)
+    def fix_rounds(self):
+        return int(self.helper('fix-rounds', 'count', 'main').stdout.strip())
+
+    def assert_two_rounds_with_agent_subject(self, subject):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '2',
+                  MOCK_CODEX='major-always', MOCK_TRIAGE_SUBJECT=subject)
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.fix_rounds(), 2)
+        # The round limit still makes the PR a draft once it is really reached.
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertIn('--draft', create[0])
+
+    def test_fix_round_count_ignores_agent_subject_starting_with_host_subject(self):
+        # 2026-10-05: the triage session's own "chore(ai): record review triage dispositions"
+        # commit counted as a second round and stopped the run after one round.
+        self.assert_two_rounds_with_agent_subject('chore(ai): record review triage dispositions')
+
+    def test_fix_round_count_ignores_agent_subject_equal_to_host_subject(self):
+        self.assert_two_rounds_with_agent_subject('chore(ai): record review triage')
+
+    def test_fix_round_count_one_real_round_counts_once(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertEqual(self.fix_rounds(), 1)
+        self.helper('fix-rounds', 'record', 'HEAD~0', expected=1)  # not a host triage commit
+        counted = self.run_cmd(['git', 'log', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.split()
+        self.helper('fix-rounds', 'record', counted[0])  # recording the same round again is a no-op
+        self.assertEqual(self.fix_rounds(), 1)
+
+    def test_fix_round_count_survives_recovery_resume(self):
+        self.ready()
+        crashed = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '1',
+                            expected=None, AI_AUTO_RECOVER='1', MOCK_CODEX='major-always', MOCK_CLAUDE='triage-crash')
+        self.assertEqual(crashed.returncode, -9)
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_CLAUDE='',
+                  MOCK_CODEX='major-always')
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.fix_rounds(), 1)
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    def test_fix_round_count_agent_subject_does_not_close_an_interrupted_triage(self):
+        # The session committed with the host subject, then the machine restarted before the
+        # host's counted commit: the round is still recorded, exactly once.
+        self.ready()
+        crashed = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=None,
+                            AI_AUTO_RECOVER='1', MOCK_CODEX='major-once', MOCK_CLAUDE='triage-crash',
+                            MOCK_TRIAGE_SUBJECT='chore(ai): record review triage')
+        self.assertEqual(crashed.returncode, -9)
+        self.assertEqual(self.fix_rounds(), 0)
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_CLAUDE='',
+                  MOCK_CODEX='major-once')
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.fix_rounds(), 1)
+        self.assertEqual(self.open_stage(), '')
+
+    def test_fix_round_count_survives_human_restart(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '1',
+                  MOCK_CODEX='major-always')
+        self.assertEqual(self.triage_calls(), 1)
+        # The human restarts the same branch with a larger budget: one more round, not two.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '2',
+                  MOCK_CODEX='major-always')
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.fix_rounds(), 2)
+
+    def test_fix_round_count_is_per_branch_and_legacy_needs_the_exact_subject(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertEqual(self.fix_rounds(), 1)
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'other', 'main'])
+        self.assertEqual(self.fix_rounds(), 0)
+        # Once a branch has a host record, a commit subject alone never counts.
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record review triage'])
+        self.assertEqual(self.fix_rounds(), 0)
+        # A legacy branch (no host record): only exact host subjects count, and are recorded.
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'legacy', 'main'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record review triage'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record review triage dispositions'])
+        self.assertEqual(self.fix_rounds(), 1)
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record review triage'])
+        self.assertEqual(self.fix_rounds(), 1)
+        self.run_cmd(['git', 'checkout', '-q', 'feature/test'])
+        self.assertEqual(self.fix_rounds(), 1)
 
     def test_triage_completion_source_leftovers_escalate_and_commit_nothing(self):
         self.ready()

@@ -189,8 +189,12 @@ if [[ "$triage" == yes ]]; then
     if [[ -e "$record" ]]; then records+=("$record"); fi
   done
   git add -- "${records[@]}"
-  git commit -m 'chore(ai): record review triage' >/dev/null
+  # Always the host's own commit (empty if the session committed everything, or after a crash
+  # between this commit and its host record): an agent commit's subject never counts.
+  git commit --allow-empty -m 'chore(ai): record review triage' >/dev/null
   ai_guard_verify
+  # The host record of this round is what the pipeline's fix round limit counts.
+  ai_helper fix-rounds record HEAD || ai_die 'Cannot record the fix round in the host state directory.'
   # A commit hook must not have slipped anything else into the counted commit.
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     ai_die 'Triage stage: changes were left after the triage commit (commit hook?).'

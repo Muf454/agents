@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: feature/flow-hardening
-Phase: ready_for_acceptance
+Phase: ready_for_review
 Current task: none
-Last completed task: T014
-Tasks complete: 14
+Last completed task: T015
+Tasks complete: 15
 Tasks remaining: 0
-Last validation: PASS at 2026-10-05T12:15:02Z
+Last validation: PASS (ai-check, 161 tests) at 2026-10-05T13:10Z
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/11
-Last updated: 2026-10-05T12:23:35Z
+Next action: Independent review of T015
+Last updated: 2026-10-05T13:10Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

@@ -70,6 +70,11 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 
 - T014 (review N2): `pr_body` copies an optional handoff section `## Flow chart` into the
   PR description under Summary; this repo's handoff declares "Flow chart updated".
+- T015: fix rounds are counted from host state, never from commit subjects. `ai-run --triage`
+  always makes its own counted commit (empty if needed) and records its hash per branch in the
+  host store (`fix-rounds record`); `ai-pipeline` counts recorded commits in base..HEAD
+  (`fix-rounds count`), and the triage stage closes only on a recorded commit. Legacy
+  branches are initialised once at pipeline start from exact-subject commits.
 
 ## Flow chart
 Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
@@ -124,9 +129,15 @@ Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
    it a draft. Edit a word in `disputes.md`, commit, rerun: it stops ("disputes.md does not
    match the dispute records") and does not touch the PR. If Codex withdraws the finding,
    no `disputes.md` is created and the PR is a normal (ready) PR.
+9. Fix round count (T015): in a scratch project, make the triage session commit with the
+   subject `chore(ai): record review triage dispositions` (or exactly
+   `chore(ai): record review triage`) and run `ai-pipeline --approved --max-fix-rounds 2`
+   against a review that keeps a MAJOR finding: two triage rounds run (not one), then the PR
+   is a draft. `python3 .ai/bin/lib/workflow.py fix-rounds count main` prints 2. Rerun with
+   `--max-fix-rounds 3`: exactly one more round. On a new branch from main it prints 0.
 
 ## Human todos
-- Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
+None.
 
 ## Next action
-Review fixes: T013 next, then the remaining fix tasks; then review again.
+All tasks done; independent review of T015 next.

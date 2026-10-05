@@ -98,6 +98,8 @@ else
 fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
+# Fix rounds are counted from host state, never from commit subjects agents can choose.
+ai_helper fix-rounds init "$base_sha" || ai_die 'Cannot record the fix rounds in the host state directory.'
 
 stop() {
   local stage=$1 reason
@@ -296,7 +298,7 @@ while true; do
     printf 'Findings already triaged (%s) and the review is still current.\n' "$verdict"
     break
   fi
-  fixes=$(count_commits '^chore(ai): record review triage')
+  fixes=$(ai_helper fix-rounds count "$base_sha") || stop review
   if (( fixes >= max_fix_rounds )); then
     unresolved=1
     printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"

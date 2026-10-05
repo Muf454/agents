@@ -185,11 +185,17 @@ host review store; committed as `chore(ai): record plan review`; reused while th
 unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
-`--max-fix-rounds` triage commits exist since the base: triage (`ai-run --triage`,
+`--max-fix-rounds` fix rounds are recorded: triage (`ai-run --triage`,
 committed as `chore(ai): record review triage`) → implement the new tasks → review
 again. A review counts as current when only `.ai/reviews`, state, run log, and handoff
-changed since its recorded HEAD. Rounds are counted from those commit messages since
-the base, so no hidden state is needed.
+changed since its recorded HEAD. Rounds are counted from host state, never from commit
+subjects (agents choose their own): `ai-run --triage` always makes its own counted commit
+(empty if needed) and records its hash in the host store (`fix-rounds record`, a file per
+branch next to the review bindings); `fix-rounds count BASE` counts recorded commits in
+`BASE..HEAD`, so the count survives recovery and human restarts of the same branch and
+another branch starts at zero. A branch without a host record (legacy) is initialised once
+at pipeline start (`fix-rounds init`, before any session) from commits whose subject is
+exactly `chore(ai): record review triage`.
 
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
@@ -210,8 +216,8 @@ Every pipeline start and resume completes an open stage first (`complete_stage`)
 the clean-tree check, plan review or implementation: `stage-verify` requires the review
 binding (verified report whose SHA-256 equals `review_digest`) and that committed,
 uncommitted and untracked changes since `start_head` are only triage records
-(`triage-scope`). If a `chore(ai): record review triage` commit already exists after
-`start_head` (crash after the commit) the stage is closed without another count;
+(`triage-scope`). If a host-recorded triage commit already exists after `start_head`
+(crash after the commit) the stage is closed without another count;
 otherwise `ai-run --triage --since start_head` records it. That is the one owner of the
 counted commit: when the dispositions are already complete and fresh it skips the Claude
 session and commits the leftover records with the round; it then re-checks the scope (a

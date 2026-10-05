@@ -240,7 +240,8 @@ tmux new -s my-app-ai
    rejected with evidence, or deferred) and append fix tasks. Triage may only touch
    workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
-   `--max-fix-rounds` rounds (default 2). Codex's report is never edited by Claude:
+   `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
+   from commit messages). Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
    whose counts disagree with its listed finding IDs is rejected.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
