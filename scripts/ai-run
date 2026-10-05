@@ -234,20 +234,20 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       if [[ -n "$(dirty_beyond_records)" ]]; then
         # Tier-1 recovery: the session finished and the full gate just passed on exactly
         # this content (gate files verified unchanged), but it didn't commit. Commit it.
-        # Only tracked changes and new files the task plans for; anything else stops the run.
-        checkpoint_list=$(mktemp .ai/local/checkpoint-XXXXXXXX)
-        ai_helper checkpoint-paths "$active_task" > "$checkpoint_list" || \
-          ai_die "Claude left uncommitted work outside $active_task's planned modules; inspect it before continuing."
-        git add --pathspec-from-file="$checkpoint_list" --pathspec-file-nul
-        # The runner's own records belong in the checkpoint too (the content checks need a clean tree).
-        git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+        # The session started from a clean tree, so everything new is its own output. Stage it
+        # all (git still skips ignored files), but never a secret-looking file.
+        git add --all -- .
+        if ! new_files=$(ai_helper checkpoint-guard); then
+          git reset -q
+          ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
+        fi
         git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
         ai_guard_verify
         # A commit hook must not have slipped unvalidated content into that checkpoint.
         [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
           ai_helper committed-matches-worktree || \
           ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
-        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it."
+        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
       fi
       ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
       ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;

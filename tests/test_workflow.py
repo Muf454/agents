@@ -152,9 +152,9 @@ if mode not in ('no-progress', 'bad-format'):
             target.write_text('#!/usr/bin/env bash\nexit 0\n')
         else:
             target.write_text('modified by agent\n')
-    if mode == 'dirty-unplanned':
-        pathlib.Path('private-note.txt').write_text('not part of the task')
-    if mode not in ('dirty', 'dirty-unplanned'):
+    if mode == 'dirty-secret':
+        pathlib.Path('deploy.pem').write_text('-----BEGIN PRIVATE KEY-----')
+    if mode not in ('dirty', 'dirty-secret'):
         subprocess.run(['git','add','--','.ai/tasks.md','.ai/state.md',task_id+'.txt','.ai/validate'],check=True)
         if mode == 'tamper':
             subprocess.run(['git','add','--',os.environ['MOCK_TAMPER_PATH']],check=True)
@@ -888,22 +888,24 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('checkpoint T001 (validated; the session did not commit)',
                       self.run_cmd(['git', 'log', '--format=%s']).stdout)
         self.assertIn("Claude didn't commit its validated work", self.notifications())
+        self.assertIn('New files: T001.txt', self.notifications())
 
-    def test_runner_never_auto_commits_unplanned_new_files(self):
+    def test_runner_checkpoint_never_commits_secret_looking_files(self):
         self.ready()
-        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty-unplanned')
-        self.assertIn("outside T001's planned modules", (self.project / '.ai/local/last-error').read_text())
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty-secret')
+        self.assertIn('secret-looking files', (self.project / '.ai/local/last-error').read_text())
         tracked = self.run_cmd(['git', 'ls-files']).stdout
-        self.assertNotIn('private-note.txt', tracked)
+        self.assertNotIn('deploy.pem', tracked)
         self.assertNotIn('T001.txt', tracked)
+        self.assertEqual(self.run_cmd(['git', 'diff', '--cached', '--name-only']).stdout.strip(), '')
 
-    def test_recovery_never_commits_unplanned_new_files(self):
+    def test_recovery_never_commits_secret_looking_files(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
                   AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun',
-                  MOCK_EXTRA_FILE='stray.txt')
-        self.assertIn("leftover files aren't in the approved plan", self.notifications())
-        self.assertNotIn('stray.txt', self.run_cmd(['git', 'ls-files']).stdout)
+                  MOCK_EXTRA_FILE='.env.production')
+        self.assertIn('leftovers include secret-looking files', self.notifications())
+        self.assertNotIn('.env.production', self.run_cmd(['git', 'ls-files']).stdout)
         self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
 
     def test_review_with_a_renamed_optional_section_is_accepted(self):

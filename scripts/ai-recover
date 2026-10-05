@@ -130,11 +130,11 @@ case "$action" in
     [[ -n "$(git status --porcelain --untracked-files=all)" ]] || escalate "$why (nothing to commit)" "$human"
     "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
     [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during validation.' 'inspect the diff.'
-    checkpoint_list=$(mktemp .ai/local/checkpoint-XXXXXXXX)
-    ai_helper checkpoint-paths --all-tasks > "$checkpoint_list" || \
-      escalate "$why; but some leftover files aren't in the approved plan." 'inspect the uncommitted files.'
-    git add --pathspec-from-file="$checkpoint_list" --pathspec-file-nul
-    git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+    git add --all -- .
+    if ! new_files=$(ai_helper checkpoint-guard); then
+      git reset -q
+      escalate "$why; but the leftovers include secret-looking files." 'inspect the uncommitted files.'
+    fi
     git commit -q -m "chore(ai): recovery checkpoint (validated leftover work)
 
 Stopped during $stage: $reason

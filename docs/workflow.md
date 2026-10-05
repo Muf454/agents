@@ -250,11 +250,13 @@ handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-mat
 filters and staged mode changes). The recovery decision must be exactly one JSON object
 (optionally fenced); envelope and decision reject duplicate keys.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
-checks after the commit. Checkpoint scope (`checkpoint-paths`): tracked changes, the
-runner records (state, run log, handoff) and untracked files matching the task's "Likely
-affected modules" (exact path, directory prefix or glob; never `.env*`); for recovery,
-the modules of every task in the approved queue. Anything else stops (tier 1) or
-escalates (recovery) without committing. The timer runs a host copy of `.ai/bin`
+checks after the commit. Checkpoint scope: `git add --all` (ignored
+files stay out), then `checkpoint-guard` inspects every staged addition (renames count as
+additions) and unstages everything if a name matches the secret patterns (`.env*`, `*.pem`,
+`*.key`, `*.p12`, `*.pfx`, SSH keys, `*credentials*`, `*secret*`, `.npmrc`, `.netrc`, ...):
+tier 1 stops, recovery escalates. Rationale: each session starts from a clean tree, so new
+files are its own output, the same set Claude's own commit would hold; a module allowlist
+parsed from task text proved brittle (spaces, globs, renames) and agent-editable. The timer runs a host copy of `.ai/bin`
 (`$XDG_DATA_HOME/ai-toolkit/watchdog/<unit>/bin`, refreshed by `--install-timer`), so the
 code that verifies the gate before crash recovery isn't checkout code; it then launches the
 checkout's `ai-recover`. `ai-watchdog --recover` launches `ai-recover` via
