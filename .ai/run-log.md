@@ -22,3 +22,4 @@
 | 2026-10-05T10:55Z | claude | T009 | DONE: README/docs/workflow.md corrected, Modes table, docs_consistency tests; vault flow chart + hub log updated | docs_consistency 3 OK; ai-check 149 OK | (this commit) | PR body must say "Flow chart updated" |
 | 2026-10-05T10:52:02Z | runner | T009 | completed | PASS | d4607bc | Claude checkpointed; continuing queue |
 | 2026-10-05T11:05Z | claude | T010 | DONE: updated runner.md, triage.md "How to work here" with foreground/600000ms gate requirement; mirrored in README step 4 | tool_contract 3 OK; ai-check 149 OK | (this commit) | All 10 tasks complete; Phase ready_for_review |
+| 2026-10-05T11:04:22Z | runner | T010 | completed | PASS | 107b4aa | Claude checkpointed; continuing queue |
