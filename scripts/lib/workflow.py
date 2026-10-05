@@ -96,11 +96,138 @@ def candidates(root):
     return '\n'.join(lines) + '\n'
 
 
+STAMP_FILE = '.ai/toolkit-version'
+TOOLKIT_GROUPS = (('runtime', '.ai/bin/'), ('prompts', '.ai/prompts/'))
+
+
+def file_sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def toolkit_owned(relative):
+    return any(relative.startswith(prefix) for _, prefix in TOOLKIT_GROUPS)
+
+
+def read_stamp(root):
+    """Return (stamp, problem). A missing or malformed stamp is a legacy install."""
+    path = root / STAMP_FILE
+    if not path.exists():
+        return {'files': {}, 'templates': {}}, 'missing'
+    try:
+        data = json.loads(path.read_text())
+        files, templates = data.get('files', {}), data.get('templates', {})
+        if not isinstance(files, dict) or not isinstance(templates, dict) or not all(
+                isinstance(v, str) for v in [*files.values(), *templates.values()]):
+            raise ValueError('bad shape')
+        return {'commit': data.get('toolkit_commit', 'unknown'), 'files': files, 'templates': templates}, None
+    except (ValueError, AttributeError, OSError):
+        return {'files': {}, 'templates': {}}, 'malformed'
+
+
+def write_stamp(root, toolkit, stamp):
+    try:
+        commit = git('rev-parse', 'HEAD', cwd=toolkit).decode().strip() or 'unknown'
+    except (subprocess.CalledProcessError, OSError):
+        commit = 'unknown'
+    text = json.dumps({'toolkit_commit': commit, 'files': dict(sorted(stamp['files'].items())),
+                       'templates': dict(sorted(stamp['templates'].items()))}, indent=2) + '\n'
+    path = root / STAMP_FILE
+    if not path.exists() or path.read_text() != text:
+        atomic(path, text)
+
+
+def install_bytes(target, data, mode):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as file:
+        temp = Path(file.name)
+        file.write(data)
+    try:
+        temp.chmod(mode)
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def file_mode(relative):
+    return 0o755 if relative.startswith('.ai/bin/') or relative in ('.ai/validate', '.ai/ci-setup') else 0o644
+
+
+def upgrade(root, toolkit, copies, apply, force):
+    if not (root / '.ai').is_dir():
+        fail('No .ai directory: run setup-project (without --upgrade) first.')
+    destinations = [*copies, STAMP_FILE]
+    safe_paths(root, destinations)
+    for relative in copies:
+        if (root / relative).exists() and not (root / relative).is_file():
+            fail(f'Expected a regular file: {relative}')
+    stamp, problem = read_stamp(root)
+    if problem:
+        print(f'WARNING: {STAMP_FILE} is {problem} (legacy install): every differing toolkit-owned '
+              'file counts as locally edited, so --force is needed to replace it.')
+    plan = []  # (action, relative, group)
+    baselines = {}
+    for group, prefix in TOOLKIT_GROUPS:
+        for relative in (r for r in copies if r.startswith(prefix)):
+            new = file_sha(copies[relative].read_bytes())
+            target = root / relative
+            if not target.exists():
+                plan.append(('CREATE', relative, group))
+            elif file_sha(target.read_bytes()) == new:
+                baselines[relative] = new
+                plan.append(('OK', relative, group))
+            elif stamp['files'].get(relative) == file_sha(target.read_bytes()):
+                plan.append(('REPLACE', relative, group))
+            else:
+                plan.append(('EDITED', relative, group))
+    for action, relative, _ in plan:
+        if action != 'OK':
+            print({'EDITED': 'EDITED (locally changed; needs --force) '}.get(action, action + ' ') + relative)
+    for relative, source in copies.items():
+        if toolkit_owned(relative):
+            continue
+        target = root / relative
+        new = file_sha(source.read_bytes())
+        if not target.exists():
+            print(f'ADVICE {relative} is missing: run setup-project (without --upgrade) to create it')
+        elif file_sha(target.read_bytes()) != new and stamp['templates'].get(relative) != new:
+            print(f'ADVICE {relative} is project-owned and differs from the current template: '
+                  f'compare with {source} and merge by hand')
+    edited = [relative for action, relative, _ in plan if action == 'EDITED']
+    changes = [(a, r) for a, r, _ in plan if a in ('CREATE', 'REPLACE') or (a == 'EDITED' and force)]
+    if edited and not force:
+        print('Refusing to upgrade: these toolkit files were edited locally (or have no baseline):')
+        for relative in edited:
+            print(f'  - {relative}')
+        print('Reconcile them (or rerun with --force to overwrite them). Nothing was changed.')
+        if apply:
+            raise SystemExit(1)
+        return
+    if not apply:
+        print(f'Plan only: {len(changes)} file(s) would change. Rerun with --upgrade --apply to apply.')
+        return
+    for relative, source in copies.items():
+        if toolkit_owned(relative) and any(r == relative for _, r in changes):
+            install_bytes(root / relative, source.read_bytes(), file_mode(relative))
+            baselines[relative] = file_sha(source.read_bytes())
+    stamp['files'].update(baselines)
+    write_stamp(root, toolkit, stamp)
+    print(f'Upgraded {len(changes)} file(s); {STAMP_FILE} updated.')
+    if any(r.startswith('.ai/bin/') for _, r in changes):
+        print('Reinstall the watchdog timer so it uses the new scripts: '
+              '.ai/bin/ai-watchdog --install-timer --diagnose --recover')
+
+
 def setup(arguments):
     parser = argparse.ArgumentParser(description='Copy templates without overwriting existing files.')
     parser.add_argument('project', type=Path)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--upgrade', action='store_true',
+                        help='plan an upgrade of toolkit-owned files (.ai/bin, .ai/prompts); changes nothing')
+    parser.add_argument('--apply', action='store_true', help='with --upgrade: apply the plan')
+    parser.add_argument('--force', action='store_true', help='with --upgrade --apply: overwrite locally edited files')
     args = parser.parse_args(arguments)
+    if (args.apply or args.force) and not args.upgrade:
+        fail('--apply and --force only make sense with --upgrade.')
     root = args.project.expanduser().resolve()
     if not root.is_dir():
         fail('Target directory must exist. Create it and run git init first.')
@@ -118,8 +245,10 @@ def setup(arguments):
     for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
                  'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
+    if args.upgrade:
+        return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
     generated = '.ai/validation-candidates.md'
-    destinations = list(copies) + [generated, '.gitignore', '.ai/local']
+    destinations = list(copies) + [generated, '.gitignore', '.ai/local', STAMP_FILE]
     safe_paths(root, destinations)
     for relative in copies:
         if (root / relative).exists() and not (root / relative).is_file():
@@ -155,6 +284,8 @@ def setup(arguments):
         print(('APPEND ' if ignore_file.exists() else 'CREATE ') + '.gitignore (local logs/settings ignored)')
     if args.dry_run:
         return
+    created = False
+    stamp, _ = read_stamp(root)  # baselines are only ever written for files this run creates
     for relative, source in copies.items():
         target = root / relative
         if target.exists():
@@ -163,6 +294,8 @@ def setup(arguments):
         # Exclusive creation protects existing files even if setup is repeated.
         with target.open('xb') as file:
             file.write(source.read_bytes())
+        stamp['files' if toolkit_owned(relative) else 'templates'][relative] = file_sha(source.read_bytes())
+        created = True
         target.chmod(0o755 if relative.startswith('.ai/bin/') or relative in ('.ai/validate', '.ai/ci-setup') else 0o644)
         if relative == '.ai/state.md':
             text = target.read_text().replace('Project: unset', f'Project: {root.name}')
@@ -179,6 +312,8 @@ def setup(arguments):
     if missing:
         with ignore_file.open('a') as file:
             file.write(('\n' if existing and not existing.endswith('\n') else '') + '\n'.join(missing) + '\n')
+    if created or not (root / STAMP_FILE).exists():  # a no-op repeat must not move the recorded commit
+        write_stamp(root, toolkit, stamp)
     print('Installed. Existing files were preserved: reconcile KEEP entries manually before running.')
 
 

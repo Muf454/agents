@@ -345,7 +345,7 @@ Limitation: a dispute is only lost if someone edits the host store outside the c
 which agent sessions cannot write.
 
 ## T008 — Toolkit version stamp and setup --upgrade
-Status: TODO
+Status: DONE
 Dependencies: T007
 Model: sonnet
 
@@ -389,7 +389,14 @@ permissions; new tests are named with `toolkit_upgrade`; the output must say `Ra
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
-(pending)
+Implemented by two pipeline sessions (sonnet) on 2026-10-05; both ended without a checkpoint
+because the gate (now ~5 min, 146 tests) exceeds the Bash tool's default 2-minute timeout: the
+session ran `.ai/bin/ai-check` in the background and could not wait for it (polling via
+`timeout … bash -c` is correctly not allowed). Recovery escalated after the second stop.
+The coordinator (Claude, interactive) checked the uncommitted work against every acceptance
+criterion (9 `toolkit_upgrade` tests incl. the refused-group, `--force` + mock pipeline smoke run
+and the CREATE path for ai-task/recheck.md), ran the full gate (PASS 2026-10-05T10:40Z, 146
+tests) and committed it. Root cause addressed in T010.
 
 ## T009 — Docs match the code
 Status: TODO
@@ -424,9 +431,39 @@ README.md, docs/workflow.md, tests
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (allowed by this run's
-permissions; new tests are named with `docs_consistency`; the output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check`.
+permissions; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (the
+suite takes ~5 minutes; never background it).
 
 ### Result / notes
 (pending)
 
+## T010 — Tool contract: run the long gate in the foreground
+Status: TODO
+Dependencies: T009
+Model: haiku
+
+### Goal
+Prevent the 2026-10-05 T008 stop: sessions must never background `.ai/bin/ai-check`.
+
+### Implementation notes
+In the shared "How to work here" section (templates/.ai/prompts/runner.md, triage.md):
+run `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout` set to 600000 ms;
+never run it in the background or poll it; if it still times out, mark the task BLOCKED with
+the evidence instead of ending without a checkpoint. Mirror the sentence in the README's
+permissions/tool section.
+
+### Likely affected modules
+templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md, README.md, tests
+
+### Acceptance criteria
+- Tests named `tool_contract` assert the foreground/600000 ms rule is present in runner and
+  triage and identical in both.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k tool_contract` (allowed by this run's
+permissions; the output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+(pending)

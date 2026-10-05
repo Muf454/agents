@@ -293,7 +293,8 @@ class ToolkitTest(unittest.TestCase):
         self.project = self.base / 'project with spaces'
         self.project.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
-        for name in ('AI_PIPELINE', 'AI_LOCK_HELD'):  # set when the gate runs inside a pipeline
+        for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST'):
+            # set when the gate runs inside a pipeline (or one resumed by ai-recover)
             self.env.pop(name, None)
         self.run_cmd(['git', 'init', '-b', 'main'])
         self.run_cmd(['git', 'config', 'user.name', 'Toolkit Test'])
@@ -2310,6 +2311,149 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / 'src.txt').write_text('stray')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
         self.assertIn('Start from a clean checkpoint', result.stderr)
+
+    # --- toolkit_upgrade: version stamp and setup-project --upgrade ---
+
+    def old_toolkit(self, drop=()):
+        """A copy of the toolkit that differs from this one: an 'older' release."""
+        import shutil
+        old = self.base / 'toolkit-a'
+        shutil.copytree(ROOT / 'scripts', old / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(ROOT / 'templates', old / 'templates')
+        for relative in drop:
+            (old / relative).unlink()
+            if relative == 'scripts/ai-task':  # the older setup did not know the command either
+                workflow = old / 'scripts/lib/workflow.py'
+                import re
+                workflow.write_text(re.sub(r"'ai-task',\s*", '', workflow.read_text()))
+        for relative in ('scripts/ai-status', 'scripts/lib/workflow.py', 'templates/.ai/prompts/runner.md'):
+            with (old / relative).open('a') as file:
+                file.write('\n# older release\n' if not relative.endswith('.md') else '\nolder release\n')
+        return old
+
+    def setup_old(self, old):
+        return self.run_cmd([str(old / 'scripts/setup-project'), str(self.project)])
+
+    def upgrade(self, *options, expected=0):
+        return self.setup_project('--upgrade', *options) if expected == 0 else self.run_cmd(
+            [str(ROOT / 'scripts/setup-project'), '--upgrade', *options, str(self.project)], expected=expected)
+
+    def snapshot(self):
+        return {str(p.relative_to(self.project)): (p.read_bytes(), p.stat().st_mode) for p in self.project.rglob('*')
+                if p.is_file() and '.git' not in p.parts}
+
+    def stamp_files(self):
+        return json.loads((self.project / '.ai/toolkit-version').read_text())['files']
+
+    def sha(self, path):
+        import hashlib
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def test_toolkit_upgrade_fresh_setup_writes_stamp(self):
+        self.setup_project()
+        data = json.loads((self.project / '.ai/toolkit-version').read_text())
+        self.assertIn('toolkit_commit', data)
+        self.assertEqual(data['files']['.ai/bin/ai-task'], self.sha(ROOT / 'scripts/ai-task'))
+        self.assertEqual(data['files']['.ai/prompts/recheck.md'], self.sha(ROOT / 'templates/.ai/prompts/recheck.md'))
+        self.assertNotIn('.ai/validate', data['files'])
+
+    def test_toolkit_upgrade_preview_changes_nothing(self):
+        self.setup_old(self.old_toolkit())
+        before = self.snapshot()
+        result = self.upgrade()
+        self.assertIn('REPLACE .ai/bin/ai-status', result.stdout)
+        self.assertIn('Plan only', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_toolkit_upgrade_replaces_outdated_and_keeps_project_files(self):
+        self.setup_old(self.old_toolkit())
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntrue\n')
+        (self.project / '.ai/permissions.allow').write_text('Bash(ls)\n')
+        self.upgrade('--apply')
+        for relative, source in (('.ai/bin/ai-status', 'scripts/ai-status'),
+                                 ('.ai/bin/lib/workflow.py', 'scripts/lib/workflow.py'),
+                                 ('.ai/prompts/runner.md', 'templates/.ai/prompts/runner.md')):
+            self.assertEqual((self.project / relative).read_bytes(), (ROOT / source).read_bytes())
+        self.assertEqual((self.project / '.ai/validate').read_text(), '#!/usr/bin/env bash\ntrue\n')
+        self.assertEqual((self.project / '.ai/permissions.allow').read_text(), 'Bash(ls)\n')
+        self.assertEqual(self.stamp_files()['.ai/bin/ai-status'], self.sha(ROOT / 'scripts/ai-status'))
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-status', os.X_OK))
+
+    def test_toolkit_upgrade_two_applies_are_stable(self):
+        self.setup_old(self.old_toolkit())
+        self.upgrade('--apply')
+        after_first = self.snapshot()
+        result = self.upgrade('--apply')
+        self.assertEqual(self.snapshot(), after_first)
+        self.assertIn('Upgraded 0 file(s)', result.stdout)
+
+    def test_toolkit_upgrade_local_edit_refuses_group_and_force_installs_all(self):
+        self.setup_old(self.old_toolkit())
+        with (self.project / '.ai/bin/lib/workflow.py').open('a') as file:
+            file.write('\n# local edit\n')
+        before = self.snapshot()
+        result = self.upgrade('--apply', expected=1)
+        self.assertIn('.ai/bin/lib/workflow.py', result.stdout)
+        self.assertIn('Nothing was changed', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.tool('ai-status')  # the old install is still usable
+        self.upgrade('--apply', '--force')
+        for relative in ('ai-status', 'lib/workflow.py', 'ai-pipeline', 'lib/common.sh'):
+            source = ROOT / 'scripts' / relative
+            self.assertEqual((self.project / '.ai/bin' / relative).read_bytes(), source.read_bytes())
+        # The installed pipeline still runs end to end with the mock agents.
+        self.run_cmd(['git', 'add', '--all'])
+        self.commit('upgrade')
+        self.run_cmd(['git', 'switch', '-c', 'feature/test'])
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -c "assert 2 + 2 == 4"\n')
+        self.commit('approved plan and real fixture gate')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+
+    def test_toolkit_upgrade_repeated_setup_does_not_bless_local_edit(self):
+        self.setup_old(self.old_toolkit())
+        baseline = self.stamp_files()['.ai/bin/ai-status']
+        with (self.project / '.ai/bin/ai-status').open('a') as file:
+            file.write('\n# local edit\n')
+        self.setup_project()
+        self.assertEqual(self.stamp_files()['.ai/bin/ai-status'], baseline)
+        self.upgrade('--apply', expected=1)
+
+    def test_toolkit_upgrade_legacy_install_needs_force_for_differing_files(self):
+        self.setup_old(self.old_toolkit())
+        (self.project / '.ai/toolkit-version').unlink()
+        result = self.upgrade()
+        self.assertIn('legacy install', result.stdout)
+        self.assertIn('EDITED', result.stdout)
+        self.upgrade('--apply', expected=1)
+        self.upgrade('--apply', '--force')
+        self.assertEqual((self.project / '.ai/bin/ai-status').read_bytes(), (ROOT / 'scripts/ai-status').read_bytes())
+        self.assertEqual(self.stamp_files()['.ai/bin/ai-task'], self.sha(ROOT / 'scripts/ai-task'))
+        (self.project / '.ai/toolkit-version').write_text('{not json')  # malformed behaves like missing
+        self.assertIn('malformed', self.upgrade().stdout)
+
+    def test_toolkit_upgrade_creates_missing_files_in_older_inventory(self):
+        old = self.old_toolkit(drop=('scripts/ai-task', 'templates/.ai/prompts/recheck.md'))
+        self.setup_old(old)
+        self.assertFalse((self.project / '.ai/bin/ai-task').exists())
+        self.assertFalse((self.project / '.ai/prompts/recheck.md').exists())
+        self.assertIn('CREATE .ai/bin/ai-task', self.upgrade().stdout)
+        self.assertFalse((self.project / '.ai/bin/ai-task').exists())
+        self.upgrade('--apply')
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-task', os.X_OK))
+        self.assertTrue((self.project / '.ai/prompts/recheck.md').is_file())
+        self.assertIn('recheck.md', json.dumps(self.stamp_files()))
+        (self.project / '.ai/tasks.md').write_text(task('T001', status='DONE'))
+        self.assertIn('DONE', self.tool('ai-task', 'show', 'T001').stdout)
+
+    def test_toolkit_upgrade_refuses_symlinked_target(self):
+        self.setup_old(self.old_toolkit())
+        target = self.project / '.ai/bin/ai-status'
+        target.unlink()
+        target.symlink_to(self.base / 'elsewhere')
+        result = self.upgrade('--apply', expected=1)
+        self.assertIn('symlink', result.stderr + result.stdout)
 
 
 if __name__ == '__main__':

@@ -56,6 +56,28 @@ If a KEEP file contains different guidance, reconcile it with the toolkit templa
 manually. Re-running setup fills missing files; it does **not** upgrade existing
 copies. Symlinked workflow destinations are rejected before copying.
 
+### Upgrading an installed project
+
+Setup records `.ai/toolkit-version` (JSON): the toolkit commit (or `"unknown"`) and, for
+each toolkit-owned file (`.ai/bin/**`, `.ai/prompts/**`), the sha256 of the version the
+toolkit installed. Plain setup only adds baselines for files it creates; it never blesses a
+kept file.
+
+```bash
+~/Projects/agents/scripts/setup-project --upgrade "$PWD"          # plan only, changes nothing
+~/Projects/agents/scripts/setup-project --upgrade --apply "$PWD"  # apply
+```
+
+The plan lists `REPLACE` (outdated, unedited), `CREATE` (missing in this project, e.g.
+`.ai/bin/ai-task` or `.ai/prompts/recheck.md` in older installs), `EDITED` (differs from its
+baseline) and `ADVICE` for project-owned files (`CLAUDE.md`, `.ai/validate`,
+`.ai/permissions.allow`, ...), which are never touched. The scripts call each other and the
+shared helper, so the runtime is upgraded as one group, all or nothing: if any toolkit file is
+locally edited the apply refuses before changing anything and lists the files; reconcile them
+or pass `--force` to overwrite. A missing or malformed stamp (legacy install) treats every
+differing toolkit file as edited. After an upgrade, reinstall the watchdog timer
+(`.ai/bin/ai-watchdog --install-timer ...`). Make the upgrade its own PR.
+
 **Existing projects: KEEP does not mean the workflow instructions were merged.**
 Setup warns when an existing CLAUDE.md or AGENTS.md lacks the toolkit's key
 sections/markers. Merge the relevant guidance before planning or unattended work;
