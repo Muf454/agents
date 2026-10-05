@@ -18,6 +18,9 @@ The validation entry point is unconfigured and deliberately exits nonzero.
 
 ## Assumptions
 
+## Flow chart
+<!-- Optional. One line, "Flow chart updated" or "Flow unchanged"; copied into the PR description. -->
+
 ## Manual testing for the human
 <!-- Concrete steps and expected results; include failure/edge cases. -->
 

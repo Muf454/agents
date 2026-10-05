@@ -592,7 +592,7 @@ BLOCKER: Test `test_script_modes_all_shebang_scripts_are_executable` added and c
 The acceptance criteria require all shebang scripts to be executable, but this cannot be achieved in this session due to permission restrictions. Human action required: Run `chmod +x scripts/ai-task` and commit the mode change to complete this task. This is the same blocker as T002 but now detected by the added test. The gate fails until the human runs chmod.
 
 ## T014 — PR body carries the flow-chart declaration (review N2)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: sonnet
 
@@ -619,4 +619,11 @@ Targeted: `python3 -m unittest discover -s tests -k pr_body_flow` (output must s
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+DONE 2026-10-05. `pr_body` (scripts/lib/workflow.py) copies an optional handoff `## Flow chart`
+section under Summary; absent section → body unchanged. This repo's `.ai/handoff.md` declares
+"Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05."; the template
+handoff has an optional section; docs/workflow.md mentions it. Tests `pr_body_flow` (2): with/without
+section (body otherwise identical), and this repo's handoff yields "Flow chart updated" in the body.
+Evidence: `-k pr_body_flow` → Ran 2 tests, OK. `.ai/bin/ai-check` → Ran 154 tests, 1 failure:
+`script_modes` for `scripts/ai-task` (0644), the pre-existing T013 blocker (needs human
+`chmod +x`); no other failures.

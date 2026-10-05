@@ -2505,6 +2505,27 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.upgrade('--apply', expected=1)
         self.assertIn('symlink', result.stderr + result.stdout)
 
+    def pr_body_for(self, handoff):
+        (self.project / '.ai/handoff.md').write_text(handoff)
+        return self.helper('pr-body', '0', '0').stdout
+
+    def test_pr_body_flow_section_is_copied_when_present(self):
+        self.setup_project()
+        base = '# Handoff\n\n## Manual testing for the human\n1. Try it.\n\n## Next action\nNone.\n'
+        plain = self.pr_body_for(base)
+        self.assertNotIn('Flow chart', plain)
+        body = self.pr_body_for(base.replace('## Manual', '## Flow chart\nFlow chart updated: audited.\n\n## Manual'))
+        self.assertIn('Flow chart updated: audited.', body)
+        self.assertLess(body.index('## Summary'), body.index('Flow chart updated'))
+        self.assertLess(body.index('Flow chart updated'), body.index('## Tasks'))
+        self.assertEqual(body.replace('Flow chart updated: audited.\n\n', ''), plain)
+
+    def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
+        handoff = (ROOT / '.ai/handoff.md').read_text()
+        self.assertIn('## Flow chart\nFlow chart updated', handoff)
+        self.setup_project()
+        self.assertIn('Flow chart updated', self.pr_body_for(handoff))
+
     def test_script_modes_all_shebang_scripts_are_executable(self):
         scripts_dir = ROOT / 'scripts'
         for script in scripts_dir.glob('*'):

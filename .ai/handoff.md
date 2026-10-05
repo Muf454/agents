@@ -68,6 +68,12 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
 
+- T014 (review N2): `pr_body` copies an optional handoff section `## Flow chart` into the
+  PR description under Summary; this repo's handoff declares "Flow chart updated".
+
+## Flow chart
+Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
+
 ## Manual testing for the human
 1. Read the PR's summary of each item; the tests cover behaviour (mocked agents).
 2. After merging: `setup-project --upgrade ~/Projects/raid-planner` shows a sensible preview.

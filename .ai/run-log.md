@@ -31,3 +31,4 @@
 | 2026-10-05T11:40:06Z | runner | T012 | completed | PASS | f40dd72 | Claude checkpointed; continuing queue |
 | 2026-10-05T12:XX:XXZ | claude | T013 | BLOCKED: test added; both chmod methods denied; gate fails on test_script_modes | FAIL (test_script_modes fails) | (checkpoint pending) | Permission restrictions prevent chmod. Human must run `chmod +x scripts/ai-task` to unblock. |
 | 2026-10-05T11:48:23Z | runner | T013 | blocked; try next independent task | not complete | d25f7cb | See task result |
+| 2026-10-05T12:30Z | claude | T014 | DONE: pr_body copies handoff `## Flow chart` under Summary; handoff, template, docs updated (review N2) | pr_body_flow 2 OK; ai-check 154 tests, 1 FAIL (script_modes ai-task, T013 blocker) | (this commit) | Gate stays red only until human runs `chmod +x scripts/ai-task` |

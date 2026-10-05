@@ -1507,6 +1507,9 @@ def pr_body(arguments):
                   '> See "Independent review" below before testing.', '']
     objective = section(spec, 'Objective')
     lines += ['## Summary', '', objective or 'See `.ai/project-spec.md`.', '']
+    flow = section(handoff, 'Flow chart')
+    if flow:
+        lines += [flow, '']
     lines += ['## Tasks', '']
     for task in tasks():
         mark = {'DONE': 'x'}.get(task['status'], ' ')
