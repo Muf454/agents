@@ -520,7 +520,7 @@ Evidence: `-k recheck_command` Ran 7 tests OK; `.ai/bin/ai-check` Ran 150 tests 
 Limitation: I couldn't run the new test against the pre-fix code because `git stash` was denied.
 
 ## T012 — Upgrade apply: all-or-nothing activation with rollback (review M2)
-Status: TODO
+Status: DONE
 Dependencies: T011
 Model: opus
 
@@ -549,7 +549,16 @@ Targeted: `python3 -m unittest discover -s tests -k toolkit_upgrade` (output mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-(pending)
+New `activate()` in scripts/lib/workflow.py: snapshots bytes/mode (or absence) of every target,
+stages all new files (including the new `.ai/toolkit-version`, renamed last) next to their
+targets, then renames; on any exception it restores replaced files, removes created files,
+temps and created directories, and fails non-zero ("every file was restored"; rollback errors
+are reported as "ROLLBACK FAILED"). `write_stamp` split into `stamp_text` + write.
+Test `test_toolkit_upgrade_write_failure_rolls_back_everything` injects `OSError` into the rename
+of `.ai/bin/lib/workflow.py` (after recheck.md/ai-task were created and runner.md/ai-status
+replaced): snapshot (bytes + modes) equals pre-upgrade, created files gone, exit 1; a later
+apply succeeds. Evidence: toolkit_upgrade `Ran 10 tests` OK; ai-check `Ran 151 tests` OK.
+README upgrade section documents it. Limitation: rollback-failure path not covered by a test.
 
 ## T013 — Source `scripts/ai-task` executable (review N1)
 Status: TODO

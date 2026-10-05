@@ -124,13 +124,17 @@ def read_stamp(root):
         return {'files': {}, 'templates': {}}, 'malformed'
 
 
-def write_stamp(root, toolkit, stamp):
+def stamp_text(toolkit, stamp):
     try:
         commit = git('rev-parse', 'HEAD', cwd=toolkit).decode().strip() or 'unknown'
     except (subprocess.CalledProcessError, OSError):
         commit = 'unknown'
-    text = json.dumps({'toolkit_commit': commit, 'files': dict(sorted(stamp['files'].items())),
+    return json.dumps({'toolkit_commit': commit, 'files': dict(sorted(stamp['files'].items())),
                        'templates': dict(sorted(stamp['templates'].items()))}, indent=2) + '\n'
+
+
+def write_stamp(root, toolkit, stamp):
+    text = stamp_text(toolkit, stamp)
     path = root / STAMP_FILE
     if not path.exists() or path.read_text() != text:
         atomic(path, text)
@@ -146,6 +150,52 @@ def install_bytes(target, data, mode):
         os.replace(temp, target)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def activate(root, files):
+    """Install every (relative, data, mode) or none of them.
+
+    Each new file is staged next to its target before anything is replaced, then renamed into
+    place. On any failure the replaced files get their previous bytes and mode back, created
+    files and directories are removed, and the error is raised with any rollback problems."""
+    previous, staged, done, made = {}, {}, [], []
+    try:
+        for relative, data, mode in files:
+            target = root / relative
+            previous[relative] = ((target.read_bytes(), target.stat().st_mode & 0o7777)
+                                  if target.exists() else None)
+            missing = [p for p in [target.parent, *target.parent.parents] if not p.exists()]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            made += missing  # deepest first
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.upgrade-', delete=False) as file:
+                staged[relative] = Path(file.name)
+                file.write(data)
+            staged[relative].chmod(mode)
+        for relative, _, _ in files:
+            os.replace(staged[relative], root / relative)
+            del staged[relative]
+            done.append(relative)
+    except Exception as error:
+        problems = []
+        for relative in reversed(done):
+            try:
+                if previous[relative] is None:
+                    (root / relative).unlink()
+                else:
+                    install_bytes(root / relative, *previous[relative])
+            except OSError as undo:
+                problems.append(f'{relative}: {undo}')
+        for temp in staged.values():
+            temp.unlink(missing_ok=True)
+        for directory in sorted(made, key=lambda p: len(p.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError as undo:
+                problems.append(f'{directory.relative_to(root)}: {undo}')
+        if problems:
+            fail(f'Upgrade failed ({error}) and ROLLBACK FAILED, the install may be mixed: '
+                 + '; '.join(problems))
+        fail(f'Upgrade failed ({error}); every file was restored and {STAMP_FILE} is unchanged.')
 
 
 def file_mode(relative):
@@ -205,12 +255,16 @@ def upgrade(root, toolkit, copies, apply, force):
     if not apply:
         print(f'Plan only: {len(changes)} file(s) would change. Rerun with --upgrade --apply to apply.')
         return
+    files = []
     for relative, source in copies.items():
         if toolkit_owned(relative) and any(r == relative for _, r in changes):
-            install_bytes(root / relative, source.read_bytes(), file_mode(relative))
-            baselines[relative] = file_sha(source.read_bytes())
+            files.append((relative, source.read_bytes(), file_mode(relative)))
+            baselines[relative] = file_sha(files[-1][1])
     stamp['files'].update(baselines)
-    write_stamp(root, toolkit, stamp)
+    text = stamp_text(toolkit, stamp)
+    if not (root / STAMP_FILE).exists() or (root / STAMP_FILE).read_text() != text:
+        files.append((STAMP_FILE, text.encode(), 0o644))
+    activate(root, files)  # all or nothing, the stamp last
     print(f'Upgraded {len(changes)} file(s); {STAMP_FILE} updated.')
     if any(r.startswith('.ai/bin/') for _, r in changes):
         print('Reinstall the watchdog timer so it uses the new scripts: '

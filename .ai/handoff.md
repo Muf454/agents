@@ -60,6 +60,10 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 - T011 (review M1): `parse_recheck` validates the whole answer set first; any answer for an
   unknown id or any malformed entry (non-object, missing/non-string id) makes every requested
   finding upheld, so an extra entry can no longer ride along with withdrawals.
+- T012 (review M2): `setup-project --upgrade --apply` activates all-or-nothing. All new files
+  (and the new stamp, last) are staged next to their targets first; a failure part-way
+  restores replaced files (bytes + mode), removes created files/dirs, leaves the stamp
+  unchanged and exits non-zero; rollback errors are reported as "ROLLBACK FAILED".
 
 ## Validation
 `.ai/validate`: shell syntax + full test suite.
@@ -67,6 +71,11 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 ## Manual testing for the human
 1. Read the PR's summary of each item; the tests cover behaviour (mocked agents).
 2. After merging: `setup-project --upgrade ~/Projects/raid-planner` shows a sensible preview.
+   Review fix M2 (T012): in a scratch project set up from an older toolkit copy, make
+   `.ai/bin/lib` read-only (`chmod a-w .ai/bin/lib`) and run `setup-project --upgrade --apply`:
+   it exits 1 with "Upgrade failed (...); every file was restored", `git status` shows no
+   changes (no new `.ai/bin/ai-task`, `.ai/toolkit-version` unchanged). `chmod u+w` it and
+   rerun: the upgrade succeeds.
 3. Permissions: in a project set up from this toolkit, `.ai/permissions.allow` lists
    `Bash(cat *)`, `Bash(git rm *)`, `Bash(.ai/bin/ai-task *)` etc., and contains no
    sed/rg/find/curl entry. In an unattended run, `cat README.md` works but
@@ -114,4 +123,4 @@ Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
 - Run `chmod +x scripts/ai-task` (and commit the mode) so the toolkit source file is executable like the other scripts.
 
 ## Next action
-Review fixes: T012 (upgrade apply rollback, M2) next, then the remaining fix tasks; then review again.
+Review fixes: T013 next, then the remaining fix tasks; then review again.

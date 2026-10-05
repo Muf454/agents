@@ -2461,6 +2461,42 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/tasks.md').write_text(task('T001', status='DONE'))
         self.assertIn('DONE', self.tool('ai-task', 'show', 'T001').stdout)
 
+    def test_toolkit_upgrade_write_failure_rolls_back_everything(self):
+        old = self.old_toolkit(drop=('scripts/ai-task', 'templates/.ai/prompts/recheck.md'))
+        self.setup_old(old)
+        self.assertIn('CREATE .ai/bin/ai-task', self.upgrade().stdout)
+        before = self.snapshot()
+        # Fail the rename of the LATER file only, after earlier files were already replaced/created.
+        inject = ('import os, sys\n'
+                  f'sys.path.insert(0, {str(ROOT / "scripts/lib")!r})\n'
+                  'import workflow\n'
+                  'real = os.replace\n'
+                  'def replace(src, dst, *a, **k):\n'
+                  '    if str(dst).endswith(".ai/bin/lib/workflow.py"):\n'
+                  '        raise OSError(28, "No space left on device (injected)")\n'
+                  '    return real(src, dst, *a, **k)\n'
+                  'os.replace = replace\n'
+                  'try:\n'
+                  '    workflow.main()\n'
+                  'except (ValueError, OSError) as error:\n'
+                  '    print(f"Error: {error}", file=sys.stderr)\n'
+                  '    sys.exit(1)\n')
+        result = self.run_cmd(['python3', '-c', inject, 'setup', '--upgrade', '--apply', str(self.project)],
+                              expected=1)
+        self.assertIn('injected', result.stderr)
+        self.assertIn('every file was restored', result.stderr)
+        self.assertNotIn('Upgraded', result.stdout)
+        after = self.snapshot()  # bytes and modes; created files and temps are gone
+        self.assertEqual(sorted(after), sorted(before))
+        self.assertEqual([k for k in after if after[k] != before[k]], [])
+        self.assertFalse((self.project / '.ai/bin/ai-task').exists())
+        self.assertFalse((self.project / '.ai/prompts/recheck.md').exists())
+        self.tool('ai-status')  # the old install is still usable
+        self.upgrade('--apply')  # and a later apply succeeds
+        self.assertEqual((self.project / '.ai/bin/lib/workflow.py').read_bytes(),
+                         (ROOT / 'scripts/lib/workflow.py').read_bytes())
+        self.assertEqual(self.stamp_files()['.ai/bin/ai-task'], self.sha(ROOT / 'scripts/ai-task'))
+
     def test_toolkit_upgrade_refuses_symlinked_target(self):
         self.setup_old(self.old_toolkit())
         target = self.project / '.ai/bin/ai-status'

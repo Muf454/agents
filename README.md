@@ -74,7 +74,11 @@ baseline) and `ADVICE` for project-owned files (`CLAUDE.md`, `.ai/validate`,
 `.ai/permissions.allow`, ...), which are never touched. The scripts call each other and the
 shared helper, so the runtime is upgraded as one group, all or nothing: if any toolkit file is
 locally edited the apply refuses before changing anything and lists the files; reconcile them
-or pass `--force` to overwrite. A missing or malformed stamp (legacy install) treats every
+or pass `--force` to overwrite. The apply itself is all or nothing too: every new file is
+staged next to its target before anything is replaced, and if a write fails part-way the
+already-replaced files get their previous bytes and mode back, created files are removed,
+`.ai/toolkit-version` is left unchanged and the command exits non-zero (a failed rollback is
+reported as such). A missing or malformed stamp (legacy install) treats every
 differing toolkit file as edited. After an upgrade, reinstall the watchdog timer
 (`.ai/bin/ai-watchdog --install-timer ...`). Make the upgrade its own PR.
 
