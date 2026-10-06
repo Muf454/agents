@@ -32,13 +32,15 @@ roles vs providers, AD-5 (the watchdog only observes), "auto-recovery never chan
     any difference, or no stamp, is stale (also with no inputs at all: a configured
     installer without lockfiles runs once).
   Running it: stdin `/dev/null`, a timeout (`AI_DEPS_TIMEOUT` environment variable, default
-  1200 s, bounded by the run's remaining time), output only to the ignored
+  1200 s, bounded by the run's remaining time, tested), output only to the ignored
   `.ai/local/deps-*.log` and the terminal; nothing tracked is written. Failure or timeout
   stops ("Dependency setup (.ai/ci-setup) failed …; see <log>"; recovery escalates). After
   it the gate digest must be unchanged and a project-tree snapshot (HEAD, index, and the
   path, kind, mode and bytes of every non-ignored file, tracked or untracked, excluding
-  `.ai/local/`) must equal the one taken before, else stop ("changed project files"); the
-  stamp is recorded only after these checks. `.ai/ci-setup` contents are never changed by the
+  `.ai/local/`; submodules included recursively) must equal the one taken before, also after
+  a failed installer run, else stop ("changed project files"); the stamp is recorded only
+  after these checks. Every dependency-setup stop starts with "Dependency setup" and is a
+  hard escalation in `ai-recover` (never auto-recovered). `.ai/ci-setup` contents are never changed by the
   toolkit run; the ci-setup template only gains comment lines documenting the declaration
   lines (one npm example).
   Not in scope: installing dependencies a task changes mid-run (that task's in-session gate
@@ -47,8 +49,10 @@ roles vs providers, AD-5 (the watchdog only observes), "auto-recovery never chan
 - **FL-07 Reliable waits.** `setup-project --watchdog` (opt-in) installs the timer after a
   successful install (`ai-watchdog <root> --install-timer --diagnose --recover`); without it
   setup prints the command as the next step. `ai-watchdog --timer-status` reports whether this
-  checkout's timer is installed; `ai-pipeline` warns at start (terminal and the STARTED
-  notification) when none is, never failing the run. README documents PID-based waits
+  checkout's timer is installed (both unit files, enabled and active per `systemctl --user`;
+  otherwise missing, or unknown when systemd can't be asked); `ai-pipeline` warns at start
+  (terminal and the STARTED/RESUMED notification) when it is missing or unknown, never
+  failing the run. README documents PID-based waits
   (`while kill -0 "$pid"`) and why `pgrep -f` waits are wrong (they match themselves). No
   script uses `pgrep -f` waits today (verified); a test keeps it that way.
 - **FL-09 What needs Zack.** The handoff's "Manual testing for the human" section has two

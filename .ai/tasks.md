@@ -37,7 +37,11 @@ scripts/lib/workflow.py:
 - `tree-snapshot`: one SHA-256 over HEAD's sha, the staged diff (`git diff --cached
   --binary`), and every non-ignored path (`git ls-files --cached --others
   --exclude-standard -z`, excluding `.ai/local/`) with its kind, mode and bytes (symlink:
-  target; missing tracked file: a marker). Equal snapshots before/after an install prove
+  target; missing tracked file: a marker). Submodules (P9): a gitlink entry (mode 160000)
+  is snapshotted recursively by the same function run inside the submodule (its HEAD,
+  staged diff and all non-ignored files, nested submodules likewise); an uninitialised
+  submodule records a marker. Unchanged submodules give equal snapshots, so projects with
+  submodules keep working. Equal snapshots before/after an install prove
   that no tracked or untracked project file, mode, index entry or commit changed, even
   when the tree was already dirty (P2). Ignored paths (the installed dependencies) are not
   covered by design.
@@ -64,6 +68,10 @@ scripts/lib/workflow.py, templates/.ai/ci-setup, tests/test_workflow.py
     mode changes (also with `core.filemode=false`), a commit is made, the index changes, an
     untracked non-ignored file appears; it does NOT change for writes under an ignored dir
     or `.ai/local/`;
+  - submodules (P9, fixture added with `git -c protocol.file.allow=always submodule add`,
+    containing a committed file): snapshot equal when nothing changes; it changes when the
+    submodule HEAD moves, a submodule file is overwritten, or an already modified submodule
+    file is overwritten again;
   - template ci-setup passes `bash -n`, still installs nothing, contains both keywords.
 
 ### Validation
@@ -92,10 +100,16 @@ write to any tracked file (no run-log line: P1). Then require: exit 0 (else mess
 "Dependency setup (.ai/ci-setup) failed (exit N[, timeout after Ns]); see <log>"),
 `ai_guard_digest` equal to EXPECTED_GATE, `tree-snapshot` equal to `before` (else
 "Dependency setup changed project files (.ai/ci-setup must only install ignored
-dependencies); see <log>"); only then `deps-record`. On failure print the message and
+dependencies); see <log>"); only then `deps-record`. The gate and snapshot checks run after
+EVERY installer exit, successful or not, and a preservation violation is reported in
+preference to the exit status (P8). On failure print the message and
 return 1 (callers decide: ai-run uses `ai_die`; recovery escalates, T003). Limit:
 `AI_DEPS_TIMEOUT` (plain environment variable, default 1200 s), capped by the run's
-remaining time.
+remaining time (`remaining_time` in ai-run; a non-positive remainder stops before running).
+Recovery category (P8): every dependency-setup stop message starts with "Dependency setup";
+scripts/ai-recover's hard-rule `case` (~line 102) gains `*'Dependency setup'*`, so these
+stops always escalate before any recovery decision or checkpoint (never `commit_and_rerun`
+or `rerun`).
 scripts/ai-run: after the start checks (clean tree, gate approved) and before the loop, when
 `tasks next` is not `none` (a task will run): `ai_deps "$AI_APPROVED_GATE" "$limit" ||
 ai_die "$(cat .ai/local/last-error …)"` (or equivalent). Not in `--triage`, not later in the
@@ -107,7 +121,8 @@ Flow chart (same task): vault `agents-flow.md` gets a host step "dependencies (.
 if missing/stale" at the start of implementation, with its ⛔ stop; bump `updated:`.
 
 ### Likely affected modules
-scripts/lib/common.sh, scripts/ai-run, tests/test_workflow.py, vault agents-flow.md
+scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.py,
+vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `deps_runner` (fixture ci-setup declares `# ai-deps-inputs: deps.lock` and
@@ -119,7 +134,16 @@ scripts/lib/common.sh, scripts/ai-run, tests/test_workflow.py, vault agents-flow
   - ci-setup exits 1, or times out (`AI_DEPS_TIMEOUT=1`, it sleeps) → `ai-run` exits 1 before
     any mock claude call; last-error names `.ai/ci-setup` and the log; no stamp;
   - ci-setup overwriting a tracked file, creating a non-ignored file, or committing a
-    tracked change → stop "changed project files", no stamp, no claude call (P2);
+    tracked change → stop "changed project files", no stamp, no claude call (P2); the same
+    when it changes a file AND exits 1 (the violation is reported, P8);
+  - run-time cap (P11): `--run-timeout 5`, `AI_DEPS_TIMEOUT=600`, an installer that sleeps
+    60 s → `ai-run` exits 1 within the run budget (well under the 25 s test timeout), no
+    stamp, no mock claude call;
+  - auto-recovery (P8, `ai-pipeline --approved` with `AI_AUTO_RECOVER=1`): a fail-once
+    installer (exits 1 on the first call only) and a change-once installer (modifies a
+    tracked file on the first call only) → each escalates ("STOPPED, needs you" naming
+    dependency setup); no recovery Claude call (`recover-calls` absent), no recovery
+    checkpoint commit, no implementation session, no PR (`gh` log has no `pr create`);
   - queue already complete (`tasks next` = none) → ci-setup not run;
   - end to end (P1): `ai-pipeline --approved` on a fresh checkout with a stale stamp, a
     successful installer, mock codex clean review, bare origin and mock gh → install runs
@@ -150,6 +174,7 @@ scripts/ai-recover `commit_and_rerun` (~line 159): before `"$AI_BIN/ai-check"`, 
 dependency setup failed: <message>." 'inspect .ai/ci-setup and the log, then rerun
 ai-pipeline.'`. Attempt reservation, hard rules, the gate comparisons and the checkpoint
 integrity checks (`stamp verify`, `committed-matches-worktree`) stay unchanged and in order.
+A dependency-setup stop that reaches ai-recover escalates via the hard rule added in T002.
 Flow chart (same task): the recovery diagram's `commit_and_rerun` branch notes "installs
 dependencies if stale, then the full gate"; bump `updated:`.
 
@@ -265,16 +290,21 @@ visible at start, and documented waits loop on a PID (two `pgrep -f` waits died 
 2026-10-05/06 by matching themselves).
 
 ### Implementation notes
-scripts/lib/watchdog.py: `--timer-status` (mutually exclusive with install/uninstall):
-prints `installed <timer unit>` (exit 0) or `missing <timer unit>` (exit 1) using the same
-unit-name logic as `timer()` (factor out `unit_name(root)`). scripts/lib/workflow.py
+scripts/lib/watchdog.py: `--timer-status` (mutually exclusive with install/uninstall), using
+the same unit-name logic as `timer()` (factor out `unit_name(root)`). Defined check (P10):
+`installed <timer>` (exit 0) only when both unit files exist AND `systemctl --user
+is-enabled <timer>` prints `enabled` AND `systemctl --user is-active <timer>` prints
+`active`; `missing <timer> (<reason>: no unit files / not enabled / not active)` (exit 1)
+otherwise; `unknown <timer> (<reason>)` (exit 2) when systemctl is unavailable or errors
+for another reason. scripts/lib/workflow.py
 `setup`: new `--watchdog` (not with `--dry-run`/`--upgrade`): after a successful install run
 `<root>/.ai/bin/ai-watchdog <root> --install-timer --diagnose --recover` (stdin /dev/null);
 a failure exits non-zero with its output ("files were installed; the timer was not"). Without
 the flag, the final message adds "Next: install the watchdog timer: .ai/bin/ai-watchdog
 --install-timer --diagnose --recover". scripts/ai-pipeline at start: if `ai-watchdog
 --timer-status` exits 1, print "No watchdog timer for this checkout; …" and append
-"(no watchdog timer for this checkout)" to the STARTED/RESUMED notification; never stop.
+"(no watchdog timer for this checkout)" to the STARTED/RESUMED notification; exit 2 →
+"(watchdog timer status unknown)" likewise; never stop.
 README: "Waiting for a run" (coordinator/scripts): wait on the pipeline PID
 (`while kill -0 "$pid" 2>/dev/null; do sleep 60; done`, or `.ai/local/pipeline.active`
 contents), never `pgrep -f <pattern>` loops (the loop's own command line matches); remove
@@ -297,9 +327,13 @@ tests/test_workflow.py, vault agents-flow.md, vault agents-human-todo.md
     copy exists, systemctl enable called); `--watchdog --dry-run` and `--watchdog --upgrade`
     are rejected; a failing systemctl → non-zero exit with the message, files installed;
   - plain setup prints the "Next: install the watchdog timer" line and writes no units;
-  - `--timer-status` → `missing …` exit 1 before install, `installed …` exit 0 after;
-  - ai-pipeline without a timer prints the warning and the STARTED notification carries the
-    note; the run continues (existing pipeline test flow passes);
+  - `--timer-status` (mock systemctl answering is-enabled/is-active): `missing` exit 1
+    before install; `installed` exit 0 after a full install; unit files present but
+    `enable --now` failed (partial install) → `missing … not enabled`; enabled but stopped
+    → `missing … not active`; systemctl absent from PATH → `unknown` exit 2 (P10);
+  - ai-pipeline with a missing/partial/stopped timer prints the warning and the STARTED
+    notification carries the note; a recovery resume's RESUMED notification carries it too;
+    unknown status → "(watchdog timer status unknown)"; the run continues in every case;
   - no `pgrep -f` in executable files under scripts/ and templates/; README has the
     `kill -0` example and the warning that `pgrep -f` waits match themselves.
 - Existing watchdog tests pass.

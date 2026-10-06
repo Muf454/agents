@@ -19,21 +19,25 @@
 - FL-03 (convergence) is out of this batch (stays in the backlog, not started).
 - Tests: `tests/test_workflow.py`, 188 tests (unittest, mock claude/codex/gh/systemctl).
 
-## Approach (revised after the Codex plan review P1–P7; FL-03 dropped earlier)
+## Approach (revised after Codex plan reviews 1 (P1–P7) and 2 (P8–P11); FL-03 dropped earlier)
 FL-01 was simplified instead of extended: the host installs only at the start of `ai-run`
 and before recovery validation, writes nothing tracked (P1), proves the install changed no
 project file with a full tree snapshot (P2), does not claim mid-run dependency changes are
 handled (P3), covers recovery (P4) and has no "no lockfile" shortcut (P5).
-1. T001 (opus) FL-01 helpers: `deps-status`, `deps-record`, `tree-snapshot` in workflow.py;
+1. T001 (opus) FL-01 helpers: `deps-status`, `deps-record`, `tree-snapshot` (submodules
+   snapshotted recursively, P9) in workflow.py;
    template ci-setup comment lines. No caller yet.
 2. T002 (opus) FL-01 runner: `ai_deps` in common.sh; ai-run calls it once before its first
    task; end-to-end pipeline test. Flow chart: dependency step.
+   Dependency-setup stops are hard escalations in ai-recover (P8); preservation is checked
+   after failed installer runs too; the run-time cap is tested (P11).
 3. T003 (opus) FL-01 recovery: `commit_and_rerun` installs before `ai-check`; escalates on
    failure. Flow chart: recovery branch.
 4. T004 (sonnet) FL-09 runtime: `pr_body` "How to test" split with flagged bullets,
    `finish_summary` counts "Needs you" only. Flow chart: PR/FINISHED.
 5. T005 (sonnet) FL-09 guidance: handoff template, prompts, CLAUDE.md/AGENTS.md templates.
-6. T006 (sonnet) FL-07: `setup-project --watchdog`, `ai-watchdog --timer-status`, pipeline
+6. T006 (sonnet) FL-07: `setup-project --watchdog`, `ai-watchdog --timer-status` (unit files +
+   enabled + active; unknown when systemd can't answer, P10), pipeline
    start warning, README waits section, no executable `pgrep -f` waits (docs may explain it),
    vault human-todo entry. Flow chart: setup and start warning.
 7. T007 (haiku) final docs audit.
