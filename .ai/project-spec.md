@@ -31,15 +31,21 @@ gate", and OR-02's "don't advertise it as OS isolation".
   - the same overlap with the `--knowledge-dir` of `ai-run`/`ai-pipeline` (real path).
   The checkout check is enforced inside `binding_dir()` (every host-state consumer fails
   closed); the knowledge-dir check is a new helper command run by `ai-run` and `ai-pipeline`
-  right after `ai_root`, before any agent (Claude or Codex) launches. `ai-recover` runs the
-  checkout check first and escalates with its message. `ai-pipeline` resolves
+  right after `ai_root`, before any agent (Claude or Codex) launches. The check takes the
+  checkout as an explicit argument (never the caller's current directory). `ai-recover`
+  runs the checkout check after its escalation setup and before its first run-manifest
+  read, and escalates with the configuration error kept in the persisted stop reason
+  (`.ai/local/last-error`), without a recovery Claude session. `ai-pipeline` resolves
   `--knowledge-dir` to its real absolute path at argument parsing (it must exist), passes
   that to `ai-run` and records it in the run manifest arguments.
-- **OR-02 Watchdog host copy.** `ai-watchdog --install-timer` refuses a host copy directory
-  (`$XDG_DATA_HOME/ai-toolkit/watchdog/<name>`; a relative `XDG_DATA_HOME` is refused) or a
-  state root that overlaps the checkout (same rules), before writing anything.
-  `start_recovery` refuses (and reports) when the running copy's directory overlaps the
-  checkout by real path or the state-root check fails.
+- **OR-02 Watchdog host copy.** `ai-watchdog PROJECT --install-timer` refuses a host copy
+  directory (`$XDG_DATA_HOME/ai-toolkit/watchdog/<name>`; a relative `XDG_DATA_HOME` is
+  refused) or a state root that overlaps the TARGET checkout `PROJECT` (same rules; checked
+  against the supplied project, also when launched from outside Git or from another
+  checkout), before writing anything. At runtime `start_recovery` refuses (and notifies,
+  with the configuration error) when the running copy's directory overlaps the checkout by
+  real path or the state-root check fails, before the gate/manifest reads and without
+  calling `systemd-run`.
 - Defaults are unchanged: with no `AI_STATE_DIR`/`XDG_STATE_HOME` set and the project outside
   `~/.local/state`, everything behaves as today.
 - Docs (README, docs/workflow.md) and the vault flow chart `agents-flow.md` describe the new
@@ -54,9 +60,17 @@ agent); gate files (`.ai/bin`, `.ai/prompts`, `.ai/validate`, permissions).
 ## Acceptance
 - A clean-filter or mode mismatch in an ordinary agent commit stops `ai-run` before the next
   task and `ai-pipeline` before review/publication, with "differs from the validated content";
-  repositories with committed symlinks and a submodule pass end to end.
+  so does a mismatch introduced only by the final handoff commit, and one introduced by a
+  push hook during a failed or a successful push (no further push attempt, no PR action, no
+  FINISHED notification; commits and queue preserved). Repositories with committed symlinks
+  and a submodule pass end to end. The mode test runs with `core.filemode=false` and asserts
+  a clean status with a HEAD/disk mode mismatch.
 - Overlapping (direct path, symlink, knowledge dir) or relative state roots are refused with
   a message naming both paths, before any mock agent is invoked; defaults still work.
-- `ai-watchdog --install-timer` with an overlapping host copy/state root is refused and
-  writes no unit files and no host copy.
+- `ai-recover` with an unsafe state root escalates with the configuration error in
+  `last-error` and the notification, before reading the manifest; no recovery Claude call.
+- `ai-watchdog PROJECT --install-timer` with an overlapping host copy/state root is refused
+  (also when launched from outside Git or from another checkout) and writes no unit files
+  and no host copy; the host watchdog's `--recover` refuses at runtime without calling
+  `systemd-run` or Claude.
 - New tests in `tests/test_workflow.py`; all existing tests still pass; `.ai/validate` passes.

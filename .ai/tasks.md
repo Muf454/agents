@@ -4,7 +4,8 @@ Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. N
 `.ai/bin`, `.ai/prompts` or other gate files. This run is started with
 `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the vault flow
 chart and hub Log can be updated. Source: vault backlog "Epic EV — Evidence integrity",
-OR-01 and OR-02. Every task leaves `.ai/bin/ai-check` passing.
+OR-01 and OR-02. Every task leaves `.ai/bin/ai-check` passing. Revised after the Codex plan
+review (`.ai/reviews/plan.md`, P1–P4).
 
 ## T001 — Byte-check every accepted DONE checkpoint in ai-run (OR-01)
 Status: TODO
@@ -25,15 +26,20 @@ empty), `ai_helper stamp verify`, and `ai_helper committed-matches-worktree`. On
 where detail is the helper's message (capture stderr, strip `Error: `) or "uncommitted
 changes after the checkpoint" / "validation stamp not current". Keep the phrase
 "differs from the validated content" (ai-recover's hard rules escalate on it). Do the same
-after the final `chore(ai): record review handoff` commit (~line 236), task label `none`/
-"final handoff". Do NOT check BLOCKED tasks (unvalidated by design). Never reset, amend or
-change task status on this stop. Keep the existing tier-1 check as is. The check compares
-every tracked file, which is why it runs after the bookkeeping commit (workflow records
+after the final `chore(ai): record review handoff` commit (~line 236), before
+`finished=yes` and before the "All tasks done" notification, with the label "final handoff".
+Do NOT check BLOCKED tasks (unvalidated by design). Never reset, amend or change task
+status on this stop. Keep the existing tier-1 check as is. The check compares every
+tracked file, which is why it runs after the bookkeeping commit (workflow records
 committed). Add a short comment saying so.
-Tests: add mock claude modes in tests/test_workflow.py MOCK_CLAUDE (runner path) as needed,
-e.g. one that commits normally after writing its file (the default may already do this),
-one that stages an executable file then runs `git update-index --chmod=-x` before
-committing (mode case), one that commits a relative symlink.
+Test fixtures (P4): the mode case sets `git config core.filemode false` in the fixture
+(as `test_committed_mode_must_match_validated_file` does) so the executable file on disk
+does not show as a change; the mock session (new MOCK_CLAUDE mode in tests/test_workflow.py)
+writes the file executable and commits it with mode 100644 (e.g. `git update-index
+--chmod=-x` after `git add`). The final-handoff case (P2) needs a mismatch that ONLY the
+final handoff commit introduces, e.g. a clean filter on `.ai/state.md` that rewrites only
+the text `ready_for_review` (present only when the final handoff commit is made; task
+checkpoints have `implementing`).
 
 ### Likely affected modules
 scripts/ai-run, tests/test_workflow.py
@@ -42,15 +48,24 @@ scripts/ai-run, tests/test_workflow.py
 - Tests named `committed_bytes_run`:
   - filter case: `.gitattributes` with a clean filter on `*.txt` (as in
     `test_committed_content_must_match_validated_files`) and the default (self-committing)
-    mock → `ai-run` exits 1, last-error contains "differs from the validated content" and the
-    file name; only one mock invocation (the next task never starts); the task's commit is
-    not reset;
-  - mode case: committed 100644 while the file on disk is executable → same stop, message
-    names the mode;
+    mock with a two-task queue → `ai-run` exits 1, last-error contains "differs from the
+    validated content" and `T001.txt`; exactly one mock invocation (T002 never starts); the
+    agent's commit and the bookkeeping commit are still in `git log` (nothing reset); T001
+    stays DONE;
+  - mode case (P4): with `core.filemode=false`, the state the new check sees is asserted
+    by the test after the run: `git status --porcelain` empty, `git ls-tree HEAD` shows
+    100644 for the file while it is executable on disk (`os.access(..., os.X_OK)`); `ai-run`
+    exits 1 with "differs from the validated content" and the message names the mode; no
+    tier-1 "the session did not commit" checkpoint commit exists;
+  - final handoff only (P2): the filter on `.ai/state.md` passes every task checkpoint;
+    `ai-run` exits 1 at the final handoff with "differs from the validated content" naming
+    `.ai/state.md`; all tasks stay DONE; the `chore(ai): record review handoff` commit is
+    still HEAD (not reset); no "All tasks done" notification;
   - valid repo: a committed relative symlink plus a submodule (fixture repo added with
     `git -c protocol.file.allow=always submodule add`, committed before the run) → the queue
     completes (`tasks complete`), tree clean.
-- Existing `test_committed_content_must_match_validated_files` still passes.
+- Existing `test_committed_content_must_match_validated_files` and
+  `test_committed_mode_must_match_validated_file` still pass.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k committed_bytes_run` (output must say `Ran N tests`, N ≥ 1).
@@ -66,21 +81,29 @@ Model: opus
 
 ### Goal
 OR-01, pipeline part: `ai-pipeline` never sends to Codex review, and never publishes, a
-HEAD whose committed bytes differ from the validated files on disk.
+HEAD whose committed bytes differ from the validated files on disk, including mismatches
+introduced during a push attempt (push hooks run project code).
 
 ### Implementation notes
 scripts/ai-pipeline: (1) in the main loop, right after `ensure_validated` and before
 `ai-review --base` (~line 300), require a clean tree and `ai_helper committed-matches-worktree`;
 on failure write `Committed content differs from the validated content: <detail>` to
 `.ai/local/last-error` and `stop review` (ai-recover escalates on the phrase). (2) In
-`publish_ready` (~line 127) add a clause after the clean-tree check:
+`publish_ready` (~line 127) add a clause right after the clean-tree check:
 `elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"`.
-Keep the order: guard, review-info, disputes, clean tree, committed bytes, tasks, review
-current, stamp. No other behaviour change.
-Test idea for publish: commit (before the run) a `.gitattributes` clean filter that applies
-only to `.ai/reviews/current.md`; the pre-review check passes (file not yet committed by the
-pipeline), the host commit `record independent review` stores filtered bytes, so
-`publish_ready` must stop before any push/`gh` call.
+Order: guard, review-info, disputes, clean tree, committed bytes, tasks, review current,
+stamp (committed bytes before "review current", so a hook commit with filtered bytes is
+reported as a byte mismatch). `push()` already calls `publish_ready` before every attempt
+and after the push; no other behaviour change.
+Test ideas: publish case: commit (before the run) a `.gitattributes` clean filter that
+applies only to `.ai/reviews/current.md`; the pre-review check passes, the host commit
+`record independent review` stores filtered bytes, so `publish_ready` must stop before any
+push. Push-hook cases (P2): `.gitattributes` clean filter on `hooked.txt`; a
+`.git/hooks/pre-push` that, once (marker file), writes `hooked.txt` on disk, commits it
+(the filter changes the committed bytes; tree stays clean) and logs each invocation to a
+file; variant A exits 1 (failed push → the retry's `publish_ready` must stop), variant B
+exits 0 (successful push → the post-push `publish_ready` must stop). Use the bare origin
+from `add_origin()` and mock gh; `AI_SLEEP` is already mocked.
 
 ### Likely affected modules
 scripts/ai-pipeline, tests/test_workflow.py
@@ -91,8 +114,16 @@ scripts/ai-pipeline, tests/test_workflow.py
     `ai-pipeline --approved --base main` stops during review; no codex call was made; message
     contains "differs from the validated content";
   - filter on `.ai/reviews/current.md` → stops with "Publish check failed at pull request
-    preparation: committed content differs …"; no push to the bare origin, no gh call, no
-    FINISHED notification;
+    preparation: committed content differs …"; nothing pushed to the bare origin, no gh call,
+    no FINISHED notification;
+  - push hook, failed push (variant A): last-error says "Publish check failed at push:
+    committed content differs from the validated content" and names `hooked.txt`; the hook
+    ran exactly once (no further push attempt after the failing check); the branch is not on
+    origin; the hook's commit and every task commit are preserved (`git log`), all tasks
+    DONE; no `gh pr create`/`gh pr edit` call; no FINISHED notification;
+  - push hook, successful push (variant B): the same reason is recorded at stage `push`
+    (after the push); hook ran once; no gh PR call; no FINISHED notification; commits and
+    queue preserved;
   - valid repo with a committed symlink and a submodule → pipeline finishes and opens the PR
     (mock gh).
 - Existing `publish` / `disputed_findings` / `triage_completion` tests still pass.
@@ -123,25 +154,25 @@ scripts/lib/workflow.py:
   (`Path.is_relative_to` both ways), checked for the lexical absolute paths
   (`os.path.abspath`) AND the real paths (`os.path.realpath`, which resolves an existing
   prefix of a not-yet-created path).
-- `check_state_root(knowledge=None)`: refuse overlap with the checkout
-  (`git rev-parse --show-toplevel`) and, when given, with the knowledge dir. Message:
-  `Host state directory <root> overlaps the checkout <path> (agent sessions can write
-  there); set AI_STATE_DIR to a directory outside it.` (analogous for the knowledge dir).
-  Do not claim OS isolation.
-- `binding_dir()` uses `state_root()` and calls `check_state_root()` (checkout only).
-- New helper command `state-root-check [KNOWLEDGE_DIR]` in `main()`.
+- `check_state_root(checkout, knowledge=None)`: the checkout is an EXPLICIT argument (never
+  discovered from the current directory inside this function), so callers such as the
+  watchdog (T005) can pass the target project. Refuse overlap with the checkout and, when
+  given, with the knowledge dir. Message: `Host state directory <root> overlaps the checkout
+  <path> (agent sessions can write there); set AI_STATE_DIR to a directory outside it.`
+  (analogous: "overlaps the knowledge directory"). Do not claim OS isolation.
+- `binding_dir()` uses `state_root()` and calls `check_state_root(<git toplevel>)`.
+- New helper command `state-root-check [--checkout PATH] [KNOWLEDGE_DIR]` in `main()`
+  (default checkout: `git rev-parse --show-toplevel` of the current directory).
 Callers: scripts/ai-run right after `ai_root` (before the clean-tree check):
 `ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"}` with `ai_die` on failure
 (also covers `--triage`). scripts/ai-pipeline: resolve `--knowledge-dir` at parsing like
 ai-run (`[[ -d ]]`, `cd -- "$2" && pwd -P`), store the resolved path in `run_args` and in
 `orig_args` (rebuild it so the manifest records the absolute path), and after `ai_root`
 run the same check before anything else (before the plan review's Codex call).
-scripts/ai-recover: right after `ai_root`/lock, `ai_helper state-root-check` (checkout only)
-or `escalate` with its message.
+ai-recover is T004; the watchdog is T005.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, scripts/ai-recover,
-tests/test_workflow.py
+scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflow.py
 
 ### Acceptance criteria
 - Tests named `state_root`:
@@ -154,7 +185,9 @@ tests/test_workflow.py
     "overlaps the knowledge directory" (both ai-run and ai-pipeline);
   - relative `AI_STATE_DIR` and (with AI_STATE_DIR unset) relative `XDG_STATE_HOME` →
     refused with "must be an absolute path";
-  - the helper `review-info`/`run-manifest` fails closed with the same message (binding_dir);
+  - the helpers `review-info`/`run-manifest gate` fail closed with the same message
+    (binding_dir); `state-root-check --checkout <project>` run from another directory
+    checks that project;
   - default: AI_STATE_DIR unset, `XDG_STATE_HOME` an absolute dir outside → works; and
     ai-pipeline with a relative `--knowledge-dir` records the absolute real path in the run
     manifest `args`.
@@ -167,27 +200,74 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 Pending.
 
-## T004 — Same check for the watchdog host copy (OR-02)
+## T004 — ai-recover refuses an overlapping state root before reading the manifest (OR-02)
 Status: TODO
 Dependencies: T003
 Model: opus
 
 ### Goal
-OR-02, watchdog part: the timer's host copy of the scripts and the state root it forwards
-must not overlap the checkout, so the code that verifies the gate before crash recovery
-can't be agent-editable.
+OR-02, recovery part (P3): auto-recovery must not read authority from, or act on, a host
+state directory the agents could write, and the human must learn why.
 
 ### Implementation notes
-scripts/lib/watchdog.py `timer()` (~line 128), install path only, before `rmtree`/`copytree`
-and before writing any unit: refuse a relative `XDG_DATA_HOME`; refuse when the host copy
-dir overlaps `root` (lexical and real paths, both directions; reuse T003's semantics:
-import `overlap`/`check_state_root` from the sibling `workflow.py` via `sys.path` of
-`Path(__file__).parent`, or run `python3 <lib>/workflow.py state-root-check` with
-`cwd=root`, whichever is simpler and works for the host copy too); run the state-root check
-for the environment the timer will forward. Report via `parser.error`-style exit 2 with a
-clear message, writing nothing. `start_recovery()` (~line 190): replace the lexical
-`bin_dir.is_relative_to(root)` with the real-path overlap check (both directions) and
-return a refusal reason when `state-root-check` fails, before launching `ai-recover`.
+scripts/ai-recover: insert the check AFTER `escalate()` (and `resume()`) are defined and
+`branch`/`reason` are initialised (~line 45), and BEFORE the first manifest read
+(`approved_gate=$(ai_helper run-manifest gate …)`, ~line 52). On failure
+(`check=$(ai_helper state-root-check 2>&1)`), keep the configuration error in the persisted
+stop reason: set `reason="${check#Error: } (stopped during $stage: $reason)"` (or an
+equivalent that contains both), then `escalate 'the host state directory is not safe for
+recovery.' 'set AI_STATE_DIR to an absolute directory outside the checkout, then rerun
+ai-pipeline.'`. `escalate` writes `$reason` to `.ai/local/last-error`, notifies once and
+clears the marker. No Claude session, no commit, no `ai-pipeline` exec. The checkout is
+checked (the knowledge dir is unknown here); the resumed ai-pipeline checks the knowledge
+dir (T003).
+
+### Likely affected modules
+scripts/ai-recover, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `recover_state_root`: with an approved run recorded in a safe state dir, then
+  `AI_STATE_DIR` pointing inside the checkout (and, separately, a relative `AI_STATE_DIR`),
+  `ai-recover --stage implementation` (with `AI_AUTO_RECOVER=1`) exits 1; stderr says
+  "escalated to the human"; `.ai/local/last-error` contains "overlaps the checkout" (resp.
+  "must be an absolute path") AND the original stop reason; exactly one "STOPPED, needs you"
+  notification containing the configuration error; no `recover-calls` file (no recovery
+  Claude session); no new commit; `pipeline.active` removed; the attempt budget in the safe
+  state dir is unchanged.
+- Existing `recover` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k recover_state_root` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Pending.
+
+## T005 — Same check for the watchdog host copy, install and runtime (OR-02)
+Status: TODO
+Dependencies: T003
+Model: opus
+
+### Goal
+OR-02, watchdog part: the timer's host copy of the scripts and the state root it uses must
+not overlap the TARGET checkout (the `project` argument, not the caller's directory), so
+the code that verifies the gate before crash recovery can't be agent-editable.
+
+### Implementation notes
+scripts/lib/watchdog.py `timer()` (~line 128) runs before `os.chdir(root)` (~line 267), so
+the check must use the supplied `root` explicitly (P1): import `check_state_root`/`overlap`
+from the sibling `workflow.py` (`sys.path` insert of `Path(__file__).resolve().parent`) and
+call `check_state_root(root)`, or run `python3 <lib>/workflow.py state-root-check
+--checkout <root>` with `cwd=root`; never rely on the caller's current directory. Install
+path only, before `rmtree`/`copytree` and before writing any unit: refuse a relative
+`XDG_DATA_HOME`; refuse when the host copy dir overlaps `root` (lexical and real paths,
+both directions); run the state-root check for the environment the timer will forward.
+Report as a clear error (exit 2 like other `parser.error`s), writing nothing.
+`start_recovery()` (~line 190): replace the lexical `bin_dir.is_relative_to(root)` with
+the real-path overlap check (both directions), and run the state-root check for `root`
+BEFORE the gate digest / `run-manifest gate` calls; on failure return a reason that
+contains the configuration error (e.g. `auto-recovery refused: Host state directory …
+overlaps the checkout …`), so the human is notified and `systemd-run` is never called.
 Uninstall stays unchanged. The watchdog does not check the knowledge dir (the resumed
 ai-pipeline does, T003).
 
@@ -195,12 +275,21 @@ ai-pipeline does, T003).
 scripts/lib/watchdog.py, tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `watchdog_host_root`:
-  - `XDG_DATA_HOME` inside the checkout → `--install-timer` exits non-zero with a message
-    naming both paths; no unit files under `XDG_CONFIG_HOME/systemd/user`, no host copy;
-  - `XDG_DATA_HOME` a symlink pointing into the checkout → same refusal;
-  - `AI_STATE_DIR` inside the checkout → `--install-timer` refused, nothing written;
-  - relative `XDG_DATA_HOME` → refused;
+- Tests named `watchdog_host_root` (mock `systemctl` as in
+  `test_watchdog_install_and_uninstall_timer`):
+  - install launched from OUTSIDE any Git repository (cwd = a plain temp dir) with
+    `AI_STATE_DIR` inside the target project → refused, message names the state dir and
+    the project; no unit files under `XDG_CONFIG_HOME/systemd/user`, no host copy, no
+    systemctl call; control: from outside Git with a safe state dir → installs;
+  - install launched from ANOTHER checkout (cwd = a second git repo) with `AI_STATE_DIR`
+    inside the target project only (not inside the caller's repo) → refused, nothing
+    written; control: launched from another checkout with a safe state dir → installs;
+  - `XDG_DATA_HOME` inside the target checkout, or a symlink pointing into it → refused,
+    nothing written; relative `XDG_DATA_HOME` → refused;
+  - runtime (P3): host copy (`host_watchdog`) with `--recover`, a crashed marker, an
+    approved run, then `AI_STATE_DIR` inside the checkout → exit 1, one notification that
+    contains the configuration error ("overlaps the checkout"), no `systemd-run.log`, no
+    `recover-calls` (no Claude);
   - existing `test_watchdog_install_and_uninstall_timer` and watchdog recovery tests pass
     unchanged (default layout accepted).
 
@@ -211,43 +300,50 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 Pending.
 
-## T005 — Docs and flow chart for the new checks
+## T006 — Docs and flow chart for the new checks
 Status: TODO
-Dependencies: T002, T004
+Dependencies: T002, T004, T005
 Model: sonnet
 
 ### Goal
 README, docs/workflow.md and the vault flow chart describe the OR-01/OR-02 stop points
-accurately (the behaviour visible in the flow changes: a check before review, the publish
-checks, and a start check).
+accurately (the behaviour visible in the flow changes: a check after every task and
+before review, the publish checks, a start check and the recovery/watchdog refusals).
 
 ### Implementation notes
 docs/workflow.md: next to the review-provenance paragraph (~line 234) say the state root
 must be an absolute path outside the checkout and the knowledge directory (checked at
-every start and by every host-state read; a configuration check, not OS isolation); in the
-runner/pipeline sections say every accepted DONE checkpoint, the final handoff commit, the
-pre-review step and the publish checks require committed bytes = validated files on disk;
-add the limitation: repositories whose content passes clean/smudge or eol filters (Git LFS,
-`text=auto` with CRLF files, `ident`) stop with "differs from the validated content".
+every start, by every host-state read, by ai-recover before it reads the run manifest and
+by the watchdog against the target project at install and before recovery; a
+configuration check, not OS isolation); in the runner/pipeline sections say every
+accepted DONE checkpoint, the final handoff commit, the pre-review step and the publish
+checks (before and after every push) require committed bytes = validated files on disk;
+add the limitation: repositories whose content passes clean/smudge or eol filters (Git
+LFS, `text=auto` with CRLF files, `ident`) stop with "differs from the validated content".
 README: same in the pipeline/publish description and the watchdog install section (~line
 630: the host copy and state directory must be outside the checkout). Add
 `docs_consistency` required-sentence assertions for the two key sentences. Vault
 `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`: add "committed bytes = validated files"
 to the publish-checks node and bullet, a note that the same check runs after every task and
-before every review, and the start check on the state directory; append a dated line to the
-hub `agents.md` Log (never tick vault checkboxes). PR description: replace the handoff
-`## Flow chart` placeholder with a line that still starts "Flow chart updated" (test
+before every review, and the start check on the state directory; update its `updated:`
+frontmatter date; append a dated line to the hub `agents.md` Log (never tick vault
+checkboxes). PR description: replace the handoff `## Flow chart` placeholder with a line
+that still starts "Flow chart updated" (test
 `test_pr_body_flow_this_repo_declares_the_flow_chart` requires it), e.g.
-"Flow chart updated: OR-01/OR-02 checks added to agents-flow.md (date)".
+"Flow chart updated: OR-01/OR-02 checks added to agents-flow.md (date)". Update the
+handoff's "Manual testing for the human" with scratch-project steps (watchdog install from
+another directory, refusal before agents launch, final-handoff mismatch diagnostics).
 
 ### Likely affected modules
-README.md, docs/workflow.md, tests/test_workflow.py, vault agents-flow.md, vault agents.md (Log)
+README.md, docs/workflow.md, tests/test_workflow.py, .ai/handoff.md, vault agents-flow.md,
+vault agents.md (Log)
 
 ### Acceptance criteria
 - Tests named `docs_consistency` pass, including the new required sentences.
-- Docs describe only implemented behaviour (cross-check against T001–T004 results) and do
+- Docs describe only implemented behaviour (cross-check against T001–T005 results) and do
   not call the state-root check isolation or sandboxing.
-- Vault flow chart and hub Log updated; handoff "Flow chart" section present.
+- Vault flow chart (with its `updated:` date) and hub Log updated; handoff "Flow chart"
+  section starts with "Flow chart updated" and states what changed.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output must say `Ran N tests`, N ≥ 1).
