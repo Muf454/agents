@@ -61,3 +61,4 @@
 | 2026-10-06T11:20Z | claude | T001 | DONE (flow batch 2, FL-01 helpers): deps-status, deps-record, tree-snapshot in workflow.py; template ci-setup declaration comments | deps_status 7 OK; ai-check 195 OK | (this commit) | no caller yet (T002/T003); no flow-chart change |
 | 2026-10-06T11:21:53Z | runner | T001 | completed | PASS | c944716 | Claude checkpointed; continuing queue |
 | 2026-10-06T11:36Z | claude | T002 | DONE (FL-01 runner): ai_deps in common.sh, ai-run installs stale deps before the first task, ai-recover escalates "Dependency setup" stops; docs + vault flow chart | deps_runner 7 OK; ai-check 202 OK (579 s) | (this commit) | gate duration near the 600 s tool limit |
+| 2026-10-06T11:46:09Z | runner | T002 | completed | PASS | 11ab355 | Claude checkpointed; continuing queue |
