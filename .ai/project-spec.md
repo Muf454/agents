@@ -1,86 +1,84 @@
-# Spec: Evidence integrity: OR-01, OR-02
+# Spec: Run flow batch 2: FL-01, FL-03, FL-07, FL-09
 
-Source: vault [[agents-backlog]], "Epic EV — Evidence integrity", items OR-01 and OR-02 (both
-P0, Source CODEX, "Suggested first batch" positions 1 and 2). Chosen and planned by Claude as
-Zack's delegate on 2026-10-05; the pipeline's Codex plan review gates it. Hub decisions
-respected: roles vs providers (no new provider assumptions), AD-5 (the watchdog only
-observes; `ai-recover` stays the single recovery executor), "auto-recovery never changes the
-gate", and OR-02's "don't advertise it as OS isolation".
+## Objective
+Run flow batch 2: FL-01, FL-03, FL-07, FL-09
+Remove the avoidable stops and the misleading human work seen in the overnight runs of
+2026-10-05/06: install dependencies on the host before tasks run (FL-01), make triage switch
+from symptom patches to a design fix when one area keeps failing review (FL-03), make
+waits and the watchdog reliable (FL-07), and make the PR say what really needs Zack (FL-09).
+
+Source: vault [[agents-backlog]] "Run flow improvements (approved by Zack 2026-10-06)",
+items FL-01, FL-03, FL-07, FL-09 (approved; first batch after OR-01/OR-02, merged as PR #14).
+Planned by Claude as Zack's delegate on 2026-10-06; the pipeline's Codex plan review gates it.
+Hub decisions respected: risk-based models with no usage-saving downgrades (2026-10-06),
+roles vs providers, AD-5 (the watchdog only observes), "auto-recovery never changes the gate"
+(gate files such as `.ai/ci-setup` are run, never edited), "don't break my system".
 
 ## Requirements
-- **OR-01 Committed bytes on every accepted checkpoint.** `committed-matches-worktree`
-  (scripts/lib/workflow.py `committed_matches_worktree`) today runs only after the runner's
-  tier-1 checkpoint (scripts/ai-run ~line 280) and the recovery checkpoint (scripts/ai-recover
-  ~line 168). It must also run:
-  - in `ai-run`, after every task accepted as DONE (validation passed), once the runner's
-    bookkeeping commit `chore(ai): record T… runner checkpoint` is made, together with a clean
-    tree and `stamp verify`; and after the final `chore(ai): record review handoff` commit;
-  - in `ai-pipeline`, before every independent review (`ai-review --base`) and as part of
-    `publish_ready`, which runs before every push attempt and after EVERY push outcome
-    (failed or successful), before the retry wait and before the terminal "push failed
-    (3 tries)" handling, so a hook mismatch on the last attempt is reported as an
-    integrity stop, not a push failure.
-  A mismatch (clean/smudge filter, mode difference) stops with a clear reason containing
-  "differs from the validated content" (an existing phrase `ai-recover` always escalates)
-  plus the helper's own detail (file and kind of difference). Nothing is reset or
-  rewritten; the queue is not changed by the stop. Cleanliness is a precondition AT the
-  check (clean tree at the checkpoint); after the stop the runner's own bookkeeping
-  (its stop line in `.ai/run-log.md`) may leave that one file modified.
-- **OR-02 Disjoint authority roots.** The host state root used by `binding_dir()`
-  (`AI_STATE_DIR`, else `$XDG_STATE_HOME/ai-toolkit`, else `~/.local/state/ai-toolkit`) is
-  refused when:
-  - `AI_STATE_DIR` (or, when it is unset, a non-empty `XDG_STATE_HOME`) is a relative path;
-  - the root overlaps the checkout (equal, inside, or containing), comparing both the
-    absolute path as given and its real path (symlinks resolved; a not-yet-existing tail is
-    resolved through its nearest existing parent);
-  - the same overlap with the `--knowledge-dir` of `ai-run`/`ai-pipeline` (real path).
-  The checkout check is enforced inside `binding_dir()` (every host-state consumer fails
-  closed); the knowledge-dir check is a new helper command run by `ai-run` and `ai-pipeline`
-  right after `ai_root`, before any agent (Claude or Codex) launches. The check takes the
-  checkout as an explicit argument (never the caller's current directory). `ai-recover`
-  runs the checkout check after its escalation setup and before its first run-manifest
-  read, and escalates with the configuration error kept in the persisted stop reason
-  (`.ai/local/last-error`), without a recovery Claude session. `ai-pipeline` resolves
-  `--knowledge-dir` to its real absolute path at argument parsing (it must exist), passes
-  that to `ai-run` and records it in the run manifest arguments.
-- **OR-02 Watchdog host copy.** `ai-watchdog PROJECT --install-timer` refuses a host copy
-  directory (`$XDG_DATA_HOME/ai-toolkit/watchdog/<name>`; a relative `XDG_DATA_HOME` is
-  refused) or a state root that overlaps the TARGET checkout `PROJECT` (same rules; checked
-  against the supplied project, also when launched from outside Git or from another
-  checkout), before writing anything. At runtime `start_recovery` refuses (and notifies,
-  with the configuration error) when the running copy's directory overlaps the checkout by
-  real path or the state-root check fails, before the gate/manifest reads and without
-  calling `systemd-run`.
-- Defaults are unchanged: with no `AI_STATE_DIR`/`XDG_STATE_HOME` set and the project outside
-  `~/.local/state`, everything behaves as today.
-- Docs (README, docs/workflow.md) and the vault flow chart `agents-flow.md` describe the new
-  stop points; wording says this is a configuration check, not OS isolation.
+- **FL-01 Dependencies before tasks (host).** `ai-run` and `ai-pipeline` (the host, never an
+  agent session) run the project's `.ai/ci-setup` when dependencies are missing or stale:
+  before the first task session, before every later task session and before every host
+  `ai-check` (cheap no-op when current). Staleness is generic, not npm-specific:
+  - inputs: files declared by a comment line in `.ai/ci-setup`
+    (`# ai-deps-inputs: package-lock.json …`), else a documented default list of well-known
+    lockfiles (package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock,
+    bun.lockb, requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, Gemfile.lock, go.sum,
+    Cargo.lock, composer.lock) that exist in the checkout;
+  - outputs: directories declared by `# ai-deps-outputs: node_modules …`, else `node_modules`
+    when `package.json` exists; a missing output is stale;
+  - a stamp `.ai/local/deps.json` records the SHA-256 of `.ai/ci-setup` and of every input;
+    any difference, or no stamp, is stale.
+  Running it: stdin `/dev/null`, a timeout (`AI_DEPS_TIMEOUT`, default 1200 s, also bounded
+  by the run's remaining time), output to `.ai/local/deps-*.log`, a run-log line. Failure or
+  timeout stops with "Dependency setup (.ai/ci-setup) failed …; see <log>". Afterwards the gate
+  digest must be unchanged and `git status` (incl. untracked, non-ignored) must equal its state
+  before, else stop ("ci-setup changed project files"). `.ai/ci-setup` contents are never
+  changed by the toolkit run; the template documents the declaration lines and
+  `setup-project`'s validation candidates suggest them.
+- **FL-03 Review convergence.** A host helper lists the BLOCKER/MAJOR findings of every
+  verified review recorded on the branch (base..HEAD, oldest first; a report counts only if
+  its SHA-256 matches its host binding) and maps each to areas = tracked file paths named in
+  the finding (e.g. its Location line). An area is **recurring** when it has a BLOCKER/MAJOR
+  finding in each of the last 3 consecutive reviews (current included). When areas recur,
+  `ai-run --triage` adds a CONVERGENCE section to the triage prompt; for every accepted
+  finding in a recurring area the referenced fix task must contain a non-empty
+  `### Design note` section (what the model lacks, the design-level change) and
+  `Model: opus`; `triage-check --fresh` enforces it. The PR body's review section lists
+  recurring areas (so a run that stops at the fix-round limit still shows them).
+- **FL-07 Reliable waits.** `setup-project --watchdog` (opt-in) installs the timer after a
+  successful install (`ai-watchdog <root> --install-timer --diagnose --recover`); without it
+  setup prints the command as the next step. `ai-watchdog --timer-status` reports whether this
+  checkout's timer is installed; `ai-pipeline` warns at start (terminal and the STARTED
+  notification) when none is, never failing the run. README documents PID-based waits
+  (`while kill -0 "$pid"`) and why `pgrep -f` waits are wrong (they match themselves). No
+  script uses `pgrep -f` waits today (verified); a test keeps it that way.
+- **FL-09 What needs Zack.** The handoff's "Manual testing for the human" section has two
+  subsections: `### Needs you` (only checks a human must do: look and feel on a phone, real
+  devices, live accounts, decisions; or "None") and `### Covered by automated tests` (each
+  developer-level step with its test name in backticks). The PR body's "How to test" shows
+  "Needs you" first and the automated list after it; bullets without a backticked test name
+  are flagged. The FINISHED notification counts only "Needs you" steps ("Nothing to test by
+  hand" when None). A legacy handoff without the subsections is treated as before (all steps
+  need the human). Runner, triage, fix-review and review prompts plus the CLAUDE.md/AGENTS.md
+  and handoff templates describe the split.
+- Each task that changes flow behaviour updates the vault `agents-flow.md` (diagram/notes and
+  its `updated:` date) in the same task; a final task audits the docs.
 
 ## Non-goals
-OS-level sandboxing; changing what the fingerprint hashes; Git LFS/eol-filter support (such
-repositories stop with the clear reason; documented); other backlog items (OR-03…); checking
-the watchdog against the knowledge directory (the resumed `ai-pipeline` does that before any
-agent); gate files (`.ai/bin`, `.ai/prompts`, `.ai/validate`, permissions).
+FL-02, FL-04, FL-05, FL-06, FL-08; changing `.ai/ci-setup`, `.ai/validate` or other gate files
+of this repo; package-manager-specific logic beyond the default lists; automatically removing
+timers of deleted worktrees; enforcing test-name existence (only the presence of a name).
 
 ## Acceptance
-- A clean-filter or mode mismatch in an ordinary agent commit stops `ai-run` before the next
-  task and `ai-pipeline` before review/publication, with "differs from the validated content";
-  so does a mismatch introduced only by the final handoff commit (after ordinary task
-  checkpoints passed; the fixture filters only the `Phase: ready_for_review` line), and one
-  introduced by a push hook during a failed push, a successful push, or the third of three
-  failed pushes (file-specific integrity reason, no further push attempt, no recovery
-  Claude session, no PR action, no FINISHED notification; commits and queue preserved).
-  Repositories with committed symlinks and a submodule pass end to end. The mode test runs
-  with `core.filemode=false`; the check runs on a clean tree, and after the stop only
-  `.ai/run-log.md` is modified while HEAD (100644) and disk (executable) differ in mode.
-- Overlapping (direct path, symlink, knowledge dir) or relative state roots are refused with
-  a message naming both paths, before any mock agent is invoked; defaults still work.
-- `ai-recover` with an unsafe state root escalates with the configuration error in
-  `last-error` and the notification, before reading the manifest; no recovery Claude call.
-- `ai-watchdog PROJECT --install-timer` with an overlapping host copy/state root is refused
-  (also when launched from outside Git or from another checkout) and writes no unit files
-  and no host copy; the host watchdog's `--recover` refuses at runtime without calling
-  `systemd-run` or Claude.
-- Each task that changes workflow behaviour updates the vault flow chart and its `updated:`
-  date in the same task; T006 audits docs and the chart at the end.
-- New tests in `tests/test_workflow.py`; all existing tests still pass; `.ai/validate` passes.
+- FL-01: a fixture project whose ci-setup creates a declared output runs it once before the
+  first task (mock agent sees the output), not again while inputs are unchanged, again after
+  the lockfile changes; failure/timeout stops before any agent session with the log path;
+  a ci-setup that touches a tracked file stops; gate files unchanged.
+- FL-03: three recorded reviews with MAJOR findings in the same file make the triage prompt
+  carry CONVERGENCE for that file and `triage-check --fresh` reject an accepted finding whose
+  task lacks a Design note or `Model: opus`; two reviews, or different files, don't; an
+  unverifiable historic report is ignored; the PR body lists recurring areas.
+- FL-07: `setup-project --watchdog` installs the timer (mock systemctl); setup without it
+  prints the command; pipeline start without a timer warns and continues.
+- FL-09: pr-body/finish-summary tests for the split, None, flagged bullets and legacy handoffs.
+- New tests in `tests/test_workflow.py`; all existing tests pass; `.ai/validate` passes.
