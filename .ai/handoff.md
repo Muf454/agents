@@ -48,7 +48,8 @@ After T005: `.ai/bin/ai-check` PASS, 188 tests (2026-10-06).
 ## Flow chart
 Flow chart updated: T001 added the committed-bytes check to "Inside one task" in
 agents-flow.md (2026-10-06); T002 added the pre-review byte check and the byte check in the
-publish checks (after every push attempt); T003–T005 add theirs, T006 finalizes this line (a test
+publish checks (after every push attempt); T003–T005 add theirs. T006 audited the chart
+against the final code (no change needed) and updated README/docs/workflow.md (a test
 requires the section to start with these words).
 
 ## Manual testing for the human
@@ -102,6 +103,13 @@ requires the section to start with these words).
    with `AI_STATE_DIR=<project>/host-state AI_AUTO_RECOVER=1`: expect exit 1, one ⛔ message
    ending "(auto-recovery refused: Host state directory … overlaps the checkout …)" and no
    `ai-recover-*` systemd unit started.
+
+9. Final-handoff mismatch (T001): in the scratch project of step 1, use `.gitattributes`
+   `.ai/state.md filter=late` with `git config filter.late.clean "sed -E 's/^Phase: ready_for_review$/Phase: tampered/'"`
+   and finish the queue: expect "The checkpoint of final handoff differs from the validated
+   content: …", no "All tasks done" notification.
+10. Docs (T006): README "Bounded runner" text and docs/workflow.md describe the byte check,
+    the filter limitation and the state-root rule; `python3 -m unittest discover -s tests -k docs_consistency` passes.
 
 ## Human todos
 None.

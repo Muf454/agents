@@ -183,6 +183,12 @@ The runner selects one eligible task per fresh Claude invocation. Claude reads
 state, reconciles interrupted work, marks IN_PROGRESS, implements, validates, records
 results, marks DONE, and commits. The runner reruns the full gate, verifies a clean
 checkpoint, records its own small state/log checkpoint, then starts the next session.
+Every accepted DONE checkpoint and the final handoff commit must contain exactly the bytes
+validation hashed (committed bytes equal to the validated files on disk), or the run stops with "differs
+from the validated content". Repositories using clean/smudge or eol filters (Git LFS,
+`text=auto` with CRLF files, `ident`) stop there too; they are not supported.
+The host state directory must be an absolute path outside the checkout and the knowledge
+directory (a configuration check, not OS isolation).
 BLOCKED tasks can be bypassed only by independent tasks with satisfied dependencies.
 
 No-progress, malformed state, CLI errors, timeouts, validation

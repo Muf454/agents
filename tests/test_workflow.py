@@ -3179,6 +3179,8 @@ class DocsConsistencyTest(unittest.TestCase):
         "automatic checkpoints stage the session's output except secret-looking files",
         'the pipeline pushes the feature branch and opens the pull request',
         'usage limits pause and resume',
+        'committed bytes equal to the validated files',
+        'outside the checkout',
     )
 
     def text(self, name):

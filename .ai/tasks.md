@@ -409,7 +409,7 @@ relative) and `test_watchdog_host_root_recovery_refuses_a_state_dir_in_the_check
 Docs: docs/workflow.md, README.md; vault agents-flow.md watchdog node + note.
 
 ## T006 — Final docs audit for the new checks
-Status: TODO
+Status: DONE
 Dependencies: T002, T004, T005
 Model: sonnet
 
@@ -458,4 +458,9 @@ Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output mu
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+README and docs/workflow.md now state the committed-bytes check on every accepted DONE
+checkpoint and the final handoff, the clean/smudge/eol filter limitation, and the absolute
+state root outside the checkout (configuration check, not isolation). Two required
+sentences added to `docs_consistency` (3 tests pass). Vault agents-flow.md audited against
+T001–T005 (no change needed, `updated:` 2026-10-06); hub Log line appended. `.ai/bin/ai-check`
+PASS, 188 tests.

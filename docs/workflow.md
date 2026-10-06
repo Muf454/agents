@@ -65,6 +65,15 @@ for repair. If no progress was checkpointed, it stops rather than spending an
 unbounded number of retries. Claude's in-session loop can fix ordinary failures;
 three repeated attempts on the same failure should produce a blocker and handoff.
 
+Every accepted DONE checkpoint and the final `record review handoff` commit must contain
+exactly the bytes validation hashed: after the runner's bookkeeping commit the tree must
+be clean, the stamp current and the committed bytes equal to the validated files on disk,
+otherwise the run stops with "The checkpoint of <task|final handoff> differs from the
+validated content" (nothing is reset; BLOCKED tasks are not checked). Limitation:
+repositories whose content passes clean/smudge or eol filters (Git LFS, `text=auto` with
+CRLF files, `ident`) stop with "differs from the validated content"; they are not
+supported by this check.
+
 ## Permissions and safety
 
 The primary boundaries are an approved scope, inspected local command permissions,
@@ -239,7 +248,10 @@ access there (only the project and an explicit `--knowledge-dir`). `ai-run` and
 `ai-pipeline` refuse to start, before any agent, when that state directory overlaps the
 checkout or the `--knowledge-dir` (equal, inside or containing, also through symlinks) or
 when `AI_STATE_DIR`/`XDG_STATE_HOME` is relative; every helper that uses it fails closed the
-same way. This is a path check, not OS isolation. Accepted findings must
+same way. The state root must be an absolute path outside the checkout and the knowledge
+directory; it is checked at every start, by every host-state read, by `ai-recover` before it
+reads the run manifest, and by the watchdog against the target project at install and before
+recovery. This is a configuration check, not OS isolation. Accepted findings must
 reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new review;
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.
