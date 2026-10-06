@@ -301,6 +301,8 @@ case "${MOCK_DEPS:-ok}" in
   overwrite) echo changed >> tracked.txt ;;
   overwrite-fail) echo changed >> tracked.txt; exit 1 ;;
   change-once) [[ $first == no ]] || echo changed >> tracked.txt ;;
+  fail-later) [[ $first == yes ]] || exit 1 ;;
+  change-later) [[ $first == yes ]] || echo changed >> tracked.txt ;;
   untracked) echo new > new.txt ;;
   commit) echo changed >> tracked.txt; git commit -qam 'installer commit' ;;
 esac
@@ -3438,6 +3440,56 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_deps_runner_changing_install_escalates_without_recovery(self):
         self.deps_recovery('change-once')
+
+    def deps_recovery_run(self, mode, expected):
+        """The session dies leaving a changed deps.lock; recovery decides commit_and_rerun.
+        The gate passes only when vendor-deps/ matches deps.lock."""
+        self.deps_ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt, deps.lock\n'))
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\ncmp -s deps.lock vendor-deps/deps.lock\n')
+        self.commit('gate that needs installed dependencies')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun',
+                  MOCK_EXTRA_FILE='deps.lock', MOCK_DEPS=mode, MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertEqual(self.deps_calls(), 2)  # ai-run's first install, then recovery's
+        return self.notifications()
+
+    def assert_deps_recovery_escalated(self, notes, message):
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', notes)
+        self.assertIn('but dependency setup failed: Dependency setup', notes)
+        self.assertIn(message, notes)
+        self.assertIn('Next: inspect .ai/ci-setup and the log', notes)
+        self.assertNotIn('🔧 Recovered', notes)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        self.assertIn('deps.lock', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_deps_recovery_installs_before_the_gate_and_resumes(self):
+        notes = self.deps_recovery_run('ok', 0)
+        self.assertEqual(notes.count('🔧 Recovered'), 1)
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        log = self.run_cmd(['git', 'log', '--format=%H %s']).stdout.splitlines()
+        checkpoint = next(line.split()[0] for line in log if 'recovery checkpoint (validated leftover work)' in line)
+        files = self.run_cmd(['git', 'show', '--name-only', '--format=', checkpoint]).stdout.split()
+        self.assertIn('deps.lock', files)
+        self.assertIn('partial.txt', files)
+        self.assertNotIn('vendor-deps/deps.lock', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertEqual((self.project / 'vendor-deps/deps.lock').read_text(), 'not in the plan')
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_deps_recovery_failed_install_escalates_without_a_commit(self):
+        notes = self.deps_recovery_run('fail-later', 1)
+        self.assert_deps_recovery_escalated(notes, 'failed (exit 1)')
+
+    def test_deps_recovery_changing_install_escalates_without_a_commit(self):
+        notes = self.deps_recovery_run('change-later', 1)
+        self.assert_deps_recovery_escalated(notes, 'changed project files')
 
     def test_deps_runner_pipeline_end_to_end(self):
         self.deps_ready()

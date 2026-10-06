@@ -158,6 +158,10 @@ printf 'Recovery decision: %s (%s)\n' "$action" "$why"
 case "$action" in
   commit_and_rerun)
     [[ -n "$(git status --porcelain --untracked-files=all)" ]] || escalate "$why (nothing to commit)" "$human"
+    # Leftovers that change a lockfile need their dependencies before the gate can pass.
+    ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}" || \
+      escalate "$why; but dependency setup failed: $AI_DEPS_ERROR." \
+        'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
     "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
     [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during validation.' 'inspect the diff.'
     git add --all -- .

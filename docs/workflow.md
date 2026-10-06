@@ -67,7 +67,9 @@ capped by the remaining run time; output in `.ai/local/deps-*.log`; no tracked f
 After every installer exit the gate digest and `tree-snapshot` (HEAD, index, every
 non-ignored file) must be unchanged, reported ahead of the exit status; only then is the
 stamp recorded. These stops start with "Dependency setup" and `ai-recover` always
-escalates them. Dependencies a task changes mid-run are installed at the next start.
+escalates them. Dependencies a task changes mid-run are installed at the next start;
+`ai-recover`'s `commit_and_rerun` also runs this step (on the dirty tree) before its
+`ai-check`, and a failed or file-changing install escalates with no commit.
 
 The runner independently reruns validation after each DONE task and at the end.
 If a post-task gate fails, it restores that task to IN_PROGRESS and leaves evidence
@@ -366,8 +368,8 @@ session and the pipeline completes the stage; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
 the decision counts only with a zero exit, a success envelope and exactly one valid
-`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree and a passing
-`ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
+`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree, installs stale
+dependencies (as `ai-run` does) and requires a passing `ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
 committed tree to match the validation stamp (a commit hook can't sneak content in); `rerun` requires a clean tree. Resumes run
 `ai-pipeline` with the saved arguments and `AI_RECOVERY_ATTEMPT=n`, which refuses to
 start if the gate digest differs from the approved one. Escalation sends one

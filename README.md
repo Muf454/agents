@@ -378,7 +378,8 @@ there if needed. Both files are protected like the rest of the gate. Hosting
 platforms such as Vercel add a preview deploy per PR, which is where you test.
 `ai-run` also runs `.ai/ci-setup` on the host before its first task when dependencies
 are missing or stale (a fresh worktree, a changed lockfile; `AI_DEPS_TIMEOUT`, default
-1200 s); it must only install git-ignored files, or the run stops.
+1200 s); it must only install git-ignored files, or the run stops. Auto-recovery does
+the same before validating leftover work that changed a lockfile.
 
 ## Optional project knowledge base
 

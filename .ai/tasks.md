@@ -186,7 +186,7 @@ fail-once and change-once recovery escalate; pipeline end to end). Mock claude g
 close to the 600 s tool limit).
 
 ## T003 — Recovery installs dependencies before its validation (FL-01)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: opus
 
@@ -224,7 +224,16 @@ Targeted: `python3 -m unittest discover -s tests -k deps_recovery` (output must 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Done 2026-10-06. scripts/ai-recover `commit_and_rerun`: after the dirty-tree check, before
+`ai-check`, `ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}"`; failure escalates
+"$why; but dependency setup failed: $AI_DEPS_ERROR." / 'inspect .ai/ci-setup and the log,
+then rerun ai-pipeline.' Gate comparisons and checkpoint integrity checks unchanged and in
+order. Tests: 3 `deps_recovery` (install + gate + checkpoint + resume, attempt 1/2; fail-later
+and change-later installers escalate with no commit, no resume, deps.lock still dirty); mock
+ci-setup gained `fail-later`/`change-later`. Docs: README CI paragraph, docs/workflow.md
+(deps section + recovery paragraph); vault flow chart recovery diagram + hub log.
+Evidence: `-k deps_recovery` Ran 3 OK; `-k recover -k deps_runner` Ran 30 OK;
+`.ai/bin/ai-check` Ran 205 OK (555 s).
 
 ## T004 — PR body and notification split "Needs you" from automated checks (FL-09)
 Status: TODO

@@ -62,3 +62,4 @@
 | 2026-10-06T11:21:53Z | runner | T001 | completed | PASS | c944716 | Claude checkpointed; continuing queue |
 | 2026-10-06T11:36Z | claude | T002 | DONE (FL-01 runner): ai_deps in common.sh, ai-run installs stale deps before the first task, ai-recover escalates "Dependency setup" stops; docs + vault flow chart | deps_runner 7 OK; ai-check 202 OK (579 s) | (this commit) | gate duration near the 600 s tool limit |
 | 2026-10-06T11:46:09Z | runner | T002 | completed | PASS | 11ab355 | Claude checkpointed; continuing queue |
+| 2026-10-06T15:52Z | claude | T003 | DONE (FL-01 recovery): ai-recover commit_and_rerun runs ai_deps before ai-check; failed/file-changing install escalates with no commit | deps_recovery 3 OK; recover+deps_runner 30 OK; ai-check 205 OK (555 s) | (this commit) | reconciled interrupted diff; vault flow chart + hub log already updated |

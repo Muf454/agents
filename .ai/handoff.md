@@ -9,6 +9,9 @@
   by the run time; log `.ai/local/deps-*.log`). Gate and tree snapshot must be unchanged
   after every installer exit, else "Dependency setup changed project files"; `ai-recover`
   always escalates "Dependency setup" stops.
+- T003 (FL-01 recovery): `ai-recover`'s `commit_and_rerun` runs the same dependency step
+  on the dirty tree before `ai-check`; a failed or file-changing install escalates
+  "dependency setup failed: …" with no commit and no resume.
 
 OR-01/OR-02 were merged via PR #14 (records in Git history).
 This branch (`feature/flow-batch-2`, from origin/master 9e11a11) plans FL-01 (host runs
@@ -25,6 +28,7 @@ PASS, 188 tests OK (2026-10-06, before planning commit).
 After T001: `.ai/bin/ai-check` PASS, 195 tests OK (2026-10-06).
 After T002: `.ai/bin/ai-check` PASS, 202 tests OK (2026-10-06), but it took 579 s: the
 suite is close to the 600 s Bash tool limit sessions use for the gate.
+After T003: `.ai/bin/ai-check` PASS, 205 tests OK (2026-10-06, 555 s).
 
 ## Assumptions
 - FL-07: timer install is opt-in (`setup-project --watchdog`); the pipeline only warns.
@@ -36,6 +40,7 @@ suite is close to the 600 s Bash tool limit sessions use for the gate.
 Flow chart updated: not yet for this run (T002, T003, T004 and T006 update the
 vault agents-flow.md; T007 replaces this line; a test requires it to start with these words).
 T002 added the dependency step (node, ⛔ stop, note, recovery hard rule) on 2026-10-06.
+T003 updated the recovery diagram's commit + rerun branch (install if stale, then the gate).
 
 ## Manual testing for the human
 
@@ -69,6 +74,11 @@ T002 added the dependency step (node, ⛔ stop, note, recovery hard rule) on 202
   `test_deps_runner_failed_install_escalates_without_recovery`,
   `test_deps_runner_changing_install_escalates_without_recovery`.
 - Pipeline end to end with install, PR and clean tree: `test_deps_runner_pipeline_end_to_end`.
+- Recovery installs dependencies before validating leftover work that changed a lockfile,
+  then commits and resumes: `test_deps_recovery_installs_before_the_gate_and_resumes`;
+  a failing or file-changing install escalates with no commit:
+  `test_deps_recovery_failed_install_escalates_without_a_commit`,
+  `test_deps_recovery_changing_install_escalates_without_a_commit`.
 - Further scenarios are added by the remaining tasks.
 
 ## Human todos
