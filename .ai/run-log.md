@@ -56,3 +56,4 @@
 | 2026-10-06T07:16:06Z | runner | T005 | completed | PASS | 8c68ae2 | Claude checkpointed; continuing queue |
 | 2026-10-06T07:40Z | claude | T006 | DONE: README + docs/workflow.md state the committed-bytes check (DONE checkpoints, final handoff), the filter/LFS/CRLF limitation and the absolute state root outside the checkout; 2 new docs_consistency sentences; vault flow chart audited, hub log appended | docs_consistency 3 OK; ai-check 188 OK | (this commit) | no flow chart change needed |
 | 2026-10-06T07:33:53Z | runner | T006 | completed | PASS | d9d3558 | Claude checkpointed; continuing queue |
+| 2026-10-06T07:42:00Z | runner | none | queue complete; ready for independent review | PASS | 66a1753 | Human acceptance remains |
