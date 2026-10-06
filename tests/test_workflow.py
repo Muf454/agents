@@ -3165,6 +3165,43 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertLess(body.index('Flow chart updated'), body.index('## Tasks'))
         self.assertEqual(body.replace('Flow chart updated: audited.\n\n', ''), plain)
 
+    SPLIT_HANDOFF = ('# Handoff\n\n## Manual testing for the human\n### Needs you\n{needs}\n\n'
+                     '### Covered by automated tests\n1. Drag fails: `test_drag_fails`\n'
+                     '2. Resize works without a name\n\n## Next action\nNone.\n')
+
+    def test_manual_testing_render_pr_body_splits_needs_you_from_automated(self):
+        self.setup_project()
+        body = self.pr_body_for(self.SPLIT_HANDOFF.format(needs='1. Check it on your phone.'))
+        self.assertLess(body.index('### Needs you'), body.index('Check it on your phone.'))
+        self.assertLess(body.index('Check it on your phone.'), body.index('### Covered by automated tests'))
+        self.assertIn('<details><summary>2 automated checks</summary>', body)
+        self.assertIn('</details>', body)
+        self.assertIn('`test_drag_fails`\n', body)
+        self.assertIn('Resize works without a name ⚠ no test named', body)
+        self.assertNotIn('test_drag_fails` ⚠', body)
+
+    def test_manual_testing_render_none_says_everything_is_automated(self):
+        self.setup_project()
+        body = self.pr_body_for(self.SPLIT_HANDOFF.format(needs='None.'))
+        self.assertIn('None — everything below is automated.', body)
+
+    def test_manual_testing_render_finish_summary_counts_only_needs_you(self):
+        self.ready()
+        self.add_origin()
+        (self.project / '.ai/handoff.md').write_text(self.SPLIT_HANDOFF.format(needs='None'))
+        self.commit('handoff with only automated steps')
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        notes = self.notifications()
+        self.assertIn('1. Nothing to test by hand (2 automated checks in the PR)', notes)
+        self.assertNotIn('manual step', notes)
+
+    def test_manual_testing_render_legacy_handoff_is_unchanged(self):
+        self.setup_project()
+        body = self.pr_body_for('# Handoff\n\n## Manual testing for the human\n1. Try it.\n2. Again.\n\n## Next action\nNone.\n')
+        self.assertIn('## How to test\n\n1. Try it.\n2. Again.\n\n---', body)
+        self.assertNotIn('Needs you', body)
+        self.assertNotIn('<details>', body)
+
     def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
         handoff = (ROOT / '.ai/handoff.md').read_text()
         self.assertIn('## Flow chart\nFlow chart updated', handoff)

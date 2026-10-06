@@ -12,6 +12,12 @@
 - T003 (FL-01 recovery): `ai-recover`'s `commit_and_rerun` runs the same dependency step
   on the dirty tree before `ai-check`; a failed or file-changing install escalates
   "dependency setup failed: …" with no commit and no resume.
+- T004 (FL-09 runtime): `workflow.py manual_testing(handoff)` splits the section into
+  `### Needs you` / `### Covered by automated tests` (no subsections = legacy, unchanged).
+  `pr-body` renders Needs you first ("None — everything below is automated." when empty) and
+  the automated list in `<details>` with its count (bullets without a backticked test name
+  get "⚠ no test named"); `finish-summary` counts only Needs-you steps or says "Nothing to
+  test by hand (N automated checks in the PR)". Vault flow chart updated.
 
 OR-01/OR-02 were merged via PR #14 (records in Git history).
 This branch (`feature/flow-batch-2`, from origin/master 9e11a11) plans FL-01 (host runs
@@ -29,6 +35,7 @@ After T001: `.ai/bin/ai-check` PASS, 195 tests OK (2026-10-06).
 After T002: `.ai/bin/ai-check` PASS, 202 tests OK (2026-10-06), but it took 579 s: the
 suite is close to the 600 s Bash tool limit sessions use for the gate.
 After T003: `.ai/bin/ai-check` PASS, 205 tests OK (2026-10-06, 555 s).
+After T004: `.ai/bin/ai-check` PASS, 209 tests OK (2026-10-06, 564 s).
 
 ## Assumptions
 - FL-07: timer install is opt-in (`setup-project --watchdog`); the pipeline only warns.

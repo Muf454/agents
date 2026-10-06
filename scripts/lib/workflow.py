@@ -1630,8 +1630,10 @@ def finish_summary(arguments):
     blocks = tasks()
     done = sum(task['status'] == 'DONE' for task in blocks)
     handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
-    steps = [line for line in section(handoff, 'Manual testing for the human').splitlines()
-             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    needs_you, automated, legacy = manual_testing(handoff)
+    steps = [line for line in needs_you.splitlines() if BULLET.match(line)]
+    steps = [line for line in steps if legacy or not NONE_TEXT.match(BULLET_PREFIX.sub('', line).strip())]
+    checks = sum(bool(BULLET.match(line)) for line in automated.splitlines())
     extra = [re.sub(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?', '', line).strip()
              for line in section(handoff, 'Human todos').splitlines()
              if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
@@ -1650,7 +1652,12 @@ def finish_summary(arguments):
         todos.append(f'Resolve {disputes} disputed finding(s) at the PR (Codex upheld what Claude rejected)')
     if unresolved:
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
-    todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
+    if steps:
+        todos.append(f'Test: {len(steps)} manual step(s) in the PR')
+    elif legacy:
+        todos.append('Test the change (no manual steps were written)')
+    else:
+        todos.append(f'Nothing to test by hand ({checks} automated checks in the PR)')
     todos.append('Merge the PR')
     todos += extra[:10]
     if len(extra) > 10:
@@ -1771,6 +1778,22 @@ def section(text, heading):
     return body
 
 
+BULLET = re.compile(r'^\s*(\d+[.)]|[-*])\s+\S')
+BULLET_PREFIX = re.compile(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?')
+
+
+def manual_testing(handoff):
+    """Split "Manual testing for the human" into (needs_you, automated, legacy).
+    Without the `### Needs you` / `### Covered by automated tests` subsections the whole
+    section is "needs you" and legacy is True."""
+    body = section(handoff, 'Manual testing for the human')
+    parts = re.split(r'^###\s+(Needs you|Covered by automated tests)\s*$', body, flags=re.M)
+    if len(parts) == 1:
+        return body, '', True
+    found = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
+    return found.get('Needs you', ''), found.get('Covered by automated tests', ''), False
+
+
 def pr_title(arguments):
     """PR title: first line of the spec objective, else the branch name."""
     objective = section(Path('.ai/project-spec.md').read_text(), 'Objective') if Path('.ai/project-spec.md').exists() else ''
@@ -1846,8 +1869,21 @@ def pr_body(arguments):
     else:
         lines.append('No review recorded.')
     lines.append('')
-    manual = section(handoff, 'Manual testing for the human')
-    lines += ['## How to test', '', manual or 'See `.ai/handoff.md`.', '']
+    needs_you, automated, legacy = manual_testing(handoff)
+    if legacy:
+        lines += ['## How to test', '', needs_you or 'See `.ai/handoff.md`.', '']
+    else:
+        lines += ['## How to test', '', '### Needs you', '']
+        if not needs_you or NONE_TEXT.match(BULLET_PREFIX.sub('', needs_you)):
+            lines += ['None — everything below is automated.', '']
+        else:
+            lines += [needs_you, '']
+        if automated:
+            flagged = [line + ('' if '`' in line or not BULLET.match(line) else ' ⚠ no test named')
+                       for line in automated.splitlines()]
+            count = sum(bool(BULLET.match(line)) for line in flagged)
+            lines += ['### Covered by automated tests', '',
+                      f'<details><summary>{count} automated checks</summary>', '', *flagged, '', '</details>', '']
     lines += ['---', 'Opened by `ai-pipeline`. Merging and deployment remain with the human.', '',
               '🤖 Generated with [Claude Code](https://claude.com/claude-code)']
     print('\n'.join(lines))

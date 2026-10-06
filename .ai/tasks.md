@@ -236,7 +236,7 @@ Evidence: `-k deps_recovery` Ran 3 OK; `-k recover -k deps_runner` Ran 30 OK;
 `.ai/bin/ai-check` Ran 205 OK (555 s).
 
 ## T004 — PR body and notification split "Needs you" from automated checks (FL-09)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -275,7 +275,9 @@ Targeted: `python3 -m unittest discover -s tests -k manual_testing_render` (outp
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+`manual_testing()` added; `pr_body` and `finish_summary` use it (legacy output unchanged).
+`manual_testing_render` Ran 4 OK; `.ai/bin/ai-check` Ran 209 OK (564 s). Vault flow chart
+(PR and FINISHED nodes, notification table) updated; `updated:` was already 2026-10-06.
 
 ## T005 — Prompts and templates describe the "Needs you" split (FL-09)
 Status: TODO
