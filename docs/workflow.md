@@ -336,8 +336,11 @@ protected branches are refused earlier); `gh pr view` decides create vs. edit;
 significant findings remain after the round limit, or while any dispute is recorded. The
 PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
-"Manual testing for the human" section. An optional handoff section `## Flow chart` (one
-line: "Flow chart updated" or "Flow unchanged") is copied under Summary. State becomes `ready_for_acceptance`.
+"Manual testing for the human" section (split into subsections `### Needs you` for steps
+only a human can perform and `### Covered by automated tests` for deterministic test
+scenarios; the PR summary counts only "Needs you" steps). An optional handoff section
+`## Flow chart` (one line: "Flow chart updated" or "Flow unchanged") is copied under
+Summary. State becomes `ready_for_acceptance`.
 
 Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports

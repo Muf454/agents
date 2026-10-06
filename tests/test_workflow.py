@@ -3718,6 +3718,10 @@ class DocsConsistencyTest(unittest.TestCase):
         'usage limits pause and resume',
         'committed bytes equal to the validated files',
         'outside the checkout',
+        'tree-snapshot',
+        'dependencies a task changes mid-run are installed at the next start',
+        'needs you',
+        'covered by automated tests',
     )
 
     def text(self, name):

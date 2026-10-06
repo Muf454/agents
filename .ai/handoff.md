@@ -44,11 +44,9 @@ After T004: `.ai/bin/ai-check` PASS, 209 tests OK (2026-10-06, 564 s).
   changes install at the next start.
 
 ## Flow chart
-Flow chart updated: not yet for this run (T002, T003, T004 and T006 update the
-vault agents-flow.md; T007 replaces this line; a test requires it to start with these words).
-T006 added the optional timer to setup and the start warning to the start check (2026-10-06).
-T002 added the dependency step (node, ⛔ stop, note, recovery hard rule) on 2026-10-06.
-T003 updated the recovery diagram's commit + rerun branch (install if stale, then the gate).
+Flow chart updated: T001–T006 on 2026-10-06 added the dependency step (node, ⛔ stop, note, recovery hard rule),
+recovery installs dependencies before validating leftovers, "Needs you" vs "Covered by automated tests" split in PR,
+and watchdog timer (status check, setup option, start warning).
 
 ## Manual testing for the human
 

@@ -293,6 +293,10 @@ commits. `--no-pr` stops after the review;
 
 The finish summary lists: deciding unresolved findings (draft PR), the manual test
 steps from `.ai/handoff.md`, merging, and every item under the handoff's "Human todos".
+Manual testing is split into `### Needs you` (steps only a human can verify, e.g. look
+and feel, phone notifications, external services) and `### Covered by automated tests`
+(scenarios with deterministic test names); the PR shows only "Needs you" steps in the
+summary.
 
 ### Auto-recovery
 
@@ -380,8 +384,9 @@ there if needed. Both files are protected like the rest of the gate. Hosting
 platforms such as Vercel add a preview deploy per PR, which is where you test.
 `ai-run` also runs `.ai/ci-setup` on the host before its first task when dependencies
 are missing or stale (a fresh worktree, a changed lockfile; `AI_DEPS_TIMEOUT`, default
-1200 s); it must only install git-ignored files, or the run stops. Auto-recovery does
-the same before validating leftover work that changed a lockfile.
+1200 s); a tree-snapshot before and after verifies no project files were changed by the
+install, or the run stops. Auto-recovery does the same before validating leftover work
+that changed a lockfile. Dependencies a task changes mid-run are installed at the next start.
 
 ## Optional project knowledge base
 

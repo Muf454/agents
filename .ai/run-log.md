@@ -70,3 +70,4 @@
 | 2026-10-06T16:43:01Z | runner | T005 | completed | PASS | b34b36b | Claude checkpointed; continuing queue |
 | 2026-10-06T17:10Z | claude | T006 | DONE (FL-07): ai-watchdog --timer-status, setup-project --watchdog, start warning + notification note, README PID waits; vault flow chart/human-todo/hub log | watchdog_setup 11 OK; ai-check 222 OK (590 s) | (this commit) | interrupted session reconciled, diff kept |
 | 2026-10-06T21:01:37Z | runner | T006 | completed | PASS | 16700d7 | Claude checkpointed; continuing queue |
+| 2026-10-06T21:07Z | claude | T007 | DONE (T007): README/docs/workflow.md describe dependency step (tree-snapshot verification, mid-run install at next start) and manual testing split ("Needs you" / "Covered by automated tests"); test REQUIRED list expanded; `.ai/handoff.md` flow-chart line updated; vault hub log appended | docs_consistency 3 OK; gate running | (pending) | awaiting full gate completion (211 tests, ~10 min) |
