@@ -102,7 +102,7 @@ mapfile -d '' -t args < <(ai_helper run-manifest args)
 case "$reason" in
   *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
   *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
-  *'differs from the validated content'*|*'Triage stage'*)
+  *'differs from the validated content'*|*'Triage stage'*|*'Dependency setup'*)
     escalate 'this kind of stop always needs a human.' 'inspect it, fix it, then rerun ai-pipeline.' ;;
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'

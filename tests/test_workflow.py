@@ -60,6 +60,8 @@ if knowledge:
 else:
     assert '--add-dir' not in args
 mode = os.environ.get('MOCK_CLAUDE', 'success')
+if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
+    assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
@@ -282,6 +284,28 @@ if args[:2] in (['pr', 'create'], ['pr', 'edit']):
     if args[1] == 'create': print('https://github.com/example/project/pull/7')
     sys.exit(0)
 sys.exit(2)
+'''
+
+# .ai/ci-setup fixture for the host dependency step; MOCK_DEPS picks a misbehaviour.
+DEPS_SETUP = r'''#!/usr/bin/env bash
+# ai-deps-inputs: deps.lock
+# ai-deps-outputs: vendor-deps
+set -euo pipefail
+printf 'call\n' >> "$MOCK_STATE_DIR/deps-calls"
+first=no
+[[ -e "$MOCK_STATE_DIR/deps-once" ]] || { first=yes; touch "$MOCK_STATE_DIR/deps-once"; }
+case "${MOCK_DEPS:-ok}" in
+  fail) exit 1 ;;
+  fail-once) [[ $first == no ]] || exit 1 ;;
+  sleep) sleep 60 ;;
+  overwrite) echo changed >> tracked.txt ;;
+  overwrite-fail) echo changed >> tracked.txt; exit 1 ;;
+  change-once) [[ $first == no ]] || echo changed >> tracked.txt ;;
+  untracked) echo new > new.txt ;;
+  commit) echo changed >> tracked.txt; git commit -qam 'installer commit' ;;
+esac
+mkdir -p vendor-deps
+cp deps.lock vendor-deps/
 '''
 
 MOCK_SLEEP = r'''#!/usr/bin/env bash
@@ -3306,6 +3330,125 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('# ai-deps-inputs:', text)
         self.assertIn('# ai-deps-outputs:', text)
         self.assertEqual(sorted(p.name for p in self.project.iterdir()), ['.git'])
+
+    # ---------------------------------------------------------------- host dependency setup
+    def deps_ready(self, queue=None):
+        self.ready(queue)
+        (self.project / '.ai/ci-setup').write_text(DEPS_SETUP)
+        (self.project / 'deps.lock').write_text('dep 1\n')
+        (self.project / 'tracked.txt').write_text('tracked\n')
+        with (self.project / '.gitignore').open('a') as file:
+            file.write('/vendor-deps/\n')
+        self.commit('dependency fixture')
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def deps_calls(self):
+        calls = self.base / 'deps-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def assert_deps_stopped(self, message):
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn(message, error)
+        self.assertIn('.ai/ci-setup', error)
+        self.assertRegex(error, r'see \.ai/local/deps-\w{8}\.log')
+        self.assertFalse((self.project / '.ai/local/deps.json').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_deps_runner_installs_once_before_the_first_task(self):
+        base = self.deps_ready()
+        result = self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertIn('Dependency setup (.ai/ci-setup): no dependency stamp', result.stdout)
+        self.assertIn('Dependencies installed', result.stdout)
+        self.assertEqual(self.deps_calls(), 1)
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.helper('tasks', 'complete')
+        # The install changed no project file: only the task and runner commits follow.
+        subjects = self.run_cmd(['git', 'log', '--format=%s', f'{base}..HEAD']).stdout.splitlines()
+        self.assertEqual(subjects, ['chore(ai): record review handoff',
+                                    'chore(ai): record T001 runner checkpoint', 'implement T001'])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+        def add_task(task_id, lock=None):
+            if lock:
+                (self.project / 'deps.lock').write_text(lock)
+            with (self.project / '.ai/tasks.md').open('a') as file:
+                file.write('\n' + task(task_id))
+            self.commit('add ' + task_id)
+        # Unchanged inputs: the next ai-run does not install again.
+        add_task('T002')
+        self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(self.deps_calls(), 1)
+        # A changed lockfile installs again at the next start that runs a task.
+        add_task('T003', 'dep 2\n')
+        self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(self.deps_calls(), 2)
+        self.assertEqual((self.project / 'vendor-deps/deps.lock').read_text(), 'dep 2\n')
+
+    def test_deps_runner_failed_or_changing_installer_stops_before_claude(self):
+        base = self.deps_ready()
+        cases = (('fail', {}, 'Dependency setup (.ai/ci-setup) failed (exit 1)'),
+                 ('sleep', {'AI_DEPS_TIMEOUT': '1'}, 'failed (exit 124, timeout after 1s)'),
+                 ('overwrite', {}, 'Dependency setup changed project files'),
+                 ('untracked', {}, 'Dependency setup changed project files'),
+                 ('commit', {}, 'Dependency setup changed project files'),
+                 ('overwrite-fail', {}, 'Dependency setup changed project files'))
+        for mode, env, message in cases:
+            with self.subTest(mode=mode):
+                self.tool('ai-run', '--approved', expected=1, MOCK_DEPS=mode, **env)
+                self.assert_deps_stopped(message)
+                self.assertEqual(self.deps_calls(), 1)
+                self.run_cmd(['git', 'reset', '-q', '--hard', base])
+                self.run_cmd(['git', 'clean', '-fdq'])
+                (self.base / 'deps-calls').unlink()
+
+    def test_deps_runner_install_is_capped_by_the_run_time(self):
+        import time
+        self.deps_ready()
+        started = time.monotonic()
+        self.tool('ai-run', '--approved', '--run-timeout', '5', expected=1,
+                  MOCK_DEPS='sleep', AI_DEPS_TIMEOUT='600')
+        self.assertLess(time.monotonic() - started, 15)
+        self.assert_deps_stopped('timeout after')
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the stop's run-log line
+        self.tool('ai-run', '--approved', expected=1, AI_DEPS_TIMEOUT='soon')
+        self.assertIn('invalid AI_DEPS_TIMEOUT', (self.project / '.ai/local/last-error').read_text())
+
+    def test_deps_runner_complete_queue_installs_nothing(self):
+        self.deps_ready(task('T001', 'DONE'))
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.deps_calls(), 0)
+
+    def deps_recovery(self, mode):
+        self.deps_ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_DEPS=mode)
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', notes)
+        self.assertIn('Dependency setup', notes)
+        self.assertIn('this kind of stop always needs a human', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertFalse(any(c[:2] == ['pr', 'create'] for c in self.gh_calls()))
+        self.assertEqual(self.deps_calls(), 1)
+
+    def test_deps_runner_failed_install_escalates_without_recovery(self):
+        self.deps_recovery('fail-once')
+
+    def test_deps_runner_changing_install_escalates_without_recovery(self):
+        self.deps_recovery('change-once')
+
+    def test_deps_runner_pipeline_end_to_end(self):
+        self.deps_ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main',
+                           MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.deps_calls(), 1)
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
 
 class DocsConsistencyTest(unittest.TestCase):

@@ -376,6 +376,9 @@ Setup installs `.github/workflows/ai-validate.yml`, which runs `.ai/ci-setup`
 to `main`, so the PR shows an independent green/red check. Add toolchain setup steps
 there if needed. Both files are protected like the rest of the gate. Hosting
 platforms such as Vercel add a preview deploy per PR, which is where you test.
+`ai-run` also runs `.ai/ci-setup` on the host before its first task when dependencies
+are missing or stale (a fresh worktree, a changed lockfile; `AI_DEPS_TIMEOUT`, default
+1200 s); it must only install git-ignored files, or the run stops.
 
 ## Optional project knowledge base
 

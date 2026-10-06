@@ -4,13 +4,13 @@ Project: agents
 Branch: feature/flow-batch-2
 Phase: implementing
 Current task: none
-Last completed task: T001
-Tasks complete: 1
-Tasks remaining: 6
-Last validation: PASS at 2026-10-06T11:21:53Z
+Last completed task: T002
+Tasks complete: 2
+Tasks remaining: 5
+Last validation: PASS at 2026-10-06T11:34:00Z
 Blocked: no
-Next action: Continue queue; see task results for any blockers
-Last updated: 2026-10-06T11:21:53Z
+Next action: Implement T003 (recovery installs dependencies before its validation)
+Last updated: 2026-10-06T11:35:56Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

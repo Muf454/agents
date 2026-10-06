@@ -59,6 +59,16 @@ of unchanged content don't invalidate evidence. Environment/dependency/service
 changes are not represented by the digest: rerun checks when those change or when
 evidence is old. This is a local convenience gate, not tamper-proof attestation or CI.
 
+Dependencies (FL-01): when `ai-run` starts and a task will run (not `--triage`), the host
+runs `.ai/ci-setup` if `deps-status` reports it missing/stale (no `.ai/local/deps.json`
+stamp, `.ai/ci-setup` changed, an `# ai-deps-inputs:`/default lockfile changed, or an
+`# ai-deps-outputs:`/`node_modules` dir is missing). Limit `AI_DEPS_TIMEOUT` (default 1200 s)
+capped by the remaining run time; output in `.ai/local/deps-*.log`; no tracked file written.
+After every installer exit the gate digest and `tree-snapshot` (HEAD, index, every
+non-ignored file) must be unchanged, reported ahead of the exit status; only then is the
+stamp recorded. These stops start with "Dependency setup" and `ai-recover` always
+escalates them. Dependencies a task changes mid-run are installed at the next start.
+
 The runner independently reruns validation after each DONE task and at the end.
 If a post-task gate fails, it restores that task to IN_PROGRESS and leaves evidence
 for repair. If no progress was checkpointed, it stops rather than spending an

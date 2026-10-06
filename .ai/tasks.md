@@ -94,7 +94,7 @@ Tests: 7 `deps_status` tests (declared, defaults, no lockfiles, outside paths, t
 submodules, template). Evidence: `-k deps_status` Ran 7 OK; `.ai/bin/ai-check` Ran 195 OK.
 
 ## T002 — ai-run installs dependencies before its first task (FL-01)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -168,7 +168,22 @@ Targeted: `python3 -m unittest discover -s tests -k deps_runner` (output must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Done 2026-10-06. scripts/lib/common.sh `ai_deps GATE LIMIT`: returns 1 with `AI_DEPS_ERROR`
+set (callers print it: ai-run `ai_die "$AI_DEPS_ERROR"`; T003 can reuse it). Order after
+every installer exit: gate digest ("…changed the approved workflow gate"), tree snapshot
+("Dependency setup changed project files …"), exit status ("failed (exit N[, timeout after
+Ns])"), then `deps-record`. A `deps-status` error (bad declaration) or a non-positive limit
+also stops with a "Dependency setup" message. Log `.ai/local/deps-XXXXXXXX.log`; terminal
+gets the stale reason, then "Dependencies installed in Ns" or the log's last 5 lines.
+scripts/ai-run: after the triage block, before the loop, only when `tasks next` ≠ none;
+`AI_DEPS_TIMEOUT` must be 1–7 digits, capped by `remaining_time`; usage text mentions it.
+scripts/ai-recover: hard rule `*'Dependency setup'*`. Docs: README CI section,
+docs/workflow.md; vault agents-flow.md (deps node + ⛔ stop, note, recovery hard rule).
+Tests: 7 `deps_runner` tests (installs once + reinstall on lock change; fail/timeout/
+overwrite/untracked/commit/overwrite+fail; run-time cap + invalid timeout; complete queue;
+fail-once and change-once recovery escalate; pipeline end to end). Mock claude gained
+`MOCK_REQUIRE`. Evidence: `-k deps_runner` Ran 7 OK; `.ai/bin/ai-check` Ran 202 OK (579 s,
+close to the 600 s tool limit).
 
 ## T003 — Recovery installs dependencies before its validation (FL-01)
 Status: TODO
