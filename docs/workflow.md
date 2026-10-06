@@ -290,9 +290,14 @@ nothing is inherited. Limitation: reusing a branch name whose host records were 
 merged fails verification (its old records sit both in the inherited copy and the store).
 
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
-(retries included) and after every push, the review must verify and be current for HEAD
-(only workflow records changed since the reviewed commit), the validation stamp must be
-current, the tree clean (untracked files too) and all tasks DONE; after each push
+(retries included) and after every push attempt (failed or successful, before the retry
+wait), the review must verify and be current for HEAD (only workflow records changed
+since the reviewed commit), the validation stamp must be current, the tree clean
+(untracked files too), the committed bytes equal to the validated files on disk
+(`committed-matches-worktree`) and all tasks DONE; a push hook that commits other bytes
+stops as "committed content differs from the validated content", not as a push failure.
+Before every Codex review the pipeline also requires a clean tree and committed bytes
+equal to the validated files. After a successful push
 `git ls-remote origin refs/heads/<branch>` must equal HEAD. Any failure stops (before PR
 creation and before any FINISHED notification); a hook can't slip unreviewed or
 unpushed content into the PR.

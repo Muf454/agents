@@ -99,7 +99,7 @@ symlink + submodule accepted). Targeted: `Ran 4 tests … OK`. Gate: `.ai/bin/ai
 updated, `updated: 2026-10-06`.
 
 ## T002 — Byte-check before review and in the publish checks (OR-01)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -178,7 +178,21 @@ Targeted: `python3 -m unittest discover -s tests -k committed_bytes_pipeline` (o
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+2026-10-06 (Claude, opus): `scripts/ai-pipeline` (1) before `ai-review --base` (after
+`ensure_validated`) requires a clean tree and `committed-matches-worktree`, else writes
+"Committed content differs from the validated content: <detail>" and `stop review`;
+(2) `publish_ready` gained the committed-bytes clause right after the clean-tree check
+(before tasks/review-current/stamp); (3) `push()` runs `publish_ready` after every attempt,
+failed or successful, before the retry wait and before the terminal "3 tries" handling (the
+separate post-loop check is now inside the loop; remote-equals-HEAD unchanged). 7 tests
+`committed_bytes_pipeline` (pre-review filter, filtered review at PR preparation, push hook
+variants A/B/C incl. C with `AI_AUTO_RECOVER=1` → escalated, no `recover-calls`; harmless
+failed push still retries; symlink + submodule → PR). Existing
+`test_publish_ready_failed_push_that_changes_checkout_stops_before_retry` now asserts no
+retry wait (the check runs before it, as this task requires). README/docs/workflow.md
+publish-check paragraphs updated. Targeted: `Ran 7 tests … OK`; `-k publish_ready` 5 OK.
+Gate: `.ai/bin/ai-check` PASS, 179 tests. Vault `agents-flow.md` (pre-review byte check node,
+publish-checks node + bullets; `updated: 2026-10-06`) and hub Log updated.
 
 ## T003 — Refuse state roots that overlap the checkout or knowledge dir (OR-02)
 Status: TODO

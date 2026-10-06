@@ -1571,6 +1571,115 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
         self.assertIn('All tasks done', self.notifications())
 
+    def no_pr_published(self):
+        self.assertEqual([c for c in self.gh_calls() if c[:2] in (['pr', 'create'], ['pr', 'edit'])], [])
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_committed_bytes_pipeline_stops_before_review(self):
+        self.ready(task('T001', 'DONE'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        (self.project / 'T001.txt').write_text('checkpointed implementation\n')
+        self.commit('done task, committed through a filter')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Pipeline stopped during review: Committed content differs from the validated content', result.stderr)
+        self.assertIn('T001.txt', (self.project / '.ai/local/last-error').read_text())
+        self.assertFalse((self.base / 'codex-calls').exists())
+        self.no_pr_published()
+
+    def test_committed_bytes_pipeline_publish_check_catches_a_filtered_review(self):
+        self.ready()
+        origin = self.add_origin()
+        (self.project / '.gitattributes').write_text('.ai/reviews/current.md filter=review\n')
+        self.run_cmd(['git', 'config', 'filter.review.clean', 'sed s/no.demonstrated.findings/flawless/'])
+        self.commit('review filter')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed at pull request preparation: committed content differs from the '
+                      'validated content', result.stderr)
+        self.assertIn('.ai/reviews/current.md', result.stderr)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual(self.gh_calls(), [])
+        self.no_pr_published()
+
+    def push_hook_commits_filtered_file(self, commit_on, exit_code):
+        """pre-push hook: on invocation number `commit_on` it commits hooked.txt through a clean
+        filter (committed bytes differ, tree stays clean); it always exits `exit_code`."""
+        (self.project / '.gitattributes').write_text('hooked.txt filter=hooked\n')
+        self.run_cmd(['git', 'config', 'filter.hooked.clean', 'sed s/original/tampered/'])
+        self.commit('hooked filter')
+        calls = self.base / 'hook-calls'
+        self.hook('pre-push', f'echo call >> "{calls}"\n'
+                              f'if [[ "$(grep -c call "{calls}")" == {commit_on} ]]; then\n'
+                              '  echo original > hooked.txt; git add hooked.txt; git commit -qm "hook: hooked.txt"\n'
+                              f'fi\nexit {exit_code}\n')
+        return calls
+
+    def assert_hooked_stop(self, calls, hook_runs):
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Publish check failed at push: committed content differs from the validated content', error)
+        self.assertIn('hooked.txt', error)
+        self.assertNotIn('3 tries', error)
+        self.assertEqual(calls.read_text().count('call'), hook_runs)
+        subjects = self.subjects()
+        self.assertEqual(subjects[0], 'hook: hooked.txt')
+        self.assertIn('implement T001', subjects)
+        self.helper('tasks', 'complete')
+        self.no_pr_published()
+
+    def test_committed_bytes_pipeline_failed_push_hook_commit_stops(self):
+        self.ready()
+        origin = self.add_origin()
+        calls = self.push_hook_commits_filtered_file(1, 1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_hooked_stop(calls, 1)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertFalse((self.base / 'sleep.log').exists())  # no retry wait after the failed check
+
+    def test_committed_bytes_pipeline_successful_push_hook_commit_stops(self):
+        self.ready()
+        self.add_origin()
+        calls = self.push_hook_commits_filtered_file(1, 0)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_hooked_stop(calls, 1)
+
+    def test_committed_bytes_pipeline_third_push_attempt_escalates_without_recovery(self):
+        self.ready()
+        origin = self.add_origin()
+        calls = self.push_hook_commits_filtered_file(3, 1)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('escalated to the human', result.stderr)
+        self.assert_hooked_stop(calls, 3)
+        self.assertFalse((self.base / 'recover-calls').exists())
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20', '40'])
+
+    def test_committed_bytes_pipeline_harmless_failed_push_still_retries(self):
+        self.ready()
+        origin = self.add_origin()
+        marker = self.base / 'failed-once'
+        self.hook('pre-push', f'[[ -e "{marker}" ]] && exit 0\ntouch "{marker}"\nexit 1\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20'])
+        self.assertEqual(self.remote_head(origin), self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+
+    def test_committed_bytes_pipeline_accepts_symlinks_and_submodules(self):
+        self.ready()
+        origin = self.add_origin()
+        source = self.base / 'submodule-source'
+        source.mkdir()
+        for command in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']):
+            subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *command],
+                           cwd=source, env=self.env, check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(source), 'vendored'])
+        (self.project / 'target.txt').write_text('symlink target\n')
+        os.symlink('target.txt', self.project / 'link')
+        self.commit('symlink and submodule')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.remote_head(origin), self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.assertIn('🏁 FINISHED', self.notifications())
+
     def test_finish_summary_lists_human_todos(self):
         self.ready()
         self.add_origin()
@@ -1807,7 +1916,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.hook('pre-push', 'echo sneaky > untracked.txt\nexit 1\n')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
         self.assertIn('Publish check failed at push: the checkout is not clean', result.stderr)
-        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20'])  # one retry wait, no 2nd push
+        self.assertFalse((self.base / 'sleep.log').exists())  # checked after the failed attempt, no retry
         self.assertEqual(self.remote_head(origin), '')
         self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
 
