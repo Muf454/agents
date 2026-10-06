@@ -276,7 +276,7 @@ path with relative `--knowledge-dir` recorded absolute). Targeted: `Ran 6 tests 
 and the watchdog (T005) not yet covered.
 
 ## T004 — ai-recover refuses an overlapping state root before reading the manifest (OR-02)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: opus
 
@@ -320,7 +320,20 @@ Targeted: `python3 -m unittest discover -s tests -k recover_state_root` (output 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+2026-10-06: scripts/ai-recover runs `ai_helper state-root-check` (checkout = git toplevel)
+after `escalate()`/`resume()` are defined and before the first `run-manifest` read; on
+failure `reason="<config error> (stopped during S: <original reason>)"` and it escalates
+("the host state directory is not safe for recovery." / "set AI_STATE_DIR to an absolute
+directory outside the checkout, then rerun ai-pipeline."). Test
+`test_recover_state_root_unsafe_escalates_before_reading_the_manifest` (subtests: inside the
+checkout, relative): exit 1, "escalated to the human", last-error holds both messages, one
+new ⛔ containing the config error, no extra recover call, HEAD unchanged, marker removed,
+run.json (attempt budget) byte-identical, nothing created inside the checkout. Targeted:
+`Ran 1 test … OK`; `.ai/bin/ai-check`: 186 tests OK. docs/workflow.md recovery contract and
+vault agents-flow.md recovery diagram + bullet updated. The test's recover-calls file
+already exists from the earlier pipeline stop, so "no recovery session" is asserted as an
+unchanged call count. Limitation: path check only, not OS isolation; knowledge dir is
+checked by the resumed ai-pipeline, the watchdog is T005.
 
 ## T005 — Same check for the watchdog host copy, install and runtime (OR-02)
 Status: TODO

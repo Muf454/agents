@@ -1495,6 +1495,37 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(self.recovery_calls()), calls)  # no AI consulted
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
+    def test_recover_state_root_unsafe_escalates_before_reading_the_manifest(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        budget = manifest.read_text()
+        calls = len(self.recovery_calls())
+        last_error = self.project / '.ai/local/last-error'
+        marker = self.project / '.ai/local/pipeline.active'
+        for state, message in ((self.project / 'state', 'overlaps the checkout'),
+                               ('relative/state', 'AI_STATE_DIR must be an absolute path')):
+            with self.subTest(state=state):
+                last_error.write_text('Claude session failed for T001\n')
+                marker.write_text('999999\n')
+                head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+                before = self.notifications().count('⛔ STOPPED, needs you')
+                result = self.tool('ai-recover', '--stage', 'implementation', expected=1,
+                                   AI_AUTO_RECOVER='1', AI_STATE_DIR=str(state))
+                self.assertIn('escalated to the human', result.stderr)
+                error = last_error.read_text()
+                self.assertIn(message, error)
+                self.assertIn('Claude session failed for T001', error)
+                stops = [line for line in self.notifications().splitlines() if '⛔ STOPPED, needs you' in line]
+                self.assertEqual(len(stops) - before, 1)
+                self.assertIn(message, stops[-1])
+                self.assertEqual(len(self.recovery_calls()), calls)  # no recovery Claude session
+                self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+                self.assertFalse(marker.exists())
+                self.assertEqual(manifest.read_text(), budget)  # attempt budget untouched
+                self.assertFalse((self.project / 'state').exists())
+
     def test_tier1_checkpoint_rejects_hook_changed_content(self):
         self.ready()
         hook = self.project / '.git/hooks/pre-commit'

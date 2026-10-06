@@ -12,6 +12,11 @@
   clean-tree check; `push()` runs `publish_ready` after every attempt (failed or successful)
   before the retry wait, so a push hook's filtered commit is reported as an integrity stop
   (ai-recover escalates) rather than "git push failed (3 tries)".
+- T003 (OR-02 core): ai-run/ai-pipeline refuse an overlapping or relative host state
+  directory before any agent; helpers fail closed.
+- T004 (OR-02, recovery): `scripts/ai-recover` checks the state directory before reading the
+  run manifest and escalates (config error + original stop reason) without a Claude
+  session, commit or attempt.
 
 Batch 1 (flow hardening, T001–T017) was merged via PR #11; its
 records are in Git history. This branch (`feature/evidence-or01-or02`, from origin/master
@@ -24,6 +29,7 @@ d6038f6) plans backlog items OR-01 (committed bytes on every accepted checkpoint
 Baseline before planning: `.ai/bin/ai-check` (shell syntax + 168 unittest tests).
 After T001: `.ai/bin/ai-check` PASS, 172 tests (2026-10-06T05:36:13Z).
 After T002: `.ai/bin/ai-check` PASS, 179 tests.
+After T004: `.ai/bin/ai-check` PASS, 186 tests (2026-10-06).
 
 ## Open assumptions (for the plan review and Zack)
 - Overlap is bidirectional (a state root containing the checkout/knowledge dir is refused).
@@ -67,10 +73,19 @@ requires the section to start with these words).
    and `AI_STATE_DIR=~/notes/state` expect "overlaps the knowledge directory";
    `AI_STATE_DIR=relative` expects "AI_STATE_DIR must be an absolute path". With
    `AI_STATE_DIR` unset (default location) both run normally.
-6. Later tasks add steps for ai-recover and the watchdog.
+6. Recovery refusal (T004): in that scratch project, let an approved
+   `ai-pipeline --approved --base main --no-pr` stop (e.g. a failing check) with the default
+   state directory, then run `AI_STATE_DIR="$PWD/host-state" AI_AUTO_RECOVER=1
+   .ai/bin/ai-recover --stage implementation`: expect exit 1 with "escalated to the human:
+   the host state directory is not safe for recovery.", one "⛔ STOPPED, needs you" message
+   naming "overlaps the checkout" and the original stop reason, the same text in
+   `.ai/local/last-error`, no Claude session, no new commit, no `.ai/local/pipeline.active`,
+   and an unchanged `attempts` in the default state dir's `run.json`. `AI_STATE_DIR=relative`
+   gives "AI_STATE_DIR must be an absolute path" the same way.
+7. A later task adds steps for the watchdog.
 
 ## Human todos
 None.
 
 ## Next action
-The pipeline continues with T003.
+The pipeline continues with T005.

@@ -328,7 +328,10 @@ write): approved gate digest, branch, arguments and the attempt counter. Recover
 its authority only from there, never from checkout files. `stop()` re-verifies the gate
 digest against the pipeline's in-memory approved digest and only then execs
 `ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
-(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: current gate
+(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: before reading
+the manifest, the host state directory must pass `state-root-check` for the checkout
+(absolute, no overlap); otherwise it escalates with the configuration error plus the
+original stop reason, without a Claude session, commit or attempt; current gate
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
@@ -356,7 +359,7 @@ default unless you changed it). `--recover` only works from the installed host c
 from the checkout it refuses and reports (a human running checkout scripts trusts them,
 as with `ai-pipeline`; the protected path is the timer's host copy). Order in
 `ai-recover`: take the lock (a rejected second process exits quietly and touches neither
-`last-error` nor the marker), reserve the attempt, then publish the marker; TERM/INT/HUP
+`last-error` nor the marker), check the state directory, reserve the attempt, then publish the marker; TERM/INT/HUP
 handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
 (HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
 filters and staged mode changes). The recovery decision must be exactly one JSON object

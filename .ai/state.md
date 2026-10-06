@@ -4,12 +4,12 @@ Project: agents
 Branch: feature/evidence-or01-or02
 Phase: implementing
 Current task: none
-Last completed task: T003
-Tasks complete: 3
-Tasks remaining: 3
-Last validation: PASS at 2026-10-06T06:39:41Z
+Last completed task: T004
+Tasks complete: 4
+Tasks remaining: 2
+Last validation: PASS at 2026-10-06 (ai-check, 186 tests, T004)
 Blocked: no
-Next action: Continue queue; see task results for any blockers
+Next action: Implement T005
 Last updated: 2026-10-06T06:39:41Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
