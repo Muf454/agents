@@ -58,3 +58,4 @@
 | 2026-10-06T07:33:53Z | runner | T006 | completed | PASS | d9d3558 | Claude checkpointed; continuing queue |
 | 2026-10-06T07:42:00Z | runner | none | queue complete; ready for independent review | PASS | 66a1753 | Human acceptance remains |
 | 2026-10-06T07:45:34Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/14 | PASS | 329d112 | Human acceptance and merge remain |
+| 2026-10-06T11:20Z | claude | T001 | DONE (flow batch 2, FL-01 helpers): deps-status, deps-record, tree-snapshot in workflow.py; template ci-setup declaration comments | deps_status 7 OK; ai-check 195 OK | (this commit) | no caller yet (T002/T003); no flow-chart change |

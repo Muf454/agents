@@ -1488,6 +1488,142 @@ def committed_matches_worktree(arguments):
                 fail(f'Committed content of {name} differs from the validated file on disk.')
 
 
+DEPS_STAMP = '.ai/local/deps.json'
+DEPS_LOCKFILES = ('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock',
+                  'bun.lock', 'bun.lockb', 'requirements*.txt', 'poetry.lock', 'uv.lock',
+                  'Pipfile.lock', 'Gemfile.lock', 'go.sum', 'Cargo.lock', 'composer.lock')
+DEPS_DECLARATION = re.compile(r'^# ?ai-deps-(inputs|outputs):(.*)$', re.M)
+
+
+def checkout_root():
+    return Path(git('rev-parse', '--show-toplevel').decode().strip()).resolve()
+
+
+def deps_inside(root, token, path):
+    """Declared paths stay inside the checkout, also after resolving symlinks."""
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        fail(f'Dependency path {token!r} in .ai/ci-setup leaves the checkout.')
+
+
+def deps_files(root, tokens):
+    """Existing files matched by relative paths/globs (directories: every file below)."""
+    found = set()
+    for token in tokens:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        matches = sorted(root.glob(token)) if re.search(r'[*?[]', token) else [root / token]
+        for match in matches:
+            if not match.exists():
+                continue
+            deps_inside(root, token, match)
+            below = [match] if not match.is_dir() else \
+                [Path(top) / name for top, _, names in os.walk(match) for name in names]
+            for path in below:
+                deps_inside(root, token, path)
+                if path.is_file():
+                    found.add(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def deps_spec(root):
+    """(setup sha, {input path: sha}, [output dirs]) from .ai/ci-setup's declarations."""
+    setup = root / '.ai/ci-setup'
+    if not setup.is_file():
+        fail('Missing .ai/ci-setup.')
+    data = setup.read_bytes()
+    declared = {'inputs': [], 'outputs': []}
+    for kind, value in DEPS_DECLARATION.findall(data.decode(errors='replace')):
+        declared[kind] += value.split()
+    inputs = deps_files(root, declared['inputs'] or DEPS_LOCKFILES)
+    outputs = declared['outputs'] or (['node_modules'] if (root / 'package.json').is_file() else [])
+    for token in outputs:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        deps_inside(root, token, root / token)
+    return file_sha(data), {path: file_sha((root / path).read_bytes()) for path in inputs}, outputs
+
+
+def deps_status(arguments):
+    """'current' or 'stale <reason>': must the host run .ai/ci-setup? No stamp is always
+    stale, even without inputs, so a configured installer runs at least once."""
+    root = checkout_root()
+    setup, inputs, outputs = deps_spec(root)
+    try:
+        stamp = json.loads((root / DEPS_STAMP).read_text())
+    except FileNotFoundError:
+        stamp = None
+        reason = 'no dependency stamp (.ai/local/deps.json)'
+    except (OSError, ValueError):
+        stamp = None
+        reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+    if stamp is not None:
+        recorded = stamp.get('inputs') if isinstance(stamp, dict) else None
+        if not isinstance(recorded, dict):
+            reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+        elif stamp.get('setup') != setup:
+            reason = '.ai/ci-setup changed'
+        elif recorded != inputs:
+            changes = [f'added {p}' for p in sorted(inputs.keys() - recorded.keys())]
+            changes += [f'removed {p}' for p in sorted(recorded.keys() - inputs.keys())]
+            changes += [f'changed {p}' for p in sorted(inputs.keys() & recorded.keys())
+                        if inputs[p] != recorded[p]]
+            reason = 'inputs changed: ' + ', '.join(changes)
+        else:
+            missing = [token for token in outputs if not (root / token).exists()]
+            reason = 'missing output ' + ', '.join(missing) if missing else None
+    print(f'stale {reason}' if reason else 'current')
+
+
+def deps_record(arguments):
+    root = checkout_root()
+    setup, inputs, _ = deps_spec(root)
+    (root / '.ai/local').mkdir(parents=True, exist_ok=True)
+    atomic(root / DEPS_STAMP, json.dumps({'setup': setup, 'inputs': inputs}, indent=2, sort_keys=True) + '\n')
+
+
+def snapshot_put(digest, *parts):
+    for part in parts:
+        part = part if isinstance(part, bytes) else str(part).encode()
+        digest.update(len(part).to_bytes(8, 'big') + part)
+
+
+def tree_snapshot(root):
+    """One hash over HEAD, the index and every non-ignored path (kind, mode, bytes) outside
+    .ai/local/; submodules recursively. Equal before/after a command proves it changed no
+    tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
+    Ignored paths (installed dependencies) are deliberately not covered."""
+    digest = hashlib.sha256()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
+    except subprocess.CalledProcessError:
+        head = b'no HEAD'
+    snapshot_put(digest, b'head', head, b'index', git('diff', '--cached', '--binary', cwd=root))
+    gitlinks = set()
+    for entry in git('ls-files', '--stage', '-z', cwd=root).split(b'\0'):
+        if entry.startswith(b'160000 '):
+            gitlinks.add(entry.split(b'\t', 1)[1])
+    listed = git('ls-files', '--cached', '--others', '--exclude-standard', '-z', cwd=root)
+    for raw in sorted({entry for entry in listed.split(b'\0') if entry}):
+        name = raw.rstrip(b'/')
+        if name == b'.ai/local' or name.startswith(b'.ai/local/'):
+            continue
+        path = Path(root) / os.fsdecode(name)
+        if name in gitlinks or raw.endswith(b'/'):  # submodule or untracked nested repository
+            initialised = (path / '.git').exists() and not path.is_symlink()
+            snapshot_put(digest, name, b'repo', tree_snapshot(path) if initialised else b'uninitialised')
+        elif path.is_symlink():
+            snapshot_put(digest, name, b'link', os.fsencode(os.readlink(path)))
+        elif path.is_file():
+            snapshot_put(digest, name, b'file', path.stat().st_mode, file_sha(path.read_bytes()))
+        elif path.is_dir():
+            snapshot_put(digest, name, b'dir', path.stat().st_mode)
+        else:
+            snapshot_put(digest, name, b'missing')
+    return digest.hexdigest()
+
+
 def finish_summary(arguments):
     """The final notification: what was delivered and the human's todo list."""
     url, reviews, unresolved = arguments[0], arguments[1], arguments[2] == '1'
@@ -1771,6 +1907,12 @@ def main():
         committed_matches_worktree(arguments)
     elif command == 'recover-decision':
         recover_decision(arguments)
+    elif command == 'deps-status':
+        deps_status(arguments)
+    elif command == 'deps-record':
+        deps_record(arguments)
+    elif command == 'tree-snapshot':
+        print(tree_snapshot(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':

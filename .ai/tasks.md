@@ -13,7 +13,7 @@ frontmatter date) in the SAME task; T007 is only the final docs audit. Revised a
 `ai-run` and before recovery validation; no tracked-file logging) and tasks split.
 
 ## T001 — Dependency freshness, stamp and tree snapshot helpers (FL-01)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -79,7 +79,19 @@ Targeted: `python3 -m unittest discover -s tests -k deps_status` (output must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Done 2026-10-06. scripts/lib/workflow.py: `deps_spec`, `deps-status`, `deps-record`,
+`tree-snapshot` (+ `checkout_root`). Declarations are lines starting `# ai-deps-inputs:` /
+`# ai-deps-outputs:` (`^# ?ai-deps-…`; indented example lines in the template do not count);
+inputs may be paths, globs or directories (every file below); missing declared inputs are
+simply absent from the map, so adding them makes it stale. Missing `.ai/ci-setup` → error.
+Stale reasons: `no dependency stamp (.ai/local/deps.json)`, `unreadable dependency stamp …`,
+`.ai/ci-setup changed`, `inputs changed: added/removed/changed <path>`, `missing output <dir>`.
+`tree-snapshot` hashes `git rev-parse HEAD`, `git diff --cached --binary`, and each
+`ls-files --cached --others --exclude-standard` path (kind, st_mode, content sha / link
+target / missing marker) except `.ai/local/`; gitlinks and untracked nested repos are
+snapshotted recursively (uninitialised → marker). Template ci-setup: comment lines only.
+Tests: 7 `deps_status` tests (declared, defaults, no lockfiles, outside paths, tree snapshot,
+submodules, template). Evidence: `-k deps_status` Ran 7 OK; `.ai/bin/ai-check` Ran 195 OK.
 
 ## T002 — ai-run installs dependencies before its first task (FL-01)
 Status: TODO

@@ -3157,6 +3157,156 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     self.assertTrue(os.access(script, os.X_OK),
                                     f'{script.name} has shebang but is not executable')
 
+    def deps_fixture(self, setup_text):
+        (self.project / '.ai').mkdir(exist_ok=True)
+        (self.project / '.ai/ci-setup').write_text(setup_text)
+
+    def deps(self):
+        return self.helper('deps-status').stdout.strip()
+
+    def test_deps_status_declared_inputs_and_outputs(self):
+        self.deps_fixture('#!/usr/bin/env bash\n# ai-deps-inputs: deps.lock extra/*.lock\n'
+                          '# ai-deps-outputs: vendor-deps\nmkdir -p vendor-deps\n')
+        (self.project / 'deps.lock').write_text('one\n')
+        (self.project / 'vendor-deps').mkdir()
+        self.assertEqual(self.deps(), 'stale no dependency stamp (.ai/local/deps.json)')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        recorded = json.loads((self.project / '.ai/local/deps.json').read_text())
+        self.assertEqual(list(recorded['inputs']), ['deps.lock'])
+        (self.project / 'deps.lock').write_text('two\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: changed deps.lock')
+        self.helper('deps-record')
+        (self.project / 'extra').mkdir()
+        (self.project / 'extra/a.lock').write_text('a\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: added extra/a.lock')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'extra/a.lock').unlink()
+        self.assertEqual(self.deps(), 'stale inputs changed: removed extra/a.lock')
+        self.helper('deps-record')
+        with (self.project / '.ai/ci-setup').open('a') as file:
+            file.write('true\n')
+        self.assertEqual(self.deps(), 'stale .ai/ci-setup changed')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'vendor-deps').rmdir()
+        self.assertEqual(self.deps(), 'stale missing output vendor-deps')
+
+    def test_deps_status_default_lockfiles_and_node_modules(self):
+        self.deps_fixture((ROOT / 'templates/.ai/ci-setup').read_text())
+        (self.project / 'package.json').write_text('{}\n')
+        (self.project / 'package-lock.json').write_text('{"lockfileVersion": 3}\n')
+        (self.project / 'requirements-dev.txt').write_text('pytest\n')
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'stale missing output node_modules')
+        recorded = json.loads((self.project / '.ai/local/deps.json').read_text())
+        self.assertEqual(sorted(recorded['inputs']), ['package-lock.json', 'requirements-dev.txt'])
+        (self.project / 'node_modules').mkdir()
+        (self.project / '.ai/local/deps.json').unlink()
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'package-lock.json').write_text('{"lockfileVersion": 3, "x": 1}\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: changed package-lock.json')
+
+    def test_deps_status_installer_without_lockfiles_runs_once(self):
+        self.deps_fixture('#!/usr/bin/env bash\necho installing\n')
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        self.assertEqual(self.deps(), 'current')
+        self.assertEqual(json.loads((self.project / '.ai/local/deps.json').read_text())['inputs'], {})
+
+    def test_deps_status_rejects_paths_outside_the_checkout(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'secret.lock').write_text('x\n')
+        (self.project / 'escape.lock').symlink_to(outside / 'secret.lock')
+        (self.project / 'escape-dir').symlink_to(outside)
+        cases = (('# ai-deps-inputs: ../outside/secret.lock', 'must be relative'),
+                 (f'# ai-deps-inputs: {outside}/secret.lock', 'must be relative'),
+                 ('# ai-deps-outputs: ../vendor', 'must be relative'),
+                 ('# ai-deps-inputs: escape.lock', 'leaves the checkout'),
+                 ('# ai-deps-inputs: *.lock', 'leaves the checkout'),
+                 ('# ai-deps-outputs: escape-dir', 'leaves the checkout'))
+        for declaration, message in cases:
+            with self.subTest(declaration=declaration):
+                self.deps_fixture(f'#!/usr/bin/env bash\n{declaration}\n')
+                for command in ('deps-status', 'deps-record'):
+                    result = self.helper(command, expected=1)
+                    self.assertIn(message, result.stderr)
+                self.assertFalse((self.project / '.ai/local/deps.json').exists())
+
+    def tree_snapshot(self):
+        return self.helper('tree-snapshot').stdout.strip()
+
+    def test_deps_status_tree_snapshot_covers_project_files(self):
+        (self.project / '.gitignore').write_text('ignored/\n')
+        (self.project / 'a.txt').write_text('one\n')
+        self.commit()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        (self.project / 'a.txt').write_text('dirty\n')
+        seen = [self.tree_snapshot()]
+        self.assertEqual(self.tree_snapshot(), seen[0])
+        (self.project / 'ignored').mkdir()
+        (self.project / 'ignored/dep.js').write_text('installed\n')
+        (self.project / '.ai/local').mkdir(parents=True)
+        (self.project / '.ai/local/deps.log').write_text('log\n')
+        self.assertEqual(self.tree_snapshot(), seen[0])
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+
+        changed(lambda: (self.project / 'a.txt').write_text('dirty again\n'))
+        changed(lambda: (self.project / 'a.txt').chmod(0o755))
+        changed(lambda: self.run_cmd(['git', 'add', '--', 'a.txt']))
+        changed(lambda: self.run_cmd(['git', 'commit', '-qm', 'change']))
+        changed(lambda: (self.project / 'new.txt').write_text('untracked\n'))
+        changed(lambda: (self.project / 'a.txt').unlink())
+
+    def test_deps_status_tree_snapshot_covers_submodules(self):
+        origin = self.base / 'sub-origin'
+        origin.mkdir()
+
+        def sub_git(cwd, *args):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=cwd, env=self.env,
+                           check=True, capture_output=True)
+        sub_git(origin, 'init', '-q', '-b', 'main')
+        (origin / 'file.txt').write_text('committed\n')
+        sub_git(origin, 'add', 'file.txt')
+        sub_git(origin, 'commit', '-qm', 'sub')
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), 'sub'])
+        self.commit('add submodule')
+        first = self.tree_snapshot()
+        self.assertEqual(self.tree_snapshot(), first)
+        seen = [first]
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+
+        sub = self.project / 'sub'
+        changed(lambda: (sub / 'file.txt').write_text('modified\n'))
+        changed(lambda: (sub / 'file.txt').write_text('modified again\n'))
+        changed(lambda: (sub_git(sub, 'add', 'file.txt'), sub_git(sub, 'commit', '-qm', 'move')))
+
+    def test_deps_status_template_ci_setup(self):
+        template = ROOT / 'templates/.ai/ci-setup'
+        self.run_cmd(['bash', '-n', str(template)])
+        result = self.run_cmd(['bash', str(template)])
+        self.assertIn('installing nothing', result.stdout)
+        text = template.read_text()
+        self.assertIn('# ai-deps-inputs:', text)
+        self.assertIn('# ai-deps-outputs:', text)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ['.git'])
+
 
 class DocsConsistencyTest(unittest.TestCase):
     """R10: README.md and docs/workflow.md must describe what the code does."""
