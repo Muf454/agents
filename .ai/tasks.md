@@ -392,7 +392,7 @@ Ran 222 tests, OK (590 s). Vault flow chart (updated 2026-10-06), hub Log and hu
 done. Limit: the real systemd path is only exercised through a mock systemctl.
 
 ## T007 — Final docs audit for batch 2
-Status: TODO
+Status: DONE
 Dependencies: T001, T002, T003, T004, T005, T006
 Model: haiku
 
