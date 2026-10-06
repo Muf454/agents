@@ -2,7 +2,7 @@
 
 Project: agents
 Branch: feature/evidence-or01-or02
-Phase: planning (approved by human-delegate 2026-10-05; revised after plan review 2026-10-06)
+Phase: planning (approved by human-delegate 2026-10-05; revised after plan reviews 1 and 2, 2026-10-06)
 Current task: none
 Last completed task: none
 Tasks complete: 0

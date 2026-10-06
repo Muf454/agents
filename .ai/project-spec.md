@@ -16,11 +16,16 @@ gate", and OR-02's "don't advertise it as OS isolation".
     bookkeeping commit `chore(ai): record T… runner checkpoint` is made, together with a clean
     tree and `stamp verify`; and after the final `chore(ai): record review handoff` commit;
   - in `ai-pipeline`, before every independent review (`ai-review --base`) and as part of
-    `publish_ready` (before every push attempt and after each push).
+    `publish_ready`, which runs before every push attempt and after EVERY push outcome
+    (failed or successful), before the retry wait and before the terminal "push failed
+    (3 tries)" handling, so a hook mismatch on the last attempt is reported as an
+    integrity stop, not a push failure.
   A mismatch (clean/smudge filter, mode difference) stops with a clear reason containing
   "differs from the validated content" (an existing phrase `ai-recover` always escalates)
   plus the helper's own detail (file and kind of difference). Nothing is reset or
-  rewritten; the queue is not changed by the stop.
+  rewritten; the queue is not changed by the stop. Cleanliness is a precondition AT the
+  check (clean tree at the checkpoint); after the stop the runner's own bookkeeping
+  (its stop line in `.ai/run-log.md`) may leave that one file modified.
 - **OR-02 Disjoint authority roots.** The host state root used by `binding_dir()`
   (`AI_STATE_DIR`, else `$XDG_STATE_HOME/ai-toolkit`, else `~/.local/state/ai-toolkit`) is
   refused when:
@@ -60,11 +65,14 @@ agent); gate files (`.ai/bin`, `.ai/prompts`, `.ai/validate`, permissions).
 ## Acceptance
 - A clean-filter or mode mismatch in an ordinary agent commit stops `ai-run` before the next
   task and `ai-pipeline` before review/publication, with "differs from the validated content";
-  so does a mismatch introduced only by the final handoff commit, and one introduced by a
-  push hook during a failed or a successful push (no further push attempt, no PR action, no
-  FINISHED notification; commits and queue preserved). Repositories with committed symlinks
-  and a submodule pass end to end. The mode test runs with `core.filemode=false` and asserts
-  a clean status with a HEAD/disk mode mismatch.
+  so does a mismatch introduced only by the final handoff commit (after ordinary task
+  checkpoints passed; the fixture filters only the `Phase: ready_for_review` line), and one
+  introduced by a push hook during a failed push, a successful push, or the third of three
+  failed pushes (file-specific integrity reason, no further push attempt, no recovery
+  Claude session, no PR action, no FINISHED notification; commits and queue preserved).
+  Repositories with committed symlinks and a submodule pass end to end. The mode test runs
+  with `core.filemode=false`; the check runs on a clean tree, and after the stop only
+  `.ai/run-log.md` is modified while HEAD (100644) and disk (executable) differ in mode.
 - Overlapping (direct path, symlink, knowledge dir) or relative state roots are refused with
   a message naming both paths, before any mock agent is invoked; defaults still work.
 - `ai-recover` with an unsafe state root escalates with the configuration error in
@@ -73,4 +81,6 @@ agent); gate files (`.ai/bin`, `.ai/prompts`, `.ai/validate`, permissions).
   (also when launched from outside Git or from another checkout) and writes no unit files
   and no host copy; the host watchdog's `--recover` refuses at runtime without calling
   `systemd-run` or Claude.
+- Each task that changes workflow behaviour updates the vault flow chart and its `updated:`
+  date in the same task; T006 audits docs and the chart at the end.
 - New tests in `tests/test_workflow.py`; all existing tests still pass; `.ai/validate` passes.

@@ -4,8 +4,10 @@ Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. N
 `.ai/bin`, `.ai/prompts` or other gate files. This run is started with
 `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the vault flow
 chart and hub Log can be updated. Source: vault backlog "Epic EV — Evidence integrity",
-OR-01 and OR-02. Every task leaves `.ai/bin/ai-check` passing. Revised after the Codex plan
-review (`.ai/reviews/plan.md`, P1–P4).
+OR-01 and OR-02. Every task leaves `.ai/bin/ai-check` passing. Revised after two Codex plan
+reviews (`.ai/reviews/plan.md`). Flow-chart rule (AGENTS.md, CLAUDE.md): every task that
+changes workflow behaviour updates the vault `agents-flow.md` (diagram/notes and its
+`updated:` frontmatter date) in the SAME task; T006 is only the final docs audit.
 
 ## T001 — Byte-check every accepted DONE checkpoint in ai-run (OR-01)
 Status: TODO
@@ -36,13 +38,22 @@ Test fixtures (P4): the mode case sets `git config core.filemode false` in the f
 (as `test_committed_mode_must_match_validated_file` does) so the executable file on disk
 does not show as a change; the mock session (new MOCK_CLAUDE mode in tests/test_workflow.py)
 writes the file executable and commits it with mode 100644 (e.g. `git update-index
---chmod=-x` after `git add`). The final-handoff case (P2) needs a mismatch that ONLY the
-final handoff commit introduces, e.g. a clean filter on `.ai/state.md` that rewrites only
-the text `ready_for_review` (present only when the final handoff commit is made; task
-checkpoints have `implementing`).
+--chmod=-x` after `git add`). The final-handoff case needs a mismatch that ONLY the final
+handoff commit introduces: a clean filter on `.ai/state.md` that rewrites only the phase
+field line, e.g. `sed -E 's/^Phase: ready_for_review$/Phase: tampered/'` (the phases
+comment in the state template also contains `ready_for_review`, so a global token filter
+would fire earlier; task checkpoints have `Phase: implementing`).
+Cleanliness (P4): the runner's EXIT handler appends a stop line to tracked
+`.ai/run-log.md`, so after a stop the tree is not fully clean. Tests assert cleanliness at
+the check boundary (the integrity check itself requires an empty `git status`; the stop
+reason must be the byte mismatch, not "uncommitted changes") and afterwards assert that
+`git status --porcelain` lists only `.ai/run-log.md`.
+Flow chart (same task): in the vault `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
+add to "Inside one task" (or the build/checks part) that every accepted task and the final
+handoff commit must contain exactly the validated bytes, else ⛔ stop; bump `updated:`.
 
 ### Likely affected modules
-scripts/ai-run, tests/test_workflow.py
+scripts/ai-run, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `committed_bytes_run`:
@@ -52,20 +63,24 @@ scripts/ai-run, tests/test_workflow.py
     validated content" and `T001.txt`; exactly one mock invocation (T002 never starts); the
     agent's commit and the bookkeeping commit are still in `git log` (nothing reset); T001
     stays DONE;
-  - mode case (P4): with `core.filemode=false`, the state the new check sees is asserted
-    by the test after the run: `git status --porcelain` empty, `git ls-tree HEAD` shows
-    100644 for the file while it is executable on disk (`os.access(..., os.X_OK)`); `ai-run`
-    exits 1 with "differs from the validated content" and the message names the mode; no
-    tier-1 "the session did not commit" checkpoint commit exists;
-  - final handoff only (P2): the filter on `.ai/state.md` passes every task checkpoint;
-    `ai-run` exits 1 at the final handoff with "differs from the validated content" naming
-    `.ai/state.md`; all tasks stay DONE; the `chore(ai): record review handoff` commit is
-    still HEAD (not reset); no "All tasks done" notification;
+  - mode case: with `core.filemode=false`; `ai-run` exits 1 with "differs from the
+    validated content" and the message names the mode (so the check ran on a clean tree,
+    not the "uncommitted changes" branch); afterwards `git status --porcelain` lists only
+    `.ai/run-log.md` (the EXIT handler's stop line); `git ls-tree HEAD` shows 100644 for the
+    file while it is executable on disk (`os.access(..., os.X_OK)`); no tier-1 "the session
+    did not commit" checkpoint commit exists;
+  - final handoff only: the phase-line filter on `.ai/state.md` with a two-task queue;
+    first assert both ordinary task checkpoints passed (both `chore(ai): record T00N runner
+    checkpoint` commits exist, both tasks DONE, two "✅ Done" notifications); then `ai-run`
+    exits 1 at the final handoff with "differs from the validated content" naming
+    `.ai/state.md`; the `chore(ai): record review handoff` commit is still HEAD (not reset);
+    afterwards only `.ai/run-log.md` is dirty; no "All tasks done" notification;
   - valid repo: a committed relative symlink plus a submodule (fixture repo added with
     `git -c protocol.file.allow=always submodule add`, committed before the run) → the queue
     completes (`tasks complete`), tree clean.
 - Existing `test_committed_content_must_match_validated_files` and
   `test_committed_mode_must_match_validated_file` still pass.
+- Vault flow chart shows the per-task/final-handoff byte check; `updated:` date bumped.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k committed_bytes_run` (output must say `Ran N tests`, N ≥ 1).
@@ -93,8 +108,15 @@ on failure write `Committed content differs from the validated content: <detail>
 `elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"`.
 Order: guard, review-info, disputes, clean tree, committed bytes, tasks, review current,
 stamp (committed bytes before "review current", so a hook commit with filtered bytes is
-reported as a byte mismatch). `push()` already calls `publish_ready` before every attempt
-and after the push; no other behaviour change.
+reported as a byte mismatch). (3) `push()` (~line 157): today a failed attempt goes
+straight to the retry wait, and the third failure writes `git push failed (3 tries)` and
+stops WITHOUT re-checking, so a hook that changed committed bytes during the last attempt
+is reported as a plain push failure (which recovery may treat as transient). Restructure
+so `publish_ready "$stage"` runs after EVERY push outcome (success or failure), before
+the retry wait and before the terminal "3 tries" failure handling; e.g. per attempt:
+`publish_ready; if git push …; then ok=1; fi; publish_ready; (( ok )) && break; try 3 →
+failure stop; sleep`. Keep the pre-attempt check and the remote-equals-HEAD check after
+success.
 Test ideas: publish case: commit (before the run) a `.gitattributes` clean filter that
 applies only to `.ai/reviews/current.md`; the pre-review check passes, the host commit
 `record independent review` stores filtered bytes, so `publish_ready` must stop before any
@@ -102,11 +124,18 @@ push. Push-hook cases (P2): `.gitattributes` clean filter on `hooked.txt`; a
 `.git/hooks/pre-push` that, once (marker file), writes `hooked.txt` on disk, commits it
 (the filter changes the committed bytes; tree stays clean) and logs each invocation to a
 file; variant A exits 1 (failed push → the retry's `publish_ready` must stop), variant B
-exits 0 (successful push → the post-push `publish_ready` must stop). Use the bare origin
-from `add_origin()` and mock gh; `AI_SLEEP` is already mocked.
+exits 0 (successful push → the post-push `publish_ready` must stop); variant C: the hook
+counts invocations and exits 1 unchanged on the first two, and on the third writes and
+commits `hooked.txt` (filtered) and exits 1. Use the bare origin from `add_origin()` and
+mock gh; `AI_SLEEP` is already mocked. Run variant C with `AI_AUTO_RECOVER=1` so the test
+proves the stop escalates without a recovery Claude session (ai-recover's hard rule on
+"differs from the validated content").
+Flow chart (same task): vault `agents-flow.md` publish-checks node and bullet gain
+"committed bytes = validated files", checked before every review and after every push
+attempt (failed or successful); bump `updated:`.
 
 ### Likely affected modules
-scripts/ai-pipeline, tests/test_workflow.py
+scripts/ai-pipeline, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `committed_bytes_pipeline`:
@@ -124,9 +153,16 @@ scripts/ai-pipeline, tests/test_workflow.py
   - push hook, successful push (variant B): the same reason is recorded at stage `push`
     (after the push); hook ran once; no gh PR call; no FINISHED notification; commits and
     queue preserved;
+  - push hook, third attempt (variant C): the hook ran exactly 3 times; last-error is the
+    file-specific integrity reason ("committed content differs from the validated content"
+    naming `hooked.txt`), NOT "git push failed (3 tries)"; no `recover-calls` file (no
+    recovery Claude invocation); the hook's commit, every task commit and all DONE tasks
+    preserved; branch not on origin; no gh PR call; no FINISHED notification;
   - valid repo with a committed symlink and a submodule → pipeline finishes and opens the PR
     (mock gh).
-- Existing `publish` / `disputed_findings` / `triage_completion` tests still pass.
+- Existing `publish` / `disputed_findings` / `triage_completion` tests still pass
+  (including the push-retry tests: a harmless failed attempt still retries).
+- Vault flow chart publish checks updated; `updated:` date bumped.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k committed_bytes_pipeline` (output must say `Ran N tests`, N ≥ 1).
@@ -170,9 +206,13 @@ ai-run (`[[ -d ]]`, `cd -- "$2" && pwd -P`), store the resolved path in `run_arg
 `orig_args` (rebuild it so the manifest records the absolute path), and after `ai_root`
 run the same check before anything else (before the plan review's Codex call).
 ai-recover is T004; the watchdog is T005.
+Flow chart (same task): vault `agents-flow.md` gains the start check ("host state directory
+must be outside the checkout and the knowledge dir; else ⛔ stop before any agent");
+bump `updated:`.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflow.py
+scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflow.py,
+vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `state_root`:
@@ -192,6 +232,7 @@ scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflo
     ai-pipeline with a relative `--knowledge-dir` records the absolute real path in the run
     manifest `args`.
 - All existing tests still pass (fixture state root is a sibling of the project).
+- Vault flow chart shows the start check; `updated:` date bumped.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k state_root` (output must say `Ran N tests`, N ≥ 1).
@@ -221,9 +262,12 @@ ai-pipeline.'`. `escalate` writes `$reason` to `.ai/local/last-error`, notifies 
 clears the marker. No Claude session, no commit, no `ai-pipeline` exec. The checkout is
 checked (the knowledge dir is unknown here); the resumed ai-pipeline checks the knowledge
 dir (T003).
+Flow chart (same task): the auto-recovery diagram in vault `agents-flow.md` gains the
+check before the run manifest is read (unsafe state dir → escalate to you); bump
+`updated:`.
 
 ### Likely affected modules
-scripts/ai-recover, tests/test_workflow.py
+scripts/ai-recover, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `recover_state_root`: with an approved run recorded in a safe state dir, then
@@ -235,6 +279,7 @@ scripts/ai-recover, tests/test_workflow.py
   Claude session); no new commit; `pipeline.active` removed; the attempt budget in the safe
   state dir is unchanged.
 - Existing `recover` tests still pass.
+- Vault recovery diagram updated; `updated:` date bumped.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k recover_state_root` (output must say `Ran N tests`, N ≥ 1).
@@ -270,9 +315,12 @@ contains the configuration error (e.g. `auto-recovery refused: Host state direct
 overlaps the checkout …`), so the human is notified and `systemd-run` is never called.
 Uninstall stays unchanged. The watchdog does not check the knowledge dir (the resumed
 ai-pipeline does, T003).
+Flow chart (same task): the watchdog part of vault `agents-flow.md` notes that install and
+auto-recovery refuse a host copy or state dir overlapping the checkout (⛔ notified, no
+recovery started); bump `updated:`.
 
 ### Likely affected modules
-scripts/lib/watchdog.py, tests/test_workflow.py
+scripts/lib/watchdog.py, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
 - Tests named `watchdog_host_root` (mock `systemctl` as in
@@ -292,6 +340,7 @@ scripts/lib/watchdog.py, tests/test_workflow.py
     `recover-calls` (no Claude);
   - existing `test_watchdog_install_and_uninstall_timer` and watchdog recovery tests pass
     unchanged (default layout accepted).
+- Vault watchdog part updated; `updated:` date bumped.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k watchdog_host_root` (output must say `Ran N tests`, N ≥ 1).
@@ -300,15 +349,15 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 Pending.
 
-## T006 — Docs and flow chart for the new checks
+## T006 — Final docs audit for the new checks
 Status: TODO
 Dependencies: T002, T004, T005
 Model: sonnet
 
 ### Goal
-README, docs/workflow.md and the vault flow chart describe the OR-01/OR-02 stop points
-accurately (the behaviour visible in the flow changes: a check after every task and
-before review, the publish checks, a start check and the recovery/watchdog refusals).
+README and docs/workflow.md describe the OR-01/OR-02 stop points accurately; final audit
+and consolidation of the vault flow chart that T001–T005 already updated task by task,
+plus the PR's flow-chart line and manual testing instructions.
 
 ### Implementation notes
 docs/workflow.md: next to the review-provenance paragraph (~line 234) say the state root
@@ -323,11 +372,10 @@ LFS, `text=auto` with CRLF files, `ident`) stop with "differs from the validated
 README: same in the pipeline/publish description and the watchdog install section (~line
 630: the host copy and state directory must be outside the checkout). Add
 `docs_consistency` required-sentence assertions for the two key sentences. Vault
-`~/zWiki/zWiki/20 Projects/agents/agents-flow.md`: add "committed bytes = validated files"
-to the publish-checks node and bullet, a note that the same check runs after every task and
-before every review, and the start check on the state directory; update its `updated:`
-frontmatter date; append a dated line to the hub `agents.md` Log (never tick vault
-checkboxes). PR description: replace the handoff `## Flow chart` placeholder with a line
+`~/zWiki/zWiki/20 Projects/agents/agents-flow.md`: audit the per-task changes of T001–T005
+against the final code (consistent wording, no duplicates, `updated:` date current); fix
+only what is wrong or missing. Append a dated line to the hub `agents.md` Log (never tick
+vault checkboxes). PR description: replace the handoff `## Flow chart` placeholder with a line
 that still starts "Flow chart updated" (test
 `test_pr_body_flow_this_repo_declares_the_flow_chart` requires it), e.g.
 "Flow chart updated: OR-01/OR-02 checks added to agents-flow.md (date)". Update the
@@ -342,8 +390,9 @@ vault agents.md (Log)
 - Tests named `docs_consistency` pass, including the new required sentences.
 - Docs describe only implemented behaviour (cross-check against T001–T005 results) and do
   not call the state-root check isolation or sandboxing.
-- Vault flow chart (with its `updated:` date) and hub Log updated; handoff "Flow chart"
-  section starts with "Flow chart updated" and states what changed.
+- Vault flow chart audited (consistent with the code, `updated:` date current) and hub
+  Log updated; handoff "Flow chart" section starts with "Flow chart updated" and states
+  what changed.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output must say `Ran N tests`, N ≥ 1).
