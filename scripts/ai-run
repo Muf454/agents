@@ -96,6 +96,23 @@ dirty_beyond_records() {
 
 review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
 
+# An accepted checkpoint must hold exactly the bytes validation hashed (filters, hooks).
+# The helper compares EVERY tracked file, so call this after the bookkeeping commit, when
+# the workflow records are committed too. Stops without resetting anything.
+verify_checkpoint() {
+  local why
+  if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    why='uncommitted changes after the checkpoint'
+  elif ! ai_helper stamp verify >/dev/null 2>&1; then
+    why='validation stamp not current'
+  elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then
+    why=${why#Error: }
+  else
+    return 0
+  fi
+  ai_die "The checkpoint of $1 differs from the validated content: $why"
+}
+
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
 knowledge_prompt() {
@@ -234,6 +251,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     git commit -m 'chore(ai): record review handoff' >/dev/null
     ai_guard_verify
     # The stamp excludes metadata so this bookkeeping does not invalidate it.
+    verify_checkpoint 'final handoff'
     finished=yes
     [[ -n "${AI_PIPELINE:-}" ]] || ai_notify 'All tasks done and validated; ready for independent review.'
     printf '%s\n' 'Tasks complete and validation passed. Review with Codex; test and merge manually.'
@@ -281,8 +299,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
           ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
         ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
       fi
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
-      ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
@@ -295,4 +312,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
   git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
   ai_guard_verify
+  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
+  if [[ "$task_status" == DONE ]]; then
+    verify_checkpoint "$active_task"
+    ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")"
+  fi
 done

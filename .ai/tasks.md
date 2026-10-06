@@ -10,7 +10,7 @@ changes workflow behaviour updates the vault `agents-flow.md` (diagram/notes and
 `updated:` frontmatter date) in the SAME task; T006 is only the final docs audit.
 
 ## T001 — Byte-check every accepted DONE checkpoint in ai-run (OR-01)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -87,7 +87,16 @@ Targeted: `python3 -m unittest discover -s tests -k committed_bytes_run` (output
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+2026-10-06 (Claude, opus): `scripts/ai-run` gained `verify_checkpoint` (clean tree, `stamp
+verify`, `committed-matches-worktree`; else `ai_die "The checkpoint of <label> differs from
+the validated content: <detail>"`), called after each DONE task's bookkeeping commit and
+after the `record review handoff` commit (label "final handoff"), before `finished=yes`.
+BLOCKED tasks are not checked; tier-1 check unchanged. The "✅ Done" notification moved
+after the check, so a rejected checkpoint never reports Done. New MOCK_CLAUDE mode
+`exec-committed-644`; 4 tests `committed_bytes_run` (filter, mode, final handoff only,
+symlink + submodule accepted). Targeted: `Ran 4 tests … OK`. Gate: `.ai/bin/ai-check` PASS,
+172 tests (2026-10-06T05:36:13Z). Vault `agents-flow.md` "Inside one task" diagram + note
+updated, `updated: 2026-10-06`.
 
 ## T002 — Byte-check before review and in the publish checks (OR-01)
 Status: TODO

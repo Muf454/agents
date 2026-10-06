@@ -170,6 +170,10 @@ if mode not in ('no-progress', 'bad-format'):
         subprocess.run(['git','add','--','.ai/tasks.md','.ai/state.md',task_id+'.txt','.ai/validate'],check=True)
         if mode == 'tamper':
             subprocess.run(['git','add','--',os.environ['MOCK_TAMPER_PATH']],check=True)
+        if mode == 'exec-committed-644':
+            # Executable on disk, committed as 100644 (unseen with core.filemode=false).
+            pathlib.Path(task_id + '.txt').chmod(0o755)
+            subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
 if mode == 'bad-format':
     pathlib.Path('.ai/tasks.md').write_text('## T001 — broken\nStatus: MAGIC\n')
@@ -1494,6 +1498,78 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('filter')
         self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
         self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def subjects(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+
+    def only_run_log_dirty(self):
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout,
+                         ' M .ai/run-log.md\n')
+
+    def test_committed_bytes_run_stops_on_a_filtered_agent_commit(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        self.commit('filter')
+        self.tool('ai-run', '--approved', expected=1)
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('The checkpoint of T001 differs from the validated content', error)
+        self.assertIn('T001.txt', error)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text(), 'call\n')
+        subjects = self.subjects()
+        self.assertEqual(subjects[0], 'chore(ai): record T001 runner checkpoint')
+        self.assertIn('implement T001', subjects)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+        self.assertNotIn('✅ Done', self.notifications())
+        self.only_run_log_dirty()
+
+    def test_committed_bytes_run_stops_on_a_committed_mode_mismatch(self):
+        self.ready()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='exec-committed-644')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('differs from the validated content', error)
+        self.assertIn('Committed mode of T001.txt (100644)', error)
+        self.only_run_log_dirty()
+        self.assertTrue(self.run_cmd(['git', 'ls-tree', 'HEAD', 'T001.txt']).stdout.startswith('100644 '))
+        self.assertTrue(os.access(self.project / 'T001.txt', os.X_OK))
+        self.assertFalse([s for s in self.subjects() if 'the session did not commit' in s])
+
+    def test_committed_bytes_run_stops_on_a_filtered_final_handoff(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.gitattributes').write_text('.ai/state.md filter=phase\n')
+        # Only the final handoff's phase line is rewritten; task checkpoints say "implementing".
+        self.run_cmd(['git', 'config', 'filter.phase.clean',
+                      "sed -E 's/^Phase: ready_for_review$/Phase: tampered/'"])
+        self.commit('phase filter')
+        self.tool('ai-run', '--approved', expected=1)
+        subjects = self.subjects()
+        for task_id in ('T001', 'T002'):
+            self.assertIn(f'chore(ai): record {task_id} runner checkpoint', subjects)
+            self.assertEqual(self.helper('tasks', 'status', task_id).stdout.strip(), 'DONE')
+        self.assertEqual(self.notifications().count('✅ Done'), 2)
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('The checkpoint of final handoff differs from the validated content', error)
+        self.assertIn('.ai/state.md', error)
+        self.assertEqual(subjects[0], 'chore(ai): record review handoff')
+        self.only_run_log_dirty()
+        self.assertNotIn('All tasks done', self.notifications())
+
+    def test_committed_bytes_run_accepts_symlinks_and_submodules(self):
+        self.ready()
+        source = self.base / 'submodule-source'
+        source.mkdir()
+        for command in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']):
+            subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *command],
+                           cwd=source, env=self.env, check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(source), 'vendored'])
+        (self.project / 'target.txt').write_text('symlink target\n')
+        os.symlink('target.txt', self.project / 'link')
+        self.commit('symlink and submodule')
+        self.tool('ai-run', '--approved')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertIn('All tasks done', self.notifications())
 
     def test_finish_summary_lists_human_todos(self):
         self.ready()
