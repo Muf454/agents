@@ -1,59 +1,86 @@
-# Spec: flow hardening, batch 1
+# Spec: Evidence integrity: OR-01, OR-02
 
-Source: [[agents-backlog]] (vault), "Suggested first batch", plus Zack's decisions of
-2026-10-05 (recorded in the vault hub `agents.md`, Decisions). Every item fixes something
-observed in real runs or found by both reviews.
+Source: vault [[agents-backlog]], "Epic EV — Evidence integrity", items OR-01 and OR-02 (both
+P0, Source CODEX, "Suggested first batch" positions 1 and 2). Chosen and planned by Claude as
+Zack's delegate on 2026-10-05; the pipeline's Codex plan review gates it. Hub decisions
+respected: roles vs providers (no new provider assumptions), AD-5 (the watchdog only
+observes; `ai-recover` stays the single recovery executor), "auto-recovery never changes the
+gate", and OR-02's "don't advertise it as OS isolation".
 
 ## Requirements
-- **B1/E1 Shared tool contract**: one identical "How to work here" section in the runner,
-  triage and recovery prompt templates: Read/Grep/Glob for reading files, Edit/Write for
-  changes (no heredoc/sed edits), plain commands without `cd`, `git rm`/`git mv` for tracked
-  files, `.ai/bin/ai-task` to change a task
-  status; recovery gets the reading rules only (it is read-only). Checks: the full gate via
-  `.ai/bin/ai-check` plus a task's own targeted test command when it names one. Template
-  `permissions.allow` adds the approved read-only shell commands (ls, grep, cat, head, tail,
-  wc, echo; NOT sed, rg or find, which can write or execute through flags), `git rm`,
-  `git mv` and `.ai/bin/ai-task *`. New
-  script `ai-task` (`ai-task set T003 IN_PROGRESS|DONE|BLOCKED|TODO`, `ai-task show T003`)
-  wrapping the existing task helper; setup installs it.
-- **B6 Model rule**: templates say: choose each task's model by its own risk (haiku
-  mechanical, sonnet ordinary, opus for security/auth/RLS, concurrency/locking, destructive
-  data migrations); a task whose own earlier attempt failed validation or review is retried
-  on opus; review-fix tasks get a model by their own risk (no blanket promotion).
-- **R6 Human todos**: runner and triage prompts: never tick or untick checkboxes in the
-  knowledge base; append dated progress to the project's log instead.
-- **R1 Recovery completes the interrupted stage**: if a run stops during triage, the resume
-  must still enforce the triage rules (only workflow records changed since the triage
-  started; dispositions complete and fresh for the current review) and count the round
-  exactly once (the `chore(ai): record review triage` commit). Recovery must never commit
-  triage-stage leftovers as a generic checkpoint.
-- **R2 Publish invariants**: after every host commit and immediately before each push, the
-  pipeline requires: review current for HEAD (only workflow records changed since the
-  reviewed commit), validation stamp current, clean tree, all tasks DONE. After the push,
-  the remote branch head equals local HEAD.
-- **R3 Disputed findings**: when triage rejects any BLOCKER/MAJOR, Codex re-checks only
-  those findings against Claude's evidence (`ai-review --recheck`, read-only, medium effort
-  by default). Per finding: `withdrawn` or `upheld`. Any upheld finding is recorded as a durable dispute (never auto-resolved) and makes the PR
-  a draft whose body starts with a "Disputed findings" section (finding, Claude's reason,
-  Codex's answer); Zack resolves disputes at the PR. Re-check reports and dispute records are
-  host-written and digest-bound like other reviews.
-- **R4/R5 Toolkit version + upgrade**: setup writes `.ai/toolkit-version` (toolkit commit
-  and per-file SHA-256 of installed toolkit-owned files). `setup-project --upgrade PATH`
-  previews, `--upgrade --apply PATH` replaces toolkit-owned files (`.ai/bin/**`,
-  `.ai/prompts/**`) and keeps project-owned ones (`.ai/validate`, `.ai/ci-setup`,
-  `.ai/permissions.allow`, `.claude/settings.json`, CLAUDE.md, AGENTS.md, docs); it lists
-  template changes to project-owned files as advice, locally edited toolkit-owned files as
-  warnings, and reminds to reinstall the watchdog timer. README: upgrades go in their own PR.
-- **R10 Docs match the code** in README and docs/workflow.md (Codex listed: denials logged
-  not fatal; runner/recovery stage application files; the pipeline pushes and opens PRs;
-  provider-limit retries and recovery exist), with a short table of modes (interactive
-  Claude, ai-run, ai-pipeline, watchdog) and what each may do. Update the vault flow chart
-  `agents-flow.md` for R3 and R1.
+- **OR-01 Committed bytes on every accepted checkpoint.** `committed-matches-worktree`
+  (scripts/lib/workflow.py `committed_matches_worktree`) today runs only after the runner's
+  tier-1 checkpoint (scripts/ai-run ~line 280) and the recovery checkpoint (scripts/ai-recover
+  ~line 168). It must also run:
+  - in `ai-run`, after every task accepted as DONE (validation passed), once the runner's
+    bookkeeping commit `chore(ai): record T… runner checkpoint` is made, together with a clean
+    tree and `stamp verify`; and after the final `chore(ai): record review handoff` commit;
+  - in `ai-pipeline`, before every independent review (`ai-review --base`) and as part of
+    `publish_ready`, which runs before every push attempt and after EVERY push outcome
+    (failed or successful), before the retry wait and before the terminal "push failed
+    (3 tries)" handling, so a hook mismatch on the last attempt is reported as an
+    integrity stop, not a push failure.
+  A mismatch (clean/smudge filter, mode difference) stops with a clear reason containing
+  "differs from the validated content" (an existing phrase `ai-recover` always escalates)
+  plus the helper's own detail (file and kind of difference). Nothing is reset or
+  rewritten; the queue is not changed by the stop. Cleanliness is a precondition AT the
+  check (clean tree at the checkpoint); after the stop the runner's own bookkeeping
+  (its stop line in `.ai/run-log.md`) may leave that one file modified.
+- **OR-02 Disjoint authority roots.** The host state root used by `binding_dir()`
+  (`AI_STATE_DIR`, else `$XDG_STATE_HOME/ai-toolkit`, else `~/.local/state/ai-toolkit`) is
+  refused when:
+  - `AI_STATE_DIR` (or, when it is unset, a non-empty `XDG_STATE_HOME`) is a relative path;
+  - the root overlaps the checkout (equal, inside, or containing), comparing both the
+    absolute path as given and its real path (symlinks resolved; a not-yet-existing tail is
+    resolved through its nearest existing parent);
+  - the same overlap with the `--knowledge-dir` of `ai-run`/`ai-pipeline` (real path).
+  The checkout check is enforced inside `binding_dir()` (every host-state consumer fails
+  closed); the knowledge-dir check is a new helper command run by `ai-run` and `ai-pipeline`
+  right after `ai_root`, before any agent (Claude or Codex) launches. The check takes the
+  checkout as an explicit argument (never the caller's current directory). `ai-recover`
+  runs the checkout check after its escalation setup and before its first run-manifest
+  read, and escalates with the configuration error kept in the persisted stop reason
+  (`.ai/local/last-error`), without a recovery Claude session. `ai-pipeline` resolves
+  `--knowledge-dir` to its real absolute path at argument parsing (it must exist), passes
+  that to `ai-run` and records it in the run manifest arguments.
+- **OR-02 Watchdog host copy.** `ai-watchdog PROJECT --install-timer` refuses a host copy
+  directory (`$XDG_DATA_HOME/ai-toolkit/watchdog/<name>`; a relative `XDG_DATA_HOME` is
+  refused) or a state root that overlaps the TARGET checkout `PROJECT` (same rules; checked
+  against the supplied project, also when launched from outside Git or from another
+  checkout), before writing anything. At runtime `start_recovery` refuses (and notifies,
+  with the configuration error) when the running copy's directory overlaps the checkout by
+  real path or the state-root check fails, before the gate/manifest reads and without
+  calling `systemd-run`.
+- Defaults are unchanged: with no `AI_STATE_DIR`/`XDG_STATE_HOME` set and the project outside
+  `~/.local/state`, everything behaves as today.
+- Docs (README, docs/workflow.md) and the vault flow chart `agents-flow.md` describe the new
+  stop points; wording says this is a configuration check, not OS isolation.
 
 ## Non-goals
-Automated plan loop (E2), browser tests (B4), orchestrator, usage reserve; refactors.
+OS-level sandboxing; changing what the fingerprint hashes; Git LFS/eol-filter support (such
+repositories stop with the clear reason; documented); other backlog items (OR-03…); checking
+the watchdog against the knowledge directory (the resumed `ai-pipeline` does that before any
+agent); gate files (`.ai/bin`, `.ai/prompts`, `.ai/validate`, permissions).
 
 ## Acceptance
-Each requirement covered by tests in `tests/test_workflow.py` (mock claude/codex), including
-the family-run scenario for R1 (triage commit denied → stop → recovery → resume counts the
-round and enforces scope). `.ai/validate` passes.
+- A clean-filter or mode mismatch in an ordinary agent commit stops `ai-run` before the next
+  task and `ai-pipeline` before review/publication, with "differs from the validated content";
+  so does a mismatch introduced only by the final handoff commit (after ordinary task
+  checkpoints passed; the fixture filters only the `Phase: ready_for_review` line), and one
+  introduced by a push hook during a failed push, a successful push, or the third of three
+  failed pushes (file-specific integrity reason, no further push attempt, no recovery
+  Claude session, no PR action, no FINISHED notification; commits and queue preserved).
+  Repositories with committed symlinks and a submodule pass end to end. The mode test runs
+  with `core.filemode=false`; the check runs on a clean tree, and after the stop only
+  `.ai/run-log.md` is modified while HEAD (100644) and disk (executable) differ in mode.
+- Overlapping (direct path, symlink, knowledge dir) or relative state roots are refused with
+  a message naming both paths, before any mock agent is invoked; defaults still work.
+- `ai-recover` with an unsafe state root escalates with the configuration error in
+  `last-error` and the notification, before reading the manifest; no recovery Claude call.
+- `ai-watchdog PROJECT --install-timer` with an overlapping host copy/state root is refused
+  (also when launched from outside Git or from another checkout) and writes no unit files
+  and no host copy; the host watchdog's `--recover` refuses at runtime without calling
+  `systemd-run` or Claude.
+- Each task that changes workflow behaviour updates the vault flow chart and its `updated:`
+  date in the same task; T006 audits docs and the chart at the end.
+- New tests in `tests/test_workflow.py`; all existing tests still pass; `.ai/validate` passes.

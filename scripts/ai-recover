@@ -51,6 +51,13 @@ resume() {
   exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"
 }
 
+# Authority must come from a host state directory agent sessions can't write: check it
+# before the manifest is read. The resumed ai-pipeline also checks the knowledge dir.
+if ! check=$(ai_helper state-root-check 2>&1); then
+  reason="${check#Error: } (stopped during $stage: ${reason% })"
+  escalate 'the host state directory is not safe for recovery.' \
+    'set AI_STATE_DIR to an absolute directory outside the checkout, then rerun ai-pipeline.'
+fi
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
   escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
 # Reserve the attempt before anything that can be interrupted, then publish the marker:

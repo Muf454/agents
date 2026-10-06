@@ -183,6 +183,12 @@ The runner selects one eligible task per fresh Claude invocation. Claude reads
 state, reconciles interrupted work, marks IN_PROGRESS, implements, validates, records
 results, marks DONE, and commits. The runner reruns the full gate, verifies a clean
 checkpoint, records its own small state/log checkpoint, then starts the next session.
+Every accepted DONE checkpoint and the final handoff commit must contain exactly the bytes
+validation hashed (committed bytes equal to the validated files on disk), or the run stops with "differs
+from the validated content". Repositories using clean/smudge or eol filters (Git LFS,
+`text=auto` with CRLF files, `ident`) stop there too; they are not supported.
+The host state directory must be an absolute path outside the checkout and the knowledge
+directory (a configuration check, not OS isolation).
 BLOCKED tasks can be bypassed only by independent tasks with satisfied dependencies.
 
 No-progress, malformed state, CLI errors, timeouts, validation
@@ -255,9 +261,11 @@ tmux new -s my-app-ai
    and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. Without an `origin` remote or `gh`, it stops at a ready local branch.
-   Before every push attempt and after every push it re-checks that the review is
-   current for HEAD, validation is current, the tree is clean and all tasks are DONE,
-   and that origin's branch head equals HEAD; any mismatch stops the run.
+   Before every review it requires that the committed bytes equal the validated files.
+   Before and after every push attempt (failed or not) it re-checks that the review is
+   current for HEAD, validation is current, the tree is clean, the committed bytes
+   equal the validated files and all tasks are DONE, and after a push that origin's
+   branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
@@ -628,7 +636,9 @@ systemctl --user list-timers 'ai-watchdog-*'
 `--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
 `~/.config/systemd/user/` with the absolute checkout path, the given options and the
 installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and runs a copy of
-the scripts kept outside the checkout (rerun `--install-timer` after updating the toolkit) (so the timer
+the scripts kept outside the checkout (rerun `--install-timer` after updating the toolkit;
+it refuses, writing nothing, when that copy or the host state directory would lie inside the
+checkout or `XDG_DATA_HOME` is relative) (so the timer
 finds `claude`, `curl` and your notification command; the unit file is readable like your
 user config). Notification
 settings come from the user config described above. Existing projects need the new

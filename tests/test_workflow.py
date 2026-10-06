@@ -170,6 +170,10 @@ if mode not in ('no-progress', 'bad-format'):
         subprocess.run(['git','add','--','.ai/tasks.md','.ai/state.md',task_id+'.txt','.ai/validate'],check=True)
         if mode == 'tamper':
             subprocess.run(['git','add','--',os.environ['MOCK_TAMPER_PATH']],check=True)
+        if mode == 'exec-committed-644':
+            # Executable on disk, committed as 100644 (unseen with core.filemode=false).
+            pathlib.Path(task_id + '.txt').chmod(0o755)
+            subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
 if mode == 'bad-format':
     pathlib.Path('.ai/tasks.md').write_text('## T001 — broken\nStatus: MAGIC\n')
@@ -652,6 +656,66 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog('--uninstall-timer', expected=1)
         self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
 
+    def assert_install(self, cwd, expected, **env):
+        # Installs the timer for self.project while the caller's directory is cwd.
+        (self.mock_bin / 'systemctl').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n')
+        (self.mock_bin / 'systemctl').chmod(0o755)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-watchdog'), str(self.project), '--install-timer'],
+                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=25)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        units = self.config / 'systemd/user'
+        hosts = self.base / 'xdg-data/ai-toolkit/watchdog'
+        if expected:
+            self.assertFalse(units.exists() and any(units.iterdir()), result.stderr)
+            self.assertFalse(hosts.exists() and any(hosts.iterdir()), result.stderr)
+            self.assertFalse((self.base / 'systemctl.log').exists())
+        else:
+            self.assertEqual(len(list(units.iterdir())), 2)
+            self.watchdog('--uninstall-timer')
+            (self.base / 'systemctl.log').unlink()
+        return result.stderr
+
+    def test_watchdog_host_root_install_checks_the_target_checkout(self):
+        self.setup_project()
+        inside = str(self.project / '.ai/local/state')
+        plain = self.base / 'plain'
+        plain.mkdir()
+        other = self.base / 'other checkout'
+        other.mkdir()
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(other)], check=True, env=self.env)
+        for cwd in (plain, other):
+            with self.subTest(cwd=cwd.name):
+                error = self.assert_install(cwd, 2, AI_STATE_DIR=inside)
+                self.assertIn('Host state directory ' + inside, error)
+                self.assertIn('overlaps the checkout ' + str(self.project), error)
+                self.assert_install(cwd, 0)  # control: safe state dir
+        link = self.base / 'data-link'
+        link.symlink_to(self.project / '.ai/local')
+        for data in (str(self.project / '.ai/local/data'), str(link)):
+            with self.subTest(data=data):
+                error = self.assert_install(plain, 2, XDG_DATA_HOME=data)
+                self.assertIn('overlaps the checkout', error)
+                self.assertFalse((self.project / '.ai/local/ai-toolkit').exists())
+        self.assertIn('XDG_DATA_HOME must be an absolute path',
+                      self.assert_install(plain, 2, XDG_DATA_HOME='relative/data'))
+        self.assertFalse((plain / 'relative').exists())
+
+    def test_watchdog_host_root_recovery_refuses_a_state_dir_in_the_checkout(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1',
+                           AI_STATE_DIR=str(self.project / '.ai/local/state'))
+        notified = self.notifications().splitlines()
+        self.assertEqual(len(notified), 1)
+        self.assertIn('auto-recovery refused: Host state directory', notified[0])
+        self.assertIn('overlaps the checkout', notified[0])
+        self.assertFalse((self.base / 'systemd-run.log').exists())
+        self.assertFalse((self.base / 'recover-calls').exists())
+
     def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
         self.setup_project()
         self.watchdog_phase('implementing')
@@ -972,6 +1036,82 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(list(notes.iterdir()), [])  # Toolkit never edits notes itself.
         self.helper('tasks', 'complete')
         self.tool('ai-run', '--approved', '--knowledge-dir', str(notes / 'missing'), expected=1)
+
+    def assert_state_root_refused(self, state, message, *args):
+        for tool in ('ai-run', 'ai-pipeline'):
+            extra = ('--base', 'main', '--no-pr') if tool == 'ai-pipeline' else ()
+            result = self.tool(tool, '--approved', *extra, *args, expected=1, AI_STATE_DIR=str(state))
+            self.assertIn(message, result.stderr)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        for name in ('codex-calls', 'codex-plan-calls'):
+            self.assertFalse((self.base / name).exists())
+
+    def test_state_root_inside_checkout_is_refused_before_any_agent(self):
+        self.ready()
+        state = self.project / 'host state'
+        self.assert_state_root_refused(state, 'overlaps the checkout')
+        self.assertFalse(state.exists())
+        self.assert_state_root_refused(self.project, 'overlaps the checkout')
+        self.assert_state_root_refused(self.base, 'overlaps the checkout')
+
+    def test_state_root_symlinks_into_or_out_of_the_checkout_are_refused(self):
+        self.ready()
+        into = self.base / 'link into checkout'
+        into.symlink_to(self.project / '.ai')
+        self.assert_state_root_refused(into / 'state', 'overlaps the checkout')
+        outside = self.base / 'outside'
+        outside.mkdir()
+        out = self.project / 'link out'
+        out.symlink_to(outside)
+        self.assert_state_root_refused(out, 'overlaps the checkout')
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_state_root_overlapping_the_knowledge_dir_is_refused(self):
+        self.ready()
+        notes = self.base / 'notes'
+        knowledge = notes / 'kb'
+        knowledge.mkdir(parents=True)
+        for state in (knowledge / 'state', knowledge, notes):
+            self.assert_state_root_refused(state, 'overlaps the knowledge directory',
+                                           '--knowledge-dir', str(knowledge))
+        self.assertEqual(list(knowledge.iterdir()), [])
+
+    def test_state_root_relative_settings_are_refused(self):
+        self.ready()
+        self.assert_state_root_refused('relative/state', 'AI_STATE_DIR must be an absolute path')
+        for tool in ('ai-run', 'ai-pipeline'):
+            result = self.tool(tool, '--approved', expected=1, AI_STATE_DIR='', XDG_STATE_HOME='relative')
+            self.assertIn('XDG_STATE_HOME must be an absolute path', result.stderr)
+
+    def test_state_root_helpers_fail_closed_and_check_the_named_checkout(self):
+        self.ready()
+        self.env['AI_STATE_DIR'] = str(self.project / 'state')
+        (self.project / '.ai/reviews/current.md').write_text('<!-- Host evidence: HEAD abcdef0; saved now. -->\n')
+        for args in (('review-info',), ('run-manifest', 'gate')):
+            self.assertIn('overlaps the checkout', self.helper(*args, expected=1).stderr)
+        self.assertFalse((self.project / 'state').exists())
+        other = self.base / 'elsewhere'
+        other.mkdir()
+        check = ['python3', str(HELPER), 'state-root-check', '--checkout', str(self.project)]
+        result = subprocess.run(check, cwd=other, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f'overlaps the checkout {self.project}', result.stderr)
+        self.env['AI_STATE_DIR'] = str(other / 'state')
+        result = subprocess.run(check, cwd=other, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_state_root_default_xdg_and_relative_knowledge_dir_recorded_absolute(self):
+        self.ready()
+        notes = self.base / 'notes'
+        notes.mkdir()
+        real = os.path.realpath(notes)
+        self.env.update(AI_STATE_DIR='', XDG_STATE_HOME=str(self.base / 'xdg-state'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--knowledge-dir', '../notes',
+                  MOCK_KNOWLEDGE_DIR=real)
+        self.helper('tasks', 'complete')
+        manifest = json.loads(next((self.base / 'xdg-state/ai-toolkit').rglob('run.json')).read_text())
+        self.assertEqual(manifest['args'][manifest['args'].index('--knowledge-dir') + 1], real)
+        self.assertFalse((self.base / 'host-state').exists())
 
     def test_repeated_setup_with_toolkit_instructions_needs_no_merge_warning(self):
         self.setup_project()
@@ -1415,6 +1555,37 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(self.recovery_calls()), calls)  # no AI consulted
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
 
+    def test_recover_state_root_unsafe_escalates_before_reading_the_manifest(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        budget = manifest.read_text()
+        calls = len(self.recovery_calls())
+        last_error = self.project / '.ai/local/last-error'
+        marker = self.project / '.ai/local/pipeline.active'
+        for state, message in ((self.project / 'state', 'overlaps the checkout'),
+                               ('relative/state', 'AI_STATE_DIR must be an absolute path')):
+            with self.subTest(state=state):
+                last_error.write_text('Claude session failed for T001\n')
+                marker.write_text('999999\n')
+                head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+                before = self.notifications().count('⛔ STOPPED, needs you')
+                result = self.tool('ai-recover', '--stage', 'implementation', expected=1,
+                                   AI_AUTO_RECOVER='1', AI_STATE_DIR=str(state))
+                self.assertIn('escalated to the human', result.stderr)
+                error = last_error.read_text()
+                self.assertIn(message, error)
+                self.assertIn('Claude session failed for T001', error)
+                stops = [line for line in self.notifications().splitlines() if '⛔ STOPPED, needs you' in line]
+                self.assertEqual(len(stops) - before, 1)
+                self.assertIn(message, stops[-1])
+                self.assertEqual(len(self.recovery_calls()), calls)  # no recovery Claude session
+                self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+                self.assertFalse(marker.exists())
+                self.assertEqual(manifest.read_text(), budget)  # attempt budget untouched
+                self.assertFalse((self.project / 'state').exists())
+
     def test_tier1_checkpoint_rejects_hook_changed_content(self):
         self.ready()
         hook = self.project / '.git/hooks/pre-commit'
@@ -1494,6 +1665,187 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('filter')
         self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='dirty')
         self.assertIn('differs from the validated content', (self.project / '.ai/local/last-error').read_text())
+
+    def subjects(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+
+    def only_run_log_dirty(self):
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout,
+                         ' M .ai/run-log.md\n')
+
+    def test_committed_bytes_run_stops_on_a_filtered_agent_commit(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        self.commit('filter')
+        self.tool('ai-run', '--approved', expected=1)
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('The checkpoint of T001 differs from the validated content', error)
+        self.assertIn('T001.txt', error)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text(), 'call\n')
+        subjects = self.subjects()
+        self.assertEqual(subjects[0], 'chore(ai): record T001 runner checkpoint')
+        self.assertIn('implement T001', subjects)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+        self.assertNotIn('✅ Done', self.notifications())
+        self.only_run_log_dirty()
+
+    def test_committed_bytes_run_stops_on_a_committed_mode_mismatch(self):
+        self.ready()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='exec-committed-644')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('differs from the validated content', error)
+        self.assertIn('Committed mode of T001.txt (100644)', error)
+        self.only_run_log_dirty()
+        self.assertTrue(self.run_cmd(['git', 'ls-tree', 'HEAD', 'T001.txt']).stdout.startswith('100644 '))
+        self.assertTrue(os.access(self.project / 'T001.txt', os.X_OK))
+        self.assertFalse([s for s in self.subjects() if 'the session did not commit' in s])
+
+    def test_committed_bytes_run_stops_on_a_filtered_final_handoff(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.gitattributes').write_text('.ai/state.md filter=phase\n')
+        # Only the final handoff's phase line is rewritten; task checkpoints say "implementing".
+        self.run_cmd(['git', 'config', 'filter.phase.clean',
+                      "sed -E 's/^Phase: ready_for_review$/Phase: tampered/'"])
+        self.commit('phase filter')
+        self.tool('ai-run', '--approved', expected=1)
+        subjects = self.subjects()
+        for task_id in ('T001', 'T002'):
+            self.assertIn(f'chore(ai): record {task_id} runner checkpoint', subjects)
+            self.assertEqual(self.helper('tasks', 'status', task_id).stdout.strip(), 'DONE')
+        self.assertEqual(self.notifications().count('✅ Done'), 2)
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('The checkpoint of final handoff differs from the validated content', error)
+        self.assertIn('.ai/state.md', error)
+        self.assertEqual(subjects[0], 'chore(ai): record review handoff')
+        self.only_run_log_dirty()
+        self.assertNotIn('All tasks done', self.notifications())
+
+    def test_committed_bytes_run_accepts_symlinks_and_submodules(self):
+        self.ready()
+        source = self.base / 'submodule-source'
+        source.mkdir()
+        for command in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']):
+            subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *command],
+                           cwd=source, env=self.env, check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(source), 'vendored'])
+        (self.project / 'target.txt').write_text('symlink target\n')
+        os.symlink('target.txt', self.project / 'link')
+        self.commit('symlink and submodule')
+        self.tool('ai-run', '--approved')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertIn('All tasks done', self.notifications())
+
+    def no_pr_published(self):
+        self.assertEqual([c for c in self.gh_calls() if c[:2] in (['pr', 'create'], ['pr', 'edit'])], [])
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_committed_bytes_pipeline_stops_before_review(self):
+        self.ready(task('T001', 'DONE'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        (self.project / 'T001.txt').write_text('checkpointed implementation\n')
+        self.commit('done task, committed through a filter')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Pipeline stopped during review: Committed content differs from the validated content', result.stderr)
+        self.assertIn('T001.txt', (self.project / '.ai/local/last-error').read_text())
+        self.assertFalse((self.base / 'codex-calls').exists())
+        self.no_pr_published()
+
+    def test_committed_bytes_pipeline_publish_check_catches_a_filtered_review(self):
+        self.ready()
+        origin = self.add_origin()
+        (self.project / '.gitattributes').write_text('.ai/reviews/current.md filter=review\n')
+        self.run_cmd(['git', 'config', 'filter.review.clean', 'sed s/no.demonstrated.findings/flawless/'])
+        self.commit('review filter')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assertIn('Publish check failed at pull request preparation: committed content differs from the '
+                      'validated content', result.stderr)
+        self.assertIn('.ai/reviews/current.md', result.stderr)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual(self.gh_calls(), [])
+        self.no_pr_published()
+
+    def push_hook_commits_filtered_file(self, commit_on, exit_code):
+        """pre-push hook: on invocation number `commit_on` it commits hooked.txt through a clean
+        filter (committed bytes differ, tree stays clean); it always exits `exit_code`."""
+        (self.project / '.gitattributes').write_text('hooked.txt filter=hooked\n')
+        self.run_cmd(['git', 'config', 'filter.hooked.clean', 'sed s/original/tampered/'])
+        self.commit('hooked filter')
+        calls = self.base / 'hook-calls'
+        self.hook('pre-push', f'echo call >> "{calls}"\n'
+                              f'if [[ "$(grep -c call "{calls}")" == {commit_on} ]]; then\n'
+                              '  echo original > hooked.txt; git add hooked.txt; git commit -qm "hook: hooked.txt"\n'
+                              f'fi\nexit {exit_code}\n')
+        return calls
+
+    def assert_hooked_stop(self, calls, hook_runs):
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Publish check failed at push: committed content differs from the validated content', error)
+        self.assertIn('hooked.txt', error)
+        self.assertNotIn('3 tries', error)
+        self.assertEqual(calls.read_text().count('call'), hook_runs)
+        subjects = self.subjects()
+        self.assertEqual(subjects[0], 'hook: hooked.txt')
+        self.assertIn('implement T001', subjects)
+        self.helper('tasks', 'complete')
+        self.no_pr_published()
+
+    def test_committed_bytes_pipeline_failed_push_hook_commit_stops(self):
+        self.ready()
+        origin = self.add_origin()
+        calls = self.push_hook_commits_filtered_file(1, 1)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_hooked_stop(calls, 1)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertFalse((self.base / 'sleep.log').exists())  # no retry wait after the failed check
+
+    def test_committed_bytes_pipeline_successful_push_hook_commit_stops(self):
+        self.ready()
+        self.add_origin()
+        calls = self.push_hook_commits_filtered_file(1, 0)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_hooked_stop(calls, 1)
+
+    def test_committed_bytes_pipeline_third_push_attempt_escalates_without_recovery(self):
+        self.ready()
+        origin = self.add_origin()
+        calls = self.push_hook_commits_filtered_file(3, 1)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('escalated to the human', result.stderr)
+        self.assert_hooked_stop(calls, 3)
+        self.assertFalse((self.base / 'recover-calls').exists())
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20', '40'])
+
+    def test_committed_bytes_pipeline_harmless_failed_push_still_retries(self):
+        self.ready()
+        origin = self.add_origin()
+        marker = self.base / 'failed-once'
+        self.hook('pre-push', f'[[ -e "{marker}" ]] && exit 0\ntouch "{marker}"\nexit 1\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20'])
+        self.assertEqual(self.remote_head(origin), self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+
+    def test_committed_bytes_pipeline_accepts_symlinks_and_submodules(self):
+        self.ready()
+        origin = self.add_origin()
+        source = self.base / 'submodule-source'
+        source.mkdir()
+        for command in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']):
+            subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *command],
+                           cwd=source, env=self.env, check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(source), 'vendored'])
+        (self.project / 'target.txt').write_text('symlink target\n')
+        os.symlink('target.txt', self.project / 'link')
+        self.commit('symlink and submodule')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.remote_head(origin), self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.assertIn('🏁 FINISHED', self.notifications())
 
     def test_finish_summary_lists_human_todos(self):
         self.ready()
@@ -1731,7 +2083,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.hook('pre-push', 'echo sneaky > untracked.txt\nexit 1\n')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
         self.assertIn('Publish check failed at push: the checkout is not clean', result.stderr)
-        self.assertEqual((self.base / 'sleep.log').read_text().split(), ['20'])  # one retry wait, no 2nd push
+        self.assertFalse((self.base / 'sleep.log').exists())  # checked after the failed attempt, no retry
         self.assertEqual(self.remote_head(origin), '')
         self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
 
@@ -2827,6 +3179,8 @@ class DocsConsistencyTest(unittest.TestCase):
         "automatic checkpoints stage the session's output except secret-looking files",
         'the pipeline pushes the feature branch and opens the pull request',
         'usage limits pause and resume',
+        'committed bytes equal to the validated files',
+        'outside the checkout',
     )
 
     def text(self, name):

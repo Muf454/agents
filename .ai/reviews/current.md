@@ -1,34 +1,34 @@
-<!-- Host evidence: HEAD 845b4f925d5f5a0e227a069913eceed052052678; merge-base 662507102d51112163819c8a0bbc06706347c49a; saved 2026-10-05T15:29:10Z. -->
+<!-- Host evidence: HEAD 51e020e5ca6ee9d6c45c0632186cc2ed5e909dfb; merge-base 7b0c4334bac93fb673777e01029770aa8b278db0; saved 2026-10-06T07:45:27Z. -->
 
 # Independent review
 
 Overall verdict: NO CHANGES REQUIRED in the inspected scope; ready for human testing.
 Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
-Reviewed HEAD: `845b4f925d5f5a0e227a069913eceed052052678`  
-Supplied base / merge-base: `662507102d51112163819c8a0bbc06706347c49a`
+Reviewed HEAD: `51e020e5ca6ee9d6c45c0632186cc2ed5e909dfb`  
+Supplied base / merge-base: `7b0c4334bac93fb673777e01029770aa8b278db0`
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, relevant documentation, scoped Git history/diff, affected source/tests, validation evidence, and the vault flow chart. The checkout was clean.
+Inspected repository instructions, specification, plan, all six tasks, state, handoff, review template, relevant documentation, scoped Git history/diff, affected source/tests, deterministic validation evidence, and the vault flow chart. The checkout remained clean.
 
-The implementation addresses the requested tool contract, permissions, model/todo guidance, triage recovery, publish checks, rejected-finding re-checks, durable disputes, toolkit upgrades, and documentation changes. No additional defect was demonstrated in these inspected areas.
+The inspected implementation satisfies the OR-01/OR-02 requirements:
 
-Prior findings **M3 and M4 are resolved**:
+- Every accepted DONE checkpoint and the final runner handoff require a clean tree, current validation stamp, and committed-content verification before completion notifications.
+- The pipeline checks committed content before each implementation review and before and after every push attempt, including the third failure. Integrity diagnostics preserve the helper’s file-specific detail and trigger human escalation.
+- Host-state consumers enforce checkout separation. Runner and pipeline startup also check the resolved knowledge directory before launching agents.
+- Recovery checks the state root before reading the manifest. Watchdog installation checks the supplied target project before mutation; runtime recovery checks precede gate/manifest access.
+- Regression tests exercise filters, executable-mode mismatches, final-handoff mismatches, push outcomes, symlinks/submodules, unsafe roots, and refusal behavior.
 
-- **M3:** `scripts/lib/workflow.py:1260` distinguishes inherited disputes from active branch records. Verification preserves inherited content, while PR generation counts only current-branch disputes. Regression tests cover normal publication after inheritance, tampering, and new disputes.
-- **M4:** `scripts/lib/workflow.py:778` and `scripts/lib/workflow.py:879` preserve interrupted triage per branch. Regression tests cover branch transitions, legacy migration, unreadable records, and completion before implementation resumes.
-
-Earlier parsing, upgrade rollback, executable-mode, and flow-chart-description fixes remain present. No separate pre-existing defect is counted.
+The earlier toolkit upgrade in the supplied range was also checked: all 21 stamped toolkit files match their recorded hashes and the supplied-base source/templates. The CI and license changes were inspected. No separate pre-existing defect was demonstrated.
 
 Validation observed/run:
 
-- Stored evidence reports **PASS**, exit 0, at `2026-10-05T15:23:38Z`, recorded at `75be82d967056f7dcb6d4ca5157b412017739b3c`. Its log records **168 tests passed**.
-- Validation-stamp verification passed at reviewed HEAD.
-- **13 read-only tests passed**, covering permissions, shared prompts, model/todo guidance, re-check parsing, executable scripts, and documentation.
-- Bash syntax checks passed for **12 files**; Python syntax checks passed for **three files**.
-- In-memory checks using the actual helpers confirmed stage survival across branch transitions, rejection of malformed stage JSON, historical dispute handling, and rejection of inherited-content tampering.
-- Task-queue checks and `git diff --check` passed.
+- Stored evidence reports **PASS**, exit 0, at `2026-10-06T07:41:59Z`, recorded at `66a1753c51ea1302920c058d2c8aeda032ed9844`; its log records **188 tests passed**.
+- Current validation-stamp verification, committed-content comparison, task-queue validation, and `git diff --check` passed.
+- **Three documentation tests**, **13 Bash syntax checks**, and **three Python syntax checks** passed.
+- In-memory checks exercised direct, containing, relative, disjoint, knowledge-directory, and symlink-prefix state paths.
+- Guarded calls to the actual watchdog functions confirmed unsafe installation refuses before mutation and unsafe runtime state refuses before subprocess/gate/manifest access.
 
-Limitations: The full `./scripts/ai-check` gate and writable integration fixtures were not rerun because they create repositories, locks, logs, and evidence. Live providers, GitHub, systemd, and physical filesystem failures were not exercised. The vault chart includes the changed workflow and `updated: 2026-10-05`; its same-session edit history cannot be verified from the repository diff. No files were written or network/MCP integrations invoked.
+Limitations: The full `./scripts/ai-check` gate and writable integration fixtures were not rerun because they create repositories, locks, logs, and evidence. Live providers, GitHub, and systemd were not exercised. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -44,29 +44,24 @@ None found in the inspected scope.
 
 ## Missing test coverage
 
-- Upgrade rollback failures are reported by the implementation but lack a dedicated regression test.
-- Live permission enforcement, provider output, GitHub draft conversion, and watchdog recovery remain manual integration checks.
-- The foreground gate timeout instruction is present, but its exact timeout value is not explicitly asserted by the shared-contract test.
-
-These coverage limitations do not establish additional defects.
+Dedicated regression coverage could strengthen runtime refusal when an installed watchdog copy is relocated through a symlink, and explicitly exercise the unset-state-variable HOME fallback. These coverage gaps do not establish defects.
 
 ## Security concerns
 
-No additional exploitable security defect was demonstrated. The new read-command permissions retain the documented ability to read outside the project. Allowlist checks and integrity checks do not establish OS isolation.
+No additional security defect was demonstrated in the inspected paths. Authority-root checks enforce the specified configuration constraints; they do not provide OS isolation.
 
 ## Architecture concerns
 
-The prior branch-lifecycle mismatches are addressed. Documented limitations remain around reusing branch names with old host dispute records or abandoned triage stages; these cases fail closed and require human reconciliation.
+The changes reuse existing helpers and add no external dependencies. The repository’s frozen `.ai/bin` intentionally remains at the stamped version; the new behavior is in `scripts/` and requires deliberate installation or upgrade.
+
+Flow chart updated: the vault note contains the new checkpoint, review, push, startup, recovery, and watchdog checks with `updated: 2026-10-06`. Same-task edit timing cannot be independently established from repository history.
 
 ## Manual testing recommendations
 
 In an isolated writable project:
 
-- Complete the handoff’s inherited-dispute and interrupted-triage branch-transition scenarios.
-- Verify publish-hook mutations stop delivery and successful delivery leaves origin at local HEAD.
-- Exercise upgrade preview, apply, and filesystem-failure recovery.
-- Run a supervised permission smoke test and watchdog recovery test.
-
-Flow chart updated: the vault note reflects the inspected workflow, and the handoff declaration is carried into the generated PR body.
+- Run the full gate and the handoff’s filter, mode, final-handoff, and push-hook scenarios.
+- Verify watchdog installation from outside Git and another checkout, including refusal without host-copy or unit-file creation.
+- Verify unsafe recovery preserves the configuration error, launches no recovery Claude session, and consumes no attempt.
 
 This review does not constitute human acceptance.

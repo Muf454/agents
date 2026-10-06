@@ -44,3 +44,17 @@
 | 2026-10-05T15:17:05Z | runner | T017 | completed | PASS | 229830d | Claude checkpointed; continuing queue |
 | 2026-10-05T15:23:38Z | runner | none | queue complete; ready for independent review | PASS | 75be82d | Human acceptance remains |
 | 2026-10-05T15:29:15Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/11 | PASS | ddaae9d | Human acceptance and merge remain |
+| 2026-10-06T05:45Z | claude | T001 | DONE: ai-run verify_checkpoint (clean tree + stamp + committed-matches-worktree) after each DONE bookkeeping commit and the final handoff commit; "✅ Done" sent after the check | committed_bytes_run 4 OK; ai-check 172 OK | (this commit) | Vault flow chart + hub log updated |
+| 2026-10-06T05:44:14Z | runner | T001 | completed | PASS | 54b0ee8 | Claude checkpointed; continuing queue |
+| 2026-10-06T06:05Z | claude | T002 | DONE: ai-pipeline byte check before every review; committed bytes in publish_ready; publish_ready after every push attempt (failed or not) | committed_bytes_pipeline 7 OK; ai-check 179 OK | (this commit) | Vault flow chart + hub log updated; README/docs publish paragraphs |
+| 2026-10-06T06:12:53Z | runner | T002 | completed | PASS | f4d6a9e | Claude checkpointed; continuing queue |
+| 2026-10-06T06:32Z | claude | T003 | DONE: state_root/overlap/check_state_root + state-root-check helper; binding_dir fails closed; ai-run/ai-pipeline refuse overlapping or relative state roots before any agent; pipeline records absolute --knowledge-dir | state_root 6 OK; ai-check 185 OK | (this commit) | docs/workflow.md, vault flow chart + hub log updated |
+| 2026-10-06T06:39:41Z | runner | T003 | completed | PASS | 94d37ec | Claude checkpointed; continuing queue |
+| 2026-10-06T06:55Z | claude | T004 | DONE: ai-recover runs state-root-check before the first run-manifest read; unsafe state dir escalates with config error + original reason, no Claude session/commit/attempt | recover_state_root 1 OK; ai-check 186 OK | (this commit) | docs/workflow.md, vault recovery diagram + hub log updated |
+| 2026-10-06T06:57:26Z | runner | T004 | completed | PASS | 302d4e4 | Claude checkpointed; continuing queue |
+| 2026-10-06T07:07Z | claude | T005 | DONE: watchdog --install-timer refuses (exit 2, nothing written) a relative XDG_DATA_HOME, a host copy or state dir overlapping the TARGET checkout; start_recovery uses real-path overlap and state-root check before the digest/manifest, notifies the config error, no systemd-run | watchdog_host_root 2 OK; watchdog 19 OK; ai-check 188 OK | (this commit) | docs/workflow.md, README, vault flow chart + hub log updated |
+| 2026-10-06T07:16:06Z | runner | T005 | completed | PASS | 8c68ae2 | Claude checkpointed; continuing queue |
+| 2026-10-06T07:40Z | claude | T006 | DONE: README + docs/workflow.md state the committed-bytes check (DONE checkpoints, final handoff), the filter/LFS/CRLF limitation and the absolute state root outside the checkout; 2 new docs_consistency sentences; vault flow chart audited, hub log appended | docs_consistency 3 OK; ai-check 188 OK | (this commit) | no flow chart change needed |
+| 2026-10-06T07:33:53Z | runner | T006 | completed | PASS | d9d3558 | Claude checkpointed; continuing queue |
+| 2026-10-06T07:42:00Z | runner | none | queue complete; ready for independent review | PASS | 66a1753 | Human acceptance remains |
+| 2026-10-06T07:45:34Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/14 | PASS | 329d112 | Human acceptance and merge remain |

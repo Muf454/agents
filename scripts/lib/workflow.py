@@ -765,14 +765,55 @@ def triage_check(arguments):
     print(f'accepted={accepted} deferred={deferred}')
 
 
+def state_root():
+    """Host state directory: AI_STATE_DIR, else $XDG_STATE_HOME/ai-toolkit, else
+    ~/.local/state/ai-toolkit. A relative setting would depend on the current directory."""
+    for name, suffix in (('AI_STATE_DIR', ''), ('XDG_STATE_HOME', 'ai-toolkit')):
+        value = os.environ.get(name, '')
+        if value:
+            if not os.path.isabs(value):
+                fail(f'{name} must be an absolute path: {value}')
+            return Path(value, suffix) if suffix else Path(value)
+    return Path(os.path.expanduser('~/.local/state/ai-toolkit'))
+
+
+def overlap(a, b):
+    """True when either path equals or lies inside the other, lexically or after resolving
+    symlinks (realpath resolves the existing prefix of a path not created yet)."""
+    for resolve in (os.path.abspath, os.path.realpath):
+        first, second = Path(resolve(a)), Path(resolve(b))
+        if first.is_relative_to(second) or second.is_relative_to(first):
+            return True
+    return False
+
+
+def check_state_root(checkout, knowledge=None):
+    """Refuse a host state directory agent sessions can write: one overlapping the checkout
+    or the knowledge directory. This is a path check, not OS isolation."""
+    root = state_root()
+    for path, label in ((checkout, 'the checkout'), (knowledge, 'the knowledge directory')):
+        if path and overlap(root, path):
+            fail(f'Host state directory {root} overlaps {label} {path} (agent sessions can '
+                 'write there); set AI_STATE_DIR to a directory outside it.')
+    return root
+
+
+def state_root_check(arguments):
+    parser = argparse.ArgumentParser(prog='state-root-check')
+    parser.add_argument('--checkout')
+    parser.add_argument('knowledge', nargs='?')
+    options = parser.parse_args(arguments)
+    checkout = options.checkout or git('rev-parse', '--show-toplevel').decode().strip()
+    check_state_root(os.path.abspath(checkout), options.knowledge)
+
+
 def binding_dir():
     """Host-only store of published review digests, outside the checkout (agent sessions
     get no write access there). Keyed by the repository's root commit and path."""
-    base = os.environ.get('AI_STATE_DIR') or os.path.join(
-        os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state'), 'ai-toolkit')
     root = Path(git('rev-parse', '--show-toplevel').decode().strip())
+    base = check_state_root(root)
     key = hashlib.sha256(str(root).encode()).hexdigest()[:16]
-    return Path(base) / 'reviews' / key
+    return base / 'reviews' / key
 
 
 def run_manifest(arguments):
@@ -1722,6 +1763,8 @@ def main():
         stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'state-root-check':
+        state_root_check(arguments)
     elif command == 'checkpoint-guard':
         checkpoint_guard(arguments)
     elif command == 'committed-matches-worktree':

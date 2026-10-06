@@ -1,173 +1,118 @@
 # Handoff
 
 ## What has been implemented?
-Toolkit self-installed. Plan for batch 1 (T001–T009) from the vault backlog.
-- T001: permissions template allows read-only shell (ls/grep/cat/head/tail/wc/echo),
-  git rm/mv and `.ai/bin/ai-task`; sed/rg/find deliberately excluded; README documents
-  that these can read files outside the project. Test fixture no longer inherits
-  `AI_PIPELINE`/`AI_LOCK_HELD` (they broke 4 tests when the gate ran inside a pipeline).
-- T002: runner/triage/recover prompts share a "How to work here" section (tools, no `cd`,
-  gate as `.ai/bin/ai-check`, `git rm`/`git mv`, `ai-task`); new `ai-task set|show` command
-  installed by setup; ai-run's contract refers to the section. `scripts/ai-task` could not be
-  chmod'ed in this session (denied): setup installs it as 0755, but the source file is 0644
-  in Git until the human runs `chmod +x scripts/ai-task`.
-- T003: B6 model rule (retry failed attempts on opus; review-fix tasks use their own risk
-  criterion, no blanket promotion) in templates/CLAUDE.md, templates/.ai/prompts/plan.md, and
-  plan-review.md. R6 human-todo rule (never tick/untick knowledge-base checkboxes; append
-  dated progress to project log) in runner.md and triage.md. Tests verify new wording and
-  absence of old wording.
-- T004: triage completion protocol (R1). Before each triage the pipeline stores a `stage`
-  (start HEAD, review digest) in the host run manifest; every pipeline start/resume first
-  completes it (review binding, only triage records changed since start, fresh dispositions),
-  closing it if the counted `chore(ai): record review triage` commit exists, else recording
-  it once via `ai-run --triage --since`. ai-recover never commits triage leftovers: it reruns
-  without a Claude decision or escalates. Failed checks are `Triage stage …` stops that
-  always escalate. Vault flow chart updated.
-- T005: publish invariants (R2). `ai-pipeline`'s `publish_ready` (review verifies and is
-  current for HEAD, validation stamp current, clean tree incl. untracked, all tasks DONE)
-  runs before the PR stage, before every push attempt (inside the retry loop) and after
-  every push; after each push origin's `refs/heads/<branch>` must equal HEAD. Failures go
-  through `stop`, before PR creation and before any FINISHED notification. The final push
-  now shows git's output (it was silenced). Vault flow chart updated.
-- T006: `ai-review --recheck` (R3 command). Own preflight (verified review, bound
-  dispositions, ≥1 rejected BLOCKER/MAJOR, only workflow records changed since the reviewed
-  commit; pending fix tasks allowed). Codex (read-only, `AI_RECHECK_EFFORT`, default medium,
-  prompt `recheck.md`) answers one JSON object; strict parsing counts anything missing,
-  duplicate, extra or malformed as upheld. Host writes `.ai/reviews/recheck.md` bound to
-  review digest + rejected-rows digest + reviewed HEAD, report hash in host state;
-  `recheck-verify` checks it. `AI_RECHECK_EFFORT` is a run setting restored by ai-recover.
-  Not yet called by ai-pipeline (T007).
-- T007: disputed findings in the pipeline (R3). `reconcile_disputes` runs right after
-  every triage and on every start/resume, before any task runs. It re-checks rejected
-  BLOCKER/MAJOR findings that have no verified re-check. Each upheld answer becomes an
-  append-only record in `.ai/reviews/disputes.md`, written from a per-branch host store and
-  committed with the re-check report in one host commit. `disputes-verify` is part of
-  `publish_ready`. A recorded dispute is never auto-resolved: the PR is a draft whose body
-  starts with "Disputed findings", and the FINISHED todos list them. The existing test
-  "rejected findings → normal PR" now supplies a withdrawn re-check answer.
-- T009: README.md and docs/workflow.md match the code (R10): denials are logged and the run
-  continues; automatic checkpoints stage the session's output except secret-looking files;
-  the pipeline pushes the feature branch and opens the pull request; usage limits pause and
-  resume; a Modes table (interactive Claude, ai-run, ai-pipeline, ai-watchdog). Wrong
-  sentences removed. `docs_consistency` tests guard them. Flow chart updated (note on
-  logged denials; audited against R1, R2, R3 and this batch). PR description must say
-  "Flow chart updated".
-- T010: Updated shared "How to work here" section to explicitly require running `.ai/bin/ai-check`
-  in the foreground with Bash tool timeout set to 600000 ms; never in the background or via
-  polling. If it times out, mark the task BLOCKED rather than ending without checkpoint.
-  Same requirement mirrored in README.md step 4. Test suite confirms sections are identical
-  in runner and triage prompts.
-- T011 (review M1): `parse_recheck` validates the whole answer set first; any answer for an
-  unknown id or any malformed entry (non-object, missing/non-string id) makes every requested
-  finding upheld, so an extra entry can no longer ride along with withdrawals.
-- T012 (review M2): `setup-project --upgrade --apply` activates all-or-nothing. All new files
-  (and the new stamp, last) are staged next to their targets first; a failure part-way
-  restores replaced files (bytes + mode), removes created files/dirs, leaves the stamp
-  unchanged and exits non-zero; rollback errors are reported as "ROLLBACK FAILED".
+- T001 (OR-01, runner): `scripts/ai-run` byte-checks every accepted DONE checkpoint and the
+  final `record review handoff` commit (`verify_checkpoint`: clean tree, current stamp,
+  `committed-matches-worktree`); a mismatch stops with "The checkpoint of <task|final
+  handoff> differs from the validated content: <detail>" and nothing is reset. "✅ Done" is
+  now sent only after the check passes. BLOCKED tasks are not checked.
+- T002 (OR-01, pipeline): `scripts/ai-pipeline` requires a clean tree and committed bytes =
+  validated files before every Codex review ("Committed content differs from the validated
+  content: …", stop review); `publish_ready` checks committed bytes right after the
+  clean-tree check; `push()` runs `publish_ready` after every attempt (failed or successful)
+  before the retry wait, so a push hook's filtered commit is reported as an integrity stop
+  (ai-recover escalates) rather than "git push failed (3 tries)".
+- T003 (OR-02 core): ai-run/ai-pipeline refuse an overlapping or relative host state
+  directory before any agent; helpers fail closed.
+- T004 (OR-02, recovery): `scripts/ai-recover` checks the state directory before reading the
+  run manifest and escalates (config error + original stop reason) without a Claude
+  session, commit or attempt.
+- T005 (OR-02, watchdog): `scripts/lib/watchdog.py` `--install-timer` checks the target
+  checkout (not the caller's directory) before writing anything: relative `XDG_DATA_HOME`,
+  a host copy overlapping the checkout, or an overlapping state dir → exit 2. At runtime
+  `start_recovery()` uses the real-path overlap check for its own copy and the state-root
+  check before the gate digest/manifest; refusal is notified, `systemd-run` never called.
+
+Batch 1 (flow hardening, T001–T017) was merged via PR #11; its
+records are in Git history. This branch (`feature/evidence-or01-or02`, from origin/master
+d6038f6) plans backlog items OR-01 (committed bytes on every accepted checkpoint) and OR-02
+(disjoint authority/state roots, incl. the watchdog host copy). See `.ai/project-spec.md`,
+`.ai/current-plan.md`, `.ai/tasks.md` (T001–T006, revised 2026-10-06 after two Codex plan reviews). Planned by Claude as Zack's delegate on
+2026-10-05; the pipeline's Codex plan review gates the plan.
 
 ## Validation
-`.ai/validate`: shell syntax + full test suite.
+Baseline before planning: `.ai/bin/ai-check` (shell syntax + 168 unittest tests).
+After T001: `.ai/bin/ai-check` PASS, 172 tests (2026-10-06T05:36:13Z).
+After T002: `.ai/bin/ai-check` PASS, 179 tests.
+After T004: `.ai/bin/ai-check` PASS, 186 tests (2026-10-06).
+After T005: `.ai/bin/ai-check` PASS, 188 tests (2026-10-06).
 
-- T014 (review N2): `pr_body` copies an optional handoff section `## Flow chart` into the
-  PR description under Summary; this repo's handoff declares "Flow chart updated".
-- T015: fix rounds are counted from host state, never from commit subjects. `ai-run --triage`
-  always makes its own counted commit (empty if needed) and records its hash per branch in the
-  host store (`fix-rounds record`); `ai-pipeline` counts recorded commits in base..HEAD
-  (`fix-rounds count`), and the triage stage closes only on a recorded commit. Legacy
-  branches are initialised once at pipeline start from exact-subject commits.
-- T016 (review M3): a dispute file inherited unchanged from the merge-base with the run's base
-  (`AI_DISPUTES_BASE`, exported by `ai-pipeline`) is historical: it verifies with an empty
-  host store, is not listed, and does not draft the PR. New records on the branch are
-  appended after the verbatim inherited part (numbered on); only they count. Any edit of
-  either part fails. Inherited upheld answers are not re-recorded. Limitation: reusing a
-  branch name whose records were already merged fails verification.
-- T017 (review M4): the open triage stage is stored per branch in the host state directory
-  (`stage-<branch hash>.json` beside `run.json`), so starting the pipeline on another branch
-  neither drops nor inherits it; back on the branch, the restart verifies and counts it once
-  before any implementation. Unreadable stage records stop `ai-pipeline` at start. A legacy
-  stage inside `run.json` still counts and moves to its branch's file on the next start.
+## Open assumptions (for the plan review and Zack)
+- Overlap is bidirectional (a state root containing the checkout/knowledge dir is refused).
+- A symlinked state root is refused only when it (or its real path) overlaps; a symlink to
+  a disjoint location is accepted.
+- Repositories with clean/smudge/eol filters (Git LFS, CRLF with `text=auto`) now stop at
+  every accepted task; documented limitation, not supported here.
+- The watchdog checks the checkout only; the resumed ai-pipeline checks the knowledge dir.
 
 ## Flow chart
-Flow chart updated: R1/R2/R3 audited, vault agents-flow.md updated 2026-10-05.
+Flow chart updated: T001 added the committed-bytes check to "Inside one task" in
+agents-flow.md (2026-10-06); T002 added the pre-review byte check and the byte check in the
+publish checks (after every push attempt); T003–T005 add theirs. T006 audited the chart
+against the final code (no change needed) and updated README/docs/workflow.md (a test
+requires the section to start with these words).
 
 ## Manual testing for the human
-1. Read the PR's summary of each item; the tests cover behaviour (mocked agents).
-2. After merging: `setup-project --upgrade ~/Projects/raid-planner` shows a sensible preview.
-   Review fix M2 (T012): in a scratch project set up from an older toolkit copy, make
-   `.ai/bin/lib` read-only (`chmod a-w .ai/bin/lib`) and run `setup-project --upgrade --apply`:
-   it exits 1 with "Upgrade failed (...); every file was restored", `git status` shows no
-   changes (no new `.ai/bin/ai-task`, `.ai/toolkit-version` unchanged). `chmod u+w` it and
-   rerun: the upgrade succeeds.
-3. Permissions: in a project set up from this toolkit, `.ai/permissions.allow` lists
-   `Bash(cat *)`, `Bash(git rm *)`, `Bash(.ai/bin/ai-task *)` etc., and contains no
-   sed/rg/find/curl entry. In an unattended run, `cat README.md` works but
-   `cat README.md > x` and `ls; curl …` are denied.
+1. Committed-bytes stop (T001): in a scratch project set up with this branch's
+   `setup-project` and a one-task approved plan, commit `.gitattributes` with
+   `*.txt filter=sneaky` and run `git config filter.sneaky.clean 'sed s/a/b/'`. Run
+   `.ai/bin/ai-run --approved`; when the session commits a `.txt` file containing "a",
+   expect exit 1 with "The checkpoint of T001 differs from the validated content:
+   Committed content of <file> differs …", no "✅ Done" notification, the agent and
+   `record T001 runner checkpoint` commits still in `git log`, and only `.ai/run-log.md`
+   dirty.
+2. Without the filter the same run completes normally ("✅ Done", "All tasks done").
+3. Push-hook stop (T002): in a scratch project with a bare `origin` remote and a finished
+   one-task plan, commit `.gitattributes` with `hooked.txt filter=hooked`, run
+   `git config filter.hooked.clean 'sed s/original/tampered/'`, and add a
+   `.git/hooks/pre-push` that runs `echo original > hooked.txt; git add hooked.txt;
+   git commit -qm hook` and exits 1. Run `.ai/bin/ai-pipeline --approved --base main`:
+   expect exit 1 with "Publish check failed at push: committed content differs from the
+   validated content: Committed content of hooked.txt differs …", one hook run (no retry),
+   no PR opened, no FINISHED notification and the hook's commit still in `git log`. With
+   auto-recovery on, expect it to be escalated to you, without a recovery Claude session.
+4. Without the hook the same pipeline pushes and opens the PR normally.
+5. State-root refusal (T003): in a scratch project with an approved plan, run
+   `AI_STATE_DIR="$PWD/host-state" .ai/bin/ai-run --approved` and the same with
+   `.ai/bin/ai-pipeline --approved --base main --no-pr`: expect exit 1 with "Host state
+   directory … overlaps the checkout … set AI_STATE_DIR to a directory outside it.", no
+   Claude/Codex session, and no `host-state` directory created. With `--knowledge-dir ~/notes`
+   and `AI_STATE_DIR=~/notes/state` expect "overlaps the knowledge directory";
+   `AI_STATE_DIR=relative` expects "AI_STATE_DIR must be an absolute path". With
+   `AI_STATE_DIR` unset (default location) both run normally.
+6. Recovery refusal (T004): in that scratch project, let an approved
+   `ai-pipeline --approved --base main --no-pr` stop (e.g. a failing check) with the default
+   state directory, then run `AI_STATE_DIR="$PWD/host-state" AI_AUTO_RECOVER=1
+   .ai/bin/ai-recover --stage implementation`: expect exit 1 with "escalated to the human:
+   the host state directory is not safe for recovery.", one "⛔ STOPPED, needs you" message
+   naming "overlaps the checkout" and the original stop reason, the same text in
+   `.ai/local/last-error`, no Claude session, no new commit, no `.ai/local/pipeline.active`,
+   and an unchanged `attempts` in the default state dir's `run.json`. `AI_STATE_DIR=relative`
+   gives "AI_STATE_DIR must be an absolute path" the same way.
+7. Watchdog install refusal (T005): from a plain directory outside any Git repository, run
+   `AI_STATE_DIR=<project>/host-state <project>/.ai/bin/ai-watchdog <project> --install-timer`:
+   expect exit 2 with "refusing to install the timer: Host state directory … overlaps the
+   checkout <project> …", and no new `ai-watchdog-*` unit in `~/.config/systemd/user`, no
+   copy under `~/.local/share/ai-toolkit/watchdog`. The same with
+   `XDG_DATA_HOME=<project>/data` gives "Host copy … overlaps the checkout";
+   `XDG_DATA_HOME=relative` gives "XDG_DATA_HOME must be an absolute path". Without these
+   overrides it installs normally (then `--uninstall-timer`).
+8. Watchdog recovery refusal (T005): with the timer installed with `--recover` and a crashed
+   pipeline (`.ai/local/pipeline.active` holding a dead PID) after an approved run, run the
+   host copy (`~/.local/share/ai-toolkit/watchdog/<unit>/bin/ai-watchdog <project> --recover`)
+   with `AI_STATE_DIR=<project>/host-state AI_AUTO_RECOVER=1`: expect exit 1, one ⛔ message
+   ending "(auto-recovery refused: Host state directory … overlaps the checkout …)" and no
+   `ai-recover-*` systemd unit started.
 
-4. Tool contract: `setup-project` into a scratch repo installs `.ai/bin/ai-task`;
-   `.ai/bin/ai-task show T001` prints status, model and dependencies and
-   `.ai/bin/ai-task set T001 DONE` changes the status (bad status or unknown id fails).
-5. Triage completion: in a scratch project with a review that has a MAJOR finding, start
-   `ai-pipeline --approved`, and when "Review triage" starts, kill the pipeline (or deny the
-   triage session's commit). Rerun `ai-pipeline --approved`: it prints "Completing the
-   interrupted review triage", `git log --oneline | grep -c 'record review triage'` is 1,
-   and there is no "recovery checkpoint" commit. If you add an uncommitted `src.txt` before
-   the rerun, it stops with "Triage stage cannot be completed safely" and commits nothing.
-6. Publish checks: in a scratch project with a bare `origin`, add a `.git/hooks/pre-push`
-   that commits a one-line change to `.ai/run-log.md` once (guard with a marker file). Run
-   `ai-pipeline --approved`: it stops with "Publish check failed after push: origin
-   <branch> is …, not HEAD …", no PR is created, and there is no FINISHED notification.
-   Without the hook, the run finishes and `git ls-remote origin <branch>` equals
-   `git rev-parse HEAD`.
-7. Re-check: in a scratch project after an `ai-review` with a MAJOR finding, write a
-   `rejected` row with evidence in `.ai/reviews/dispositions.md`, commit, and run
-   `.ai/bin/ai-review --recheck`. It prints "Re-check saved to .ai/reviews/recheck.md:
-   N withdrawn, M upheld", commits `chore(ai): record review re-check`, and
-   `python3 .ai/bin/lib/workflow.py recheck-verify` prints one line per rejected finding.
-   Edit the evidence in the dispositions: `recheck-verify` now fails ("different rejection
-   evidence"). Commit a source change and rerun `--recheck`: refused ("code changed since
-   the reviewed commit") without calling Codex.
-   Review fix M1 (T011): with a mocked/hand-written Codex answer that withdraws every
-   rejected finding but also contains an answer for an unknown id (e.g. `M9`) or a bare
-   string entry, the report shows every finding `upheld` and the parsing notes say
-   "every finding counts as upheld".
-8. Disputed findings: in a scratch project with a bare `origin` and `gh`, run
-   `ai-pipeline --approved` on a change where Codex reports a MAJOR finding that Claude
-   rejects. "Re-check of rejected findings (Codex)" runs right after the triage. If Codex
-   upholds it, `git show --stat HEAD~N` for `chore(ai): record review re-check` lists both
-   `.ai/reviews/recheck.md` and `.ai/reviews/disputes.md`. The PR is a draft, its description
-   starts with "Disputed findings" (finding, Claude's reason, Codex's answer), and the
-   FINISHED notification says "Resolve 1 disputed finding(s)". Rerunning the pipeline keeps
-   it a draft. Edit a word in `disputes.md`, commit, rerun: it stops ("disputes.md does not
-   match the dispute records") and does not touch the PR. If Codex withdraws the finding,
-   no `disputes.md` is created and the PR is a normal (ready) PR.
-9. Fix round count (T015): in a scratch project, make the triage session commit with the
-   subject `chore(ai): record review triage dispositions` (or exactly
-   `chore(ai): record review triage`) and run `ai-pipeline --approved --max-fix-rounds 2`
-   against a review that keeps a MAJOR finding: two triage rounds run (not one), then the PR
-   is a draft. `python3 .ai/bin/lib/workflow.py fix-rounds count main` prints 2. Rerun with
-   `--max-fix-rounds 3`: exactly one more round. On a new branch from main it prints 0.
-10. Inherited disputes (T016, review M3): after step 8's disputed PR, merge it into `main`
-   locally, create `feature/next` from `main`, add a task and run `ai-pipeline --approved
-   --base main`: it publishes a normal (not draft) PR without a "Disputed findings" section,
-   and `disputes.md` is unchanged. `AI_DISPUTES_BASE=main python3 .ai/bin/lib/workflow.py
-   disputes-verify` prints 0. Edit a word in the inherited `disputes.md`, commit, rerun: it
-   stops ("disputes.md does not match"). On a fresh branch where Codex upholds a new
-   rejection, the file keeps the inherited part verbatim and appends `D2`; the PR is a draft
-   listing only the new dispute.
-11. Triage stage per branch (T017, review M4): in a scratch project, start `ai-pipeline
-   --approved` on branch A against a review with a MAJOR finding and kill it during "Review
-   triage" after the triage session committed. Switch to a new branch B and run `ai-pipeline
-   --approved` there (any outcome); `python3 .ai/bin/lib/workflow.py run-manifest stage`
-   prints nothing on B. Switch back to A: the same command prints `triage <sha> <digest>`;
-   rerun `ai-pipeline --approved`: it prints "Completing the interrupted review triage",
-   `git log --oneline | grep -c 'record review triage$'` is 1 and that commit comes before
-   any implementation commit. Write `{not json` into A's `stage-*.json` under
-   `~/.local/state/ai-toolkit/reviews/*/`: the pipeline stops with "Cannot read this
-   branch's triage stage".
+9. Final-handoff mismatch (T001): in the scratch project of step 1, use `.gitattributes`
+   `.ai/state.md filter=late` with `git config filter.late.clean "sed -E 's/^Phase: ready_for_review$/Phase: tampered/'"`
+   and finish the queue: expect "The checkpoint of final handoff differs from the validated
+   content: …", no "All tasks done" notification.
+10. Docs (T006): README "Bounded runner" text and docs/workflow.md describe the byte check,
+    the filter limitation and the state-root rule; `python3 -m unittest discover -s tests -k docs_consistency` passes.
 
 ## Human todos
 None.
 
 ## Next action
-All tasks DONE (T017 per-branch triage stage). Rerun the gate and request a fresh
-independent review.
+The pipeline continues with T006.

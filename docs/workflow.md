@@ -65,6 +65,15 @@ for repair. If no progress was checkpointed, it stops rather than spending an
 unbounded number of retries. Claude's in-session loop can fix ordinary failures;
 three repeated attempts on the same failure should produce a blocker and handoff.
 
+Every accepted DONE checkpoint and the final `record review handoff` commit must contain
+exactly the bytes validation hashed: after the runner's bookkeeping commit the tree must
+be clean, the stamp current and the committed bytes equal to the validated files on disk,
+otherwise the run stops with "The checkpoint of <task|final handoff> differs from the
+validated content" (nothing is reset; BLOCKED tasks are not checked). Limitation:
+repositories whose content passes clean/smudge or eol filters (Git LFS, `text=auto` with
+CRLF files, `ident`) stop with "differs from the validated content"; they are not
+supported by this check.
+
 ## Permissions and safety
 
 The primary boundaries are an approved scope, inspected local command permissions,
@@ -235,7 +244,14 @@ outside the checkout (`${AI_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/ai-tool
 keyed by repository path and reviewed HEAD). Every consumer (`review-info`, triage, the
 pipeline's freshness check) verifies it, including on resume and after hooks; a report
 that doesn't match is invalid until Codex reviews again. Agent sessions get no write
-access there (only the project and an explicit `--knowledge-dir`). Accepted findings must
+access there (only the project and an explicit `--knowledge-dir`). `ai-run` and
+`ai-pipeline` refuse to start, before any agent, when that state directory overlaps the
+checkout or the `--knowledge-dir` (equal, inside or containing, also through symlinks) or
+when `AI_STATE_DIR`/`XDG_STATE_HOME` is relative; every helper that uses it fails closed the
+same way. The state root must be an absolute path outside the checkout and the knowledge
+directory; it is checked at every start, by every host-state read, by `ai-recover` before it
+reads the run manifest, and by the watchdog against the target project at install and before
+recovery. This is a configuration check, not OS isolation. Accepted findings must
 reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new review;
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.
@@ -290,9 +306,14 @@ nothing is inherited. Limitation: reusing a branch name whose host records were 
 merged fails verification (its old records sit both in the inherited copy and the store).
 
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
-(retries included) and after every push, the review must verify and be current for HEAD
-(only workflow records changed since the reviewed commit), the validation stamp must be
-current, the tree clean (untracked files too) and all tasks DONE; after each push
+(retries included) and after every push attempt (failed or successful, before the retry
+wait), the review must verify and be current for HEAD (only workflow records changed
+since the reviewed commit), the validation stamp must be current, the tree clean
+(untracked files too), the committed bytes equal to the validated files on disk
+(`committed-matches-worktree`) and all tasks DONE; a push hook that commits other bytes
+stops as "committed content differs from the validated content", not as a push failure.
+Before every Codex review the pipeline also requires a clean tree and committed bytes
+equal to the validated files. After a successful push
 `git ls-remote origin refs/heads/<branch>` must equal HEAD. Any failure stops (before PR
 creation and before any FINISHED notification); a hook can't slip unreviewed or
 unpushed content into the PR.
@@ -319,7 +340,10 @@ write): approved gate digest, branch, arguments and the attempt counter. Recover
 its authority only from there, never from checkout files. `stop()` re-verifies the gate
 digest against the pipeline's in-memory approved digest and only then execs
 `ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
-(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: current gate
+(fd 9 is handed over across exec) and the liveness marker. `ai-recover`: before reading
+the manifest, the host state directory must pass `state-root-check` for the checkout
+(absolute, no overlap); otherwise it escalates with the configuration error plus the
+original stop reason, without a Claude session, commit or attempt; current gate
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
@@ -343,11 +367,17 @@ budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn'
 cleared to their defaults, and the resumed pipeline skips the user config file
 (`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
-default unless you changed it). `--recover` only works from the installed host copy; run
+default unless you changed it). `--install-timer` checks this for the TARGET checkout (the
+`project` argument, not the caller's directory) before writing anything: it refuses (exit 2)
+a relative `XDG_DATA_HOME`, a host copy that overlaps the checkout (equal, inside or
+containing, also through symlinks) and a state directory that does. At runtime the host copy
+repeats the state-directory check before reading the gate digest or the manifest; on failure
+it notifies `auto-recovery refused: Host state directory … overlaps the checkout …` and
+never calls `systemd-run`. `--recover` only works from the installed host copy; run
 from the checkout it refuses and reports (a human running checkout scripts trusts them,
 as with `ai-pipeline`; the protected path is the timer's host copy). Order in
 `ai-recover`: take the lock (a rejected second process exits quietly and touches neither
-`last-error` nor the marker), reserve the attempt, then publish the marker; TERM/INT/HUP
+`last-error` nor the marker), check the state directory, reserve the attempt, then publish the marker; TERM/INT/HUP
 handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
 (HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
 filters and staged mode changes). The recovery decision must be exactly one JSON object

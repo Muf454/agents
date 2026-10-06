@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: feature/flow-hardening
+Branch: feature/evidence-or01-or02
 Phase: ready_for_acceptance
 Current task: none
-Last completed task: T017
-Tasks complete: 17
+Last completed task: T006
+Tasks complete: 6
 Tasks remaining: 0
-Last validation: PASS at 2026-10-05T15:23:38Z
+Last validation: PASS at 2026-10-06T07:41:59Z
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/11
-Last updated: 2026-10-05T15:29:15Z
+Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/14
+Last updated: 2026-10-06T07:45:34Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

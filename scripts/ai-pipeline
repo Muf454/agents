@@ -21,6 +21,7 @@ EOF
 }
 orig_args=("$@")
 base=main; pr_base=''; max_fix_rounds=2; draft=no; open_pr=yes; approved=no; plan_review=yes
+knowledge_dir=''
 review_args=(); run_args=()
 while (( $# )); do
   case "$1" in
@@ -40,7 +41,14 @@ while (( $# )); do
     --review-timeout)
       (( $# >= 2 )) || ai_die 'Missing review timeout'
       review_args=(--timeout "$2"); shift 2 ;;
-    --sessions|--session-timeout|--run-timeout|--model|--knowledge-dir)
+    --knowledge-dir)
+      (( $# >= 2 )) || ai_die 'Missing knowledge directory'
+      [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
+      knowledge_dir=$(cd -- "$2" && pwd -P)
+      # The run manifest records the resolved path, not one relative to the caller.
+      orig_args[${#orig_args[@]} - $# + 1]=$knowledge_dir
+      run_args+=("$1" "$knowledge_dir"); shift 2 ;;
+    --sessions|--session-timeout|--run-timeout|--model)
       (( $# >= 2 )) || ai_die "Missing value for $1"
       run_args+=("$1" "$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -51,6 +59,9 @@ done
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
 ai_root
+# Host authority state must live where agent sessions cannot write; checked before any agent.
+state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
+  ai_die "${state_error#Error: }"
 # The pipeline owns the shared checkout lock for its whole run; its children inherit it.
 ai_lock
 export AI_LOCK_HELD=$$
@@ -136,14 +147,16 @@ review_current() {
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
 # Publish invariants: what gets published is exactly what was reviewed and validated.
-# Checked after host commits on the publish path, before every push attempt and after
-# each push (commit and push hooks run project code); any failure stops.
+# Checked after host commits on the publish path, before and after every push attempt
+# (commit and push hooks run project code); any failure stops. The committed bytes come
+# before "review current" so a hook commit with filtered bytes is reported as such.
 publish_ready() {
   local why=''
   ai_guard_verify
   if ! why=$(ai_helper review-info 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-review integrity check failed}
   elif ! why=$(ai_helper disputes-verify 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-dispute records do not verify}
   elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
+  elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"
   elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
   elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
   elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
@@ -154,15 +167,19 @@ publish_ready() {
 }
 # Pushes hit transient network/auth hiccups; retry before treating it as a stop.
 # Usage: push STAGE FAILURE-MESSAGE git-push-args...; afterwards origin's branch is HEAD.
+# Push hooks run project code, so the publish checks run after EVERY attempt, failed or
+# not: a hook's change is reported as such, never as a (retryable) push failure.
 push() {
-  local stage=$1 failed=$2 try remote; shift 2
+  local stage=$1 failed=$2 try ok remote; shift 2
   for try in 1 2 3; do
     publish_ready "$stage"
-    git push "$@" && break
+    ok=0
+    if git push "$@"; then ok=1; fi
+    publish_ready "$stage"
+    (( ok )) && break
     if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
     ${AI_SLEEP:-sleep} $(( try * 20 ))
   done
-  publish_ready "$stage"
   remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
   [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
     printf 'Publish check failed after %s: origin %s is %s, not HEAD %s (push hook?)\n' \
@@ -283,6 +300,14 @@ while true; do
   fi
   if ! review_current; then
     ensure_validated
+    # Codex reviews the committed range: it must hold exactly the validated bytes.
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+      printf '%s\n' 'Committed content differs from the validated content: the checkout is not clean' > .ai/local/last-error
+      stop review
+    elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then
+      printf 'Committed content differs from the validated content: %s\n' "${why#Error: }" > .ai/local/last-error
+      stop review
+    fi
     step 'Independent review (Codex)'
     "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
     ai_guard_verify

@@ -14,6 +14,16 @@ import subprocess
 import sys
 import time
 
+# The sibling helper (the same copy: checkout .ai/bin/lib or the timer's host copy).
+# No __pycache__: .ai/bin is part of the approved gate digest.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow import check_state_root, overlap  # noqa: E402
+
+
+class Refused(Exception):
+    """An unsafe host layout: reported as is, before anything is written."""
+
 
 def positive(value):
     number = int(value)
@@ -146,6 +156,18 @@ def timer(root, args, install):
         systemctl('daemon-reload')
         print('Removed ' + name)
         return 0
+    # Check the TARGET checkout (root), never the caller's directory, before writing anything:
+    # a host copy or state dir an agent session can edit would defeat the gate check.
+    data = os.environ.get('XDG_DATA_HOME')
+    if data and not os.path.isabs(data):
+        raise Refused('XDG_DATA_HOME must be an absolute path: ' + data)
+    if overlap(host, root):
+        raise Refused(f'Host copy {host} overlaps the checkout {root} (agent sessions can write '
+                      'there); set XDG_DATA_HOME to a directory outside it.')
+    try:
+        check_state_root(root)  # reads the AI_STATE_DIR/XDG_STATE_HOME the timer forwards
+    except ValueError as error:
+        raise Refused(str(error)) from None
     if host.exists():
         shutil.rmtree(host)
     shutil.copytree(Path(__file__).resolve().parent.parent, host / 'bin',
@@ -193,8 +215,12 @@ def start_recovery(root, local, marker):
     # Verify with THIS copy's code (the host copy --install-timer made), never checkout code.
     # Whether recovery is allowed is the approved run's setting; ai-recover enforces it.
     bin_dir = Path(__file__).resolve().parent.parent
-    if bin_dir.is_relative_to(root):
+    if overlap(bin_dir, root):
         return 'auto-recovery only runs from the installed timer (ai-watchdog --install-timer --recover)'
+    try:
+        check_state_root(root)  # before trusting the approved run recorded there
+    except ValueError as error:
+        return 'auto-recovery refused: ' + str(error).rstrip('.')
     common = bin_dir / 'lib' / 'common.sh'
     # Same check ai-pipeline does before handing over: only approved gate code may run.
     digest = subprocess.run(['bash', '-c', 'source "$1"; ai_guard_digest', 'ai-watchdog', str(common)],
@@ -267,6 +293,8 @@ def main():
     if args.install_timer or args.uninstall_timer:
         try:
             return timer(root, args, args.install_timer)
+        except Refused as error:
+            parser.error('refusing to install the timer: ' + str(error))
         except (OSError, ValueError) as error:
             parser.error('cannot write the timer units: ' + str(error))
     local.mkdir(exist_ok=True)
