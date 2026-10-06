@@ -2,11 +2,11 @@
 
 Project: agents
 Branch: feature/flow-batch-2
-Phase: planning (approved by human-delegate 2026-10-06; trimmed to FL-01, FL-07, FL-09)
+Phase: planning (approved by human-delegate 2026-10-06; revised after plan review)
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 4
+Tasks remaining: 7
 Last validation: PASS at 2026-10-06 (baseline before planning, 188 tests)
 Blocked: no
 Next action: run pipeline (ai-pipeline --approved --base master --knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents")

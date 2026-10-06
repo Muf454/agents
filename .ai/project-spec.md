@@ -16,26 +16,34 @@ roles vs providers, AD-5 (the watchdog only observes), "auto-recovery never chan
 (gate files such as `.ai/ci-setup` are run, never edited), "don't break my system".
 
 ## Requirements
-- **FL-01 Dependencies before tasks (host).** `ai-run` and `ai-pipeline` (the host, never an
-  agent session) run the project's `.ai/ci-setup` when dependencies are missing or stale:
-  before the first task session, before every later task session and before every host
-  `ai-check` (cheap no-op when current). Staleness is generic, not npm-specific:
+- **FL-01 Dependencies before tasks (host), kept small** (revised after the plan review).
+  The host, never an agent session, runs the project's `.ai/ci-setup` when dependencies are
+  missing or stale at exactly two points: the start of every `ai-run` invocation that will
+  run a task (so every pipeline start, resume and fix round), and in `ai-recover`'s
+  `commit_and_rerun` before its validation. Staleness is generic, not npm-specific:
   - inputs: files declared by a comment line in `.ai/ci-setup`
     (`# ai-deps-inputs: package-lock.json …`), else a documented default list of well-known
     lockfiles (package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock,
     bun.lockb, requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, Gemfile.lock, go.sum,
-    Cargo.lock, composer.lock) that exist in the checkout;
+    Cargo.lock, composer.lock) that exist at the repo root;
   - outputs: directories declared by `# ai-deps-outputs: node_modules …`, else `node_modules`
     when `package.json` exists; a missing output is stale;
   - a stamp `.ai/local/deps.json` records the SHA-256 of `.ai/ci-setup` and of every input;
-    any difference, or no stamp, is stale.
-  Running it: stdin `/dev/null`, a timeout (`AI_DEPS_TIMEOUT`, default 1200 s, also bounded
-  by the run's remaining time), output to `.ai/local/deps-*.log`, a run-log line. Failure or
-  timeout stops with "Dependency setup (.ai/ci-setup) failed …; see <log>". Afterwards the gate
-  digest must be unchanged and `git status` (incl. untracked, non-ignored) must equal its state
-  before, else stop ("ci-setup changed project files"). `.ai/ci-setup` contents are never
-  changed by the toolkit run; the ci-setup template only gains comment lines documenting
-  the declaration lines (one npm example).
+    any difference, or no stamp, is stale (also with no inputs at all: a configured
+    installer without lockfiles runs once).
+  Running it: stdin `/dev/null`, a timeout (`AI_DEPS_TIMEOUT` environment variable, default
+  1200 s, bounded by the run's remaining time), output only to the ignored
+  `.ai/local/deps-*.log` and the terminal; nothing tracked is written. Failure or timeout
+  stops ("Dependency setup (.ai/ci-setup) failed …; see <log>"; recovery escalates). After
+  it the gate digest must be unchanged and a project-tree snapshot (HEAD, index, and the
+  path, kind, mode and bytes of every non-ignored file, tracked or untracked, excluding
+  `.ai/local/`) must equal the one taken before, else stop ("changed project files"); the
+  stamp is recorded only after these checks. `.ai/ci-setup` contents are never changed by the
+  toolkit run; the ci-setup template only gains comment lines documenting the declaration
+  lines (one npm example).
+  Not in scope: installing dependencies a task changes mid-run (that task's in-session gate
+  failure follows the existing rules; the next `ai-run` start or recovery validation
+  installs them), installs before every gate, ai-pipeline's own validation step.
 - **FL-07 Reliable waits.** `setup-project --watchdog` (opt-in) installs the timer after a
   successful install (`ai-watchdog <root> --install-timer --diagnose --recover`); without it
   setup prints the command as the next step. `ai-watchdog --timer-status` reports whether this
@@ -61,11 +69,13 @@ of this repo; package-manager-specific logic beyond the default lists; automatic
 timers of deleted worktrees; enforcing test-name existence (only the presence of a name).
 
 ## Acceptance
-- FL-01: a fixture project whose ci-setup creates a declared output runs it once before the
-  first task (mock agent sees the output), not again while inputs are unchanged, again after
-  the lockfile changes; failure/timeout stops before any agent session with the log path;
-  a ci-setup that touches a tracked file stops; gate files unchanged; the template
-  ci-setup documents the declaration lines and still installs nothing.
+- FL-01: a fixture project whose ci-setup creates a declared output runs it once at the
+  start of `ai-run` (mock agent sees the output), not again while inputs are unchanged;
+  failure/timeout stops before any agent session with the log path; a ci-setup that
+  overwrites an already modified file, creates a non-ignored file or commits stops without a
+  stamp; a full pipeline with a stale stamp finishes with a clean tree and a PR; recovery
+  installs changed dependencies before its validation and commits valid leftover work; the
+  template ci-setup documents the declaration lines and still installs nothing.
 - FL-07: `setup-project --watchdog` installs the timer (mock systemctl); setup without it
   prints the command; pipeline start without a timer warns and continues.
 - FL-09: pr-body/finish-summary tests for the split, None, flagged bullets and legacy handoffs.
