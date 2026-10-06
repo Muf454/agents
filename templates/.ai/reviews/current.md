@@ -24,5 +24,9 @@ evidence/reproduction, recommended direction. “None found” if actually inspe
 
 ## Manual testing recommendations
 
+### Needs you
+
+### Covered by automated tests
+
 <!-- Claude's dispositions live in .ai/reviews/dispositions.md; this report is never
 edited after the host saves it. -->

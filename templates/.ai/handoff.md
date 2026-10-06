@@ -22,7 +22,13 @@ The validation entry point is unconfigured and deliberately exits nonzero.
 <!-- Optional. One line, "Flow chart updated" or "Flow unchanged"; copied into the PR description. -->
 
 ## Manual testing for the human
-<!-- Concrete steps and expected results; include failure/edge cases. -->
+
+### Needs you
+<!-- Only what a human must do or decide: look and feel, phone/real devices, live accounts,
+external services, decisions. Concrete steps and expected results, or "None". -->
+
+### Covered by automated tests
+<!-- Every step a test can reproduce, one bullet each, with the test name in backticks. -->
 
 ## Human todos
 <!-- Actions only the human can take (decisions, credentials, manual setup, content

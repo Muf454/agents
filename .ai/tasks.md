@@ -280,7 +280,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 (PR and FINISHED nodes, notification table) updated; `updated:` was already 2026-10-06.
 
 ## T005 — Prompts and templates describe the "Needs you" split (FL-09)
-Status: TODO
+Status: DONE
 Dependencies: T004
 Model: sonnet
 
@@ -315,7 +315,10 @@ Targeted: `python3 -m unittest discover -s tests -k manual_testing_prompts` (out
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+DONE. Handoff template, runner/triage/fix-review/review prompts, review template, and
+templates CLAUDE.md/AGENTS.md describe "Needs you" vs "Covered by automated tests"; shared
+"How to work here" untouched. Tests `manual_testing_prompts` (2) added. Targeted run with
+`tool_contract`: Ran 5 tests OK; `.ai/bin/ai-check`: Ran 211 tests OK.
 
 ## T006 — Watchdog timer at setup, start warning, PID-based waits (FL-07)
 Status: TODO

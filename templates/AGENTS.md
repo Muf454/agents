@@ -26,7 +26,9 @@ Start each finding with its stable ID as a heading or bullet (e.g. `### M1 — .
 then the problem, location (`path:line`), why it matters,
 evidence/reproduction where practical, and recommended direction. Record validation
 actually observed, commands not run, scope limitations, missing tests, security
-and architecture concerns, manual testing recommendations, and overall verdict.
+and architecture concerns, manual testing recommendations (split into "Needs you" for what
+a human must check and "Covered by automated tests" for what is or should be a test), and
+overall verdict.
 Say “no findings” only for the areas inspected; don't imply proof of correctness.
 
 The scripted review uses a read-only Codex sandbox: output the complete Markdown

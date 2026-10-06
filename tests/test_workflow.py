@@ -3202,6 +3202,23 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('Needs you', body)
         self.assertNotIn('<details>', body)
 
+    def test_manual_testing_prompts_describe_the_split(self):
+        handoff = (ROOT / 'templates/.ai/handoff.md').read_text()
+        self.assertIn('### Needs you', handoff)
+        self.assertIn('### Covered by automated tests', handoff)
+        for name in ('.ai/prompts/runner.md', '.ai/prompts/triage.md', '.ai/prompts/fix-review.md',
+                     '.ai/prompts/review.md', 'CLAUDE.md', 'AGENTS.md'):
+            with self.subTest(file=name):
+                text = ' '.join((ROOT / 'templates' / name).read_text().split())
+                self.assertIn('Needs you', text)
+                self.assertIn('Covered by automated tests', text)
+
+    def test_manual_testing_prompts_fresh_handoff_renders_in_pr_body(self):
+        self.setup_project()
+        body = self.helper('pr-body', '0', '0').stdout
+        self.assertIn('## Summary', body)
+        self.assertIn('## Tasks', body)
+
     def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
         handoff = (ROOT / '.ai/handoff.md').read_text()
         self.assertIn('## Flow chart\nFlow chart updated', handoff)

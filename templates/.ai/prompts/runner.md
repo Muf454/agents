@@ -15,8 +15,11 @@ run its targeted checks and `.ai/bin/ai-check`, and fix failures your change
 caused. Update relevant docs/decisions (and the configured knowledge base, if
 any). Mark it DONE only when its acceptance criteria are met, with evidence in
 "Result / notes". Update `.ai/state.md` and `.ai/handoff.md` (keep "Manual testing
-for the human" current: concrete steps and expected results for the whole
-feature; list actions only the human can take under "Human todos", or "None"),
+for the human" current for the whole feature, in two parts: `### Needs you` only for
+what a human must do (look and feel, phone/real devices, live accounts, external
+services, decisions) with concrete steps and expected results, or "None"; every step a
+test can reproduce goes under `### Covered by automated tests` with its test name in
+backticks; list actions only the human can take under "Human todos", or "None"),
 append a concise `.ai/run-log.md` outcome, and commit with explicit
 paths (`git add -- <files>`; never `-A`, `.`, `--no-verify`, or `-n`).
 

@@ -66,3 +66,4 @@
 | 2026-10-06T16:02:49Z | runner | T003 | completed | PASS | 3573019 | Claude checkpointed; continuing queue |
 | 2026-10-06T16:30Z | claude | T004 | DONE (FL-09 runtime): manual_testing() in workflow.py; pr-body and finish-summary split "Needs you" from automated checks; vault flow chart updated | manual_testing_render 4 OK; ai-check 209 OK (564 s) | (this commit) | legacy handoffs render unchanged |
 | 2026-10-06T16:23:20Z | runner | T004 | completed | PASS | 197b3bc | Claude checkpointed; continuing queue |
+| 2026-10-06T16:50Z | claude | T005 | DONE (FL-09 guidance): templates/prompts/handoff describe "Needs you" vs "Covered by automated tests" | manual_testing_prompts + tool_contract 5 OK; ai-check 211 OK (565 s) | (this commit) | no flow-chart change |
