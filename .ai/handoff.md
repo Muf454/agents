@@ -17,6 +17,11 @@
 - T004 (OR-02, recovery): `scripts/ai-recover` checks the state directory before reading the
   run manifest and escalates (config error + original stop reason) without a Claude
   session, commit or attempt.
+- T005 (OR-02, watchdog): `scripts/lib/watchdog.py` `--install-timer` checks the target
+  checkout (not the caller's directory) before writing anything: relative `XDG_DATA_HOME`,
+  a host copy overlapping the checkout, or an overlapping state dir → exit 2. At runtime
+  `start_recovery()` uses the real-path overlap check for its own copy and the state-root
+  check before the gate digest/manifest; refusal is notified, `systemd-run` never called.
 
 Batch 1 (flow hardening, T001–T017) was merged via PR #11; its
 records are in Git history. This branch (`feature/evidence-or01-or02`, from origin/master
@@ -30,6 +35,7 @@ Baseline before planning: `.ai/bin/ai-check` (shell syntax + 168 unittest tests)
 After T001: `.ai/bin/ai-check` PASS, 172 tests (2026-10-06T05:36:13Z).
 After T002: `.ai/bin/ai-check` PASS, 179 tests.
 After T004: `.ai/bin/ai-check` PASS, 186 tests (2026-10-06).
+After T005: `.ai/bin/ai-check` PASS, 188 tests (2026-10-06).
 
 ## Open assumptions (for the plan review and Zack)
 - Overlap is bidirectional (a state root containing the checkout/knowledge dir is refused).
@@ -82,10 +88,23 @@ requires the section to start with these words).
    `.ai/local/last-error`, no Claude session, no new commit, no `.ai/local/pipeline.active`,
    and an unchanged `attempts` in the default state dir's `run.json`. `AI_STATE_DIR=relative`
    gives "AI_STATE_DIR must be an absolute path" the same way.
-7. A later task adds steps for the watchdog.
+7. Watchdog install refusal (T005): from a plain directory outside any Git repository, run
+   `AI_STATE_DIR=<project>/host-state <project>/.ai/bin/ai-watchdog <project> --install-timer`:
+   expect exit 2 with "refusing to install the timer: Host state directory … overlaps the
+   checkout <project> …", and no new `ai-watchdog-*` unit in `~/.config/systemd/user`, no
+   copy under `~/.local/share/ai-toolkit/watchdog`. The same with
+   `XDG_DATA_HOME=<project>/data` gives "Host copy … overlaps the checkout";
+   `XDG_DATA_HOME=relative` gives "XDG_DATA_HOME must be an absolute path". Without these
+   overrides it installs normally (then `--uninstall-timer`).
+8. Watchdog recovery refusal (T005): with the timer installed with `--recover` and a crashed
+   pipeline (`.ai/local/pipeline.active` holding a dead PID) after an approved run, run the
+   host copy (`~/.local/share/ai-toolkit/watchdog/<unit>/bin/ai-watchdog <project> --recover`)
+   with `AI_STATE_DIR=<project>/host-state AI_AUTO_RECOVER=1`: expect exit 1, one ⛔ message
+   ending "(auto-recovery refused: Host state directory … overlaps the checkout …)" and no
+   `ai-recover-*` systemd unit started.
 
 ## Human todos
 None.
 
 ## Next action
-The pipeline continues with T005.
+The pipeline continues with T006.

@@ -336,7 +336,7 @@ unchanged call count. Limitation: path check only, not OS isolation; knowledge d
 checked by the resumed ai-pipeline, the watchdog is T005.
 
 ## T005 — Same check for the watchdog host copy, install and runtime (OR-02)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: opus
 
@@ -394,7 +394,19 @@ Targeted: `python3 -m unittest discover -s tests -k watchdog_host_root` (output 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+2026-10-06: scripts/lib/watchdog.py imports `check_state_root`/`overlap` from the sibling
+workflow.py (`sys.dont_write_bytecode`: no `__pycache__` in the digested `.ai/bin`). Install
+path (before `rmtree`/`copytree`/units) raises `Refused` for a relative `XDG_DATA_HOME`, a
+host copy overlapping `root`, or `check_state_root(root)` failing → `parser.error('refusing
+to install the timer: …')`, exit 2. `start_recovery()` uses `overlap(bin_dir, root)` and
+runs `check_state_root(root)` before the digest/`run-manifest gate`, returning `auto-recovery
+refused: Host state directory … overlaps the checkout …`. Uninstall unchanged. Tests
+`test_watchdog_host_root_install_checks_the_target_checkout` (subtests: plain dir and another
+checkout as cwd, refused + safe control; XDG_DATA_HOME inside / symlink into checkout;
+relative) and `test_watchdog_host_root_recovery_refuses_a_state_dir_in_the_checkout`.
+`python3 -m unittest discover -s tests -k watchdog_host_root`: Ran 2 tests OK; `-k watchdog`:
+19 OK (existing install/recovery tests unchanged). `.ai/bin/ai-check`: Ran 188 tests OK.
+Docs: docs/workflow.md, README.md; vault agents-flow.md watchdog node + note.
 
 ## T006 — Final docs audit for the new checks
 Status: TODO

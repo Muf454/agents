@@ -355,7 +355,13 @@ budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn'
 cleared to their defaults, and the resumed pipeline skips the user config file
 (`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
-default unless you changed it). `--recover` only works from the installed host copy; run
+default unless you changed it). `--install-timer` checks this for the TARGET checkout (the
+`project` argument, not the caller's directory) before writing anything: it refuses (exit 2)
+a relative `XDG_DATA_HOME`, a host copy that overlaps the checkout (equal, inside or
+containing, also through symlinks) and a state directory that does. At runtime the host copy
+repeats the state-directory check before reading the gate digest or the manifest; on failure
+it notifies `auto-recovery refused: Host state directory … overlaps the checkout …` and
+never calls `systemd-run`. `--recover` only works from the installed host copy; run
 from the checkout it refuses and reports (a human running checkout scripts trusts them,
 as with `ai-pipeline`; the protected path is the timer's host copy). Order in
 `ai-recover`: take the lock (a rejected second process exits quietly and touches neither

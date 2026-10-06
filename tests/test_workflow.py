@@ -656,6 +656,66 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.watchdog('--uninstall-timer', expected=1)
         self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
 
+    def assert_install(self, cwd, expected, **env):
+        # Installs the timer for self.project while the caller's directory is cwd.
+        (self.mock_bin / 'systemctl').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n')
+        (self.mock_bin / 'systemctl').chmod(0o755)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-watchdog'), str(self.project), '--install-timer'],
+                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=25)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        units = self.config / 'systemd/user'
+        hosts = self.base / 'xdg-data/ai-toolkit/watchdog'
+        if expected:
+            self.assertFalse(units.exists() and any(units.iterdir()), result.stderr)
+            self.assertFalse(hosts.exists() and any(hosts.iterdir()), result.stderr)
+            self.assertFalse((self.base / 'systemctl.log').exists())
+        else:
+            self.assertEqual(len(list(units.iterdir())), 2)
+            self.watchdog('--uninstall-timer')
+            (self.base / 'systemctl.log').unlink()
+        return result.stderr
+
+    def test_watchdog_host_root_install_checks_the_target_checkout(self):
+        self.setup_project()
+        inside = str(self.project / '.ai/local/state')
+        plain = self.base / 'plain'
+        plain.mkdir()
+        other = self.base / 'other checkout'
+        other.mkdir()
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(other)], check=True, env=self.env)
+        for cwd in (plain, other):
+            with self.subTest(cwd=cwd.name):
+                error = self.assert_install(cwd, 2, AI_STATE_DIR=inside)
+                self.assertIn('Host state directory ' + inside, error)
+                self.assertIn('overlaps the checkout ' + str(self.project), error)
+                self.assert_install(cwd, 0)  # control: safe state dir
+        link = self.base / 'data-link'
+        link.symlink_to(self.project / '.ai/local')
+        for data in (str(self.project / '.ai/local/data'), str(link)):
+            with self.subTest(data=data):
+                error = self.assert_install(plain, 2, XDG_DATA_HOME=data)
+                self.assertIn('overlaps the checkout', error)
+                self.assertFalse((self.project / '.ai/local/ai-toolkit').exists())
+        self.assertIn('XDG_DATA_HOME must be an absolute path',
+                      self.assert_install(plain, 2, XDG_DATA_HOME='relative/data'))
+        self.assertFalse((plain / 'relative').exists())
+
+    def test_watchdog_host_root_recovery_refuses_a_state_dir_in_the_checkout(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1',
+                           AI_STATE_DIR=str(self.project / '.ai/local/state'))
+        notified = self.notifications().splitlines()
+        self.assertEqual(len(notified), 1)
+        self.assertIn('auto-recovery refused: Host state directory', notified[0])
+        self.assertIn('overlaps the checkout', notified[0])
+        self.assertFalse((self.base / 'systemd-run.log').exists())
+        self.assertFalse((self.base / 'recover-calls').exists())
+
     def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
         self.setup_project()
         self.watchdog_phase('implementing')
