@@ -47,3 +47,4 @@
 | 2026-10-06T05:45Z | claude | T001 | DONE: ai-run verify_checkpoint (clean tree + stamp + committed-matches-worktree) after each DONE bookkeeping commit and the final handoff commit; "✅ Done" sent after the check | committed_bytes_run 4 OK; ai-check 172 OK | (this commit) | Vault flow chart + hub log updated |
 | 2026-10-06T05:44:14Z | runner | T001 | completed | PASS | 54b0ee8 | Claude checkpointed; continuing queue |
 | 2026-10-06T06:05Z | claude | T002 | DONE: ai-pipeline byte check before every review; committed bytes in publish_ready; publish_ready after every push attempt (failed or not) | committed_bytes_pipeline 7 OK; ai-check 179 OK | (this commit) | Vault flow chart + hub log updated; README/docs publish paragraphs |
+| 2026-10-06T06:12:53Z | runner | T002 | completed | PASS | f4d6a9e | Claude checkpointed; continuing queue |
