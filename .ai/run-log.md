@@ -51,3 +51,4 @@
 | 2026-10-06T06:32Z | claude | T003 | DONE: state_root/overlap/check_state_root + state-root-check helper; binding_dir fails closed; ai-run/ai-pipeline refuse overlapping or relative state roots before any agent; pipeline records absolute --knowledge-dir | state_root 6 OK; ai-check 185 OK | (this commit) | docs/workflow.md, vault flow chart + hub log updated |
 | 2026-10-06T06:39:41Z | runner | T003 | completed | PASS | 94d37ec | Claude checkpointed; continuing queue |
 | 2026-10-06T06:55Z | claude | T004 | DONE: ai-recover runs state-root-check before the first run-manifest read; unsafe state dir escalates with config error + original reason, no Claude session/commit/attempt | recover_state_root 1 OK; ai-check 186 OK | (this commit) | docs/workflow.md, vault recovery diagram + hub log updated |
+| 2026-10-06T06:57:26Z | runner | T004 | completed | PASS | 302d4e4 | Claude checkpointed; continuing queue |
