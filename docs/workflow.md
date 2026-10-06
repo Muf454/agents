@@ -235,7 +235,11 @@ outside the checkout (`${AI_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/ai-tool
 keyed by repository path and reviewed HEAD). Every consumer (`review-info`, triage, the
 pipeline's freshness check) verifies it, including on resume and after hooks; a report
 that doesn't match is invalid until Codex reviews again. Agent sessions get no write
-access there (only the project and an explicit `--knowledge-dir`). Accepted findings must
+access there (only the project and an explicit `--knowledge-dir`). `ai-run` and
+`ai-pipeline` refuse to start, before any agent, when that state directory overlaps the
+checkout or the `--knowledge-dir` (equal, inside or containing, also through symlinks) or
+when `AI_STATE_DIR`/`XDG_STATE_HOME` is relative; every helper that uses it fails closed the
+same way. This is a path check, not OS isolation. Accepted findings must
 reference new TODO fix tasks (`triage-check --fresh`) and always lead to a new review;
 `unresolved` is derived from the final review each round. The gate is re-verified after
 every host commit and push; draft conversion of an existing PR is verified, not assumed.

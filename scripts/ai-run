@@ -52,6 +52,9 @@ done
 [[ -z "$since" || "$triage" == yes ]] || ai_die '--since only applies to --triage.'
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
+# Host authority state must live where agent sessions cannot write (also for --triage).
+state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
+  ai_die "${state_error#Error: }"
 ai_lock
 rm -f .ai/local/last-error
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'

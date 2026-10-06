@@ -195,7 +195,7 @@ Gate: `.ai/bin/ai-check` PASS, 179 tests. Vault `agents-flow.md` (pre-review byt
 publish-checks node + bullets; `updated: 2026-10-06`) and hub Log updated.
 
 ## T003 — Refuse state roots that overlap the checkout or knowledge dir (OR-02)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -262,7 +262,18 @@ Targeted: `python3 -m unittest discover -s tests -k state_root` (output must say
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+2026-10-06: `state_root()`, `overlap()`, `check_state_root(checkout, knowledge)` and the
+`state-root-check [--checkout PATH] [KNOWLEDGE_DIR]` helper in scripts/lib/workflow.py;
+`binding_dir()` checks against the git toplevel (key unchanged). ai-run and ai-pipeline run the
+check right after `ai_root` (before lock, clean-tree check and any Codex/Claude call);
+ai-pipeline resolves `--knowledge-dir` like ai-run and writes the absolute real path into
+`orig_args` (run manifest) and `run_args`. Six `state_root` tests (inside/equal/containing
+checkout, symlinks both ways, knowledge dir inside/equal/containing for both tools, relative
+AI_STATE_DIR/XDG_STATE_HOME, helpers fail closed + `--checkout` from another dir, default XDG
+path with relative `--knowledge-dir` recorded absolute). Targeted: `Ran 6 tests … OK`;
+`.ai/bin/ai-check`: 185 tests OK, exit 0. docs/workflow.md and vault agents-flow.md updated
+(start check node + bullet). Limitation: path check only, not OS isolation; ai-recover (T004)
+and the watchdog (T005) not yet covered.
 
 ## T004 — ai-recover refuses an overlapping state root before reading the manifest (OR-02)
 Status: TODO

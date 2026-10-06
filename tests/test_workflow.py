@@ -977,6 +977,82 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'complete')
         self.tool('ai-run', '--approved', '--knowledge-dir', str(notes / 'missing'), expected=1)
 
+    def assert_state_root_refused(self, state, message, *args):
+        for tool in ('ai-run', 'ai-pipeline'):
+            extra = ('--base', 'main', '--no-pr') if tool == 'ai-pipeline' else ()
+            result = self.tool(tool, '--approved', *extra, *args, expected=1, AI_STATE_DIR=str(state))
+            self.assertIn(message, result.stderr)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        for name in ('codex-calls', 'codex-plan-calls'):
+            self.assertFalse((self.base / name).exists())
+
+    def test_state_root_inside_checkout_is_refused_before_any_agent(self):
+        self.ready()
+        state = self.project / 'host state'
+        self.assert_state_root_refused(state, 'overlaps the checkout')
+        self.assertFalse(state.exists())
+        self.assert_state_root_refused(self.project, 'overlaps the checkout')
+        self.assert_state_root_refused(self.base, 'overlaps the checkout')
+
+    def test_state_root_symlinks_into_or_out_of_the_checkout_are_refused(self):
+        self.ready()
+        into = self.base / 'link into checkout'
+        into.symlink_to(self.project / '.ai')
+        self.assert_state_root_refused(into / 'state', 'overlaps the checkout')
+        outside = self.base / 'outside'
+        outside.mkdir()
+        out = self.project / 'link out'
+        out.symlink_to(outside)
+        self.assert_state_root_refused(out, 'overlaps the checkout')
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_state_root_overlapping_the_knowledge_dir_is_refused(self):
+        self.ready()
+        notes = self.base / 'notes'
+        knowledge = notes / 'kb'
+        knowledge.mkdir(parents=True)
+        for state in (knowledge / 'state', knowledge, notes):
+            self.assert_state_root_refused(state, 'overlaps the knowledge directory',
+                                           '--knowledge-dir', str(knowledge))
+        self.assertEqual(list(knowledge.iterdir()), [])
+
+    def test_state_root_relative_settings_are_refused(self):
+        self.ready()
+        self.assert_state_root_refused('relative/state', 'AI_STATE_DIR must be an absolute path')
+        for tool in ('ai-run', 'ai-pipeline'):
+            result = self.tool(tool, '--approved', expected=1, AI_STATE_DIR='', XDG_STATE_HOME='relative')
+            self.assertIn('XDG_STATE_HOME must be an absolute path', result.stderr)
+
+    def test_state_root_helpers_fail_closed_and_check_the_named_checkout(self):
+        self.ready()
+        self.env['AI_STATE_DIR'] = str(self.project / 'state')
+        (self.project / '.ai/reviews/current.md').write_text('<!-- Host evidence: HEAD abcdef0; saved now. -->\n')
+        for args in (('review-info',), ('run-manifest', 'gate')):
+            self.assertIn('overlaps the checkout', self.helper(*args, expected=1).stderr)
+        self.assertFalse((self.project / 'state').exists())
+        other = self.base / 'elsewhere'
+        other.mkdir()
+        check = ['python3', str(HELPER), 'state-root-check', '--checkout', str(self.project)]
+        result = subprocess.run(check, cwd=other, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f'overlaps the checkout {self.project}', result.stderr)
+        self.env['AI_STATE_DIR'] = str(other / 'state')
+        result = subprocess.run(check, cwd=other, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_state_root_default_xdg_and_relative_knowledge_dir_recorded_absolute(self):
+        self.ready()
+        notes = self.base / 'notes'
+        notes.mkdir()
+        real = os.path.realpath(notes)
+        self.env.update(AI_STATE_DIR='', XDG_STATE_HOME=str(self.base / 'xdg-state'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--knowledge-dir', '../notes',
+                  MOCK_KNOWLEDGE_DIR=real)
+        self.helper('tasks', 'complete')
+        manifest = json.loads(next((self.base / 'xdg-state/ai-toolkit').rglob('run.json')).read_text())
+        self.assertEqual(manifest['args'][manifest['args'].index('--knowledge-dir') + 1], real)
+        self.assertFalse((self.base / 'host-state').exists())
+
     def test_repeated_setup_with_toolkit_instructions_needs_no_merge_warning(self):
         self.setup_project()
         result = self.setup_project('--dry-run')

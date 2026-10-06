@@ -59,7 +59,15 @@ requires the section to start with these words).
    no PR opened, no FINISHED notification and the hook's commit still in `git log`. With
    auto-recovery on, expect it to be escalated to you, without a recovery Claude session.
 4. Without the hook the same pipeline pushes and opens the PR normally.
-5. Later tasks add steps for the state-root refusal.
+5. State-root refusal (T003): in a scratch project with an approved plan, run
+   `AI_STATE_DIR="$PWD/host-state" .ai/bin/ai-run --approved` and the same with
+   `.ai/bin/ai-pipeline --approved --base main --no-pr`: expect exit 1 with "Host state
+   directory … overlaps the checkout … set AI_STATE_DIR to a directory outside it.", no
+   Claude/Codex session, and no `host-state` directory created. With `--knowledge-dir ~/notes`
+   and `AI_STATE_DIR=~/notes/state` expect "overlaps the knowledge directory";
+   `AI_STATE_DIR=relative` expects "AI_STATE_DIR must be an absolute path". With
+   `AI_STATE_DIR` unset (default location) both run normally.
+6. Later tasks add steps for ai-recover and the watchdog.
 
 ## Human todos
 None.

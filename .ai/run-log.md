@@ -48,3 +48,4 @@
 | 2026-10-06T05:44:14Z | runner | T001 | completed | PASS | 54b0ee8 | Claude checkpointed; continuing queue |
 | 2026-10-06T06:05Z | claude | T002 | DONE: ai-pipeline byte check before every review; committed bytes in publish_ready; publish_ready after every push attempt (failed or not) | committed_bytes_pipeline 7 OK; ai-check 179 OK | (this commit) | Vault flow chart + hub log updated; README/docs publish paragraphs |
 | 2026-10-06T06:12:53Z | runner | T002 | completed | PASS | f4d6a9e | Claude checkpointed; continuing queue |
+| 2026-10-06T06:32Z | claude | T003 | DONE: state_root/overlap/check_state_root + state-root-check helper; binding_dir fails closed; ai-run/ai-pipeline refuse overlapping or relative state roots before any agent; pipeline records absolute --knowledge-dir | state_root 6 OK; ai-check 185 OK | (this commit) | docs/workflow.md, vault flow chart + hub log updated |
