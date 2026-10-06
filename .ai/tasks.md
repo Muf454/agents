@@ -432,3 +432,113 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 Pending.
+
+## T008 — Tree snapshot covers uninitialised submodule paths (review M1)
+Status: TODO
+Dependencies: T001, T002
+Model: opus
+
+### Goal
+Codex review M1: `tree_snapshot` (scripts/lib/workflow.py ~1627) records every gitlink
+without `.git` as the constant `uninitialised`, before its symlink/file checks. An installer
+that creates or overwrites files under an uninitialised submodule path, or replaces it with a
+symlink, leaves the snapshot unchanged, so FL-01's "installer changed no project file" check
+passes and the stamp is recorded.
+
+### Implementation notes
+Determine the real kind first: a symlink at a gitlink/nested-repo path is recorded as `link`
+plus its target (never followed); an initialised repository recurses as today; an
+uninitialised gitlink directory records its mode plus a recursive filesystem walk of its
+contents (relative path, kind, mode, bytes or link target; symlinks not followed); a
+non-directory file at that path records `file` with bytes; absence records `missing`. Git
+reports no untracked files under a gitlink path, so the walk must be filesystem-based; no
+ignore rules apply inside (an uninitialised submodule should be empty). Keep the docstring
+accurate. Prefer direct `tree-snapshot` calls in tests over full runner fixtures: the gate is
+already near the 600 s session limit; at most one runner-level regression.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `tree_snapshot_uninitialised_submodule`: with a real repository containing a
+  committed but uninitialised gitlink, the snapshot changes when a file is created inside the
+  path, when an existing file there is overwritten, when its mode changes, and when the
+  directory is replaced by a symlink; it is unchanged when nothing is touched.
+- One runner regression: an installer that creates a file inside an uninitialised submodule
+  path (exit 0 and exit 1) stops with "Dependency setup changed project files" and records no
+  stamp.
+- Existing `deps_status` / `deps_runner` / `deps_recovery` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k tree_snapshot_uninitialised_submodule` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Pending.
+
+## T009 — Dependency outputs must be directories (review N2)
+Status: TODO
+Dependencies: T001
+Model: sonnet
+
+### Goal
+Codex review N2: `deps_status` (scripts/lib/workflow.py ~1588) treats any existing path as
+a present output, so a regular file or a broken symlink at `node_modules` reports `current`.
+
+### Implementation notes
+Use `is_dir()` for declared outputs; report `stale missing output <p>` when absent and
+`stale output <p> is not a directory` when something else is there (a symlink to a directory
+counts as present). Unit-level tests only (no runner fixtures).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (only if it describes the
+output check)
+
+### Acceptance criteria
+- Tests named `deps_status_output_kind`: matching stamp with a regular file at the output →
+  stale "not a directory"; broken symlink → stale; symlink to a directory → current; real
+  directory → current.
+- Existing `deps_status` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k deps_status_output_kind` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Pending.
+
+## T010 — Wrapped automated test bullets are not flagged; FINISHED count regression (review N1)
+Status: TODO
+Dependencies: T004
+Model: sonnet
+
+### Goal
+Codex review N1: `pr_body` (scripts/lib/workflow.py ~1896) checks only a bullet's first
+physical line for a backtick, so this branch's own handoff gets five false "⚠ no test named"
+warnings for test names on continuation lines; a lone backtick also passes. Also add the
+missing plan-review P12 regression (FINISHED counting with both subsections populated).
+
+### Implementation notes
+Group the automated section into list items (a bullet line plus its indented continuation
+lines); flag an item unless it contains a nonempty paired backtick span (e.g.
+`` `[^`\n]+` `` across the joined item). Append the warning to the item's last line so the
+Markdown stays valid. Item count logic unchanged. Unit-level tests only.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `manual_testing_wrapped`: a bullet whose test name is on a continuation line
+  gets no warning; an unnamed bullet and a bullet with an unmatched single backtick are
+  flagged; the count of automated checks is unchanged; rendering this repo's own
+  `.ai/handoff.md` flags only bullets that truly name no test.
+- A `finish_summary` test with two "Needs you" steps and three automated checks reports
+  "Test: 2 manual step(s)" (P12).
+- Existing `manual_testing_render` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k manual_testing_wrapped` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Pending.
