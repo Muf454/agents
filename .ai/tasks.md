@@ -321,7 +321,7 @@ templates CLAUDE.md/AGENTS.md describe "Needs you" vs "Covered by automated test
 `tool_contract`: Ran 5 tests OK; `.ai/bin/ai-check`: Ran 211 tests OK.
 
 ## T006 — Watchdog timer at setup, start warning, PID-based waits (FL-07)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -385,7 +385,11 @@ Targeted: `python3 -m unittest discover -s tests -k watchdog_setup` (output must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Done. `--timer-status` (unit_name/units_dir factored out), `setup-project --watchdog` and the
+"Next" line, ai-pipeline start warning plus STARTED/RESUMED note, README "Waiting for a run".
+`python3 -m unittest discover -s tests -k watchdog_setup`: Ran 11 tests, OK. `.ai/bin/ai-check`:
+Ran 222 tests, OK (590 s). Vault flow chart (updated 2026-10-06), hub Log and human-todo item
+done. Limit: the real systemd path is only exercised through a mock systemctl.
 
 ## T007 — Final docs audit for batch 2
 Status: TODO

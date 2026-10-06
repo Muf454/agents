@@ -46,6 +46,7 @@ After T004: `.ai/bin/ai-check` PASS, 209 tests OK (2026-10-06, 564 s).
 ## Flow chart
 Flow chart updated: not yet for this run (T002, T003, T004 and T006 update the
 vault agents-flow.md; T007 replaces this line; a test requires it to start with these words).
+T006 added the optional timer to setup and the start warning to the start check (2026-10-06).
 T002 added the dependency step (node, ⛔ stop, note, recovery hard rule) on 2026-10-06.
 T003 updated the recovery diagram's commit + rerun branch (install if stale, then the gate).
 
@@ -59,7 +60,11 @@ T003 updated the recovery diagram's commit + rerun branch (install if stale, the
    "Dependency setup (.ai/ci-setup): no dependency stamp …" then "Dependencies installed in
    Ns (log .ai/local/deps-….log)"; `.ai/local/deps.json` exists; `git status` stays clean.
    A second run with an unchanged lockfile shows no dependency step.
-2. Expected later in this batch: the watchdog warning and the PR's "How to test" layout.
+2. Watchdog warning on a real checkout: in a worktree without a timer, start
+   `.ai/bin/ai-pipeline --approved`. Expected: "No watchdog timer for this checkout; …" on
+   screen and "(no watchdog timer for this checkout)" in the phone STARTED notification.
+   Then `.ai/bin/ai-watchdog --install-timer --diagnose --recover`, run
+   `.ai/bin/ai-watchdog --timer-status` (expect `installed …`), and start again: no warning.
 
 ### Covered by automated tests
 - Dependency freshness (declared inputs/outputs, edits, added/removed inputs, ci-setup edit,
@@ -86,6 +91,11 @@ T003 updated the recovery diagram's commit + rerun branch (install if stale, the
   a failing or file-changing install escalates with no commit:
   `test_deps_recovery_failed_install_escalates_without_a_commit`,
   `test_deps_recovery_changing_install_escalates_without_a_commit`.
+- Watchdog timer (T006): `--timer-status` missing/installed/partial/stopped/unknown, setup
+  `--watchdog` (files + units, rejected with `--dry-run`/`--upgrade`, failing systemctl),
+  plain setup's "Next" line, pipeline start warning and notification note (missing, stopped,
+  unknown, recovery resume, quiet when installed), no `pgrep -f` waits and README PID example:
+  `test_watchdog_setup_*` (11 tests in `tests/test_workflow.py`).
 - Further scenarios are added by the remaining tasks.
 
 ## Human todos

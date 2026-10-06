@@ -135,10 +135,49 @@ def unit_quote(value, command=True):
     return '"' + (escaped.replace('$', '$$') if command else escaped) + '"'
 
 
-def timer(root, args, install):
-    units = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
+def unit_name(root):
     slug = re.sub(r'[^A-Za-z0-9_.-]+', '-', root.name).strip('-') or 'project'
-    name = f'ai-watchdog-{slug}-{hashlib.sha256(str(root).encode()).hexdigest()[:8]}'
+    return f'ai-watchdog-{slug}-{hashlib.sha256(str(root).encode()).hexdigest()[:8]}'
+
+
+def units_dir():
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
+
+
+def timer_status(root):
+    """Print installed / missing / unknown for this checkout's timer; exit 0 / 1 / 2."""
+    name = unit_name(root)
+    units = units_dir()
+    timer_name = name + '.timer'
+    if not (units / (name + '.service')).is_file() or not (units / timer_name).is_file():
+        print(f'missing {timer_name} (no unit files)')
+        return 1
+    answers = {}
+    for query in ('is-enabled', 'is-active'):
+        try:
+            result = subprocess.run(['systemctl', '--user', query, timer_name],
+                                    capture_output=True, text=True)
+        except OSError as error:
+            print(f'unknown {timer_name} (systemctl unavailable: {error.strerror or error})')
+            return 2
+        answers[query] = result.stdout.strip()
+        if result.returncode and not answers[query]:
+            print(f'unknown {timer_name} (systemctl {query} failed: '
+                  f'{result.stderr.strip()[:120] or "exit " + str(result.returncode)})')
+            return 2
+    if answers['is-enabled'] != 'enabled':
+        print(f'missing {timer_name} (not enabled)')
+        return 1
+    if answers['is-active'] != 'active':
+        print(f'missing {timer_name} (not active)')
+        return 1
+    print(f'installed {timer_name}')
+    return 0
+
+
+def timer(root, args, install):
+    units = units_dir()
+    name = unit_name(root)
     service, timer_unit = units / (name + '.service'), units / (name + '.timer')
     def systemctl(*command):
         result = subprocess.run(['systemctl', '--user', *command])
@@ -284,12 +323,16 @@ def main():
     timer_group.add_argument('--install-timer', action='store_true',
                              help='install and start a systemd user timer (every 10 min) with these options')
     timer_group.add_argument('--uninstall-timer', action='store_true')
+    timer_group.add_argument('--timer-status', action='store_true',
+                             help="print installed/missing/unknown for this checkout's timer (exit 0/1/2)")
     args = parser.parse_args()
     root = Path(args.project).resolve()
     ai = root / '.ai'
     local = ai / 'local'
     if not ai.is_dir() or ai.is_symlink() or local.is_symlink():
         parser.error('project must have a real .ai directory and safe .ai/local')
+    if args.timer_status:
+        return timer_status(root)
     if args.install_timer or args.uninstall_timer:
         try:
             return timer(root, args, args.install_timer)

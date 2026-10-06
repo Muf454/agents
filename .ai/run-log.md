@@ -68,3 +68,4 @@
 | 2026-10-06T16:23:20Z | runner | T004 | completed | PASS | 197b3bc | Claude checkpointed; continuing queue |
 | 2026-10-06T16:50Z | claude | T005 | DONE (FL-09 guidance): templates/prompts/handoff describe "Needs you" vs "Covered by automated tests" | manual_testing_prompts + tool_contract 5 OK; ai-check 211 OK (565 s) | (this commit) | no flow-chart change |
 | 2026-10-06T16:43:01Z | runner | T005 | completed | PASS | b34b36b | Claude checkpointed; continuing queue |
+| 2026-10-06T17:10Z | claude | T006 | DONE (FL-07): ai-watchdog --timer-status, setup-project --watchdog, start warning + notification note, README PID waits; vault flow chart/human-todo/hub log | watchdog_setup 11 OK; ai-check 222 OK (590 s) | (this commit) | interrupted session reconciled, diff kept |

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -681,6 +682,143 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.mock_bin / 'systemctl').write_text('#!/usr/bin/env bash\n[[ "$2" != disable ]]\n')
         self.watchdog('--uninstall-timer', expected=1)
         self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
+
+    def mock_systemctl(self):
+        # Records calls; enable --now makes the timer enabled+active unless MOCK_SYSTEMCTL=fail.
+        # MOCK_SYSTEMCTL=broken answers queries with an error and no output (no user bus).
+        (self.mock_bin / 'systemctl').write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n'
+            'case "$MOCK_SYSTEMCTL:$2" in\n'
+            '  fail:enable) echo "Failed to enable" >&2; exit 1 ;;\n'
+            '  broken:is-*) echo "Failed to connect to bus" >&2; exit 1 ;;\n'
+            'esac\n'
+            'case "$2" in\n'
+            '  enable) echo enabled > "$MOCK_STATE_DIR/sc-enabled"; echo active > "$MOCK_STATE_DIR/sc-active" ;;\n'
+            '  disable) rm -f "$MOCK_STATE_DIR"/sc-enabled "$MOCK_STATE_DIR"/sc-active ;;\n'
+            '  is-enabled) cat "$MOCK_STATE_DIR/sc-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;\n'
+            '  is-active) cat "$MOCK_STATE_DIR/sc-active" 2>/dev/null || { echo inactive; exit 3; } ;;\n'
+            'esac\n'
+            'exit 0\n')
+        (self.mock_bin / 'systemctl').chmod(0o755)
+
+    def timer_status(self, expected, **env):
+        result = self.watchdog('--timer-status', expected=expected, **env)
+        return result.stdout.strip()
+
+    def test_watchdog_setup_flag_installs_files_and_timer(self):
+        self.mock_systemctl()
+        result = self.setup_project('--watchdog')
+        units = sorted((self.config / 'systemd/user').iterdir())
+        self.assertEqual([u.suffix for u in units], ['.service', '.timer'])
+        self.assertTrue((self.base / 'xdg-data/ai-toolkit/watchdog' / units[0].stem / 'bin/ai-watchdog').is_file())
+        self.assertIn('--user enable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
+        self.assertNotIn('Next: install the watchdog timer', result.stdout)
+        self.assertTrue(self.timer_status(0).startswith('installed '))
+
+    def test_watchdog_setup_flag_is_rejected_with_dry_run_and_upgrade(self):
+        self.mock_systemctl()
+        for option in ('--dry-run', '--upgrade'):
+            with self.subTest(option=option):
+                result = self.run_cmd([str(ROOT / 'scripts/setup-project'), '--watchdog', option,
+                                       str(self.project)], expected=1)
+                self.assertIn('--watchdog', result.stderr + result.stdout)
+        self.assertFalse((self.project / '.ai').exists())
+        self.assertFalse((self.base / 'systemctl.log').exists())
+
+    def test_watchdog_setup_flag_reports_a_failing_systemctl(self):
+        self.mock_systemctl()
+        result = self.run_cmd([str(ROOT / 'scripts/setup-project'), '--watchdog', str(self.project)],
+                              expected=1, env=dict(self.env, MOCK_SYSTEMCTL='fail'))
+        self.assertIn('the timer was not', result.stderr + result.stdout)
+        self.assertIn('enable', result.stderr + result.stdout)
+        self.assertTrue((self.project / '.ai/bin/ai-watchdog').is_file())
+
+    def test_watchdog_setup_plain_prints_next_step_and_writes_no_units(self):
+        self.mock_systemctl()
+        result = self.setup_project()
+        self.assertIn('Next: install the watchdog timer: .ai/bin/ai-watchdog --install-timer --diagnose --recover',
+                      result.stdout)
+        self.assertFalse((self.config / 'systemd').exists())
+        self.assertFalse((self.base / 'systemctl.log').exists())
+
+    def test_watchdog_setup_timer_status_missing_installed_partial_stopped_unknown(self):
+        self.setup_project()
+        self.mock_systemctl()
+        self.assertIn('no unit files', self.timer_status(1))
+        self.watchdog('--install-timer')
+        self.assertTrue(self.timer_status(0).startswith('installed ai-watchdog-'))
+        (self.base / 'sc-enabled').unlink()  # unit files present, enable --now never took effect
+        self.assertTrue(self.timer_status(1).startswith('missing '))
+        self.assertIn('not enabled', self.timer_status(1))
+        (self.base / 'sc-enabled').write_text('enabled\n')
+        (self.base / 'sc-active').write_text('inactive\n')
+        self.assertIn('not active', self.timer_status(1))
+        (self.base / 'sc-active').write_text('active\n')
+        self.assertTrue(self.timer_status(0).startswith('installed '))
+        self.assertTrue(self.timer_status(2, MOCK_SYSTEMCTL='broken').startswith('unknown '))
+        (self.mock_bin / 'systemctl').unlink()
+        empty = self.base / 'empty-bin'
+        empty.mkdir()
+        result = self.run_cmd([sys.executable, '-I', str(self.project / '.ai/bin/lib/watchdog.py'),
+                               str(self.project), '--timer-status'], expected=2,
+                              env=dict(self.env, PATH=str(empty)))
+        self.assertTrue(result.stdout.startswith('unknown '), result.stdout)
+        self.watchdog('--timer-status', '--install-timer', expected=2)
+
+    def pipeline_ready(self):
+        self.ready()
+        self.mock_systemctl()
+
+    def test_watchdog_setup_pipeline_warns_when_timer_is_missing(self):
+        self.pipeline_ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('No watchdog timer for this checkout', result.stdout)
+        self.assertIn('▶ STARTED on feature/test. (no watchdog timer for this checkout)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_warns_when_timer_is_stopped(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        (self.base / 'sc-active').write_text('inactive\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('No watchdog timer for this checkout', result.stdout)
+        self.assertIn('(no watchdog timer for this checkout)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_is_quiet_with_an_installed_timer(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertNotIn('watchdog timer', result.stdout)
+        self.assertIn('▶ STARTED on feature/test.\n', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_notes_unknown_status_and_continues(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_SYSTEMCTL='broken')
+        self.assertIn('Watchdog timer status unknown', result.stdout)
+        self.assertIn('(watchdog timer status unknown)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_recovery_resume_notification_carries_the_note(self):
+        self.pipeline_ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        self.assertIn('▶ RESUMED on feature/test after auto-recovery (1). (no watchdog timer for this checkout)',
+                      self.notifications())
+
+    def test_watchdog_setup_no_pgrep_f_waits_in_executable_code_and_readme_documents_pids(self):
+        for directory in ('scripts', 'templates'):
+            for path in sorted((ROOT / directory).rglob('*')):
+                if path.is_file() and path.suffix != '.md':
+                    self.assertNotRegex(path.read_text(errors='replace'), r'pgrep\s+(-\w*f|--full)',
+                                        str(path))
+        readme = (ROOT / 'README.md').read_text()
+        self.assertIn('while kill -0 "$pid" 2>/dev/null; do sleep 60; done', readme)
+        self.assertIn('pgrep -f', readme)
+        self.assertIn('matches itself', readme)
 
     def assert_install(self, cwd, expected, **env):
         # Installs the timer for self.project while the caller's directory is cwd.

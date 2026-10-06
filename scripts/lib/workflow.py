@@ -279,9 +279,13 @@ def setup(arguments):
                         help='plan an upgrade of toolkit-owned files (.ai/bin, .ai/prompts); changes nothing')
     parser.add_argument('--apply', action='store_true', help='with --upgrade: apply the plan')
     parser.add_argument('--force', action='store_true', help='with --upgrade --apply: overwrite locally edited files')
+    parser.add_argument('--watchdog', action='store_true',
+                        help='after installing, install the watchdog timer for this checkout')
     args = parser.parse_args(arguments)
     if (args.apply or args.force) and not args.upgrade:
         fail('--apply and --force only make sense with --upgrade.')
+    if args.watchdog and (args.dry_run or args.upgrade):
+        fail('--watchdog cannot be combined with --dry-run or --upgrade.')
     root = args.project.expanduser().resolve()
     if not root.is_dir():
         fail('Target directory must exist. Create it and run git init first.')
@@ -369,6 +373,16 @@ def setup(arguments):
     if created or not (root / STAMP_FILE).exists():  # a no-op repeat must not move the recorded commit
         write_stamp(root, toolkit, stamp)
     print('Installed. Existing files were preserved: reconcile KEEP entries manually before running.')
+    if not args.watchdog:
+        print('Next: install the watchdog timer: .ai/bin/ai-watchdog --install-timer --diagnose --recover')
+        return
+    result = subprocess.run([str(root / '.ai/bin/ai-watchdog'), str(root), '--install-timer',
+                             '--diagnose', '--recover'],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    print(result.stdout, end='')
+    if result.returncode:
+        fail('The watchdog timer was not installed (files were installed; the timer was not): '
+             + (result.stderr.strip() or result.stdout.strip() or f'exit {result.returncode}'))
 
 
 def task_blocks(text):

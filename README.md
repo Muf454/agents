@@ -54,7 +54,9 @@ and adds local-log/local-settings exclusions to `.gitignore`. Existing files,
 including CLAUDE.md, AGENTS.md, docs, Claude settings, and validation, are preserved.
 If a KEEP file contains different guidance, reconcile it with the toolkit template
 manually. Re-running setup fills missing files; it does **not** upgrade existing
-copies. Symlinked workflow destinations are rejected before copying.
+copies. Symlinked workflow destinations are rejected before copying. Setup ends by
+suggesting the watchdog timer; `setup-project --watchdog "$PWD"` installs it too (see
+[Optional checkout watchdog](#optional-checkout-watchdog)).
 
 ### Upgrading an installed project
 
@@ -637,6 +639,15 @@ systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
 
+`ai-watchdog --timer-status` prints `installed`, `missing (reason)` or `unknown (reason)`
+(exit 0, 1, 2); `installed` needs both unit files, `enabled` and `active`. `ai-pipeline`
+checks it at every start and says so in the screen output and the STARTED/RESUMED
+notification when the timer is missing or unknown; the run continues. `setup-project
+--watchdog` installs the timer right after the files (not with `--dry-run` or
+`--upgrade`); plain setup ends with a "Next: install the watchdog timer" line. Each new
+run worktree is its own checkout and needs its own timer; remove it with
+`--uninstall-timer` before deleting the worktree.
+
 `--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
 `~/.config/systemd/user/` with the absolute checkout path, the given options and the
 installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and runs a copy of
@@ -648,6 +659,17 @@ user config). Notification
 settings come from the user config described above. Existing projects need the new
 `ai-watchdog` and `lib/watchdog.py` copied into `.ai/bin/` deliberately, because setup
 preserves existing files.
+
+### Waiting for a run
+
+Wait on the pipeline's PID (the contents of `.ai/local/pipeline.active`), never on a
+`pgrep -f <pattern>` loop: the waiting shell's own command line contains the pattern, so
+the loop matches itself and never ends (or ends wrongly).
+
+```bash
+pid=$(cat .ai/local/pipeline.active)
+while kill -0 "$pid" 2>/dev/null; do sleep 60; done
+```
 
 ## License
 
