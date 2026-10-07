@@ -1,13 +1,11 @@
-<!-- Plan review of plan digest a398de7d9bffa1a00b2c53517ee3f8ba105d0248bffb395cf42f43b3dff0b2c0; saved 2026-10-07T12:08:40Z. -->
+<!-- Plan review of plan digest 1c62b82b91e192a4e029c5dc789ff5ca83edea8384cfc0e737363385a0b8d725; saved 2026-10-07T12:13:30Z. -->
 
 # Plan review
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION.
 Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
 
-Reviewed HEAD: `3368b065331966fe70c244cc7785bf4d47730ea3`.
-
-Inspected repository instructions, spec, plan, tasks, state/handoff, affected scripts and tests, validation configuration, relevant documentation, prior review, Git history/diff, and the vault flow chart. No files modified; no network or MCP integrations invoked.
+Reviewed HEAD: `b4138fec03e052031c16440220f436f0a3f5fa91`.
 
 ## BLOCKER findings
 
@@ -15,29 +13,25 @@ None.
 
 ## MAJOR findings
 
-- P26: Recovery escalation can overwrite the substage where recovery failed.
+- P28: Specify a registration hook placement that cannot read an uninitialized branch variable.
 
-  **Location:** `.ai/tasks.md:71–76`, `.ai/tasks.md:227–249`; `scripts/ai-recover:35–44`, `scripts/ai-recover:165`.
+  **Location:** `.ai/tasks.md:191`; `scripts/ai-pipeline:109`, `scripts/ai-pipeline:113`; `scripts/lib/common.sh:3`.
 
-  T004 explicitly sets `stage=checks, state=recovering` before recovery validation, but its escalation hook calls `observe stop "$stage"` using the **original pipeline stop label**.
+  T003 specifies calling `ai_helper pipeline-register "$AI_ROOT" "$branch" || true` after `run-manifest start` and on resume. However, the actual script assigns `branch=$AI_START_BRANCH` only after the manifest start/resume block. Placing the hook immediately after the stated boundary therefore expands an unset `$branch` under `set -u`, terminating the pipeline before implementation. `|| true` cannot catch this shell expansion failure, violating the requirement that registration never change a run’s outcome.
 
-  Under T001’s normalization rules, an original label such as `review`, `re-check`, or `pull request` replaces the recorded Checks stage. Thus recovery validation can fail while the dashboard highlights Review, Re-check, or PR. The planned acceptance test covers recovery from Build, where the `implementation` group happens to preserve Checks, so it misses this behavior.
+  **Evidence:** A read-only Bash reproduction with the same variable initialization and planned invocation exited 127 with `branch: unbound variable`.
 
-  **Evidence:** A read-only evaluation of the planned transition rules produced `checks → review`, `checks → recheck`, and `checks → pr` when escalating those original labels. The actual recovery script retains its original `$stage` throughout validation.
+  **Concrete plan change:** Specify one shared invocation after successful manifest start/resume verification, using the already initialized `$AI_START_BRANCH`, or explicitly place it after `branch=$AI_START_BRANCH`. Extend acceptance coverage to verify registration and unchanged outcomes on both initial start and recovery resume, including a failing registry write.
 
-  **Concrete plan change:** Track the current recovery substage separately from the original stop label, and preserve it when escalation records the stop. Keep the original label in explanatory text. Add recovery-validation failure tests starting from stages outside the implementation group, asserting final `stage=checks, state=stopped` and dashboard status `needs_you`.
+- P29: T006 assigns security-sensitive terminal sanitization to `sonnet`.
 
-- P27: Recovery’s dependency installer has no planned Setup observation.
+  **Location:** `.ai/tasks.md:333`, `.ai/tasks.md:352`; `.ai/project-spec.md:82`; `.ai/current-plan.md:53`.
 
-  **Location:** `.ai/tasks.md:223–235`, `.ai/tasks.md:242–247`; `scripts/lib/common.sh:150–167`; `scripts/ai-recover:159–165`; `tests/test_workflow.py:3745–3793`.
+  T006 implements removal of terminal controls and escape sequences from agent-writable checkout data. The plan explicitly relies on this protection to prevent forged records from injecting terminal escapes. This is security work, but the task specifies `Model: sonnet`, contrary to the required `opus` assignment for security tasks.
 
-  T004 places the Setup observation in `ai-run`, but the actual install decision and command live in `common.sh`’s `ai_deps`. Recovery independently calls that function before validating leftovers.
+  T001’s safe file readers do not provide this protection: safe filesystem access and safe terminal output are separate responsibilities.
 
-  When a failed build leaves a changed lockfile, recovery starts with the Build stage preserved. As written, its dependency install never records Setup. If that install fails, escalation with label `implementation` preserves Build. The dashboard therefore reports a Build failure for a failed recovery dependency install, contrary to the requirement that failed installs remain on Setup.
-
-  Existing fixtures already exercise this exact path with `fail-later` and `change-later`; their assertions check notifications and checkpoint preservation, not observations.
-
-  **Concrete plan change:** Include `scripts/lib/common.sh` in T004 and place the observation hook at the actual stale-install boundary in `ai_deps`, with caller context that preserves `state=recovering` during recovery. Extend the existing recovery-install fixtures to assert Setup during installation and `stage=setup, state=stopped` after failure, while preserving existing exit, notification, and checkpoint behavior.
+  **Concrete plan change:** Move sanitization and its security tests into an `opus` task, letting T006 consume the completed helper, or change T006 to `Model: opus`. Explicitly verify sanitization of every displayed checkout-derived string, including project, branch, observation detail/note, checkout path, notifications, and last error.
 
 ## MINOR findings
 
@@ -45,24 +39,26 @@ None.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean.
+- Requested HEAD confirmed; working tree clean before and after review.
 - Task-queue validation passed.
 - Planning diff whitespace check passed.
-- **14 Bash syntax checks** and **3 Python syntax checks** passed.
+- **13 Bash syntax checks** and **3 in-memory Python syntax checks** passed.
 - **3 documentation consistency tests** passed.
-- Planned recovery-stop normalization evaluated read-only.
+- Registration-hook shell failure reproduced without writing files.
 - Validation-stamp verification reported **no validation evidence** in this checkout.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration tests were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
 
-## Scope, architecture, and model assessment
+## Scope, architecture, and coverage assessment
 
-The advisory, read-only, stdlib-only design fits the requested scope. Dependencies are ordered, every task specifies a model, and the security/concurrency tasks use `opus`. No task’s own failed implementation retry is recorded.
+Inspected repository instructions, spec, plan, tasks, state/handoff, relevant documentation, affected source and tests, validation configuration, Git history/diff, prior review, and the vault flow chart.
 
-The findings concern planned observation behavior; they are not demonstrated regressions in existing code. Flow-chart updates are correctly scheduled for T002/T003 and marked pending in the handoff.
+The advisory, read-only, standard-library design fits the requested scope. Dependencies are ordered and every task specifies a model. The earlier recovery-substage findings are addressed in the revised plan. No task’s own failed implementation retry is recorded.
+
+The findings concern planned changes, not demonstrated regressions in existing code. Flow-chart updates are scheduled for T002/T003 and correctly remain pending. Implementation remains subject to the recorded efficiency-batch merge prerequisite.
 
 ## Manual testing recommendations
 
-After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Include recovery dependency-install and validation failures; verify their highlighted boxes. Check navigation, expansion, scrolling, resize, colors, and terminal restoration.
+After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Check highlighted stages, navigation, expansion, scrolling, resize, colors, and terminal restoration.
 
-This review assesses plan readiness, not implementation correctness or human acceptance.
+No files were modified; no network or MCP integrations were invoked. This review assesses plan readiness, not implementation correctness or human acceptance.
