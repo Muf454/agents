@@ -242,6 +242,41 @@ def timer(root, args, install):
 FORWARDED_ENV = ('PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'AI_STATE_DIR')
 
 
+UNAVAILABLE = 'Diagnosis unavailable'
+
+
+def diagnose(args, local, agent, prompt):
+    """One bounded read-only diagnosis by AGENT; never raises."""
+    command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]
+    output = None
+    if agent == 'codex':
+        # Codex has its own limit; Claude's is shared with implementation and interactive sessions.
+        if not shutil.which('codex'):
+            return f'{UNAVAILABLE}: Codex CLI not installed.'
+        descriptor, output = tempfile.mkstemp(dir=local, prefix='.diagnosis-', suffix='.md')
+        os.close(descriptor)
+        command += ['codex', 'exec', '--ignore-user-config', '-c', 'approval_policy="never"',
+                    '--sandbox', 'read-only', '-c', 'model_reasoning_effort="medium"',
+                    '--output-last-message', output, prompt]
+    else:
+        command += ['claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
+                    '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
+                    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                    '--model', os.environ.get('AI_DIAGNOSIS_MODEL') or 'claude-sonnet-5-5', '--', prompt]
+    try:
+        with open('/dev/null') as stdin:
+            result = subprocess.run(command, stdin=stdin, capture_output=True, text=True)
+        diagnosis = (read(Path(output)) if output else result.stdout).strip()
+        if result.returncode or not diagnosis:
+            diagnosis = f'{UNAVAILABLE} (exit {result.returncode}).\n' + diagnosis
+    except OSError as error:
+        diagnosis = f'{UNAVAILABLE}: {error}'
+    finally:
+        if output:
+            Path(output).unlink(missing_ok=True)
+    return diagnosis
+
+
 def forwarded_env():
     return {key: value for key, value in os.environ.items()
             if (key in FORWARDED_ENV or key.startswith('AI_')) and key != 'AI_WATCHDOG_NOW'
@@ -317,8 +352,10 @@ def main():
     parser.add_argument('--recover', action='store_true',
                         help='after a crashed ai-pipeline, start ai-recover (bounded auto-recovery)')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
-    parser.add_argument('--diagnosis-agent', choices=('codex', 'claude'), default='codex',
-                        help='read-only diagnosis by Codex (default; separate limit) or Claude')
+    parser.add_argument('--diagnosis-agent', choices=('auto', 'codex', 'claude'), default='auto',
+                        help='read-only diagnosis: auto (default: Codex, then Claude when Codex fails, '
+                             'e.g. at its usage limit), codex or claude (AI_DIAGNOSIS_MODEL, default '
+                             'claude-sonnet-5-5)')
     timer_group = parser.add_mutually_exclusive_group()
     timer_group.add_argument('--install-timer', action='store_true',
                              help='install and start a systemd user timer (every 10 min) with these options')
@@ -430,33 +467,12 @@ def main():
                           'create or delete anything or run project code (tests, builds, git writes). '
                           'Inspect .ai/state.md, .ai/run-log.md and .ai/local logs as needed. '
                           'Start with a one-line summary, then evidence and suggested human recovery.\n' + message)
-                command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]
-                output = None
-                if args.diagnosis_agent == 'codex':
-                    # Default: Codex has its own limit; Claude's is shared with interactive sessions.
-                    descriptor, output = tempfile.mkstemp(dir=local, prefix='.diagnosis-', suffix='.md')
-                    os.close(descriptor)
-                    command += ['codex', 'exec', '--ignore-user-config', '-c', 'approval_policy="never"',
-                                '--sandbox', 'read-only', '-c', 'model_reasoning_effort="medium"',
-                                '--output-last-message', output, prompt]
-                else:
-                    command += ['claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
-                                '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
-                                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
-                    if os.environ.get('AI_MODEL'):
-                        command += ['--model', os.environ['AI_MODEL']]
-                    command += ['--', prompt]
-                try:
-                    with open('/dev/null') as stdin:
-                        result = subprocess.run(command, stdin=stdin, capture_output=True, text=True)
-                    diagnosis = (read(Path(output)) if output else result.stdout).strip()
-                    if result.returncode or not diagnosis:
-                        diagnosis = f'Diagnosis unavailable (exit {result.returncode}).\n' + diagnosis
-                except OSError as error:
-                    diagnosis = f'Diagnosis unavailable: {error}'
-                finally:
-                    if output:
-                        Path(output).unlink(missing_ok=True)
+                diagnosis = ''
+                if args.diagnosis_agent in ('codex', 'auto'):
+                    diagnosis = diagnose(args, local, 'codex', prompt)
+                if args.diagnosis_agent == 'claude' or (args.diagnosis_agent == 'auto' and diagnosis.startswith(UNAVAILABLE)):
+                    # auto: Codex first (its own limit); Claude Sonnet when Codex can't answer.
+                    diagnosis = diagnose(args, local, 'claude', prompt)
                 save(local / 'diagnosis.md', diagnosis + '\n')
                 message += ' Diagnosis: ' + ' '.join(diagnosis.splitlines()[0].split())[:300]
             common = Path(__file__).resolve().with_name('common.sh')

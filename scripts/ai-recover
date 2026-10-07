@@ -66,10 +66,10 @@ attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3
   escalate 'the run manifest is unreadable.' 'rerun ai-pipeline --approved by hand.'
 # Restore the approved run's settings (notifications, budgets, models); settings the run
 # didn't have fall back to their defaults instead of inheriting this environment's.
-unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT
+unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL
 while IFS= read -r -d '' setting; do
   case "${setting%%=*}" in
-    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT)
+    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL)
       export "$setting" ;;
   esac
 done < <(ai_helper run-manifest env)

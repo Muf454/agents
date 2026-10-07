@@ -99,6 +99,12 @@ dirty_beyond_records() {
   git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
 
+# Host-side outcome log for tuning the model rules (ai-status --outcomes); never fatal.
+task_outcome() {
+  ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" 2>/dev/null || \
+    printf '%s\n' 'Note: could not append to the outcome log.' >&2
+}
+
 review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
 
 # An accepted checkpoint must hold exactly the bytes validation hashed (filters, hooks).
@@ -286,6 +292,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  task_started=$SECONDS
   claude_session "$prompt" "${task_model:-$model}"
   ai_branch
   ai_helper tasks check
@@ -296,6 +303,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
       if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
         ai_guard_verify
+        task_outcome validation_failed
         ai_helper tasks set "$active_task" IN_PROGRESS
         ai_helper state blocked "Validation failed after $active_task; inspect validation log"
         ai_die "Validation failed; $active_task returned to IN_PROGRESS."
@@ -319,13 +327,16 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
           ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
         ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
       fi
+      task_outcome done
       ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
+      task_outcome blocked
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
       ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
-    *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
+    *) task_outcome no_checkpoint
+       ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
   ai_helper state implementing 'Continue queue; see task results for any blockers'
   # Commit runner bookkeeping separately; never stage application files here.

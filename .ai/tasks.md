@@ -289,3 +289,28 @@ Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output mu
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+
+## T006 — Reconcile with master after merging PRs #16/#17
+Status: TODO
+Dependencies: T005
+Model: sonnet
+
+### Goal
+The gate passes on the merge of `origin/master` (reviewer fallback, PRs #16/#17) into this branch, and the handoff is current.
+
+### Implementation notes
+Merge resolved by mission control 2026-10-07: records kept from this branch, run-log kept both sides, `scripts/ai-review` keeps this branch's PREVIOUS ROUNDS / CHANGED SINCE context and calls master's `run_review` (Codex or Claude fallback), tests keep both sides. One semantic conflict remains: master's `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets` computes the expected flags per line, but this branch's live handoff has wrapped bullets whose test name is on a continuation line, so it expects flags the PR body (correctly) does not emit. Compute the expected list per list item (a `- ` line plus its indented continuation lines; flagged on the item's last line when no line of the item has a backtick), matching `pr_body`'s rule. Also check that the review-context tests still pass through `run_review` with `AI_REVIEWER=auto` and with the Claude fallback (the Claude prompt gets the same PREVIOUS ROUNDS context). Update `.ai/handoff.md` "Needs you": the `.ai/validate` switch is already applied (`becd1bf`, approved by Zack) and a coordinator-timed `.ai/bin/ai-check` took 107 s wall (253 tests, 2026-10-07); remove the two stale steps.
+
+### Likely affected modules
+tests/test_workflow.py, scripts/ai-review, .ai/handoff.md
+
+### Acceptance criteria
+- `.ai/bin/ai-check` passes on the merged tree.
+- The live-handoff test passes for wrapped bullets and still flags an unnamed bullet (keep or add a fixture case).
+- Handoff "Needs you" has no stale gate steps.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k manual_testing -k review_context`.
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
