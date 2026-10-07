@@ -7,7 +7,7 @@ included). This run is started with `--knowledge-dir "$HOME/zWiki/zWiki/20 Proje
 of 2026-10-07 (pipeline dashboard, high priority; backlog OR-19 + minimal OR-12). Every task
 leaves `.ai/bin/ai-check` passing. Flow-chart rule (AGENTS.md, CLAUDE.md): a task that
 changes workflow behaviour updates the vault `agents-flow.md` (and its `updated:` date) in
-the SAME task; T007 is only the final docs audit.
+the SAME task; T008 is only the final docs audit.
 Gate note: the serial gate takes about 611 s. When `.ai/bin/ai-check` times out in the
 session, run the task's targeted tests, record the timeout in the result, and leave the full
 gate to the host's post-task `ai-check` (1800 s limit).
@@ -16,7 +16,10 @@ change a run. Observation writers are best effort and never change a run's outco
 Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
 into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
-Revised after plan review 3 (`.ai/reviews/plan.md`, P19–P22, all accepted): explicit
+Revised after plan review 4 (`.ai/reviews/plan.md`, P23–P25, all accepted): recovery's
+unexpected-exit handler records the stop; liveness split into its own opus task (T005);
+pty test covers navigation, overflow, resize and an injected exception.
+Revised after plan review 3 (P19–P22, all accepted): explicit
 recovery stage key; safe traversal for Git metadata and `.ai/tasks.md`; old T002 split into
 T002–T004; handoff flow line marked pending until T002.
 Revised after plan review 2 (P11–P18, all accepted): substage wins
@@ -36,7 +39,7 @@ never through an agent-planted symlink. Helpers only; callers come in T002–T00
 ### Implementation notes
 scripts/lib/workflow.py (new subcommands; every one exits 0 and prints `Warning: …` to stderr
 on any failure or deadline, so callers are never blocked or failed):
-- Shared safe I/O (P12–P14), used by every writer here and by the dashboard (T005):
+- Shared safe I/O (P12–P14), used by every writer here and by the dashboard (T005, T006):
   - `local_dir_fd(root)`: open ROOT, then `.ai`, then `local` each with
     `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor (`dir_fd=`); a
     symlink or non-directory anywhere → refuse. All later opens, temp creation, `rename`,
@@ -223,7 +226,9 @@ scripts/ai-run: `ai_observe step setup` only when `ai_deps` actually installs (s
 `ai_observe step checks final` before the final one (~257); `--triage` → `step triage`.
 scripts/ai-recover: `ai_observe recovering "<attempt>/<max>"` when recovery starts;
 `ai_observe recovering "<attempt>/<max>" checks` before its leftover validation (explicit
-stage key, P19); `escalate` → `ai_observe stop "$stage" "<reason>"`.
+stage key, P19); `escalate` → `ai_observe stop "$stage" "<reason>"`; in `on_exit`'s existing
+failure branch (P23) → `ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"`
+before the notification (keeps the substage; best effort).
 No new flow-chart change (T003's note covers stage records).
 
 ### Likely affected modules
@@ -239,7 +244,10 @@ scripts/ai-run, scripts/ai-recover, tests/test_workflow.py
     with `stage=setup, state=stopped`; the same after ai-recover escalation;
   - recovery: `state=recovering` with the stopped stage kept; recovery validation of a
     stopped build shows `stage=checks, state=recovering`; its failure and escalation end
-    with `state=stopped` (P19).
+    with `state=stopped` (P19);
+  - unexpected recovery exits (P23): TERM and an injected failing command during recovery
+    end with `state=stopped`, the substage kept, the same exit code as today and exactly one
+    STOPPED notification.
 - All existing tests pass unchanged.
 
 ### Validation
@@ -248,32 +256,77 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T005 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
+## T005 — Discovery and liveness (marker + process identity)
 Status: TODO
 Dependencies: T004
+Model: opus
+
+### Goal
+Decide, read-only and race-safely, which checkouts have pipelines and whether each pipeline
+is alive, crashed or gone, with the watchdog's semantics on bounded descriptor reads (P3, P24).
+
+### Implementation notes
+New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BEFORE the
+`sys.path` insert of its own directory, then import `state_root` and T001's
+`checkout_fds`/`read_record` from workflow.py and `process`, `is_runner`, `start_ns` from
+watchdog.py). Do not call watchdog.py's `marker_snapshot`/`pipeline_died` (they open by path
+and read unbounded); reimplement their semantics:
+- `discover()` → list of `(checkout, runners)`: checkouts from `<state root>/pipelines/*.json`
+  (read with `read_record` on a no-follow descriptor of that directory; `checkout` must be an
+  absolute existing directory with a real `.ai/`), plus the cwd of every live runner process
+  (`/proc/<pid>/cwd`, `is_runner`) whose cwd has a real `.ai/`; dedupe by realpath; keep the
+  runner processes found per checkout as `(pid, start ticks)`.
+- `liveness(local_fd, runners)` → `alive` / `crashed` / `gone`: marker read with
+  `read_record(local_fd, 'pipeline.active', 4096)` (PID and mtime from the same open).
+  Marker present: alive iff its PID is a live `ai-pipeline`/`ai-recover` whose start time is
+  not after the marker mtime + 1 s; otherwise crashed iff a second `read_record` returns the
+  same (pid, mtime) (a run finishing during the snapshot is not a crash; an orphaned child
+  runner does not make a dead pipeline alive). No marker: alive iff `runners` is not empty
+  (legacy versions without `pipeline.active`), else gone.
+
+### Likely affected modules
+scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `dashboard_liveness_*` (fixture checkouts in a temp dir, `AI_STATE_DIR` temp):
+  - a live process named `ai-pipeline` (symlinked script) holding the marker → alive;
+    `ai-recover` likewise;
+  - a marker whose PID is reused by a newer process → crashed, not alive;
+  - a marker removed between the two reads (hook/monkeypatch) → gone, not crashed;
+  - a dead pipeline with an orphaned live `ai-run` child in the checkout → crashed;
+  - a legacy checkout with no marker found only via `/proc` → alive; no marker and no runner
+    → gone;
+  - a FIFO marker and a symlinked `.ai/local` → returns within 5 s, treated as unreadable
+    (not alive, not crashed), no exception;
+  - discovery: registry entries with a relative path, a missing directory, a symlinked `.ai`
+    or invalid JSON are skipped; duplicates from the registry and `/proc` merge into one.
+- No file is written (directory listing with mtimes unchanged; no `__pycache__`).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k dashboard_liveness` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T006 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
+Status: TODO
+Dependencies: T005
 Model: sonnet
 
 ### Goal
 A pure, read-only snapshot of all pipelines on this machine, printable as text or JSON.
 
 ### Implementation notes
-New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BEFORE the
-`sys.path` insert of its own directory, then import `state_root` from workflow.py and
-`process`, `is_runner`, `start_ns` from watchdog.py, the way watchdog.py imports workflow).
-Every checkout file is read only through T001's `checkout_fds`/`read_record`/`git_branch`
-(bounded, nonblocking, regular files only, pinned descriptors; P14, P20), including
-`pipeline.active` (content and mtime from one open), `.ai/tasks.md` and Git metadata; a
-checkout whose records cannot be read safely shows as `unknown` while the others render:
-- `discover()`: checkouts from `<state root>/pipelines/*.json` (`checkout` must be an
-  absolute existing directory containing `.ai/`), plus `/proc/<pid>/cwd` of live runner
-  processes (`is_runner`) whose cwd contains `.ai/`; dedupe by realpath.
-- `inspect(checkout, now)` → dict: `project`, `branch` (read `.git/HEAD` or the worktree's
-  gitdir file; no git subprocess needed, fall back to `unknown`), `alive` (pipeline.active
-  PID → `process()` is a runner), `observation` (validated fields, else none), `events` (last
+Extend `scripts/lib/dashboard.py` (T005). Every checkout file is read only through T001's
+`checkout_fds`/`read_record`/`git_branch` (bounded, nonblocking, regular files only, pinned
+descriptors; P14, P20), including `.ai/tasks.md` and Git metadata; a checkout whose records
+cannot be read safely shows as `unknown` while the others render:
+- `inspect(checkout, runners, now)` → dict: `project`, `branch` (`git_branch`; fall back to
+  `unknown`), `liveness` (T005), `observation` (validated fields, else none), `events` (last
   20 parsed notification lines, malformed lines skipped), `last_error`, `tasks` (done/total
   via workflow `task_blocks` on `.ai/tasks.md` text; on error none), `status`, `stage`,
   `since`, `updated` (newest mtime of the files read).
-- Status rules (first match): crashed → `crashed`; alive and state `paused`/`recovering` →
+- Status rules (first match): liveness crashed → `crashed`; alive and state `paused`/`recovering` →
   that; alive → `running`; state `stopped`, or a `last-error` newer than the observation,
   with nothing alive → `needs_you`; state `done` → `finished`; else `idle`. Legacy (no
   observation): stage `unknown`; alive → `running`.
@@ -283,8 +336,8 @@ checkout whose records cannot be read safely shows as `unknown` while the others
   finished → idle, then by `updated`; hides only `finished`, `needs_you` and `idle` entries
   whose `updated` is older than 24 h unless `all_runs` (crashed and live runs always show).
 - CLI: `--once` (plain text: per run one title line, one compact stage line, last event;
-  T006 replaces this with the shared renderer), `--json`, `--all`. Without `--once`/`--json`
-  this task prints the text once too (T006 adds the TUI).
+  T007 replaces this with the shared renderer), `--json`, `--all`. Without `--once`/`--json`
+  this task prints the text once too (T007 adds the TUI).
 New `scripts/ai-dashboard` (bash; must work outside a checkout and through a symlink): resolve
 its real location with `readlink -f -- "${BASH_SOURCE[0]}"`, then
 `exec python3 -B "$dir/lib/dashboard.py" "$@"`. Do not source common.sh (it reads user
@@ -302,10 +355,8 @@ tests/test_dashboard.py (new) or tests/test_workflow.py
   - one fixture per status (running via a live process named `ai-pipeline` through a
     symlinked script, paused, recovering, needs_you, crashed, finished, idle) gives the
     expected status and stage;
-  - process identity: a marker whose PID is reused by a newer process → crashed, not
-    running; a marker removed during the snapshot → not crashed; a dead pipeline with an
-    orphaned live `ai-run` child → crashed; a legacy checkout with no marker and no
-    observation, found only via `/proc` → running, stage unknown;
+  - a legacy checkout with no marker and no observation, found only via `/proc` → running,
+    stage unknown (process identity cases are T005's tests);
   - malformed `observation.json`, malformed log lines and an unreadable tasks file → no
     exception, fields unknown;
   - an ESC/OSC sequence in a notification and in `last-error` is absent from `--once` and
@@ -329,9 +380,9 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T006 — Curses TUI with the flow as boxes
+## T007 — Curses TUI with the flow as boxes
 Status: TODO
-Dependencies: T005
+Dependencies: T006
 Model: sonnet
 
 ### Goal
@@ -389,6 +440,12 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
   `TERM=xterm-256color`, `AI_STATE_DIR` fixture, send `q`; exits 0 within 10 s and the output
   ends with the terminal restored (contains the rmcup/normal-screen sequence or `stty -a`
   on the pty shows `icanon echo` after exit).
+- Test `dashboard_render_curses_interaction` (P25): under a pty sized 24×100 with 8 fixture
+  runs (more than fit): ↓ past the viewport keeps the selected card visible (its title in
+  the screen dump), Enter shows its details, a resize to 20×70 (`TIOCSWINSZ` + SIGWINCH)
+  switches to compact lines, then `q` exits 0; with an injected exception in `render`
+  (test-only monkeypatch via a small importable entry point) the process exits nonzero and
+  the terminal is restored. Each test bounded to 15 s.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k dashboard_render` (must say `Ran N tests`, N ≥ 1).
@@ -396,9 +453,9 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T007 — Docs and final audit for the dashboard
+## T008 — Docs and final audit for the dashboard
 Status: TODO
-Dependencies: T006
+Dependencies: T007
 Model: haiku
 
 ### Goal
