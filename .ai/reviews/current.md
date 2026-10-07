@@ -1,23 +1,24 @@
-<!-- Host evidence: HEAD 86912702b4c62e535c57fe98176b0f2689855dc5; merge-base 9e11a113f02525b2f1e10db3eb73eb571495507b; saved 2026-10-06T21:47:11Z. -->
+<!-- Host evidence: HEAD 993bd33ef53c13a7ff28cf1a2454bc5e89328e96; merge-base 9e11a113f02525b2f1e10db3eb73eb571495507b; saved 2026-10-07T08:10:57Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED — FL-01’s preservation check has a significant gap; two localized correctness issues also need attention.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
+Overall verdict: PROCEED WITH MINOR FIXES — the requested behavior is substantially delivered; two localized issues remain.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `86912702b4c62e535c57fe98176b0f2689855dc5`  
+Reviewed HEAD: `993bd33ef53c13a7ff28cf1a2454bc5e89328e96`
 Supplied base / verified merge-base: `9e11a113f02525b2f1e10db3eb73eb571495507b`
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, review template, relevant documentation, scoped Git history/diff, affected source/tests, validation evidence, and the vault flow chart. The checkout was clean. All findings below concern introduced code; no separate pre-existing defect was demonstrated.
+Inspected repository instructions, specification, plan, tasks, state, handoff, prior reviews/dispositions, relevant documentation, scoped Git history/diff, affected source/tests, validation evidence, and the vault flow chart. The checkout was clean.
 
 Validation observed/run:
 
-- Stored evidence reports **PASS**, exit 0, at `2026-10-06T21:42:47Z`, recorded at `7e14e4a8ae66b67248157d94f24b47181ab76a3e`. Its log records **222 tests passed** in 614.436 seconds.
-- Current fingerprint matches the stored evidence. Validation-stamp verification, task-queue validation, committed-content comparison, and `git diff --check` passed.
-- **Three documentation tests**, **12 Bash syntax checks**, and **three Python syntax checks** passed.
-- Read-only, in-memory checks exercised the actual snapshot, PR rendering, dependency freshness, mixed-handoff counting, and timer-status functions.
+- Stored evidence reports **PASS**, exit 0, at `2026-10-07T08:05:47Z`, recorded with HEAD `6e8668ffc2f86aeed449576edfdc3ce2f8e0acad`. Its log records **229 tests passed** in 596.552 seconds. Validation-stamp verification confirms that its fingerprint matches the current checkout.
+- Task-queue validation, queue-completion verification, and committed-content comparison passed.
+- **Three documentation tests**, **12 Bash syntax checks**, and **three Python compilation checks** passed.
+- Read-only checks exercised the actual dependency-output validation, submodule snapshot, PR rendering, mixed-handoff notification counting, and timer-status functions with mocked I/O where needed.
+- `git diff --check` reported one trailing-whitespace occurrence in the existing review artifact. Excluding that artifact, it passed.
 
-Limitations: The full `./scripts/ai-check` gate and writable integration fixtures were not rerun because they create repositories, locks, logs, and validation artifacts. Reproductions using mocked filesystem/Git responses are identified below. Live providers, GitHub, package installation, and systemd were not exercised. No project files were written or network/MCP integrations invoked.
+Limitations: The full `./scripts/ai-check` gate and writable integration fixtures were not rerun because they create repositories, locks, logs, and validation artifacts. Live providers, package installation, systemd, and GitHub were not exercised. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -25,74 +26,81 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M1 — Uninitialized submodule paths can change without changing the preservation snapshot
+None found in the inspected scope.
 
-**Location:** [scripts/lib/workflow.py:1627](/home/zack/Projects/wt/agents-flow2/scripts/lib/workflow.py:1627); caller: `scripts/lib/common.sh:172`.
-
-**Requirement:** FL-01 requires an unchanged snapshot of every non-ignored project file’s path, kind, mode and bytes, including submodules, after every installer exit.
-
-**Problem:** Every gitlink lacking `.git` is represented only by `uninitialised`. This branch runs before symlink and file handling. It therefore gives the same representation to an empty uninitialized submodule, that path containing newly created files, and that path replaced by a symlink. Existing files within such a directory are also never inspected.
-
-**Impact:** An installer can create or overwrite project files in this area without triggering “changed project files.” A successful installer can then receive a dependency stamp and allow the run to continue despite violating the preservation requirement.
-
-**Evidence:** A read-only reproduction invoked the actual `tree_snapshot` function with mocked Git/filesystem responses. Empty, file-containing and symlink states for the same uninitialized gitlink returned identical hashes. The function performed no recursive content inspection or symlink-target read. Existing submodule tests cover initialized submodules only.
-
-**Recommended direction:** Snapshot the actual kind and mode before repository handling. Preserve symlink targets explicitly, and inspect filesystem contents beneath uninitialized submodule directories using defined ignore rules. Add integration regressions for file creation, overwrite and symlink replacement, including unsuccessful installers.
+The previous M1 submodule-preservation defect and N2 output-directory defect are addressed by the implementation and regression tests. N1’s ordinary wrapped-line and unmatched-backtick cases are fixed; the paragraph-break case below remains.
 
 ## MINOR findings
 
-### N1 — Wrapped test names receive false “no test named” warnings
+### N1 — Test names after paragraph breaks still receive false coverage warnings
 
-**Location:** [scripts/lib/workflow.py:1896](/home/zack/Projects/wt/agents-flow2/scripts/lib/workflow.py:1896); examples: `.ai/handoff.md:68`, `:77`, `:79`, `:83`, `:87`.
+**Location:** `scripts/lib/workflow.py:1842`.
 
 **Requirement:** FL-09 flags automated bullets without a backticked test name.
 
-**Problem:** Rendering checks only the bullet’s first physical line. A valid Markdown bullet whose test name appears on an indented continuation line is flagged incorrectly. Checking for any single backtick also does not establish a complete backticked name.
+**Problem:** `flag_unnamed` ends the current list item at every blank line. Markdown permits a list item to contain additional indented paragraphs, so a test name in such a paragraph is excluded from the check.
 
-**Impact:** The PR gives misleading coverage warnings for correctly named tests.
+**Evidence:** Running the actual PR renderer with this automated item:
 
-**Evidence:** Running the actual PR renderer against this branch’s handoff produced six warnings. Five were false positives for bullets with test names on continuation lines; the unnamed placeholder at `.ai/handoff.md:97` was correctly flagged.
+```markdown
+- Scenario.
 
-**Recommended direction:** Parse complete Markdown list items and check each item for a nonempty, paired backtick span. Test wrapped names, unnamed bullets and unmatched backticks.
+  Covered by `test_scenario`.
+```
 
-### N2 — Dependency output files are accepted as output directories
+produced:
 
-**Location:** [scripts/lib/workflow.py:1588](/home/zack/Projects/wt/agents-flow2/scripts/lib/workflow.py:1588).
+```markdown
+- Scenario. ⚠ no test named
 
-**Requirement:** FL-01 defines outputs as directories, with a missing output making dependencies stale.
+  Covered by `test_scenario`.
+```
 
-**Problem:** Freshness uses `exists()` instead of checking directory type. With matching stamp/input hashes, a regular file at `node_modules` or another declared output path yields `current`.
+**Impact:** Correctly named automated checks receive misleading warnings. The automated-check count remains correct.
 
-**Impact:** The host skips dependency setup even though the required output directory is absent.
+**Recommended direction:** Preserve blank lines and subsequent indented paragraphs within the list item. Add a regression covering a test name after a paragraph break.
 
-**Evidence:** A read-only check invoked the actual `deps_status` function with a matching mocked stamp/spec and an existing regular file as the declared output. It reported `current` while `is_dir()` was false.
+### N3 — The workflow guide contradicts setup’s watchdog behavior
 
-**Recommended direction:** Require directories and report missing or incorrect output types clearly. Add regression cases for regular files and broken symlinks at output paths.
+**Location:** `docs/workflow.md:507`; implementation: `scripts/lib/workflow.py:376`.
+
+**Requirement:** FL-07 introduces opt-in timer installation through `setup-project --watchdog`; T007 requires documentation to describe implemented behavior accurately.
+
+**Problem:** The watchdog section still states, “Nothing is installed by `setup-project`.” Setup now installs the timer when `--watchdog` is supplied. This guide also omits the new timer-status and pipeline-warning behavior.
+
+**Impact:** Readers following the operating guide receive incorrect setup guidance and incomplete information about checkout monitoring.
+
+**Evidence:** The source invokes the installed watchdog with `--install-timer --diagnose --recover`. README documents the new behavior, while the workflow guide retains the contradictory statement.
+
+**Recommended direction:** Qualify the statement for setup without `--watchdog`, and document timer status and STARTED/RESUMED warnings. Extend documentation checks to cover these contracts.
+
+Both findings concern behavior or documentation affected by this change. No separate pre-existing defect was demonstrated.
 
 ## Missing test coverage
 
-The suite lacks the regressions described in M1, N1 and N2. The plan review’s P12 recommendation also remains absent: a committed regression for FINISHED counting when both subsections contain steps. An independent in-memory check confirmed correct counting for two human steps and three automated checks.
+- A named automated list item containing a blank line before its indented test-name paragraph.
+- Documentation assertions covering opt-in timer installation, timer status, and pipeline warnings.
+
+Existing added tests cover dependency freshness, installer failure/timeout and preservation, recovery installation, timer states, legacy handoffs, wrapped names, and mixed human/automated notification counting.
 
 ## Security concerns
 
-M1 weakens the installer preservation boundary. No additional security defect was demonstrated in the inspected paths.
-
-Host execution of package-manager code and the agent-writable dependency stamp are documented, accepted design choices. They are not sandbox isolation.
+No additional security defect was demonstrated in the inspected paths. Host execution of package-manager code and the agent-writable dependency stamp remain documented, accepted design choices; the checks provide boundary verification rather than OS isolation.
 
 ## Architecture concerns
 
-The implementation reuses existing helpers and adds no external dependencies. The frozen `.ai/bin` remains unchanged intentionally; target projects require deliberate installation or upgrade.
+The implementation reuses existing helpers and adds no external dependencies. The frozen `.ai/bin` remains unchanged intentionally; installed projects need a deliberate upgrade.
 
-Flow chart updated: the vault note contains the dependency step, recovery rule, testing split and timer warnings, with `updated: 2026-10-06`. Same-task edit timing cannot be independently established from repository history.
+Flow chart updated: the vault note contains the dependency step, recovery rule, testing split, and watchdog warnings, with `updated: 2026-10-06`. Same-task edit timing cannot be established from repository history.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-After fixes, verify an opted-in timer and STARTED/RESUMED wording on real systemd and phone notifications. Inspect the resulting PR’s human-testing instructions.
+Verify an opted-in timer and STARTED/RESUMED phone notifications on real systemd. Inspect the resulting PR’s testing instructions.
 
 ### Covered by automated tests
 
-Rerun the full gate in an isolated writable checkout after adding the missing regressions. Retain the existing dependency failure/timeout, recovery, timer-status and legacy-handoff fixtures.
+Add the paragraph-break regression and watchdog documentation assertions, then run the full gate in a writable checkout.
 
 This review does not constitute human acceptance.
