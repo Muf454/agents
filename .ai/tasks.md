@@ -16,7 +16,9 @@ change a run. Observation writers are best effort and never change a run's outco
 Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
 into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
-Revised after plan review 6 (`.ai/reviews/plan.md`, P28–P29, all accepted): registration
+Revised after plan review 7 (`.ai/reviews/plan.md`, P30–P31, all accepted): the notification
+log is always rewritten via temp + rename (hard-link safe); T005 also runs its sanitize tests.
+Revised after plan review 6 (P28–P29, all accepted): registration
 uses `$AI_START_BRANCH` after the start/resume block; terminal sanitising moved into the opus
 task T005.
 Revised after plan review 5 (P26–P27, all accepted): recovery
@@ -83,9 +85,12 @@ on any failure or deadline, so callers are never blocked or failed):
   set directly (no label normalisation); without it the current stage is kept.
   Temp file + `os.replace(…, src_dir_fd=fd, dst_dir_fd=fd)` (replaces a symlink at the
   destination instead of following it); the previous record is read with `read_record`.
-- `notify-log ROOT MESSAGE`: `flock` on `notifications.lock` (bounded as above); append one
-  JSON line `{"ts","message"}` to `notifications.log` (regular file, nonblocking open);
-  over 200 lines → write the last 200 to a temp file and `os.replace`, still under the lock.
+- `notify-log ROOT MESSAGE`: `flock` on `notifications.lock` (bounded as above; opened
+  without truncation, never written to). Never modify the existing log inode (P30: a hard
+  link would pass `O_NOFOLLOW` and the regular-file check): read the current log with
+  `read_record` (bounded), append the new JSON line `{"ts","message"}` in memory, keep the
+  last 200 lines, write them to an exclusively created temp file and `os.replace` it onto
+  `notifications.log` (pinned directory descriptor), all under the lock.
 - `pipeline-register CHECKOUT BRANCH`: `root = check_state_root(checkout)`; under a bounded
   `flock` on `root/pipelines/.lock` write `<sha256(checkout)[:16]>.json` atomically, then
   prune: for each other entry, re-read it under the lock and delete it only when its JSON is
@@ -117,6 +122,9 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
     `..` or a relative path, and a symlink inside the gitdir path give None within 5 s;
   - `checkout_fds`/`open_dir`: `.ai` symlinked → None; `.ai/tasks.md` read through the
     pinned `.ai` descriptor after `.ai` is swapped for a symlink reads the original;
+  - `notify-log`: `notifications.log` and `observation.json` hard-linked to a sentinel
+    file outside `.ai/local` (P30): after notifications/observations the sentinel's bytes
+    are unchanged; through the pipeline fixture the outcome is unchanged too;
   - `notify-log`: a symlinked log and a symlinked lock leave the sentinel unchanged; 250
     messages keep the last 200 in order; with 200 older lines prefilled, two processes
     appending 100 uniquely numbered messages each concurrently (production limit) leave
@@ -340,6 +348,7 @@ scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_work
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k dashboard_liveness` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k dashboard_sanitize` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes

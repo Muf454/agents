@@ -92,3 +92,4 @@
 | 2026-10-07T12:04Z | claude | none | plan review 4: 0 BLOCKER, 2 MAJOR, 1 MINOR; all accepted (recovery on_exit stop, liveness as opus T005, pty interaction test); 8 tasks | not run | (this commit) | plan review round 5 next |
 | 2026-10-07T12:09Z | claude | none | plan review 5: 0 BLOCKER, 2 MAJOR, 0 MINOR; both accepted (escalation keeps recovery substage, Setup recorded in ai_deps incl. recovery) | not run | (this commit) | plan review round 6 next |
 | 2026-10-07T12:13Z | claude | none | plan review 6: 0 BLOCKER, 2 MAJOR; both accepted (registration after branch init, sanitising in opus T005) | not run | (this commit) | plan review round 7 next |
+| 2026-10-07T12:18Z | claude | none | plan review 7: 0 BLOCKER, 1 MAJOR, 1 MINOR; both accepted (hard-link-safe log rewrite, sanitize targeted run) | not run | (this commit) | plan review round 8 next |

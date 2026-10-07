@@ -14,7 +14,7 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach (revised after Codex plan reviews 1–6, P1–P29; all accepted)
+## Approach (revised after Codex plan reviews 1–7, P1–P31; all accepted)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
    normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
    (flock, race-safe prune), plus the shared safe I/O (pinned directory descriptors,
@@ -35,7 +35,7 @@
    pty interaction test (P25).
 8. T008 (haiku) docs and final audit.
 
-Dependencies: linear, T001 → T008. Plan reviews 1–6 (P1–P29): all findings accepted.
+Dependencies: linear, T001 → T008. Plan reviews 1–7 (P1–P31): all findings accepted.
 
 ## Sequencing (Zack, 2026-10-07)
 Implementation starts only after `feature/efficiency-batch` is merged: both runs edit

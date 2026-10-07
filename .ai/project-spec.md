@@ -56,8 +56,9 @@ providers, gate files are never edited by a pipeline session.
   `workflow.py notify-log` into `${AI_ROOT:-$PWD}/.ai/local/notifications.log` (JSON lines
   `{"ts","message"}`, kept to the last 200), whether or not `AI_NOTIFY_CMD` is set. Writers
   (pipeline, ai-run, ai-recover, the watchdog) serialise append + trim with `flock` on
-  `.ai/local/notifications.lock`; the destination is opened with `O_NOFOLLOW` and must be a
-  regular file; trimming writes a temp file + `rename` under the lock. Readers take no lock
+  `.ai/local/notifications.lock`; the existing log inode is never written (hard-link
+  safe): each update reads it bounded, appends and trims in memory, and replaces it with an
+  exclusively created temp file + `rename` under the lock. Readers take no lock
   and skip a malformed or partial last line. Never fatal.
 - **Host registry.** `ai-pipeline` start (and resume) runs `workflow.py pipeline-register`:
   under `flock` on `<state root>/pipelines/.lock` it writes
