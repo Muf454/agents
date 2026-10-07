@@ -1,322 +1,142 @@
 # Task queue
 
-Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. Never edit
-`.ai/bin`, `.ai/prompts` or other gate files (this repo's `.ai/validate` and `.ai/ci-setup`
-included). This run is started with `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"`
-(absolute path) so the vault flow chart and hub Log can be updated. Source: vault backlog
-FL-11, B3, FL-03 (chosen by Zack 2026-10-07). Every task leaves `.ai/bin/ai-check` passing.
-Flow-chart rule (AGENTS.md, CLAUDE.md): every task that changes workflow behaviour updates
-the vault `agents-flow.md` (diagram/notes and its `updated:` frontmatter date) in the SAME
-task; T005 is only the final docs audit.
-Gate note: until Zack switches `.ai/validate` after this run, the serial gate takes about
-611 s. When `.ai/bin/ai-check` times out in the session, run the task's targeted tests,
-record the timeout in the result, and leave the full gate to the host's post-task
-`ai-check` (1800 s limit). Sessions cannot run `python3 tests/run_parallel.py` directly (not
-on the frozen allowlist; plan review P2); the full-suite parallel runs are host evidence
-recorded by the coordinator after the run (see the plan's "Human steps").
-Revised after Codex plan review 1 (`.ai/reviews/plan.md`, P1–P7).
+Branch `feature/supervisor` (FL-04, bounded supervisor for "needs a human" stops). Prioritised by
+Zack 2026-10-07 before the dashboard (DB-01). Edit `scripts/`, `templates/`, `tests/`, docs and the
+vault notes named below. Never edit `.ai/bin`, `.ai/prompts` or other gate files of this repo.
+Every task leaves `.ai/bin/ai-check` passing. Flow-chart rule: T006 updates the vault `agents-flow.md`.
 
-## T001 — Parallel test runner (FL-11)
-Status: DONE
+## T001 — Supervised plan revision loop in ai-pipeline
+Status: TODO
 Dependencies: none
 Model: opus
 
 ### Goal
-Run the full suite in parallel shards so it fits well inside 600 s, without changing what
-is tested.
+R1, R5: a plan review with BLOCKER/MAJOR findings leads to a bounded, logged revision round instead of an immediate human stop.
 
 ### Implementation notes
-New `tests/run_parallel.py`, stdlib only: discover with
-`unittest.defaultTestLoader.discover('tests')`, flatten to test IDs, sort, deal round-robin
-into `AI_TEST_WORKERS` shards (default `min(8, os.cpu_count() or 1)`; invalid values stop
-with a clear message). Run each shard as `python3 -m unittest <ids…>` in a subprocess
-(`concurrent.futures`, cwd = repo root, stdin `/dev/null`). Discovery IDs such as
-`test_workflow.DocsConsistencyTest.…` only import with the discovery directory on the
-import path (P1: a bare subprocess fails with `ModuleNotFoundError`), so every worker gets
-`PYTHONPATH` = the resolved start directory (absolute, also for `--start-dir`), prepended to
-any existing value. Add `--collect-only` (print the collected count and exit 0). Parse each shard's
-`Ran N tests` and `OK`/`FAILED (...)` lines, print each failing shard's full output, then one
-summary. Exit 1 when any shard fails or crashes, when no test was collected, or when the
-sum of `Ran N` differs from the collected count. Must work from any cwd (resolve the repo
-root from `__file__`). Check the suite for shared state across tests (fixed paths outside
-the per-test temp dir, env leaks, `AI_PIPELINE`-style inheritance seen in batch 1) and fix
-real isolation problems in the tests; never skip or delete a test.
-Add a `## Running the tests` note to README (parallel and serial commands, AI_TEST_WORKERS).
+`scripts/ai-pipeline` plan-review block: when `plan_blockers + plan_majors > 0` and `AI_SUPERVISE` is not `0` and fewer than `AI_SUPERVISE_PLAN_ROUNDS` (default 3, from the user config like other `AI_*` settings) revisions happened in this run, run `ai-run --revise-plan` (new mode, T002), verify the gate (`ai_guard_verify`) and that only the allowed records changed since the stage start (reuse the triage `--since` record check), commit, then loop back to the plan review. Count rounds from the run manifest/state so a resumed pipeline does not reset the limit. A revision that marks any finding `needs-human` stops with that reason. Each round: `ai_log`, `ai_notify "🔁 Plan revised (round n/N): accepted a, rejected b"`, and the time counts toward the run budget. Limit reached → stop as today with "plan review: supervision limit reached".
 
 ### Likely affected modules
-tests/run_parallel.py, tests/test_workflow.py, README.md
+scripts/ai-pipeline, scripts/lib/workflow.py (round counting, record check), tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `parallel_runner` (run the runner as a subprocess on a small temporary test
-  directory via a `--start-dir` option, default `tests`, with `PYTHONPATH` removed from the
-  environment): all pass → exit 0 and `Ran 3 tests`; launched once with cwd = repo root and
-  once with cwd = an unrelated temp directory, both pass; one failing test → exit 1 and its
-  traceback printed; zero tests → exit 1; a shard that crashes (`os._exit` in a test) →
-  exit 1 and count mismatch reported; `AI_TEST_WORKERS=0` and `x` rejected; on the real
-  `tests` directory `--collect-only` reports the same count as
-  `unittest.defaultTestLoader.discover('tests').countTestCases()`.
-- Serial `python3 -m unittest discover -s tests` still passes (host gate).
-- Not session evidence (P2/P6): the three full parallel runs, each under 200 s with default
-  workers and the same count as serial, are run and recorded by the coordinator after the
-  pipeline and are a precondition for the `.ai/validate` switch, not for T001 DONE.
+- Mock run: plan review MAJOR → revision → plan review APPROVE → implementation starts (one test).
+- Limit reached → human stop with the reason; `AI_SUPERVISE=0` → today's behaviour; resume keeps the count.
+- A revision touching a non-record file stops the run.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+targeted tests; `.ai/bin/ai-check`
 
 ### Result / notes
-2026-10-07 (Claude, opus): `tests/run_parallel.py` (stdlib; `--start-dir`, `--collect-only`,
-`AI_TEST_WORKERS` with default min(8, CPU count); empty value = default; 0/negative/non-integer
-rejected on stderr, exit 1). Each shard gets `PYTHONPATH` = resolved start dir + existing value,
-cwd = repo root, stdin /dev/null. Exit 1 on failing/crashed shard (full output printed), zero
-tests, count mismatch, or a module that fails to import (its error is printed; discovery
-`_FailedTest` IDs cannot be loaded by name in a shard). `ParallelRunnerTest`: 7
-`parallel_runner` tests (all pass from repo root, an unrelated cwd and a relative
-`--start-dir`; failing test traceback; zero tests; `os._exit` crash + count mismatch; import
-error; invalid workers; `--collect-only` equals a fresh `TestLoader().discover('tests')`
-count). Targeted: `python3 -m unittest discover -s tests -k parallel_runner` → Ran 7 tests OK.
-Isolation audit: `ToolkitTest` uses a per-test temp dir, copied env (pipeline vars popped),
-mocked systemd/gh/claude/codex and per-test XDG/AI_STATE_DIR; the watchdog's runner scan is
-scoped by process cwd (per-test dir); no in-process env/cwd mutation. One real race fixed:
-`test_watchdog_setup_no_pgrep_f_waits…` walked `scripts/` and could read a `__pycache__`
-temp file another shard was writing; it now skips `__pycache__`. README `## Running the tests`.
-Session cannot run `python3 tests/run_parallel.py` itself (denied by the allowlist, as
-expected per P2), so full-suite parallel runs remain coordinator evidence. Gate: foreground
-`.ai/bin/ai-check` exceeded the 600 s Bash tool limit and finished in the background with
-`Ran 236 tests in 618.180s OK`, then "Validation modified project content" because this
-session edited `.ai/` records while it ran; the host's post-task `ai-check` on the committed
-tree is the gate of record (gate note).
-2026-10-07 resume (Claude, opus): host gate had failed on
-`test_pr_body_flow_this_repo_declares_the_flow_chart` (live handoff says "Flow unchanged");
-coordinator fix df0aefd accepts either wording. Re-verified: targeted `-k parallel_runner
--k flow_this_repo` Ran 8 OK; foreground `.ai/bin/ai-check` Ran 236 tests in 598.682s OK
-(inside the 600 s limit, barely). DONE.
 
-## T002 — Review history helper
-Status: DONE
+## T002 — Plan revision session: prompt, dispositions round, validator
+Status: TODO
 Dependencies: T001
 Model: sonnet
 
 ### Goal
-One helper that summarises earlier review rounds on the branch, for Codex (T003) and triage
-(T004).
+R1, R2: the planning session evaluates each plan finding and records a checkable decision.
 
 ### Implementation notes
-One shared routine (P3) `review_rounds(base, head)` in workflow.py returning the list of
-earlier rounds (uncapped) and a renderer that applies the cap, so the count never depends
-on rendering. Two entry points (dispatch next to `triage-check`):
-- `review-history --base B --head H` (used by ai-review before the new review exists:
-  earlier rounds = rounds in `B..H`);
-- `review-history --current` (used by triage and convergence): read the current review's
-  host header `<!-- Host evidence: HEAD H; merge-base M; … -->` from
-  `.ai/reviews/current.md` and use rounds in `M..H`. The current review's own commit comes
-  after H, so it is excluded by construction; no `--since` and no branch base needed, and
-  the result is the same in every caller (pipeline triage, ai-run triage, interrupted-triage
-  recovery). `--since` stays only the triage scope boundary.
-- `--count` prints only the uncapped number of earlier rounds.
-Walk `git log --reverse --format=%H%x00%s B..H`; a round is a commit whose subject is
-exactly `chore(ai): record independent review` and that changed `.ai/reviews/current.md`.
-From that commit's `current.md`: reviewed HEAD (`Host evidence: HEAD …;`), BLOCKER and MAJOR
-finding IDs and titles (reuse the existing finding parser used by `triage-check`). The
-disposition per finding comes from `.ai/reviews/dispositions.md` at the first later commit
-with subject `chore(ai): record review triage` before the next review round; none →
-"no triage recorded". Output: `## Previous review rounds` then per round
-`### Round n (HEAD abc1234)` and one bullet per finding `- M2 [MAJOR] title — accepted (T012)`.
-Cap at 6000 characters, dropping the oldest rounds first with
-`(n earlier rounds omitted)`. No rounds → print nothing, exit 0. Docstring: context only,
-never authority (subjects can be imitated). Also print the last reviewed HEAD on request
-(`--last-head`, with `--base/--head`) for T003.
+`scripts/ai-run --revise-plan`: one fresh Claude session with `templates/.ai/prompts/plan-revision.md` (installed as `.ai/prompts/plan-revision.md`), the plan review, earlier plan-review rounds (reuse `review-history` from the efficiency batch) and the editable-file list from the spec. It appends a section "## Plan review round n (HEAD …)" to `.ai/reviews/dispositions.md`: one row per BLOCKER/MAJOR (accepted with the task it changed / rejected with concrete evidence / needs-human with the question for Zack). Validator `workflow.py plan-dispositions-check`: every finding ID of the current plan review has a row; rejected rows have evidence text; from round 3 a same-line `Convergence: <text>` is present. `setup-project` installs the new prompt.
 
 ### Likely affected modules
-scripts/lib/workflow.py, tests/test_workflow.py
+scripts/ai-run, scripts/lib/workflow.py, templates/.ai/prompts/plan-revision.md, scripts/setup-project, tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `review_history`: no round → empty output; two rounds with triage → both
-  rounds, IDs, titles, dispositions with task IDs; a round without triage → "no triage
-  recorded"; a commit with the review subject that did not change `current.md` is ignored;
-  cap drops oldest rounds and says so while `--count` still reports the uncapped number;
-  `--last-head` prints the newest reviewed HEAD; `--current` built from real host commit
-  order (review commit, triage commit, fix commits, second review committed as current)
-  lists exactly the first round and `--count` is 1 (the current review is excluded);
-  `--current` without a host header fails clearly.
+- Validator tests: missing row, rejected without evidence, round 3 without Convergence → fail; complete → pass.
+- The session's allowlist allows edits only to the records listed in the spec (test of the generated arguments).
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k review_history` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+targeted tests; `.ai/bin/ai-check`
 
 ### Result / notes
-Implemented (uncommitted work preserved in the checkpoint): `review_rounds`, `render_rounds`,
-`review_history` and the `review-history` dispatch in scripts/lib/workflow.py; 7
-`ReviewHistoryTest` tests in tests/test_workflow.py. Targeted `-k review_history`: Ran 7 tests, OK.
-BLOCKED: the foreground `.ai/bin/ai-check` hit the 600000 ms Bash tool timeout (T001's gate took
-598.7 s, so the suite is at the limit and the 7 added tests tip it over). No gate result for this
-change; the human or runner must run the gate with a longer limit (or the parallel runner from
-T001) and, if green, set T002 DONE.
-DONE 2026-10-07T17:00Z (coordinator, approved by Zack): the gate now runs the parallel shards
-(`becd1bf`); `.ai/bin/ai-check` 243 tests OK in 102 s on this content.
 
-## T003 — Codex reviews get the earlier rounds and the delta (B3)
-Status: DONE
-Dependencies: T002
-Model: sonnet
-
-### Goal
-Codex stops spending tokens rediscovering what earlier rounds found, while still reviewing
-the whole range.
-
-### Implementation notes
-`scripts/ai-review`, implementation review path only (~line 122): after REVIEW SCOPE, append
-the `review-history --base "$merge_base" --head "$head"` output under `PREVIOUS ROUNDS:` when non-empty, plus
-`CHANGED SINCE THE LAST REVIEW: inspect git diff <last-head>..$head` when `--last-head`
-returns a commit that is an ancestor of HEAD. Plan review and recheck prompts unchanged.
-A helper failure must not block the review: log a warning line and review without history.
-Template `templates/.ai/prompts/review.md`: one short paragraph: use PREVIOUS ROUNDS to
-verify accepted findings are really fixed and not to re-raise rejected findings without new
-evidence; still review the full range for cross-cutting defects. Vault flow chart: note the
-review context in the review step; bump `updated:`.
-
-### Likely affected modules
-scripts/ai-review, templates/.ai/prompts/review.md, tests/test_workflow.py, vault agents-flow.md
-
-### Acceptance criteria
-- Tests named `review_context` (mock codex records its prompt): first review → no
-  PREVIOUS ROUNDS; second review after a triage round → PREVIOUS ROUNDS with the earlier
-  finding IDs and CHANGED SINCE THE LAST REVIEW naming the previous HEAD; plan review and
-  recheck prompts contain neither; a failing helper still produces a review.
-- Template paragraph present (docs_consistency or prompt test).
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k review_context` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
-
-### Result / notes
-`scripts/ai-review` (implementation review only) appends `PREVIOUS ROUNDS:` from
-`review-history --base/--head` and `CHANGED SINCE THE LAST REVIEW: inspect git diff <last>..<head>`
-when `--last-head` is an ancestor of HEAD; a helper failure prints a warning and reviews without
-history. `templates/.ai/prompts/review.md` has the paragraph. The mock codex now logs every prompt
-(`codex-prompts.log`). 5 new tests (4 `review_context`, 1 `review_prompt_template`): targeted run
-Ran 5 OK; `.ai/bin/ai-check` Ran 248 tests in 106.6s (8 shards) OK. Vault: flow chart review node
-and hub log updated.
-
-## T004 — Review convergence rule in triage (FL-03)
-Status: DONE
+## T003 — Escalation model and fix-round extension
+Status: TODO
 Dependencies: T002
 Model: opus
 
 ### Goal
-After three rounds of significant findings in the same area, triage fixes the design, not
-another symptom.
+R2, R3.
 
 ### Implementation notes
-`scripts/ai-run --triage`: append `review-history --current` output as `PREVIOUS ROUNDS:`
-plus `This review is round <n>.` (n = `review-history --current --count` + 1) to the triage
-prompt. `--since` is unchanged (scope boundary only). Template
-`templates/.ai/prompts/triage.md`: the convergence rule from the spec, with an example
-`Convergence: T014 design note "the sync model lacks an edited marker"` and
-`Convergence: none — findings are in unrelated areas (…)`. `triage-check --fresh`: compute
-the round itself from the same routine (`review_rounds` via the current header, uncapped
-count + 1), so all its callers (ai-pipeline ~221 and ~348, ai-run ~183 and ~205) agree with
-no new arguments; when the round is ≥ 3, require a line matching
-`^Convergence:[ \t]*[^ \t\r\n]` (P5: same-line text; `\s` would cross newlines) in
-dispositions.md, else fail with "Round <n> triage needs a Convergence: line (see the
-triage prompt)". Rounds 1–2 unchanged. Plain `triage-check` (without `--fresh`) unchanged.
-Template `dispositions.md` header comment (workflow.py ~733) mentions the line. Vault flow
-chart: convergence note at triage; bump `updated:`.
+Plan revision model: `opus`, from round `AI_SUPERVISE_ESCALATE_ROUND` (default 3) `AI_SUPERVISE_ESCALATE_MODEL` (default `claude-fable-5-1`); logged in the outcome log as a task-like event (`kind: plan_revision`). Fix rounds: when `fixes >= max_fix_rounds` with BLOCKER/MAJOR open, allow one extra round (once per run) only if the BLOCKER+MAJOR count fell in each of the last two review rounds (read from the review history); otherwise today's draft PR. Notify "🔁 Extra fix round: findings falling (x → y → z)".
 
 ### Likely affected modules
-scripts/ai-run, scripts/lib/workflow.py, templates/.ai/prompts/triage.md, tests/test_workflow.py, vault agents-flow.md
+scripts/ai-pipeline, scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `convergence`:
-  - end to end through `ai-pipeline` with mock codex/claude and the real host commit order,
-    three review rounds with BLOCKER/MAJOR findings (`--max-fix-rounds 3`): round 2 triage
-    passes without `Convergence:`; round 3 triage without it stops with the message; with
-    it the round passes; the triage prompt says "round 2"/"round 3" and lists the earlier
-    rounds' finding IDs;
-  - an interrupted round-3 triage resumed through `ai-run --triage` reports the same round
-    number; a history long enough to hit the 6000-character cap still counts round 3;
-  - `Convergence:` empty, whitespace only, or followed only by the table on the next line
-    fails; `Convergence: T014 design note …` passes;
-  - existing triage tests pass.
+- Round 3 uses the escalation model (mock args), rounds 1–2 opus.
+- Extra round only when counts fall twice; at most once per run; flat or rising counts → draft as today.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k convergence` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
-
-### Result / notes
-`ai-run --triage` appends `This review is round <n>.` (`review-history --current --count` + 1)
-and `PREVIOUS ROUNDS:` (`review-history --current`) to the triage prompt; a helper failure
-stops the triage stage (the check needs the same routine). Its final `triage-check --fresh`
-failure now carries the helper's message ("Triage incomplete: <reason>") into the stop
-reason. `workflow.py`: shared `current_review_rounds()`; `triage-check --fresh` requires
-`^Convergence:[ \t]*[^ \t\r\n]` (HTML comments stripped first, so the template comment
-can't satisfy it) from round 3; plain `triage-check` and rounds 1–2 unchanged. Template
-`triage.md` has the rule and both examples; dispositions header comment mentions the line.
-Mock claude logs triage prompts and takes `MOCK_CONVERGENCE`. 5 `convergence` tests: three-round
-`ai-pipeline` run (`--max-fix-rounds 3`: round 2 passes without the line, round 3 stops with
-the message and the rerun with it completes; prompts say round 1/2/3 and list earlier IDs and
-dispositions), interrupted round 3 resumed through `ai-run --triage` (round 3), cap overflow
-still counts round 3, empty/whitespace/next-line/commented/lowercase lines fail, round 2
-needs none. Targeted `-k convergence` Ran 5 OK; `-k convergence -k triage -k task_model -k
-review_context` Ran 26 OK; `.ai/bin/ai-check` Ran 253 tests in 112.5s (8 shards) OK.
-`docs/workflow.md` convergence paragraph (README left to T005). Vault: flow chart triage
-node + note, hub Log line.
-
-## T005 — Final docs audit for the efficiency batch
-Status: DONE
-Dependencies: T001, T003, T004
-Model: haiku
-
-### Goal
-Docs match the code for the parallel runner, review context and convergence rule.
-
-### Implementation notes
-README and `docs/workflow.md`: parallel runner and `AI_TEST_WORKERS`; that `.ai/validate`
-switch is a human gate step; review context (history is context only); convergence rule and
-the `Convergence:` line. Add matching required sentences to `DocsConsistencyTest`. Update
-`.ai/handoff.md` "Manual testing for the human" (Needs you: approve and apply the
-`.ai/validate` switch, then time one gate run; everything else under Covered by automated
-tests with test names). Append a dated line to the vault hub Log.
-
-### Likely affected modules
-README.md, docs/workflow.md, tests/test_workflow.py, .ai/handoff.md, vault agents.md
-
-### Acceptance criteria
-- `docs_consistency` tests pass with the new sentences; handoff split correct; hub Log line.
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+targeted tests; `.ai/bin/ai-check`
 
 ### Result / notes
 
-## T006 — Reconcile with master after merging PRs #16/#17
-Status: DONE
-Dependencies: T005
+## T004 — Retry a malformed review once
+Status: TODO
+Dependencies: T001
 Model: sonnet
 
 ### Goal
-The gate passes on the merge of `origin/master` (reviewer fallback, PRs #16/#17) into this branch, and the handoff is current.
+R4: a review rejected by the host's format checks is retried once with the error before stopping.
 
 ### Implementation notes
-Merge resolved by mission control 2026-10-07: records kept from this branch, run-log kept both sides, `scripts/ai-review` keeps this branch's PREVIOUS ROUNDS / CHANGED SINCE context and calls master's `run_review` (Codex or Claude fallback), tests keep both sides. One semantic conflict remains: master's `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets` computes the expected flags per line, but this branch's live handoff has wrapped bullets whose test name is on a continuation line, so it expects flags the PR body (correctly) does not emit. Compute the expected list per list item (a `- ` line plus its indented continuation lines; flagged on the item's last line when no line of the item has a backtick), matching `pr_body`'s rule. Also check that the review-context tests still pass through `run_review` with `AI_REVIEWER=auto` and with the Claude fallback (the Claude prompt gets the same PREVIOUS ROUNDS context). Update `.ai/handoff.md` "Needs you": the `.ai/validate` switch is already applied (`becd1bf`, approved by Zack) and a coordinator-timed `.ai/bin/ai-check` took 107 s wall (253 tests, 2026-10-07); remove the two stale steps.
+`scripts/ai-review` (plan, code and recheck modes; Codex and Claude fallback): when publishing fails a format check (missing section, counts not matching IDs, no verdict line), rerun the reviewer once with `FORMAT ERROR: <message>. Return the full report again in the required structure.` appended; the second failure stops as today. Keep the first output in `.ai/local/` for inspection.
 
 ### Likely affected modules
-tests/test_workflow.py, scripts/ai-review, .ai/handoff.md
+scripts/ai-review, scripts/lib/workflow.py, tests/test_workflow.py
 
 ### Acceptance criteria
-- `.ai/bin/ai-check` passes on the merged tree.
-- The live-handoff test passes for wrapped bullets and still flags an unnamed bullet (keep or add a fixture case).
-- Handoff "Needs you" has no stale gate steps.
+- Mock reviewer: malformed then valid → published; malformed twice → stop; valid first → one call.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k manual_testing -k review_context`.
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+targeted tests; `.ai/bin/ai-check`
 
 ### Result / notes
-2026-10-07 (Claude, sonnet): `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets`
-now groups wrapped bullets with their continuation lines (warning on the last line), matching
-`flag_unnamed`; the fixture tests for unnamed and lone-backtick bullets stay. Handoff "Needs you"
-is None (validate switch already applied). `tests/run_parallel.py` now clears `FORCE_COLOR` and
-sets `NO_COLOR` for shards: with colored output the summary regexes missed every shard.
-Targeted: Ran 14 OK. `.ai/bin/ai-check`: Ran 272 tests in 125.6s (8 shards) OK. DONE.
+
+## T005 — End-to-end supervision scenarios
+Status: TODO
+Dependencies: T003, T004
+Model: sonnet
+
+### Goal
+The whole loop works through `ai-pipeline` with mocks.
+
+### Implementation notes
+Scenarios in `tests/test_workflow.py` (mock Codex/Claude like the convergence tests): MAJOR → revision → APPROVE → implementation → review → PR; needs-human finding stops with the question in the notification; three revisions then limit stop; escalation model at round 3; extra fix round when findings fall; malformed plan review retried.
+
+### Likely affected modules
+tests/test_workflow.py
+
+### Acceptance criteria
+- All scenarios pass under `tests/run_parallel.py`.
+
+### Validation
+`.ai/bin/ai-check`
+
+### Result / notes
+
+## T006 — Docs, flow chart, handoff
+Status: TODO
+Dependencies: T005
+Model: haiku
+
+### Goal
+R6: docs and the flow chart match the code.
+
+### Implementation notes
+README and `docs/workflow.md` (supervision settings, limits, needs-human, escalation, extra fix round, malformed retry), `templates/CLAUDE.md`/`AGENTS.md` if they describe stops; vault `agents-flow.md` (plan-review loop and extra fix round) and a hub Log line; `.ai/handoff.md` "Manual testing for the human" (Needs you: one real supervised run on a small plan; everything else covered by named tests). PR body: "Flow chart updated".
+
+### Likely affected modules
+README.md, docs/workflow.md, templates/, .ai/handoff.md, vault agents-flow.md, agents.md
+
+### Acceptance criteria
+- `docs_consistency` tests pass with new required sentences; flow chart updated.
+
+### Validation
+`python3 -m unittest discover -s tests -k docs_consistency`; `.ai/bin/ai-check`
+
+### Result / notes

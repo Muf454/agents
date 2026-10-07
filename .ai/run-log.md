@@ -110,3 +110,4 @@
 | 2026-10-07T18:29:49Z | runner | T006 | completed | PASS | 0c24798 | Claude checkpointed; continuing queue |
 | 2026-10-07T18:31:54Z | runner | none | queue complete; ready for independent review | PASS | abe04b7 | Human acceptance remains |
 | 2026-10-07T18:37:23Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/18 | PASS | 640ceee | Human acceptance and merge remain |
+| 2026-10-07T18:48:25Z | claude (mission control) | plan | FL-04 bounded supervisor: spec, plan, T001–T006 (Zack: before the dashboard) | — | (this commit) | |
