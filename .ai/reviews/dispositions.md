@@ -1,5 +1,15 @@
 # Review dispositions (Claude)
 
+## Plan review round 3 (HEAD e52ed76, 2026-10-07): BLOCKER 0, MAJOR 2, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 exact runner entries also unsafe | accepted | Third round on the reviewer's runner commands. Convergence: the reviewer inherits no runners at all (exact or wildcard), only read-only file tools; it uses the host's validation evidence like Codex. Tests seeded with unsafe exact and wildcard entries. | T001 |
+| P2 triage would open a task attempt | accepted | `claude_session` serves `--triage` too. Attempt tracking is opt-in for implementation; triage and limit-retry regressions added. | T002 |
+| P3 flow chart deferred to T002 | accepted | T001 updates the chart for the reviewer policy itself. | T001 |
+| P4 targeted tests miss reviewer tests | accepted | Explicit `-k` selection incl. `claude_review`. | T001 |
+
+
 ## Plan review (HEAD 00e644d, 2026-10-07): BLOCKER 0, MAJOR 3, MINOR 2 — all accepted, tasks revised
 
 | Finding | Disposition | Evidence / reason | Fix task |

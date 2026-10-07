@@ -12,18 +12,18 @@ Model: opus
 R1: the fallback reviewer cannot write outside the probe directory through allowed Bash commands.
 
 ### Implementation notes
-`scripts/lib/workflow.py` `review_allowlist`: replace the drop filters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`) with a positive `REVIEW_KEEP` list; add `REVIEW_DENY` printed by `review-allowlist --deny`. `scripts/ai-review` `claude_attempt`: pass `--disallowedTools` and save both lists in the `.allowlist` file. Update `docs/workflow.md` (reviewer section). Reference: `.ai/local/reference/catchup-m1-m2.patch` (its KEEP list is too broad, see plan review P1). Enumerate each runner the reviewer may inherit and its writing/executing/emitting options (e.g. `pytest --junitxml/--basetemp/-p`, `go test -exec/-o/-coverprofile`, `tsc --noEmit false/--outDir/--build`, `vitest --outputFile/-u/--coverage/--reporter=…`, `npm test -- …` passing them through), including attached values (`--opt=value`, `-ovalue`). A wildcard entry is inherited only for runners whose dangerous options are all denied by `REVIEW_DENY` patterns; otherwise inherit only exact (no-wildcard) entries of that runner or drop it. Keep the trusted-project-code limitation stated in the docs. A first T001 session (2026-10-07, on the pre-#18 serial gate) left uncommitted work, saved as `.ai/local/reference/t001-wip.patch` (unvalidated; reuse after checking). The live permission-engine check (Claude CLI in a disposable repo) is done by mission control after the task, not by the session; list the commands to try in the task result.
+Convergence (plan review round 3, P1): stop screening runner arguments. The Claude fallback reviewer inherits NO test, lint, build or other runner commands from the project allowlist (exact or wildcard): like Codex in its read-only sandbox, it relies on the host's validation evidence (`.ai/local/validation.json`, gate logs) and reads code. `scripts/lib/workflow.py` `review_allowlist`: Read/Glob/Grep, the read-only git subcommands, `Edit(./.ai/local/review-probes/**)`, and from the project allowlist only exact or wildcard entries of a fixed set of read-only file tools (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `pwd`); everything else is dropped. `REVIEW_DENY` (printed by `review-allowlist --deny`, passed as `--disallowedTools`) still denies `--output`, `-o`, `--ext-diff`, `--textconv`, `git grep -O`/`--open-files-in-pager`, `git -c`, `git --…` and any `>` redirection for the git and file-tool entries. `scripts/ai-review` `claude_attempt`: pass `--disallowedTools`, save both lists in the `.allowlist` file. Update `templates/.ai/prompts/claude-review.md` if it tells the reviewer to run tests (it should use the validation evidence), `docs/workflow.md` (reviewer section: no runners, why) and the vault flow chart `agents-flow.md` (reviewer policy; bump its `updated:` date) in this task. Reference: `.ai/local/reference/catchup-m1-m2.patch` and `t001-wip.patch` (both inherit runners: do not copy that part). The live permission-engine check (Claude CLI in a disposable repo) is done by mission control after the task; list the commands to try in the task result.
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/ai-review, tests/test_workflow.py, docs/workflow.md
 
 ### Acceptance criteria
-- `python3 -c *`, `bash -c *`, `rg *`, `npm install *`, `npm run build`, `npx eslint *` are not inherited; `npm test`, `npx vitest run *`, `npm run lint`, `python3 -m unittest *`, `cat *` are.
+- Table-driven test seeded with unsafe project entries, exact AND wildcard: `Bash(pytest --basetemp=/outside)`, `Bash(go test -exec /outside ./...)`, `Bash(npx tsc --outDir /outside)`, `Bash(bash -n +n -c "touch /outside")`, `Bash(npm test)`, `Bash(npx vitest run *)`, `Bash(python3 -m unittest *)`, `Bash(npm install *)`, `Bash(rg *)`: none is inherited; `Bash(cat *)`, `Bash(grep *)`, `Bash(ls)` are.
 - The reviewer invocation carries the deny list (`--output`, `>`, `git -c`, `--ext-diff`, ...); the reviewer-args test asserts it.
-- A table-driven test: for every inherited runner, each enumerated dangerous form (`pytest --junitxml=/x`, `go test -exec /x ./...`, `npx tsc --noEmit --noEmit false`, `npx vitest run --outputFile=/x`, ...) is either not allowed by any inherited entry or matched by a deny pattern (fnmatch of the Claude glob), and the safe forms stay allowed.
+- Vault flow chart shows the reviewer policy; `updated:` bumped.
 
 ### Validation
-targeted tests (`-k review_allowlist -k fallback`); `.ai/bin/ai-check`
+`python3 -m unittest tests.test_workflow -k review_allowlist -k review_policy -k claude_review -k fallback`; `.ai/bin/ai-check`
 
 ### Result / notes
 
@@ -36,7 +36,7 @@ Model: sonnet
 R2: error, timeout and interruption attempts appear in the outcome log exactly once.
 
 ### Implementation notes
-`scripts/ai-run`: open the attempt immediately before the actual `claude` invocation (after preflight checks such as the remaining-time budget); usage-limit pauses and retries inside `claude_session` stay part of the same attempt. Close it in `task_outcome`; the EXIT handler logs `timeout` (session exit 124/137), `interrupted` (runner exit 130/143) or `error` for an open attempt. `scripts/lib/workflow.py` `outcome task`: must log even when `.ai/tasks.md` no longer parses (title/category from metadata captured at launch, or a tolerant fallback); genuine write failures stay nonfatal. Update the "Outcome log" section of `docs/workflow.md` and the vault flow chart `agents-flow.md` (stricter reviewer policy from T001 and the stopped-attempt lifecycle); the PR description must say "Flow chart updated". Reference: `.ai/local/reference/catchup-m1-m2.patch` (opens the attempt too early, see P4).
+`scripts/ai-run`: attempt tracking is opt-in for implementation sessions only (the implementation loop passes a flag or sets a variable before calling `claude_session`; `--triage` never opens an attempt, P2). Open the attempt immediately before the actual `claude` invocation (after preflight checks such as the remaining-time budget); usage-limit pauses and retries inside `claude_session` stay part of the same attempt. Close it in `task_outcome`; the EXIT handler logs `timeout` (session exit 124/137), `interrupted` (runner exit 130/143) or `error` for an open attempt. `scripts/lib/workflow.py` `outcome task`: must log even when `.ai/tasks.md` no longer parses (title/category from metadata captured at launch, or a tolerant fallback); genuine write failures stay nonfatal. Update the "Outcome log" section of `docs/workflow.md` and the vault flow chart `agents-flow.md` (stopped-attempt lifecycle; T001 already did the reviewer policy); the PR description must say "Flow chart updated". Reference: `.ai/local/reference/catchup-m1-m2.patch` (opens the attempt too early, see P4).
 
 ### Likely affected modules
 scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
@@ -48,6 +48,7 @@ scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.m
 - SIGINT and SIGTERM to a runner with an active session (subprocess test, bounded waits, child cleanup) exit 130/143 with exactly one `interrupted` line; the retry is the next attempt.
 - A session that leaves `.ai/tasks.md` unparseable (existing malformed-queue test) logs exactly one `error`; after repair the retry is attempt 2, `first_pass=false`.
 - A run with zero time budget left logs no task outcome.
+- Successful and failed `--triage` runs create no task outcome; a usage-limit pause and retry inside one implementation session yields exactly one outcome with the original start time.
 - Vault flow chart updated.
 
 ### Validation
