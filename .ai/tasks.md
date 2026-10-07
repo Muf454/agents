@@ -17,7 +17,7 @@ recorded by the coordinator after the run (see the plan's "Human steps").
 Revised after Codex plan review 1 (`.ai/reviews/plan.md`, P1–P7).
 
 ## T001 — Parallel test runner (FL-11)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -86,6 +86,11 @@ expected per P2), so full-suite parallel runs remain coordinator evidence. Gate:
 `Ran 236 tests in 618.180s OK`, then "Validation modified project content" because this
 session edited `.ai/` records while it ran; the host's post-task `ai-check` on the committed
 tree is the gate of record (gate note).
+2026-10-07 resume (Claude, opus): host gate had failed on
+`test_pr_body_flow_this_repo_declares_the_flow_chart` (live handoff says "Flow unchanged");
+coordinator fix df0aefd accepts either wording. Re-verified: targeted `-k parallel_runner
+-k flow_this_repo` Ran 8 OK; foreground `.ai/bin/ai-check` Ran 236 tests in 598.682s OK
+(inside the 600 s limit, barely). DONE.
 
 ## T002 — Review history helper
 Status: TODO

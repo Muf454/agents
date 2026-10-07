@@ -14,12 +14,10 @@ FL-03 (review convergence rule). See `.ai/project-spec.md`, `.ai/current-plan.md
   README `## Running the tests`. `.ai/validate` is unchanged (still serial).
 
 ## Validation run
-After T001: targeted `python3 -m unittest discover -s tests -k parallel_runner` Ran 7 OK.
-The session's foreground `.ai/bin/ai-check` exceeded the 600 s Bash tool limit (serial
-suite) and finished in the background: `Ran 236 tests in 618.180s OK`, but ai-check then
-reported "Validation modified project content" because the session edited `.ai/` records
-while it ran. The host's post-task `ai-check` (1800 s) on the committed tree is the gate of
-record.
+After T001 (resumed after the coordinator's flow-chart test fix df0aefd): targeted
+`-k parallel_runner -k flow_this_repo` Ran 8 OK; foreground `.ai/bin/ai-check` Ran 236 tests
+in 598.682s OK. The serial gate sits right at the 600 s session tool limit, so later tasks
+may still time out in-session (gate note in `.ai/tasks.md`).
 
 ## Assumptions
 - An empty `AI_TEST_WORKERS` means the default; any other non-positive or non-integer value
