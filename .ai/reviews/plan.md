@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 867c4eaddbf51b9623b54457dcff131ae75210c2f083d1b57869985a691e5119; saved 2026-10-07T11:56:04Z. -->
+<!-- Plan review of plan digest 4b8de92023cfad1a13cdabd31d97945b17193c9b106af9c8d098f9707190de65; saved 2026-10-07T12:02:46Z. -->
 
 # Plan review
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=2
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
 
-Reviewed HEAD: `18e00863603f5aa41e48ea8bce5c10d2f6a520dc`.
+Reviewed HEAD: `82369e63a611b5276c2c4163ce0149636c0b97a2`.
 
-Inspected repository instructions, spec, plan, tasks, state/handoff, affected source, existing tests, validation scripts, documentation, Git history, and the vault flow chart. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, spec, plan, tasks, state/handoff, prior review, affected source, existing tests, validation scripts, relevant documentation, Git history/diff, and the vault flow chart. No files modified; no network or MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -15,70 +15,58 @@ None.
 
 ## MAJOR findings
 
-- P19: Recovery’s explicit Checks transition conflicts with the helper’s precedence rule.
+- P23: Unexpected recovery exits would be displayed as idle.
 
-  **Location:** `.ai/tasks.md:49–58`, `.ai/tasks.md:132–134`; `scripts/ai-recover:159–165`.
+  **Location:** `.ai/tasks.md:224–226`, `.ai/tasks.md:276–279`; `scripts/ai-recover:77–88`.
 
-  T002 calls `observe recovering "<attempt>/<max>" checks` before recovery validation. T001 applies its outer-label precedence rule to this argument, but that table contains `validation`, not `checks`. Unknown labels preserve the previous stage.
+  T004 adds observations for recovery start, validation, and `escalate`, but omits recovery’s existing EXIT handler. On TERM, INT, HUP, or an unexpected command failure, that handler announces a stop and removes the pipeline marker without updating `last-error`.
 
-  Applying the specified rule to a recovering Build therefore leaves it on Build while validation runs. This contradicts the spec’s required `stage=checks, state=recovering`. The acceptance criteria do not explicitly test this transition.
+  After the planned recovery-start observation, the original error is older than the observation. Once the handler removes the marker and recovery exits, T005’s rules see no live runner, no crash marker, `state=recovering`, and an older error. They therefore select `idle`, despite the announced stop.
 
-  **Concrete plan change:** Distinguish a normalized stop label from an explicit stage key. For `recovering NOTE STAGE`, require a valid stage key and select it directly; without STAGE, preserve the current stage. Add helper and recovery-fixture assertions for Build → Checks while remaining recovering, followed by validation failure and escalation.
+  **Evidence:** A read-only probe executed the actual EXIT handler with all side effects mocked. Exit 143 announced STOPPED and removed the marker. Applying the proposed status rules to the resulting timestamps and state produced `idle`.
 
-- P20: The shared safe-reader interface does not cover all required dashboard paths.
+  **Concrete plan change:** Add a best-effort `observe stop '' <unexpected-exit reason>` inside the handler’s existing guarded failure branch, preserving the current substage. Add recovery-fixture tests for handled signals and unexpected failures, asserting `state=stopped`, dashboard status `needs_you`, preserved stage, unchanged exit outcome, and one stop notification.
 
-  **Location:** `.ai/tasks.md:36–45`, `.ai/tasks.md:184–198`; `scripts/lib/watchdog.py:90–111`.
+- P24: T005 assigns new concurrency-sensitive liveness logic to sonnet.
 
-  T001 supplies `local_dir_fd(root)`, which returns a descriptor for `.ai/local`. T003 requires every checkout file to use that interface, including `.ai/tasks.md` and Git metadata. Those files are elsewhere. This checkout demonstrates both cases: tasks are in `.ai/tasks.md`, and `.git` redirects to `/home/zack/Projects/agents/.git/worktrees/agents-dashboard`.
+  **Location:** `.ai/tasks.md:254`, `.ai/tasks.md:260–278`, `.ai/tasks.md:305–308`; `.ai/current-plan.md:28–30`.
 
-  The plan does not specify how to obtain safe descriptors for those locations. Using ordinary pathname reads would bypass the promised protection against FIFOs, intermediate symlinks, and directory replacement. Reading everything relative to the local descriptor would instead lose required fields.
+  T005 must implement PID-reuse checks, marker re-reading during concurrent removal, orphan-child handling, and marker-free process discovery. Its explicit model is `sonnet`.
 
-  The reader contract should also expose metadata from the opened descriptor: watchdog liveness deliberately reads PID and marker mtime from the same file, then re-reads the marker.
+  T001 currently supplies bounded reads and descriptor metadata, but does not own the liveness decision protocol. The existing watchdog implementation cannot simply be called unchanged: `marker_snapshot()` uses an ordinary pathname open, conflicting with the dashboard’s required bounded descriptor-based reads. Consequently, T005 still requires concurrency-sensitive adaptation. Under the requested model policy, this requires `opus`.
 
-  **Concrete plan change:** Extend T001’s `opus` work with explicit safe directory traversal for checkout root, `.ai`, `.ai/local`, and normal/worktree Git metadata. Define bounded reads that return content and descriptor metadata together. Make T003 consume those APIs. Add normal-repository and worktree branch/task-count tests, unsafe Git-metadata tests, and a marker-replacement test that preserves watchdog identity semantics.
+  **Concrete plan change:** Move the bounded marker/liveness helper and its PID-reuse, marker-removal, and orphan-child tests into T001 on `opus`. Let T005 on `sonnet` consume that tested interface. Alternatively, explicitly change T005 to `opus`.
 
 ## MINOR findings
 
-- P21: T002 is too broad for one unattended task.
+- P25: The curses smoke test does not exercise navigation or resize behavior.
 
-  **Location:** `.ai/tasks.md:104–167`.
+  **Location:** `.ai/tasks.md:364–391`.
 
-  T002 combines notification mirroring, pause overlays, pipeline registration and stages, task-runner stages, recovery hooks, integration tests, handoff changes, and a vault update. It spans seven named files or artifacts and several distinct execution paths.
+  T006 requires selection, scrolling, expansion, resize handling, and terminal restoration on exceptions. Its automated interaction test only sends `q`; pure renderer tests cannot verify viewport behavior or terminal cleanup after failure.
 
-  **Concrete plan change:** Split it into smaller tasks for notification/pause hooks, pipeline hooks, and runner/recovery hooks, each with focused validation. Keep required flow-chart updates in the same task as the corresponding behavior change.
-
-- P22: The handoff reports a future flow-chart update as completed.
-
-  **Location:** `.ai/handoff.md:18–21`; `.ai/tasks.md:135–139`.
-
-  The handoff says “Flow chart updated (by T002)” and describes the new dashboard note as present. T002 remains TODO, and the inspected vault note has no dashboard/observation entry and retains `updated: 2026-10-06`.
-
-  This is a planning-record defect, preceding implementation. The existing test checks the declaration’s wording, not whether the update happened.
-
-  **Concrete plan change:** Explicitly mark the update as pending T002 while retaining the required test marker. Replace that pending statement with completed evidence only after T002 updates the vault note and date.
+  **Concrete plan change:** Extend the pty coverage with enough cards to overflow the viewport, arrow-key navigation and Enter, a terminal resize, and an injected exception. Assert that selection remains visible and the terminal is restored. Keep tests bounded and independent of live providers.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree remained clean.
-- Planning diff whitespace check passed.
+- Requested HEAD confirmed; working tree clean.
 - Task-queue validation passed.
-- Python syntax checks passed for the two existing library modules and test module.
-- Bash syntax checks passed for 13 files.
+- Planning diff whitespace check passed.
+- **13 Bash syntax checks** and **3 Python syntax checks** passed.
 - Documentation consistency: **3 tests passed**.
-- Existing flow-chart test’s first assertion now passes; its writable fixture portion was not run.
-- Read-only probes confirmed the task/Git path mismatch and reproduced the literal recovery-precedence result.
+- Recovery EXIT-handler probe confirmed the P23 execution path.
 - Validation-stamp verification failed: **no validation evidence exists in this checkout**.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and writable integration fixtures were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
 
-## Security, architecture, and model assessment
+## Security, architecture, and scope assessment
 
-The stdlib-only, advisory dashboard fits the requested scope. The earlier bounded-I/O, locking, substage, and rendering revisions substantially improve the plan.
+The advisory, stdlib-only dashboard fits the spec. T001 appropriately uses `opus` for path safety and locking. Every task specifies a model; no failed implementation retry is recorded.
 
-Every task specifies a model; no failed implementation retry is recorded. Keep the additional safe traversal and marker-reading work in T001 on `opus`, allowing T003 on `sonnet` to assemble already-tested helpers.
+The flow-chart update is accurately marked pending T002/T003. No additional pre-existing defect was demonstrated in the inspected scope.
 
 ## Manual testing recommendations
 
-After implementation and automated validation, inspect two simultaneous tmux runs through build, checks, pause, recovery, stop, and finish. Verify scrolling, selection, expansion, resizing, role colors, and terminal restoration.
+After implementation and automated validation, inspect two simultaneous tmux pipelines through pause, recovery, stop, and finish. Verify navigation, expansion, scrolling, resizing, role colors, and terminal restoration.
 
 This review assesses plan readiness, not implementation correctness or human acceptance.
