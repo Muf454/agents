@@ -14,6 +14,16 @@ import subprocess
 import sys
 import time
 
+# The sibling helper (the same copy: checkout .ai/bin/lib or the timer's host copy).
+# No __pycache__: .ai/bin is part of the approved gate digest.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow import check_state_root, overlap  # noqa: E402
+
+
+class Refused(Exception):
+    """An unsafe host layout: reported as is, before anything is written."""
+
 
 def positive(value):
     number = int(value)
@@ -125,10 +135,49 @@ def unit_quote(value, command=True):
     return '"' + (escaped.replace('$', '$$') if command else escaped) + '"'
 
 
-def timer(root, args, install):
-    units = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
+def unit_name(root):
     slug = re.sub(r'[^A-Za-z0-9_.-]+', '-', root.name).strip('-') or 'project'
-    name = f'ai-watchdog-{slug}-{hashlib.sha256(str(root).encode()).hexdigest()[:8]}'
+    return f'ai-watchdog-{slug}-{hashlib.sha256(str(root).encode()).hexdigest()[:8]}'
+
+
+def units_dir():
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
+
+
+def timer_status(root):
+    """Print installed / missing / unknown for this checkout's timer; exit 0 / 1 / 2."""
+    name = unit_name(root)
+    units = units_dir()
+    timer_name = name + '.timer'
+    if not (units / (name + '.service')).is_file() or not (units / timer_name).is_file():
+        print(f'missing {timer_name} (no unit files)')
+        return 1
+    answers = {}
+    for query in ('is-enabled', 'is-active'):
+        try:
+            result = subprocess.run(['systemctl', '--user', query, timer_name],
+                                    capture_output=True, text=True)
+        except OSError as error:
+            print(f'unknown {timer_name} (systemctl unavailable: {error.strerror or error})')
+            return 2
+        answers[query] = result.stdout.strip()
+        if result.returncode and not answers[query]:
+            print(f'unknown {timer_name} (systemctl {query} failed: '
+                  f'{result.stderr.strip()[:120] or "exit " + str(result.returncode)})')
+            return 2
+    if answers['is-enabled'] != 'enabled':
+        print(f'missing {timer_name} (not enabled)')
+        return 1
+    if answers['is-active'] != 'active':
+        print(f'missing {timer_name} (not active)')
+        return 1
+    print(f'installed {timer_name}')
+    return 0
+
+
+def timer(root, args, install):
+    units = units_dir()
+    name = unit_name(root)
     service, timer_unit = units / (name + '.service'), units / (name + '.timer')
     def systemctl(*command):
         result = subprocess.run(['systemctl', '--user', *command])
@@ -146,6 +195,18 @@ def timer(root, args, install):
         systemctl('daemon-reload')
         print('Removed ' + name)
         return 0
+    # Check the TARGET checkout (root), never the caller's directory, before writing anything:
+    # a host copy or state dir an agent session can edit would defeat the gate check.
+    data = os.environ.get('XDG_DATA_HOME')
+    if data and not os.path.isabs(data):
+        raise Refused('XDG_DATA_HOME must be an absolute path: ' + data)
+    if overlap(host, root):
+        raise Refused(f'Host copy {host} overlaps the checkout {root} (agent sessions can write '
+                      'there); set XDG_DATA_HOME to a directory outside it.')
+    try:
+        check_state_root(root)  # reads the AI_STATE_DIR/XDG_STATE_HOME the timer forwards
+    except ValueError as error:
+        raise Refused(str(error)) from None
     if host.exists():
         shutil.rmtree(host)
     shutil.copytree(Path(__file__).resolve().parent.parent, host / 'bin',
@@ -181,6 +242,41 @@ def timer(root, args, install):
 FORWARDED_ENV = ('PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'AI_STATE_DIR')
 
 
+UNAVAILABLE = 'Diagnosis unavailable'
+
+
+def diagnose(args, local, agent, prompt):
+    """One bounded read-only diagnosis by AGENT; never raises."""
+    command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]
+    output = None
+    if agent == 'codex':
+        # Codex has its own limit; Claude's is shared with implementation and interactive sessions.
+        if not shutil.which('codex'):
+            return f'{UNAVAILABLE}: Codex CLI not installed.'
+        descriptor, output = tempfile.mkstemp(dir=local, prefix='.diagnosis-', suffix='.md')
+        os.close(descriptor)
+        command += ['codex', 'exec', '--ignore-user-config', '-c', 'approval_policy="never"',
+                    '--sandbox', 'read-only', '-c', 'model_reasoning_effort="medium"',
+                    '--output-last-message', output, prompt]
+    else:
+        command += ['claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
+                    '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
+                    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                    '--model', os.environ.get('AI_DIAGNOSIS_MODEL') or 'claude-sonnet-5-5', '--', prompt]
+    try:
+        with open('/dev/null') as stdin:
+            result = subprocess.run(command, stdin=stdin, capture_output=True, text=True)
+        diagnosis = (read(Path(output)) if output else result.stdout).strip()
+        if result.returncode or not diagnosis:
+            diagnosis = f'{UNAVAILABLE} (exit {result.returncode}).\n' + diagnosis
+    except OSError as error:
+        diagnosis = f'{UNAVAILABLE}: {error}'
+    finally:
+        if output:
+            Path(output).unlink(missing_ok=True)
+    return diagnosis
+
+
 def forwarded_env():
     return {key: value for key, value in os.environ.items()
             if (key in FORWARDED_ENV or key.startswith('AI_')) and key != 'AI_WATCHDOG_NOW'
@@ -193,8 +289,12 @@ def start_recovery(root, local, marker):
     # Verify with THIS copy's code (the host copy --install-timer made), never checkout code.
     # Whether recovery is allowed is the approved run's setting; ai-recover enforces it.
     bin_dir = Path(__file__).resolve().parent.parent
-    if bin_dir.is_relative_to(root):
+    if overlap(bin_dir, root):
         return 'auto-recovery only runs from the installed timer (ai-watchdog --install-timer --recover)'
+    try:
+        check_state_root(root)  # before trusting the approved run recorded there
+    except ValueError as error:
+        return 'auto-recovery refused: ' + str(error).rstrip('.')
     common = bin_dir / 'lib' / 'common.sh'
     # Same check ai-pipeline does before handing over: only approved gate code may run.
     digest = subprocess.run(['bash', '-c', 'source "$1"; ai_guard_digest', 'ai-watchdog', str(common)],
@@ -252,21 +352,29 @@ def main():
     parser.add_argument('--recover', action='store_true',
                         help='after a crashed ai-pipeline, start ai-recover (bounded auto-recovery)')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
-    parser.add_argument('--diagnosis-agent', choices=('codex', 'claude'), default='codex',
-                        help='read-only diagnosis by Codex (default; separate limit) or Claude')
+    parser.add_argument('--diagnosis-agent', choices=('auto', 'codex', 'claude'), default='auto',
+                        help='read-only diagnosis: auto (default: Codex, then Claude when Codex fails, '
+                             'e.g. at its usage limit), codex or claude (AI_DIAGNOSIS_MODEL, default '
+                             'claude-sonnet-5-5)')
     timer_group = parser.add_mutually_exclusive_group()
     timer_group.add_argument('--install-timer', action='store_true',
                              help='install and start a systemd user timer (every 10 min) with these options')
     timer_group.add_argument('--uninstall-timer', action='store_true')
+    timer_group.add_argument('--timer-status', action='store_true',
+                             help="print installed/missing/unknown for this checkout's timer (exit 0/1/2)")
     args = parser.parse_args()
     root = Path(args.project).resolve()
     ai = root / '.ai'
     local = ai / 'local'
     if not ai.is_dir() or ai.is_symlink() or local.is_symlink():
         parser.error('project must have a real .ai directory and safe .ai/local')
+    if args.timer_status:
+        return timer_status(root)
     if args.install_timer or args.uninstall_timer:
         try:
             return timer(root, args, args.install_timer)
+        except Refused as error:
+            parser.error('refusing to install the timer: ' + str(error))
         except (OSError, ValueError) as error:
             parser.error('cannot write the timer units: ' + str(error))
     local.mkdir(exist_ok=True)
@@ -359,33 +467,12 @@ def main():
                           'create or delete anything or run project code (tests, builds, git writes). '
                           'Inspect .ai/state.md, .ai/run-log.md and .ai/local logs as needed. '
                           'Start with a one-line summary, then evidence and suggested human recovery.\n' + message)
-                command = ['timeout', '--signal=TERM', '--kill-after=10s', str(args.diagnosis_timeout)]
-                output = None
-                if args.diagnosis_agent == 'codex':
-                    # Default: Codex has its own limit; Claude's is shared with interactive sessions.
-                    descriptor, output = tempfile.mkstemp(dir=local, prefix='.diagnosis-', suffix='.md')
-                    os.close(descriptor)
-                    command += ['codex', 'exec', '--ignore-user-config', '-c', 'approval_policy="never"',
-                                '--sandbox', 'read-only', '-c', 'model_reasoning_effort="medium"',
-                                '--output-last-message', output, prompt]
-                else:
-                    command += ['claude', '-p', '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
-                                '--allowedTools', 'Read,Glob,Grep', '--setting-sources', 'project',
-                                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
-                    if os.environ.get('AI_MODEL'):
-                        command += ['--model', os.environ['AI_MODEL']]
-                    command += ['--', prompt]
-                try:
-                    with open('/dev/null') as stdin:
-                        result = subprocess.run(command, stdin=stdin, capture_output=True, text=True)
-                    diagnosis = (read(Path(output)) if output else result.stdout).strip()
-                    if result.returncode or not diagnosis:
-                        diagnosis = f'Diagnosis unavailable (exit {result.returncode}).\n' + diagnosis
-                except OSError as error:
-                    diagnosis = f'Diagnosis unavailable: {error}'
-                finally:
-                    if output:
-                        Path(output).unlink(missing_ok=True)
+                diagnosis = ''
+                if args.diagnosis_agent in ('codex', 'auto'):
+                    diagnosis = diagnose(args, local, 'codex', prompt)
+                if args.diagnosis_agent == 'claude' or (args.diagnosis_agent == 'auto' and diagnosis.startswith(UNAVAILABLE)):
+                    # auto: Codex first (its own limit); Claude Sonnet when Codex can't answer.
+                    diagnosis = diagnose(args, local, 'claude', prompt)
                 save(local / 'diagnosis.md', diagnosis + '\n')
                 message += ' Diagnosis: ' + ' '.join(diagnosis.splitlines()[0].split())[:300]
             common = Path(__file__).resolve().with_name('common.sh')

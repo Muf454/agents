@@ -10,6 +10,7 @@ Hands-off delivery of an approved plan on a feature branch:
   Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
   -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
+  Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
 (default: --base when it is a local or origin/ branch).
@@ -21,6 +22,7 @@ EOF
 }
 orig_args=("$@")
 base=main; pr_base=''; max_fix_rounds=2; draft=no; open_pr=yes; approved=no; plan_review=yes
+knowledge_dir=''
 review_args=(); run_args=()
 while (( $# )); do
   case "$1" in
@@ -40,7 +42,14 @@ while (( $# )); do
     --review-timeout)
       (( $# >= 2 )) || ai_die 'Missing review timeout'
       review_args=(--timeout "$2"); shift 2 ;;
-    --sessions|--session-timeout|--run-timeout|--model|--knowledge-dir)
+    --knowledge-dir)
+      (( $# >= 2 )) || ai_die 'Missing knowledge directory'
+      [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
+      knowledge_dir=$(cd -- "$2" && pwd -P)
+      # The run manifest records the resolved path, not one relative to the caller.
+      orig_args[${#orig_args[@]} - $# + 1]=$knowledge_dir
+      run_args+=("$1" "$knowledge_dir"); shift 2 ;;
+    --sessions|--session-timeout|--run-timeout|--model)
       (( $# >= 2 )) || ai_die "Missing value for $1"
       run_args+=("$1" "$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -49,8 +58,16 @@ while (( $# )); do
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
-command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
+case "${AI_REVIEWER:-auto}" in
+  claude) ;;
+  codex) command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first (or set AI_REVIEWER=auto).' ;;
+  auto) command -v codex >/dev/null || printf '%s\n' 'Codex CLI not found: reviews run on the Claude fallback reviewer.' ;;
+  *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
+esac
 ai_root
+# Host authority state must live where agent sessions cannot write; checked before any agent.
+state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
+  ai_die "${state_error#Error: }"
 # The pipeline owns the shared checkout lock for its whole run; its children inherit it.
 ai_lock
 export AI_LOCK_HELD=$$
@@ -82,7 +99,7 @@ fi
 # and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
 open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
-    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md')" ]] || \
+    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
@@ -127,6 +144,13 @@ host_commit() {
   git commit -m "$1" >/dev/null
   ai_guard_verify
 }
+# A Claude fallback review appends to the fallback log: commit it with the review record.
+review_record() {
+  local paths=("$@")
+  [[ -z "$(git status --porcelain --untracked-files=all -- .ai/reviews/fallback-log.md)" ]] || \
+    paths+=(.ai/reviews/fallback-log.md)
+  printf '%s\n' "${paths[@]}"
+}
 # Review is current if nothing but workflow records changed since the reviewed commit.
 review_current() {
   local info reviewed
@@ -136,14 +160,16 @@ review_current() {
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
 # Publish invariants: what gets published is exactly what was reviewed and validated.
-# Checked after host commits on the publish path, before every push attempt and after
-# each push (commit and push hooks run project code); any failure stops.
+# Checked after host commits on the publish path, before and after every push attempt
+# (commit and push hooks run project code); any failure stops. The committed bytes come
+# before "review current" so a hook commit with filtered bytes is reported as such.
 publish_ready() {
   local why=''
   ai_guard_verify
   if ! why=$(ai_helper review-info 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-review integrity check failed}
   elif ! why=$(ai_helper disputes-verify 2>&1 >/dev/null); then why=${why#Error: }; why=${why:-dispute records do not verify}
   elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
+  elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"
   elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
   elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
   elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
@@ -154,15 +180,19 @@ publish_ready() {
 }
 # Pushes hit transient network/auth hiccups; retry before treating it as a stop.
 # Usage: push STAGE FAILURE-MESSAGE git-push-args...; afterwards origin's branch is HEAD.
+# Push hooks run project code, so the publish checks run after EVERY attempt, failed or
+# not: a hook's change is reported as such, never as a (retryable) push failure.
 push() {
-  local stage=$1 failed=$2 try remote; shift 2
+  local stage=$1 failed=$2 try ok remote; shift 2
   for try in 1 2 3; do
     publish_ready "$stage"
-    git push "$@" && break
+    ok=0
+    if git push "$@"; then ok=1; fi
+    publish_ready "$stage"
+    (( ok )) && break
     if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
     ${AI_SLEEP:-sleep} $(( try * 20 ))
   done
-  publish_ready "$stage"
   remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
   [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
     printf 'Publish check failed after %s: origin %s is %s, not HEAD %s (push hook?)\n' \
@@ -215,17 +245,18 @@ recheck_fail() {
 reconcile_disputes() {
   local status added paths=() file
   status=$(ai_helper recheck-status 2>&1) || recheck_fail "$status"
-  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  # The fallback log is appended by every Claude review and committed with the next record.
+  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all -- . ':!.ai/reviews/fallback-log.md')" ]]; then
     recheck_fail 'uncommitted .ai/reviews/recheck.md or disputes.md that do not verify; inspect them.'
   fi
   [[ "$status" != none ]] || return 0
   if [[ "$status" == pending ]]; then
-    step 'Re-check of rejected findings (Codex)'
+    step 'Re-check of rejected findings (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
     ai_guard_verify
   fi
   added=$(ai_helper disputes-record 2>&1) || recheck_fail "$added"
-  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md; do
+  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md .ai/reviews/fallback-log.md; do
     [[ -z "$(git status --porcelain --untracked-files=all -- "$file")" ]] || paths+=("$file")
   done
   if (( ${#paths[@]} )); then
@@ -242,10 +273,20 @@ reconcile_disputes() {
   if (( added > 0 )); then printf 'Recorded %s disputed finding(s); the PR will be a draft.\n' "$added"; fi
 }
 
+# A missing watchdog timer never stops the run, but the human should know at the start.
+timer_note=''
+timer_state=$("$AI_BIN/ai-watchdog" "$PWD" --timer-status 2>/dev/null </dev/null) && timer_rc=0 || timer_rc=$?
+case "$timer_rc" in
+  0) ;;
+  1) printf 'No watchdog timer for this checkout; a crash or restart would go unnoticed. Install it: .ai/bin/ai-watchdog --install-timer --diagnose --recover\n'
+     timer_note=' (no watchdog timer for this checkout)' ;;
+  *) printf 'Watchdog timer status unknown: %s\n' "${timer_state:-no answer}"
+     timer_note=' (watchdog timer status unknown)' ;;
+esac
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
-  ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
+  ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT).$timer_note"
 else
-  ai_notify "▶ STARTED on $branch."
+  ai_notify "▶ STARTED on $branch.$timer_note"
 fi
 if [[ -n "$open_stage" ]]; then
   step 'Completing the interrupted review triage'
@@ -257,10 +298,11 @@ reconcile_disputes
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
   if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
-    step 'Plan review (Codex)'
+    step 'Plan review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --plan "${review_args[@]}" || stop 'plan review'
     ai_guard_verify
-    host_commit 'chore(ai): record plan review' .ai/reviews/plan.md
+    mapfile -t records < <(review_record .ai/reviews/plan.md)
+    host_commit 'chore(ai): record plan review' "${records[@]}"
     plan_info=$(ai_helper plan-review-info) || stop 'plan review'
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$plan_info" == current* ]] || \
@@ -283,10 +325,19 @@ while true; do
   fi
   if ! review_current; then
     ensure_validated
-    step 'Independent review (Codex)'
+    # Codex reviews the committed range: it must hold exactly the validated bytes.
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+      printf '%s\n' 'Committed content differs from the validated content: the checkout is not clean' > .ai/local/last-error
+      stop review
+    elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then
+      printf 'Committed content differs from the validated content: %s\n' "${why#Error: }" > .ai/local/last-error
+      stop review
+    fi
+    step 'Independent review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
     ai_guard_verify
-    host_commit 'chore(ai): record independent review' .ai/reviews/current.md
+    mapfile -t records < <(review_record .ai/reviews/current.md)
+    host_commit 'chore(ai): record independent review' "${records[@]}"
   fi
   read -r _ blockers majors minors < <(ai_helper review-info)
   printf 'Review: BLOCKER %s, MAJOR %s, MINOR %s\n' "$blockers" "$majors" "$minors"

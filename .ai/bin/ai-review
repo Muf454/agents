@@ -6,8 +6,15 @@ Usage: ai-review --base REF [--timeout SECONDS]   review the implementation
        ai-review --plan [--timeout SECONDS]       review spec/plan/tasks before implementing
        ai-review --recheck [--timeout SECONDS]    Codex re-checks the BLOCKER/MAJOR findings
                                                   Claude rejected (withdrawn or upheld each)
-Model/effort: AI_REVIEW_MODEL (default: Codex default), AI_REVIEW_EFFORT (default high);
-the re-check uses AI_RECHECK_EFFORT (default medium).
+Reviewer: AI_REVIEWER=auto (default: Codex, and a read-only Claude review when Codex
+reports a usage limit), codex (Codex only; pauses at its limit) or claude (Claude only).
+Codex model/effort: AI_REVIEW_MODEL (default: Codex default), AI_REVIEW_EFFORT (default
+high); the re-check uses AI_RECHECK_EFFORT (default medium). Claude reviewer:
+claude-fable-5-1 for plan/code reviews of risky work (a task on opus or naming RLS, auth,
+locks, migrations, deletion ...), else claude-opus-5-5, effort high; re-checks on
+claude-opus-5-5. Overrides: AI_CLAUDE_REVIEW_MODEL, AI_CLAUDE_REVIEW_EFFORT.
+Claude-written reviews are labelled and listed in .ai/reviews/fallback-log.md for a
+later Codex catch-up review.
 EOF
   exit 0
 fi
@@ -28,37 +35,150 @@ done
 if [[ "$plan" == no && "$recheck" == no ]]; then
   [[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
 fi
-command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
-if [[ "$recheck" == yes ]]; then ai_review_args AI_RECHECK_EFFORT medium; else ai_review_args; fi
+reviewer=${AI_REVIEWER:-auto}
+case "$reviewer" in
+  codex) command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first (or set AI_REVIEWER=auto).' ;;
+  claude) command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.' ;;
+  auto) command -v codex >/dev/null || command -v claude >/dev/null || \
+          ai_die 'Install and authenticate Codex CLI (reviewer) or Claude Code (fallback reviewer) first.' ;;
+  *) ai_die "Invalid AI_REVIEWER: $reviewer (auto, codex or claude)" ;;
+esac
+if [[ "$recheck" == yes ]]; then
+  codex_effort=${AI_RECHECK_EFFORT:-medium}; ai_review_args AI_RECHECK_EFFORT medium
+else
+  codex_effort=${AI_REVIEW_EFFORT:-high}; ai_review_args
+fi
 ai_root
 ai_lock
+if [[ "$recheck" == yes ]]; then mode=recheck; elif [[ "$plan" == yes ]]; then mode=plan; else mode=code; fi
 
-# Codex read-only run with usage-limit pauses. Sets $report; $1 is the prompt.
-codex_review() {
-  local prompt=$1 code reset start_head
+# Claude reviewer model by risk (re-checks: opus); the human's overrides win.
+claude_model() {
+  local risk
+  claude_effort=${AI_CLAUDE_REVIEW_EFFORT:-high}
+  [[ "$claude_effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_CLAUDE_REVIEW_EFFORT: $claude_effort"
+  if [[ "$mode" == recheck ]]; then
+    claude_risk='re-check'; claude_model=claude-opus-5-5
+  else
+    risk=$(ai_helper review-risk)
+    claude_risk=${risk#* }
+    if [[ "$risk" == high* ]]; then claude_model=claude-fable-5-1; else claude_risk='normal risk'; claude_model=claude-opus-5-5; fi
+  fi
+  if [[ -n "${AI_CLAUDE_REVIEW_MODEL:-}" ]]; then
+    [[ "$AI_CLAUDE_REVIEW_MODEL" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || ai_die "Invalid AI_CLAUDE_REVIEW_MODEL: $AI_CLAUDE_REVIEW_MODEL"
+    claude_model=$AI_CLAUDE_REVIEW_MODEL
+  fi
+}
+
+# One read-only Claude review; returns 0 (report written), 2 (usage limit; $reset set) or dies.
+claude_attempt() {
+  local prompt=$1 log errors code allowed=() probes=.ai/local/review-probes
+  [[ -f .ai/prompts/claude-review.md ]] || \
+    ai_die 'Missing .ai/prompts/claude-review.md; upgrade the toolkit copy (setup-project --upgrade).'
+  mapfile -t allowed < <(ai_helper review-allowlist)
+  (( ${#allowed[@]} )) || ai_die 'Cannot build the reviewer allowlist from .ai/permissions.allow.'
+  # What the reviewer was allowed, next to its log, for the human to inspect.
+  printf '%s\n' "${allowed[@]}" > "${report%.md}.allowlist"
+  prompt+=$'\n\n'"$(cat .ai/prompts/claude-review.md)"
+  prompt+=$'\n\nCLAUDE REVIEWER: you are the independent reviewer for this run (wherever the instructions above say Codex, they mean you). Scratch probes may be written only under .ai/local/review-probes/ (ignored, deleted afterwards). Your final response must follow the output contract above exactly.'
+  log="${report%.md}.claude.json"
+  errors="${report%.md}.claude.stderr.log"
+  rm -rf -- "$probes"; mkdir -p -- "$probes"
+  printf 'Claude review (%s, effort %s; %s): %s mode, limit %ss, log %s\n' \
+    "$claude_model" "$claude_effort" "$claude_risk" "$mode" "$limit" "$log"
+  set +e
+  timeout --signal=TERM --kill-after=10s "$limit" claude -p \
+    --permission-mode dontAsk --output-format json \
+    --tools Read,Glob,Grep,Bash,Edit,Write --allowedTools "${allowed[@]}" \
+    --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+    --model "$claude_model" --effort "$claude_effort" \
+    -- "$prompt" < /dev/null > "$log" 2> "$errors"
+  code=$?
+  set -e
+  rm -rf -- "$probes"
+  if (( code != 124 && code != 137 )) && ! ai_helper claude-result "$log" --check-only 2>/dev/null && \
+      reset=$(ai_helper limit-check "$log" "$errors"); then
+    return 2
+  fi
+  (( code == 0 )) || ai_die "Claude review failed (exit $code); prior review preserved. See $log and $errors."
+  ai_helper claude-text "$log" "$report" || ai_die "Claude review failed; prior review preserved. See $log."
+}
+
+# The review: Codex read-only first; on a Codex usage limit (auto) a read-only Claude
+# review; limits otherwise pause and retry (Codex first again). Sets $report and the
+# reviewer label ($review_by, AI_REVIEW_LABEL for the publish helpers); $1 is the prompt.
+run_review() {
+  local prompt=$1 code reset start_head fallback='' started=$SECONDS try_codex
   start_head=$(git rev-parse HEAD)
   report=$(mktemp .ai/local/review-XXXXXXXX.md)
   events="${report%.md}.events.log"
+  unchanged() {
+    [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]]
+  }
   while true; do
-    set +e
-    timeout --signal=TERM --kill-after=10s "$limit" codex exec \
-      --ignore-user-config -c 'approval_policy="never"' --sandbox read-only "${AI_REVIEW_ARGS[@]}" \
-      --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
-    code=$?
-    set -e
-    (( code != 0 )) || break
-    if (( code != 124 && code != 137 )) && reset=$(ai_helper limit-check "$events"); then
-      ai_limit_pause Codex "$reset"
-      [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
-        ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
+    try_codex=no
+    if [[ "$reviewer" == codex ]] || { [[ "$reviewer" == auto ]] && command -v codex >/dev/null; }; then try_codex=yes; fi
+    if [[ "$try_codex" == yes ]]; then
+      set +e
+      timeout --signal=TERM --kill-after=10s "$limit" codex exec \
+        --ignore-user-config -c 'approval_policy="never"' --sandbox read-only "${AI_REVIEW_ARGS[@]}" \
+        --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
+      code=$?
+      set -e
+      if (( code == 0 )); then
+        review_by=codex; review_model=${AI_REVIEW_MODEL:-default}; review_effort=$codex_effort
+        break
+      fi
+      if ! (( code != 124 && code != 137 )) || ! reset=$(ai_helper limit-check "$events"); then
+        ai_die "Codex failed; prior review preserved. See $events."
+      fi
+      if [[ "$reviewer" == codex ]]; then
+        ai_limit_pause Codex "$reset"
+        unchanged || ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
+        continue
+      fi
+      fallback='Codex usage limit'
+      [[ "$reset" == 0 ]] || fallback+=" until $(date -d "@$reset" '+%F %H:%M')"
+    else
+      fallback=$([[ "$reviewer" == claude ]] && printf 'AI_REVIEWER=claude' || printf 'Codex CLI not installed')
+    fi
+    [[ -n "${claude_model:-}" ]] || claude_model
+    printf '%s; reviewing with Claude instead.\n' "$fallback"
+    [[ -n "${AI_PIPELINE:-}" && -z "${fallback_notified:-}" && "$reviewer" == auto ]] && \
+      ai_notify "↪ $fallback: the $mode review runs on Claude ($claude_model) instead." || true
+    fallback_notified=1
+    rm -f -- "$report"
+    code=0
+    claude_attempt "$prompt" || code=$?
+    if (( code == 2 )); then
+      ai_limit_pause Claude "$reset"
+      unchanged || ai_die 'Checkout changed while waiting for the usage limit; rerun the review.'
       continue
     fi
-    ai_die "Codex failed; prior review preserved. See $events."
+    review_by=$([[ "$reviewer" == claude ]] && printf claude || printf claude-fallback)
+    review_model=$claude_model; review_effort=$claude_effort
+    local who='Claude fallback'
+    [[ "$reviewer" != claude ]] || who='Claude'
+    export AI_REVIEW_BY="$who, $claude_model"
+    export AI_REVIEW_LABEL="$who ($claude_model, effort $claude_effort; $fallback). Codex catch-up review pending: see .ai/reviews/fallback-log.md."
+    break
   done
-  [[ -s "$report" ]] || ai_die "Codex produced no review; see $events."
-  [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]] || \
-    ai_die 'Checkout changed during review; report kept locally, not published as current.'
+  review_seconds=$(( SECONDS - started ))
+  [[ -s "$report" ]] || ai_die "The reviewer produced no review; see $events."
+  unchanged || ai_die 'Checkout changed during review; report kept locally, not published as current.'
+  review_reason=$fallback
 }
+
+# After publishing: the fallback list (for the Codex catch-up) and the outcome log (never fatal).
+review_records() {
+  local head=$1 base=$2
+  if [[ "$review_by" == claude* ]]; then
+    ai_helper fallback-record "$mode" "$review_model" "$review_effort" "$head" "$base" "$review_reason"
+  fi
+  ai_helper outcome review "$mode" "$review_by" "$review_model" "$review_effort" "$review_seconds" "$report" \
+    2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+}
+reviewer_name() { [[ "$review_by" == codex ]] && printf Codex || printf 'Claude (%s)' "$review_model"; }
 
 if [[ "$plan" == yes ]]; then
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || ai_die 'Commit the plan before reviewing it.'
@@ -68,19 +188,23 @@ if [[ "$plan" == yes ]]; then
   prompt=$(cat .ai/prompts/plan-review.md)
   prompt+=$'\n\nPLAN SCOPE: HEAD='
   prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
-  codex_review "$prompt"
+  run_review "$prompt"
   ai_helper publish-plan-review "$report" "$digest"
+  review_records "$(git rev-parse HEAD)" plan
   # Run by hand, record it like the pipeline does, so the checkout stays clean for ai-pipeline.
   if [[ -z "${AI_PIPELINE:-}" ]]; then
-    git add -- .ai/reviews/plan.md
-    git diff --cached --quiet -- .ai/reviews/plan.md || \
-      git commit -q -m 'chore(ai): record plan review' -- .ai/reviews/plan.md
+    records=(.ai/reviews/plan.md)
+    [[ ! -f .ai/reviews/fallback-log.md ]] || records+=(.ai/reviews/fallback-log.md)
+    git add -- "${records[@]}"
+    git diff --cached --quiet -- "${records[@]}" || \
+      git commit -q -m 'chore(ai): record plan review' -- "${records[@]}"
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$(ai_helper plan-review-info)" == current* && -z "$(git status --porcelain --untracked-files=all)" ]] || \
       ai_die 'Reviewed content changed while recording the plan review (commit hook?); review again.'
   fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
-  printf 'Plan review saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' "$blockers" "$majors" "$minors"
+  printf 'Plan review by %s saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' \
+    "$(reviewer_name)" "$blockers" "$majors" "$minors"
   exit 0
 fi
 if [[ "$recheck" == yes ]]; then
@@ -95,18 +219,21 @@ if [[ "$recheck" == yes ]]; then
   prompt+="$head; review: .ai/reviews/current.md; dispositions: .ai/reviews/dispositions.md. Rejected findings (ID, level, Claude's evidence), one per line:"
   prompt+=$'\n'"${prepared#*$'\n'}"
   prompt+=$'\n\nReturn only the JSON object as the final response. Do not write project files or invoke network/MCP integrations.'
-  codex_review "$prompt"
+  run_review "$prompt"
   ai_helper publish-recheck "$report" "$head" "$digest" "$rows_hash"
+  review_records "$head" recheck
   # Run by hand, record it like the plan review, so the checkout stays clean.
   if [[ -z "${AI_PIPELINE:-}" ]]; then
-    git add -- .ai/reviews/recheck.md
-    git diff --cached --quiet -- .ai/reviews/recheck.md || \
-      git commit -q -m 'chore(ai): record review re-check' -- .ai/reviews/recheck.md
+    records=(.ai/reviews/recheck.md)
+    [[ ! -f .ai/reviews/fallback-log.md ]] || records+=(.ai/reviews/fallback-log.md)
+    git add -- "${records[@]}"
+    git diff --cached --quiet -- "${records[@]}" || \
+      git commit -q -m 'chore(ai): record review re-check' -- "${records[@]}"
   fi
   answers=$(ai_helper recheck-verify) || ai_die 'Re-check report failed verification after saving it (commit hook?).'
   upheld=$(grep -c $'\tupheld\t' <<< "$answers" || true)
   withdrawn=$(grep -c $'\twithdrawn\t' <<< "$answers" || true)
-  printf 'Re-check saved to .ai/reviews/recheck.md: %s withdrawn, %s upheld.\n' "$withdrawn" "$upheld"
+  printf 'Re-check by %s saved to .ai/reviews/recheck.md: %s withdrawn, %s upheld.\n' "$(reviewer_name)" "$withdrawn" "$upheld"
   exit 0
 fi
 exec 8>.ai/local/validation.lock
@@ -122,9 +249,10 @@ head=$(git rev-parse HEAD)
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='
 prompt+="$head; supplied base=$base_sha; merge-base=$merge_base. Inspect git diff $merge_base..$head and actual source. Validation evidence: .ai/local/validation.json. Return the full Markdown review as the final response. Do not write project files or invoke network/MCP integrations."
-codex_review "$prompt"
+run_review "$prompt"
 ai_helper publish-review "$report" "$head" "$merge_base"
+review_records "$head" "$merge_base"
 read -r _ blockers majors minors < <(ai_helper review-info)
-printf 'Review saved to .ai/reviews/current.md (HEAD %s): BLOCKER %s, MAJOR %s, MINOR %s. Claude evaluates findings before fixing.\n' \
-  "$head" "$blockers" "$majors" "$minors"
-[[ -n "${AI_PIPELINE:-}" ]] || ai_notify "Codex review done: BLOCKER $blockers, MAJOR $majors, MINOR $minors."
+printf 'Review by %s saved to .ai/reviews/current.md (HEAD %s): BLOCKER %s, MAJOR %s, MINOR %s. Claude evaluates findings before fixing.\n' \
+  "$(reviewer_name)" "$head" "$blockers" "$majors" "$minors"
+[[ -n "${AI_PIPELINE:-}" ]] || ai_notify "$(reviewer_name) review done: BLOCKER $blockers, MAJOR $majors, MINOR $minors."

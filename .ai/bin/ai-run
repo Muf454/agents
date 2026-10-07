@@ -14,6 +14,8 @@ dispositions are already complete (an interrupted triage), it records the round
 without a new session. --since (ai-pipeline's stage start) bounds what triage may
 have changed: only workflow records, committed or not.
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
+Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
+(time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
 EOF
 }
@@ -52,6 +54,9 @@ done
 [[ -z "$since" || "$triage" == yes ]] || ai_die '--since only applies to --triage.'
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
+# Host authority state must live where agent sessions cannot write (also for --triage).
+state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
+  ai_die "${state_error#Error: }"
 ai_lock
 rm -f .ai/local/last-error
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
@@ -94,7 +99,30 @@ dirty_beyond_records() {
   git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
 
+# Host-side outcome log for tuning the model rules (ai-status --outcomes); never fatal.
+task_outcome() {
+  ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" 2>/dev/null || \
+    printf '%s\n' 'Note: could not append to the outcome log.' >&2
+}
+
 review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
+
+# An accepted checkpoint must hold exactly the bytes validation hashed (filters, hooks).
+# The helper compares EVERY tracked file, so call this after the bookkeeping commit, when
+# the workflow records are committed too. Stops without resetting anything.
+verify_checkpoint() {
+  local why
+  if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    why='uncommitted changes after the checkpoint'
+  elif ! ai_helper stamp verify >/dev/null 2>&1; then
+    why='validation stamp not current'
+  elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then
+    why=${why#Error: }
+  else
+    return 0
+  fi
+  ai_die "The checkpoint of $1 differs from the validated content: $why"
+}
 
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
@@ -210,6 +238,16 @@ else
   base_prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
 fi
 
+# Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,
+# once, before a task runs. Dependencies a task changes mid-run wait for the next start.
+if [[ "$(ai_helper tasks next)" != none ]]; then
+  deps_limit=${AI_DEPS_TIMEOUT:-1200}
+  [[ "$deps_limit" =~ ^[1-9][0-9]{0,6}$ ]] || ai_die "Dependency setup: invalid AI_DEPS_TIMEOUT: $deps_limit"
+  remaining=$(remaining_time)
+  (( deps_limit <= remaining )) || deps_limit=$remaining
+  ai_deps "$AI_APPROVED_GATE" "$deps_limit" || ai_die "$AI_DEPS_ERROR"
+fi
+
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_guard_verify
   ai_branch
@@ -234,6 +272,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     git commit -m 'chore(ai): record review handoff' >/dev/null
     ai_guard_verify
     # The stamp excludes metadata so this bookkeeping does not invalidate it.
+    verify_checkpoint 'final handoff'
     finished=yes
     [[ -n "${AI_PIPELINE:-}" ]] || ai_notify 'All tasks done and validated; ready for independent review.'
     printf '%s\n' 'Tasks complete and validation passed. Review with Codex; test and merge manually.'
@@ -248,6 +287,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  task_started=$SECONDS
   claude_session "$prompt" "${task_model:-$model}"
   ai_branch
   ai_helper tasks check
@@ -258,6 +298,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
       if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
         ai_guard_verify
+        task_outcome validation_failed
         ai_helper tasks set "$active_task" IN_PROGRESS
         ai_helper state blocked "Validation failed after $active_task; inspect validation log"
         ai_die "Validation failed; $active_task returned to IN_PROGRESS."
@@ -281,18 +322,25 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
           ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
         ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
       fi
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue'
-      ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")" ;;
+      task_outcome done
+      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
+      task_outcome blocked
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
       ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
-    *) ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
+    *) task_outcome no_checkpoint
+       ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
   ai_helper state implementing 'Continue queue; see task results for any blockers'
   # Commit runner bookkeeping separately; never stage application files here.
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
   git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
   ai_guard_verify
+  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
+  if [[ "$task_status" == DONE ]]; then
+    verify_checkpoint "$active_task"
+    ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")"
+  fi
 done
