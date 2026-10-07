@@ -92,3 +92,4 @@
 | 2026-10-07T12:30:36Z | runner | T001 | completed | PASS | 48bf6b2 | Claude checkpointed; continuing queue |
 | 2026-10-07T13:00Z | claude | T002 | BLOCKED: `review-history` helper + 7 `review_history` tests implemented | targeted Ran 7 OK; foreground ai-check exceeded the 600 s tool timeout (no result) | (this commit) | rerun the gate with a longer limit; if green set DONE |
 | 2026-10-07T12:42:06Z | runner | T002 | blocked; try next independent task | not complete | ffcca46 | See task result |
+| 2026-10-07T12:42:06Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | c6b8e7b | No merge or deployment performed |
