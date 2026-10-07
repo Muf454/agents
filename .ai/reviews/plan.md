@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 4b8de92023cfad1a13cdabd31d97945b17193c9b106af9c8d098f9707190de65; saved 2026-10-07T12:02:46Z. -->
+<!-- Plan review of plan digest a398de7d9bffa1a00b2c53517ee3f8ba105d0248bffb395cf42f43b3dff0b2c0; saved 2026-10-07T12:08:40Z. -->
 
 # Plan review
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
 
-Reviewed HEAD: `82369e63a611b5276c2c4163ce0149636c0b97a2`.
+Reviewed HEAD: `3368b065331966fe70c244cc7785bf4d47730ea3`.
 
-Inspected repository instructions, spec, plan, tasks, state/handoff, prior review, affected source, existing tests, validation scripts, relevant documentation, Git history/diff, and the vault flow chart. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, spec, plan, tasks, state/handoff, affected scripts and tests, validation configuration, relevant documentation, prior review, Git history/diff, and the vault flow chart. No files modified; no network or MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -15,58 +15,54 @@ None.
 
 ## MAJOR findings
 
-- P23: Unexpected recovery exits would be displayed as idle.
+- P26: Recovery escalation can overwrite the substage where recovery failed.
 
-  **Location:** `.ai/tasks.md:224–226`, `.ai/tasks.md:276–279`; `scripts/ai-recover:77–88`.
+  **Location:** `.ai/tasks.md:71–76`, `.ai/tasks.md:227–249`; `scripts/ai-recover:35–44`, `scripts/ai-recover:165`.
 
-  T004 adds observations for recovery start, validation, and `escalate`, but omits recovery’s existing EXIT handler. On TERM, INT, HUP, or an unexpected command failure, that handler announces a stop and removes the pipeline marker without updating `last-error`.
+  T004 explicitly sets `stage=checks, state=recovering` before recovery validation, but its escalation hook calls `observe stop "$stage"` using the **original pipeline stop label**.
 
-  After the planned recovery-start observation, the original error is older than the observation. Once the handler removes the marker and recovery exits, T005’s rules see no live runner, no crash marker, `state=recovering`, and an older error. They therefore select `idle`, despite the announced stop.
+  Under T001’s normalization rules, an original label such as `review`, `re-check`, or `pull request` replaces the recorded Checks stage. Thus recovery validation can fail while the dashboard highlights Review, Re-check, or PR. The planned acceptance test covers recovery from Build, where the `implementation` group happens to preserve Checks, so it misses this behavior.
 
-  **Evidence:** A read-only probe executed the actual EXIT handler with all side effects mocked. Exit 143 announced STOPPED and removed the marker. Applying the proposed status rules to the resulting timestamps and state produced `idle`.
+  **Evidence:** A read-only evaluation of the planned transition rules produced `checks → review`, `checks → recheck`, and `checks → pr` when escalating those original labels. The actual recovery script retains its original `$stage` throughout validation.
 
-  **Concrete plan change:** Add a best-effort `observe stop '' <unexpected-exit reason>` inside the handler’s existing guarded failure branch, preserving the current substage. Add recovery-fixture tests for handled signals and unexpected failures, asserting `state=stopped`, dashboard status `needs_you`, preserved stage, unchanged exit outcome, and one stop notification.
+  **Concrete plan change:** Track the current recovery substage separately from the original stop label, and preserve it when escalation records the stop. Keep the original label in explanatory text. Add recovery-validation failure tests starting from stages outside the implementation group, asserting final `stage=checks, state=stopped` and dashboard status `needs_you`.
 
-- P24: T005 assigns new concurrency-sensitive liveness logic to sonnet.
+- P27: Recovery’s dependency installer has no planned Setup observation.
 
-  **Location:** `.ai/tasks.md:254`, `.ai/tasks.md:260–278`, `.ai/tasks.md:305–308`; `.ai/current-plan.md:28–30`.
+  **Location:** `.ai/tasks.md:223–235`, `.ai/tasks.md:242–247`; `scripts/lib/common.sh:150–167`; `scripts/ai-recover:159–165`; `tests/test_workflow.py:3745–3793`.
 
-  T005 must implement PID-reuse checks, marker re-reading during concurrent removal, orphan-child handling, and marker-free process discovery. Its explicit model is `sonnet`.
+  T004 places the Setup observation in `ai-run`, but the actual install decision and command live in `common.sh`’s `ai_deps`. Recovery independently calls that function before validating leftovers.
 
-  T001 currently supplies bounded reads and descriptor metadata, but does not own the liveness decision protocol. The existing watchdog implementation cannot simply be called unchanged: `marker_snapshot()` uses an ordinary pathname open, conflicting with the dashboard’s required bounded descriptor-based reads. Consequently, T005 still requires concurrency-sensitive adaptation. Under the requested model policy, this requires `opus`.
+  When a failed build leaves a changed lockfile, recovery starts with the Build stage preserved. As written, its dependency install never records Setup. If that install fails, escalation with label `implementation` preserves Build. The dashboard therefore reports a Build failure for a failed recovery dependency install, contrary to the requirement that failed installs remain on Setup.
 
-  **Concrete plan change:** Move the bounded marker/liveness helper and its PID-reuse, marker-removal, and orphan-child tests into T001 on `opus`. Let T005 on `sonnet` consume that tested interface. Alternatively, explicitly change T005 to `opus`.
+  Existing fixtures already exercise this exact path with `fail-later` and `change-later`; their assertions check notifications and checkpoint preservation, not observations.
+
+  **Concrete plan change:** Include `scripts/lib/common.sh` in T004 and place the observation hook at the actual stale-install boundary in `ai_deps`, with caller context that preserves `state=recovering` during recovery. Extend the existing recovery-install fixtures to assert Setup during installation and `stage=setup, state=stopped` after failure, while preserving existing exit, notification, and checkpoint behavior.
 
 ## MINOR findings
 
-- P25: The curses smoke test does not exercise navigation or resize behavior.
-
-  **Location:** `.ai/tasks.md:364–391`.
-
-  T006 requires selection, scrolling, expansion, resize handling, and terminal restoration on exceptions. Its automated interaction test only sends `q`; pure renderer tests cannot verify viewport behavior or terminal cleanup after failure.
-
-  **Concrete plan change:** Extend the pty coverage with enough cards to overflow the viewport, arrow-key navigation and Enter, a terminal resize, and an injected exception. Assert that selection remains visible and the terminal is restored. Keep tests bounded and independent of live providers.
+None.
 
 ## Validation observed
 
 - Requested HEAD confirmed; working tree clean.
 - Task-queue validation passed.
 - Planning diff whitespace check passed.
-- **13 Bash syntax checks** and **3 Python syntax checks** passed.
-- Documentation consistency: **3 tests passed**.
-- Recovery EXIT-handler probe confirmed the P23 execution path.
-- Validation-stamp verification failed: **no validation evidence exists in this checkout**.
+- **14 Bash syntax checks** and **3 Python syntax checks** passed.
+- **3 documentation consistency tests** passed.
+- Planned recovery-stop normalization evaluated read-only.
+- Validation-stamp verification reported **no validation evidence** in this checkout.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and writable integration fixtures were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
 
-## Security, architecture, and scope assessment
+## Scope, architecture, and model assessment
 
-The advisory, stdlib-only dashboard fits the spec. T001 appropriately uses `opus` for path safety and locking. Every task specifies a model; no failed implementation retry is recorded.
+The advisory, read-only, stdlib-only design fits the requested scope. Dependencies are ordered, every task specifies a model, and the security/concurrency tasks use `opus`. No task’s own failed implementation retry is recorded.
 
-The flow-chart update is accurately marked pending T002/T003. No additional pre-existing defect was demonstrated in the inspected scope.
+The findings concern planned observation behavior; they are not demonstrated regressions in existing code. Flow-chart updates are correctly scheduled for T002/T003 and marked pending in the handoff.
 
 ## Manual testing recommendations
 
-After implementation and automated validation, inspect two simultaneous tmux pipelines through pause, recovery, stop, and finish. Verify navigation, expansion, scrolling, resizing, role colors, and terminal restoration.
+After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Include recovery dependency-install and validation failures; verify their highlighted boxes. Check navigation, expansion, scrolling, resize, colors, and terminal restoration.
 
 This review assesses plan readiness, not implementation correctness or human acceptance.
