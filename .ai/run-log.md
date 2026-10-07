@@ -85,3 +85,4 @@
 | 2026-10-07T06:51:58Z | runner | T010 | blocked; try next independent task | not complete | 3465a65 | See task result |
 | 2026-10-07T06:51:58Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | a83b635 | No merge or deployment performed |
 | 2026-10-07T08:11:21Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/15 | PASS | b46943b | Human acceptance and merge remain |
+| 2026-10-07T11:05Z | claude | T001 | DONE (FL-11): `tests/run_parallel.py` + 7 `parallel_runner` tests; `__pycache__` race in a scripts scan fixed; README "Running the tests" | targeted Ran 7 OK; session gate 236 OK in 618 s (backgrounded) but flagged content change from concurrent record edits | (this commit) | full parallel timing runs are coordinator evidence; `.ai/validate` unchanged |

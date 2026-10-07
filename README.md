@@ -596,6 +596,23 @@ validation evidence, runner behavior, and review safety. It does not spend token
 or validate the models' reasoning. Do a short supervised real CLI run in your first
 project before trusting long unattended execution.
 
+## Running the tests
+
+```bash
+python3 tests/run_parallel.py                 # parallel shards, works from any directory
+AI_TEST_WORKERS=4 python3 tests/run_parallel.py
+python3 tests/run_parallel.py --collect-only  # print the number of tests only
+python3 -m unittest discover -s tests         # serial, what the gate runs today
+python3 -m unittest discover -s tests -k parallel_runner   # one group by name
+```
+
+`tests/run_parallel.py` discovers the same tests as the serial command and splits them
+round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
+runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
+crashes, when it collects no tests, or when the shards ran a different number of tests than
+it collected. Switching `.ai/validate` to the parallel runner is a gate change that a human
+approves.
+
 ## Deliberately manual for now
 
 Requirements/critical decisions, approval of scope and permissions, acceptance,

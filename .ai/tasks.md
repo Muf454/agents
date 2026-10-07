@@ -17,7 +17,7 @@ recorded by the coordinator after the run (see the plan's "Human steps").
 Revised after Codex plan review 1 (`.ai/reviews/plan.md`, P1–P7).
 
 ## T001 — Parallel test runner (FL-11)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -65,6 +65,27 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (output mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-07 (Claude, opus): `tests/run_parallel.py` (stdlib; `--start-dir`, `--collect-only`,
+`AI_TEST_WORKERS` with default min(8, CPU count); empty value = default; 0/negative/non-integer
+rejected on stderr, exit 1). Each shard gets `PYTHONPATH` = resolved start dir + existing value,
+cwd = repo root, stdin /dev/null. Exit 1 on failing/crashed shard (full output printed), zero
+tests, count mismatch, or a module that fails to import (its error is printed; discovery
+`_FailedTest` IDs cannot be loaded by name in a shard). `ParallelRunnerTest`: 7
+`parallel_runner` tests (all pass from repo root, an unrelated cwd and a relative
+`--start-dir`; failing test traceback; zero tests; `os._exit` crash + count mismatch; import
+error; invalid workers; `--collect-only` equals a fresh `TestLoader().discover('tests')`
+count). Targeted: `python3 -m unittest discover -s tests -k parallel_runner` → Ran 7 tests OK.
+Isolation audit: `ToolkitTest` uses a per-test temp dir, copied env (pipeline vars popped),
+mocked systemd/gh/claude/codex and per-test XDG/AI_STATE_DIR; the watchdog's runner scan is
+scoped by process cwd (per-test dir); no in-process env/cwd mutation. One real race fixed:
+`test_watchdog_setup_no_pgrep_f_waits…` walked `scripts/` and could read a `__pycache__`
+temp file another shard was writing; it now skips `__pycache__`. README `## Running the tests`.
+Session cannot run `python3 tests/run_parallel.py` itself (denied by the allowlist, as
+expected per P2), so full-suite parallel runs remain coordinator evidence. Gate: foreground
+`.ai/bin/ai-check` exceeded the 600 s Bash tool limit and finished in the background with
+`Ran 236 tests in 618.180s OK`, then "Validation modified project content" because this
+session edited `.ai/` records while it ran; the host's post-task `ai-check` on the committed
+tree is the gate of record (gate note).
 
 ## T002 — Review history helper
 Status: TODO

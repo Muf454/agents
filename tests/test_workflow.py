@@ -815,6 +815,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_watchdog_setup_no_pgrep_f_waits_in_executable_code_and_readme_documents_pids(self):
         for directory in ('scripts', 'templates'):
             for path in sorted((ROOT / directory).rglob('*')):
+                # Bytecode is not source, and parallel shards write it concurrently.
+                if '__pycache__' in path.parts:
+                    continue
                 if path.is_file() and path.suffix != '.md':
                     self.assertNotRegex(path.read_text(errors='replace'), r'pgrep\s+(-\w*f|--full)',
                                         str(path))
@@ -3802,6 +3805,87 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
         self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+
+class ParallelRunnerTest(unittest.TestCase):
+    """FL-11: tests/run_parallel.py shards the suite without changing what is tested."""
+
+    RUNNER = ROOT / 'tests/run_parallel.py'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ai-parallel-test-')
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.suite = self.base / 'suite'
+        self.suite.mkdir()
+        self.elsewhere = self.base / 'elsewhere'
+        self.elsewhere.mkdir()
+        # No PYTHONPATH: the runner must give each shard the discovery directory itself.
+        self.env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'AI_TEST_WORKERS')}
+        self.env['AI_TEST_WORKERS'] = '2'
+
+    def write(self, name, body):
+        (self.suite / name).write_text('import os, unittest\n\n\nclass Sample(unittest.TestCase):\n' + body)
+
+    def runner(self, *args, cwd=None, workers=None, expected=0):
+        env = dict(self.env)
+        if workers is not None:
+            env['AI_TEST_WORKERS'] = workers
+        result = subprocess.run([sys.executable, str(self.RUNNER), *args], cwd=cwd or ROOT, env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        if expected is not None:
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def test_parallel_runner_all_pass_from_repo_root_and_unrelated_cwd(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n')
+        self.write('test_two.py', '    def test_c(self): pass\n')
+        for cwd in (ROOT, self.elsewhere):
+            result = self.runner('--start-dir', str(self.suite), cwd=cwd)
+            self.assertIn('Ran 3 tests', result.stdout)
+            self.assertIn('2 shards, 3 collected', result.stdout)
+            self.assertNotIn('ModuleNotFoundError', result.stdout)
+        relative = self.runner('--start-dir', 'suite', cwd=self.base)
+        self.assertIn('Ran 3 tests', relative.stdout)
+
+    def test_parallel_runner_failing_test_prints_traceback(self):
+        self.write('test_one.py', '    def test_a(self): pass\n'
+                   '    def test_b(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('Traceback', result.stdout)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertIn('FAILED (failing shards:', result.stdout)
+        self.assertNotIn('count mismatch', result.stdout)
+
+    def test_parallel_runner_zero_tests_fail(self):
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('no tests collected', result.stdout)
+
+    def test_parallel_runner_crashed_shard_fails_with_count_mismatch(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): os._exit(3)\n'
+                   '    def test_c(self): pass\n    def test_d(self): pass\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('crashed (exit code 3)', result.stdout)
+        self.assertRegex(result.stdout, r'count mismatch: ran \d of 4 collected tests')
+
+    def test_parallel_runner_import_error_fails(self):
+        (self.suite / 'test_broken.py').write_text('import no_such_module_for_this_test\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('no_such_module_for_this_test', result.stdout)
+        self.assertIn('test discovery failed', result.stdout)
+
+    def test_parallel_runner_rejects_invalid_workers(self):
+        self.write('test_one.py', '    def test_a(self): pass\n')
+        for value in ('0', 'x', '-2'):
+            result = self.runner('--start-dir', str(self.suite), workers=value, expected=1)
+            self.assertIn('AI_TEST_WORKERS must be a positive integer', result.stderr)
+        self.runner('--start-dir', str(self.suite), workers='')  # empty means the default
+
+    def test_parallel_runner_collect_only_matches_serial_discovery(self):
+        # A fresh loader: `unittest -k` sets name patterns on the default loader of this process.
+        expected = unittest.TestLoader().discover(str(ROOT / 'tests')).countTestCases()
+        result = self.runner('--collect-only', cwd=self.elsewhere)
+        self.assertEqual(result.stdout.strip(), f'Collected {expected} tests')
 
 
 class DocsConsistencyTest(unittest.TestCase):
