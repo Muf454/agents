@@ -13,9 +13,13 @@ session, run the task's targeted tests, record the timeout in the result, and le
 gate to the host's post-task `ai-check` (1800 s limit).
 Read-only rule for this batch: nothing the dashboard does may write a file, take a lock or
 change a run. Observation writers are best effort and never change a run's outcome.
-Revised after Codex plan review 1 (`.ai/reviews/plan.md`, P1–P10, all accepted): T001 split
+Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
 into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
+Revised after plan review 2 (`.ai/reviews/plan.md`, P11–P18, all accepted): substage wins
+over an outer stop label; nonblocking opens and bounded locks; directory-descriptor-relative
+I/O; one bounded safe reader (T001) used by the dashboard; handoff flow declaration restored
+(P15); unknown-stage rendering; Re-check in Codex colour.
 
 ## T001 — Safe record writers: observation, notification log, host registry
 Status: TODO
@@ -28,23 +32,37 @@ never through an agent-planted symlink. Helpers only; callers come in T002.
 
 ### Implementation notes
 scripts/lib/workflow.py (new subcommands; every one exits 0 and prints `Warning: …` to stderr
-on any failure, so callers stay unaffected):
-- `observe ACTION [ARGS]` on `.ai/local/observation.json` (schema in the spec):
+on any failure or deadline, so callers are never blocked or failed):
+- Shared safe I/O (P12–P14), used by every writer here and by the dashboard (T003):
+  - `local_dir_fd(root)`: open ROOT, then `.ai`, then `local` each with
+    `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor (`dir_fd=`); a
+    symlink or non-directory anywhere → refuse. All later opens, temp creation, `rename`,
+    `unlink` and `flock` use that pinned descriptor (`dir_fd=`/`src_dir_fd=`), never a path
+    string, so replacing `.ai` or `.ai/local` after the check cannot redirect any I/O.
+  - `read_record(dir_fd, name, limit)`: open with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, `fstat`
+    must be a regular file, read at most `limit` bytes (observation 64 KiB, notifications
+    256 KiB tail, marker/last-error 4 KiB, tasks 1 MiB), decode UTF-8 with `errors='replace'`;
+    anything else → None. Never blocks on a FIFO or device.
+  - Writes: open/create with `O_NOFOLLOW|O_NONBLOCK` (+ `O_EXCL` for temp files), `fstat`
+    regular before writing; `flock` with `LOCK_EX|LOCK_NB` retried every 50 ms up to a 2 s
+    deadline, then warn and skip the write.
+- `observe ACTION [ARGS]` on `observation.json` (schema in the spec):
   `step STAGE [DETAIL]` (state active, new `since`), `pause NOTE` (keep stage/detail/since,
-  state paused), `resume` (state active, note cleared), `stop LABEL REASON` (normalise LABEL
-  with the table in the spec; unknown → keep the recorded stage; state stopped),
+  state paused), `resume` (state active, note cleared), `stop LABEL REASON`,
   `recovering NOTE [STAGE]`, `done NOTE`. Unknown stage keys are refused (warning).
-  Safety: `.ai/local` must exist, be a real directory and not a symlink (`lstat`); write a
-  temp file created with `O_CREAT|O_EXCL|O_NOFOLLOW` in `.ai/local`, then `os.replace` (a
-  rename replaces a symlink at the destination instead of following it). Read the previous
-  record with `O_NOFOLLOW`; malformed → start fresh.
-- `notify-log ROOT MESSAGE`: same `.ai/local` checks under ROOT; `flock` on
-  `.ai/local/notifications.lock` (opened `O_NOFOLLOW`, regular file only); open the log with
-  `O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW`, `fstat` must be a regular file; append one JSON line
-  `{"ts","message"}`; when it exceeds 200 lines, rewrite the last 200 into a temp file and
-  `os.replace` it, still under the lock.
-- `pipeline-register CHECKOUT BRANCH`: `root = check_state_root(checkout)`; under `flock` on
-  `root/pipelines/.lock` write `<sha256(checkout)[:16]>.json` atomically (`atomic()`), then
+  Stop precedence (P11): each outer label has a group of box keys — `implementation` →
+  {setup, build, checks}; `validation` → {checks}; `plan review` → {plan_review}; `review` →
+  {review}; `triage` → {triage}; `re-check` → {recheck}; `pull request`, `pull request
+  preparation`, `final push` → {pr}; empty label → any. If the recorded stage is in the
+  label's group (or the label is empty/unknown), keep it; otherwise use the label's first
+  key. The same rule applies to `recovering` with a STAGE argument.
+  Temp file + `os.replace(…, src_dir_fd=fd, dst_dir_fd=fd)` (replaces a symlink at the
+  destination instead of following it); the previous record is read with `read_record`.
+- `notify-log ROOT MESSAGE`: `flock` on `notifications.lock` (bounded as above); append one
+  JSON line `{"ts","message"}` to `notifications.log` (regular file, nonblocking open);
+  over 200 lines → write the last 200 to a temp file and `os.replace`, still under the lock.
+- `pipeline-register CHECKOUT BRANCH`: `root = check_state_root(checkout)`; under a bounded
+  `flock` on `root/pipelines/.lock` write `<sha256(checkout)[:16]>.json` atomically, then
   prune: for each other entry, re-read it under the lock and delete it only when its JSON is
   invalid or its `checkout` is not an existing directory.
 No flow-chart change (no behaviour yet).
@@ -57,14 +75,21 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
   - each action produces the schema; a pause keeps stage/detail/since and `resume` restores
     `active`; every existing stop label (`implementation`, `validation`, `plan review`,
     `review`, `triage`, `re-check`, `pull request`, `pull request preparation`, `final push`)
-    maps to its box key; an unknown label keeps the stage;
-  - `.ai/local` as a symlink, `observation.json` as a symlink to a sentinel file, the temp
-    name pre-planted as a symlink: the sentinel is unchanged and the exit status is 0;
-  - `notify-log`: a symlinked or FIFO `notifications.log` and a symlinked lock leave the
-    sentinel unchanged, exit 0; 250 messages keep the last 200 in order; two processes
-    appending 100 messages each concurrently (with trimming active) lose none of the last
-    200 and every line parses (deterministic: force trimming on every write via a small
-    test-only limit environment variable `AI_NOTIFY_LOG_LINES`);
+    maps to its box key when the recorded stage is outside its group; `stop implementation`
+    after `step checks` or `step setup` keeps checks/setup (P11); an unknown label keeps the
+    stage;
+  - `.ai` or `.ai/local` as a symlink, `observation.json` as a symlink to a sentinel, the
+    temp name pre-planted as a symlink, and `.ai/local` replaced by a symlink AFTER
+    validation (in-process test that swaps the directory between `local_dir_fd` and the
+    write): outside sentinels unchanged, exit 0;
+  - FIFO `observation.json` / `notifications.log` / `notifications.lock` and a lock held by
+    another process: the helper returns within 5 s (test timeout), exit 0, warning;
+  - `read_record`: FIFO, symlink to `/dev/zero`, a 10 MiB file and invalid UTF-8 return
+    within 5 s with None or a bounded, decoded result;
+  - `notify-log`: a symlinked log and a symlinked lock leave the sentinel unchanged; 250
+    messages keep the last 200 in order; with 200 older lines prefilled, two processes
+    appending 100 uniquely numbered messages each concurrently (production limit) leave
+    exactly those 200 new messages, once each, every line valid JSON (P16);
   - `pipeline-register`: writes the entry; prunes a removed checkout and invalid JSON; a
     registration replaced between the prune's listing and its delete (simulated by a hook
     or by holding the lock in the test and rewriting the entry) is kept; `pipelines` being
@@ -110,6 +135,8 @@ scripts/ai-recover: `ai_observe recovering "<attempt>/<max>"` when recovery star
 Vault `agents-flow.md`: a note under "Phone notifications": every notification is also kept
 in `.ai/local/notifications.log`, and the scripts record the current stage in
 `.ai/local/observation.json` (advisory, read by `ai-dashboard`; flow unchanged); `updated:`.
+Keep `.ai/handoff.md` "## Flow chart" starting with `Flow chart updated` (existing test
+`test_pr_body_flow_this_repo_declares_the_flow_chart`) and make its text match the note.
 
 ### Likely affected modules
 scripts/lib/common.sh, scripts/ai-pipeline, scripts/ai-run, scripts/ai-recover,
@@ -131,7 +158,12 @@ tests/test_workflow.py, vault agents-flow.md
     is logged and a symlinked log (sentinel) leaves the sentinel and the watchdog outcome
     unchanged;
   - `pipelines` replaced by a regular file in the state root: warning, run outcome unchanged,
-    run manifest still written.
+    run manifest still written;
+  - substage precedence end to end (P11): a failing post-task validation and a failing final
+    validation end with `stage=checks, state=stopped`; a failing dependency install ends
+    with `stage=setup, state=stopped`; the same after ai-recover escalation;
+  - a FIFO `notifications.log` and a held `notifications.lock` (another process holding it
+    for the whole run): the pipeline still completes with its normal outcome (P12).
 - All existing tests pass unchanged (terminal output and notifications unchanged).
 
 ### Validation
@@ -151,8 +183,10 @@ A pure, read-only snapshot of all pipelines on this machine, printable as text o
 ### Implementation notes
 New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BEFORE the
 `sys.path` insert of its own directory, then import `state_root` from workflow.py and
-`process`, `is_runner`, `marker_snapshot`, `pipeline_died`, `start_ns` from watchdog.py, the
-way watchdog.py imports workflow):
+`process`, `is_runner`, `start_ns` from watchdog.py, the way watchdog.py imports workflow).
+Every checkout file is read only through T001's `local_dir_fd`/`read_record` (bounded,
+nonblocking, regular files only; P14), including `pipeline.active` and `.ai/tasks.md`; a
+checkout whose records cannot be read safely shows as `unknown` while the others render:
 - `discover()`: checkouts from `<state root>/pipelines/*.json` (`checkout` must be an
   absolute existing directory containing `.ai/`), plus `/proc/<pid>/cwd` of live runner
   processes (`is_runner`) whose cwd contains `.ai/`; dedupe by realpath.
@@ -199,6 +233,8 @@ tests/test_dashboard.py (new) or tests/test_workflow.py
     exception, fields unknown;
   - an ESC/OSC sequence in a notification and in `last-error` is absent from `--once` and
     `--json` output;
+  - a checkout with a FIFO marker, a FIFO observation and a 10 MiB notification log, next to
+    a healthy checkout: `--once` returns within 5 s and shows the healthy run correctly;
   - old (> 24 h) finished, needs_you and idle runs are hidden without `--all` and shown with
     it; an old crashed run is shown in both;
   - read-only: a recursive listing with mtimes of the fixture checkouts, the state root, the
@@ -232,10 +268,13 @@ scripts/lib/dashboard.py:
   `active_codex`, `active_script`, `done`, `pending`, `stopped`, `dim`, `event`). Used by
   `--once` (styles dropped) and by curses (styles → colour pairs / attributes).
 - Stages and roles: Plan check (codex), Setup (script), Build n/N (claude), Checks (script),
-  Review (codex), Triage (claude; `recheck` shows in this box as "Re-check"), PR (script).
+  Review (codex), Triage (claude; `recheck` shows in this box as "Re-check" with style
+  `active_codex`, P18), PR (script).
   The box is always the observation's `stage`; `state` only decorates it: `stopped` → that box
   in style `stopped`, `paused` ⏸ / `recovering` 🔧 inside it, `done` → all passed. No parsing
-  of free text.
+  of free text. Stage `none`, `unknown`, or no/malformed observation (P17): no box is
+  highlighted or ticked, the marker line says `stage unknown` (legacy runs: `stage unknown
+  (older toolkit)`), and the title/status and last event still render.
 - Width ≥ 100: three box lines (`┌─┐ │ │ └─┘`; active `╔═╗ ║ ║ ╚═╝`) joined by `──`, a
   marker line (✓ under passed boxes, the detail `T003 · sonnet · 12m` under the active box),
   then the latest event (`✅ Done …` with `HH:MM`). Overlays inside the active box: ⏸ paused,
@@ -263,6 +302,9 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
   - writer-to-renderer: observations produced by the T001 `observe` helper (not hand-written
     fixtures) for a paused build, a paused review, a recovery and a stop from each real
     stop label render the overlay in the right box;
+  - `recheck` renders the Triage box as "Re-check" in `active_codex`;
+  - legacy and malformed-observation snapshots render with no active box and `stage
+    unknown`, through `render()` and through `ai-dashboard --once`;
   - paused/recovering/crashed overlays; no rendered line exceeds the width (wide emoji
     counted as 2) at widths 40–200;
   - empty state text; expanded view shows at most 8 events.
@@ -298,7 +340,8 @@ Users find and understand the dashboard; records match the code.
   and OR-19 done-by-this-branch note (no checkbox ticking); `agents-human-todo.md`: optional
   `ln -s ~/Projects/agents/scripts/ai-dashboard ~/.local/bin/` and upgrading projects'
   `.ai/bin` so their runs record stages.
-- `.ai/handoff.md` "Manual testing for the human" (`### Needs you` / `### Covered by
+- `.ai/handoff.md`: "## Flow chart" still starts with `Flow chart updated` and matches the
+  vault note; "Manual testing for the human" (`### Needs you` / `### Covered by
   automated tests`, naming the tests).
 
 ### Likely affected modules

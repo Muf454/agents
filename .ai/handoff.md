@@ -16,7 +16,9 @@ Not run on this branch yet (master passed the gate for PR #15).
 - The dashboard is advisory and read-only; `.ai/local/` records are agent-writable.
 
 ## Flow chart
-T002 adds a note (stages observed, notifications mirrored locally); the flow itself is unchanged.
+Flow chart updated (by T002): a note under "Phone notifications" in the vault `agents-flow.md`
+says stages are recorded in `.ai/local/observation.json` and notifications mirrored to
+`.ai/local/notifications.log` for `ai-dashboard`; the flow itself is unchanged.
 
 ## Manual testing for the human
 

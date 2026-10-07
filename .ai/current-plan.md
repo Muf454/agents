@@ -14,10 +14,12 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach (revised after Codex plan review 1, P1–P10; all accepted)
+## Approach (revised after Codex plan reviews 1 (P1–P10) and 2 (P11–P18); all accepted)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
    normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
-   (flock, race-safe prune). Concurrency and path safety → opus (P4, P5, P6).
+   (flock, race-safe prune), plus the shared safe I/O (pinned directory descriptors,
+   nonblocking regular-file opens, bounded reads and locks) the dashboard reuses.
+   Concurrency and path safety → opus (P4–P6, P12–P14).
 2. T002 (sonnet) stage writers: `ai_observe`/`ai_notify` in common.sh call the helpers;
    ai-pipeline, ai-run (incl. its own `ai-check` calls, P2), ai-recover, pause; writer-level
    tests; vault flow note.

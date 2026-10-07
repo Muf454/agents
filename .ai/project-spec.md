@@ -43,6 +43,13 @@ providers, gate files are never edited by a pipeline session.
   symlinked or non-directory `.ai/local`, writes via a temp file in `.ai/local` + `rename`
   (never following a symlink at the destination) and never fails the caller (exit 0, warning
   on stderr).
+- **Safety and bounds (plan review 2, P11–P14).** A recorded substage wins over an outer stop
+  label from the same group (`implementation` covers setup/build/checks), so a failed
+  validation or install stays on Checks/Setup. All record I/O (writers and the dashboard's
+  reads) goes through one helper set in workflow.py: directories opened with
+  `O_DIRECTORY|O_NOFOLLOW` and used as pinned descriptors; files opened `O_NOFOLLOW|O_NONBLOCK`,
+  regular files only, reads size-capped; locks `LOCK_NB` with a 2 s deadline. Unsafe input or
+  a deadline → warning and skip, never a blocked or failed run, never a frozen dashboard.
 - **Notification mirror.** `ai_notify` also records each message through
   `workflow.py notify-log` into `${AI_ROOT:-$PWD}/.ai/local/notifications.log` (JSON lines
   `{"ts","message"}`, kept to the last 200), whether or not `AI_NOTIFY_CMD` is set. Writers
