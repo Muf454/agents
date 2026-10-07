@@ -93,3 +93,4 @@
 | 2026-10-07T12:09Z | claude | none | plan review 5: 0 BLOCKER, 2 MAJOR, 0 MINOR; both accepted (escalation keeps recovery substage, Setup recorded in ai_deps incl. recovery) | not run | (this commit) | plan review round 6 next |
 | 2026-10-07T12:13Z | claude | none | plan review 6: 0 BLOCKER, 2 MAJOR; both accepted (registration after branch init, sanitising in opus T005) | not run | (this commit) | plan review round 7 next |
 | 2026-10-07T12:18Z | claude | none | plan review 7: 0 BLOCKER, 1 MAJOR, 1 MINOR; both accepted (hard-link-safe log rewrite, sanitize targeted run) | not run | (this commit) | plan review round 8 next |
+| 2026-10-07T12:20Z | claude | none | plan review 8: clean (0/0/0); plan ready, waiting for the efficiency batch merge | not run | d9b901a | Zack approves and starts after merging master |
