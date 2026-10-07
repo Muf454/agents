@@ -33,11 +33,13 @@ providers, gate files are never edited by a pipeline session.
   `state=recovering`, `note=<attempt>/<max>`, keeping the stage that stopped. `done`:
   `stage=pr`, `note=<PR url or "no PR">`.
   Writers: `ai-pipeline` (each `step`; `stop`; the pipeline-shell `ai_die`; `finish`),
-  `ai-run` (`setup` around an actual install; `build` per task with detail
+  `ai_deps` in common.sh (`setup` at an actual install, as a recovering overlay during
+  recovery), `ai-run` (`build` per task with detail
   `<id> · <model> · <n>/<N>`; `checks` around its post-task and final `ai-check` calls,
   then `build` again when the next task starts; `triage` for `--triage`),
   `ai_limit_pause` (pause overlay), `ai-recover` (`recovering`; its recovery validation
-  shows `stage=checks, state=recovering`; escalation → `stopped`), `ensure_validated` in the
+  shows `stage=checks, state=recovering`; escalation → `stopped`, keeping the substage
+  recovery last recorded), `ensure_validated` in the
   pipeline (`checks`).
   All writes go through one Python helper (`workflow.py observe`), which refuses a missing,
   symlinked or non-directory `.ai/local`, writes via a temp file in `.ai/local` + `rename`

@@ -34,4 +34,6 @@ Not done yet.
 None yet (T008 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-Run the pipeline: `.ai/bin/ai-pipeline --approved --base master --knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"`.
+Waiting: implementation starts after `feature/efficiency-batch` is merged (Zack, 2026-10-07).
+Then merge `master` into this branch, rerun the plan review if the plan changed, and start:
+`.ai/bin/ai-pipeline --approved --base master --knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"`.

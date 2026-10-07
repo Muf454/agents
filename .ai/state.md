@@ -9,7 +9,7 @@ Tasks complete: 0
 Tasks remaining: 8
 Last validation: not run
 Blocked: no
-Next action: Codex plan review, then Zack approves and starts ai-pipeline
+Next action: Wait for the efficiency batch merge, merge master, then Zack starts ai-pipeline
 Last updated: 2026-10-07T11:20:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

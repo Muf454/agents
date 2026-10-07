@@ -36,6 +36,14 @@
 
 Dependencies: linear, T001 → T008. Plan reviews 1–5 (P1–P27): all findings accepted.
 
+## Sequencing (Zack, 2026-10-07)
+Implementation starts only after `feature/efficiency-batch` is merged: both runs edit
+`scripts/lib/workflow.py`, `scripts/ai-run`, `tests/test_workflow.py`, README and the vault
+flow note, and two agents test suites at once push the ~610 s gate over the session limit.
+Before starting: merge `master` into `feature/dashboard` (by hand, coordinator), resolve the
+mechanical conflicts, adjust the gate note in tasks.md if FL-11 changed `.ai/validate`, and
+rerun the plan review if the plan changed.
+
 ## API / data changes
 - New files (ignored, host-written): `.ai/local/observation.json`,
   `.ai/local/notifications.log`; host `<state root>/pipelines/<key>.json`.
