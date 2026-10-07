@@ -2,14 +2,14 @@
 
 Project: agents
 Branch: feature/flow-batch-2
-Phase: implementing
+Phase: blocked
 Current task: none
 Last completed task: T008
 Tasks complete: 8
 Tasks remaining: 2
 Last validation: FAIL at 2026-10-07T06:51:48Z
 Blocked: yes
-Next action: Continue queue; see task results for any blockers
+Next action: No runnable tasks; resolve blockers/dependencies
 Last updated: 2026-10-07T06:51:58Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
