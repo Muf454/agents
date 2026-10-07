@@ -199,7 +199,7 @@ Ran 5 OK; `.ai/bin/ai-check` Ran 248 tests in 106.6s (8 shards) OK. Vault: flow 
 and hub log updated.
 
 ## T004 — Review convergence rule in triage (FL-03)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: opus
 
@@ -244,6 +244,23 @@ Targeted: `python3 -m unittest discover -s tests -k convergence` (output must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+`ai-run --triage` appends `This review is round <n>.` (`review-history --current --count` + 1)
+and `PREVIOUS ROUNDS:` (`review-history --current`) to the triage prompt; a helper failure
+stops the triage stage (the check needs the same routine). Its final `triage-check --fresh`
+failure now carries the helper's message ("Triage incomplete: <reason>") into the stop
+reason. `workflow.py`: shared `current_review_rounds()`; `triage-check --fresh` requires
+`^Convergence:[ \t]*[^ \t\r\n]` (HTML comments stripped first, so the template comment
+can't satisfy it) from round 3; plain `triage-check` and rounds 1–2 unchanged. Template
+`triage.md` has the rule and both examples; dispositions header comment mentions the line.
+Mock claude logs triage prompts and takes `MOCK_CONVERGENCE`. 5 `convergence` tests: three-round
+`ai-pipeline` run (`--max-fix-rounds 3`: round 2 passes without the line, round 3 stops with
+the message and the rerun with it completes; prompts say round 1/2/3 and list earlier IDs and
+dispositions), interrupted round 3 resumed through `ai-run --triage` (round 3), cap overflow
+still counts round 3, empty/whitespace/next-line/commented/lowercase lines fail, round 2
+needs none. Targeted `-k convergence` Ran 5 OK; `-k convergence -k triage -k task_model -k
+review_context` Ran 26 OK; `.ai/bin/ai-check` Ran 253 tests in 112.5s (8 shards) OK.
+`docs/workflow.md` convergence paragraph (README left to T005). Vault: flow chart triage
+node + note, hub Log line.
 
 ## T005 — Final docs audit for the efficiency batch
 Status: TODO

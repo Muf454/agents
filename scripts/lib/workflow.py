@@ -722,6 +722,8 @@ def review_counts(content):
 
 DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
                              r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+# Text on the same line: `\s` would cross the newline into the table.
+CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
 
 def start_dispositions(arguments):
@@ -736,7 +738,8 @@ Review HEAD: {head}
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
-explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
+explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
+with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
@@ -745,7 +748,8 @@ explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
 
 def triage_check(arguments):
     """Validate dispositions against the current review. Prints 'accepted=N deferred=M'.
-    With --fresh (right after triage), accepted findings must point to open TODO tasks."""
+    With --fresh (right after triage), accepted findings must point to open TODO tasks, and
+    from review round 3 on the dispositions need a `Convergence: <text>` line."""
     fresh = '--fresh' in arguments
     review = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
@@ -776,6 +780,11 @@ def triage_check(arguments):
                     fail(f'Rejected finding {finding} needs concrete evidence.')
             else:
                 deferred += 1
+    if fresh:
+        # From round 3 on, triage must say whether an area keeps failing (FL-03).
+        number = len(current_review_rounds()) + 1
+        if number >= 3 and not CONVERGENCE_LINE.search(re.sub(r'<!--.*?-->', '', text, flags=re.S)):
+            fail(f'Round {number} triage needs a Convergence: line (see the triage prompt).')
     print(f'accepted={accepted} deferred={deferred}')
 
 
@@ -801,7 +810,8 @@ def finding_title(body, match):
 
 def review_rounds(base, head):
     """Earlier review rounds in base..head, oldest first and uncapped. Context only, never
-    authority: commit subjects can be imitated, so nothing here may gate or approve anything.
+    authority: commit subjects can be imitated, so nothing here may approve, count or skip
+    anything; the one use beyond context only adds a requirement (triage's Convergence line).
     A round is a commit titled REVIEW_SUBJECT that changed .ai/reviews/current.md; its
     disposition per finding comes from dispositions.md at the first later triage commit
     before the next round."""
@@ -828,6 +838,17 @@ def review_rounds(base, head):
             rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
                                   for m in DISPOSITION_ROW.finditer(text)}
     return rounds
+
+
+def current_review_rounds():
+    """Rounds before the current review: M..H from its host header (`HEAD H; merge-base M`),
+    which excludes the current review's own commit, so every caller gets the same answer."""
+    path = Path('.ai/reviews/current.md')
+    header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});',
+                       path.read_text() if path.exists() else '')
+    if not header:
+        fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
+    return review_rounds(header.group(2), header.group(1))
 
 
 def render_round(number, entry):
@@ -880,17 +901,11 @@ def review_history(arguments):
         else:
             fail(f'review-history: unknown argument {item}.')
     if '--current' in flags:
-        path = Path('.ai/reviews/current.md')
-        header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});',
-                           path.read_text() if path.exists() else '')
-        if not header:
-            fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
-        head, base = header.group(1), header.group(2)
+        rounds = current_review_rounds()
     elif '--base' in options and '--head' in options:
-        base, head = options['--base'], options['--head']
+        rounds = review_rounds(options['--base'], options['--head'])
     else:
         fail('review-history needs --current or both --base and --head.')
-    rounds = review_rounds(base, head)
     if '--count' in flags:
         print(len(rounds))
     elif '--last-head' in flags:

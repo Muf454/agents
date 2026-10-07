@@ -17,8 +17,14 @@ FL-03 (review convergence rule). See `.ai/project-spec.md`, `.ai/current-plan.md
 - T003 (B3): `ai-review --base` appends `PREVIOUS ROUNDS:` and `CHANGED SINCE THE LAST REVIEW:
   inspect git diff <last>..<head>` to the implementation review prompt (not plan review or
   re-check); a helper failure warns and reviews without history. `review.md` template explains it.
+- T004 (FL-03): the triage prompt gets `This review is round <n>.` and `PREVIOUS ROUNDS:`
+  (`review-history --current`); `triage.md` has the convergence rule; `triage-check --fresh`
+  requires a same-line `Convergence: <text>` from round 3 (round from the same routine; HTML
+  comments ignored). `ai-run --triage` stops with the helper's exact reason.
 
 ## Validation run
+After T004: targeted `-k convergence` Ran 5 OK; `.ai/bin/ai-check` Ran 253 tests in 112.5s OK.
+
 After T003: targeted `-k review_context -k review_prompt_template` Ran 5 OK; `.ai/bin/ai-check`
 Ran 248 tests in 106.6s (8 shards) OK.
 
@@ -33,7 +39,8 @@ may still time out in-session (gate note in `.ai/tasks.md`).
 
 ## Flow chart
 Flow chart updated (T003): the "Codex reviews the code" node notes the earlier rounds and the
-diff since the last review.
+diff since the last review. Flow chart updated (T004): triage node (round number, earlier
+rounds, Convergence: line from round 3) and a convergence note.
 
 ## Manual testing for the human
 
@@ -65,10 +72,21 @@ diff since the last review.
   `test_review_context_plan_review_and_recheck_prompts_have_neither`.
 - A failing helper still yields a review: `test_review_context_failing_helper_still_produces_a_review`.
 - Template explains the context: `test_review_prompt_template_explains_previous_rounds`.
+- Three review rounds through `ai-pipeline --max-fix-rounds 3`: round 2 triage passes without
+  `Convergence:`, round 3 stops with "Round 3 triage needs a Convergence: line", the rerun with
+  the line completes; prompts say round 1/2/3 and list earlier finding IDs:
+  `test_convergence_pipeline_requires_the_line_from_round_three`.
+- Interrupted round 3 resumed through `ai-run --triage` reports round 3:
+  `test_convergence_interrupted_round_three_resumes_through_ai_run_with_the_same_round`.
+- History over the 6000-character cap still counts round 3:
+  `test_convergence_history_over_the_cap_still_counts_round_three`.
+- Empty, whitespace-only, next-line, commented-out and lowercase `Convergence:` fail; a real
+  line passes; plain `triage-check` unchanged: `test_convergence_line_checked_only_with_fresh_from_round_three`.
+- Round 2 needs no line: `test_convergence_round_two_needs_no_line`.
 - Further scenarios are added by the remaining tasks.
 
 ## Human todos
 - Run the three timed parallel runs and approve the `.ai/validate` switch (see Needs you).
 
 ## Next action
-Runner continues with T004 (review convergence rule in triage).
+Runner continues with T005 (final docs audit: README review context + convergence rule).

@@ -230,6 +230,17 @@ verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks
 optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
+Convergence (FL-03): the triage prompt gets `This review is round <n>.` and, from round 2,
+`PREVIOUS ROUNDS:` (`review-history --current`: earlier recorded reviews in
+`merge-base..HEAD` of the current review's host header, with finding IDs, titles and
+dispositions; context only). When one area has had BLOCKER/MAJOR findings in three
+consecutive rounds, triage adds a design task instead of another symptom fix. From round 3
+on (only reachable with `--max-fix-rounds` ≥ 3), `triage-check --fresh` requires a line
+`Convergence: <text>` (text on the same line, outside HTML comments) in
+`dispositions.md`; without it the triage stops with "Round <n> triage needs a Convergence:
+line". It computes the round from the same routine as the prompt (uncapped count + 1), so
+every caller agrees; plain `triage-check` and rounds 1–2 are unchanged.
+
 Triage completion (one counted round, even across stops and crashes): before each triage
 the pipeline records `stage = {name: triage, start_head, review_digest}` per branch in
 the host state directory (`stage-<branch hash>.json` beside `run.json`; `run-manifest

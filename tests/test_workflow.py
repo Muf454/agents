@@ -78,10 +78,17 @@ if mode == 'limit-far':
     sys.exit(1)
 if 'TRIAGE CONTRACT' in prompt:
     with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-calls', 'a') as f: f.write('call\n')
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-prompts.log', 'a') as f:
+        f.write('=== PROMPT ===\n' + prompt + '\n')
     tasks_file = pathlib.Path('.ai/tasks.md')
     text = tasks_file.read_text()
     review = pathlib.Path('.ai/reviews/dispositions.md')
-    if mode == 'triage-rewrites-review':
+    convergence = os.environ.get('MOCK_CONVERGENCE')
+    if convergence is not None and '| M1 |' in review.read_text():
+        # Resuming a triage whose rows are recorded: only the convergence line is missing.
+        review.write_text(review.read_text() + convergence + '\n')
+        subprocess.run(['git','add','--','.ai/reviews/dispositions.md'],check=True)
+    elif mode == 'triage-rewrites-review':
         current = pathlib.Path('.ai/reviews/current.md')
         current.write_text(current.read_text().replace('MAJOR=1', 'MAJOR=0'))
         subprocess.run(['git','add','--','.ai/reviews/current.md'],check=True)
@@ -103,7 +110,8 @@ if 'TRIAGE CONTRACT' in prompt:
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
-                             if mode == 'triage-mixed-reject' else ''))
+                             if mode == 'triage-mixed-reject' else '')
+                          + (convergence + '\n' if convergence else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
             pathlib.Path('src.txt').write_text('not allowed in triage')
@@ -2134,6 +2142,98 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('PREVIOUS ROUNDS', text)
         self.assertIn('CHANGED SINCE THE LAST REVIEW', text)
         self.assertIn('full range', text)
+
+    # ---------------------------------------------------------------- review convergence (FL-03)
+    def triage_prompts(self):
+        path = self.base / 'triage-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def three_round_pipeline(self):
+        """Rounds 1 and 2 triage without a Convergence: line; round 3 stops for lack of it."""
+        self.ready()
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                         expected=1, MOCK_CODEX='major-always')
+
+    def test_convergence_pipeline_requires_the_line_from_round_three(self):
+        result = self.three_round_pipeline()
+        self.assertIn('Round 3 triage needs a Convergence: line', result.stderr)
+        self.assertIn('Round 3 triage needs a Convergence: line', self.notifications())
+        self.assertEqual(self.triage_rounds(), 2)
+        prompts = self.triage_prompts()
+        self.assertEqual(len(prompts), 3)
+        self.assertIn('This review is round 1.', prompts[0])
+        self.assertNotIn('PREVIOUS ROUNDS:', prompts[0])
+        self.assertIn('This review is round 2.', prompts[1])
+        self.assertIn('- M1 [MAJOR] fixture defect at T001.txt:1. — accepted (T002)', prompts[1])
+        self.assertIn('This review is round 3.', prompts[2])
+        self.assertIn('### Round 1', prompts[2])
+        self.assertIn('### Round 2', prompts[2])
+        self.assertIn('accepted (T003)', prompts[2])
+        # The rerun completes the interrupted round 3 once the line is there.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                  MOCK_CODEX='major-always',
+                  MOCK_CONVERGENCE='Convergence: T004 design note "the fixture lacks a marker"')
+        self.assertEqual(self.triage_rounds(), 3)
+        self.assertIn('This review is round 3.', self.triage_prompts()[-1])
+        self.assertEqual(self.helper('tasks', 'status', 'T004').stdout.strip(), 'DONE')
+
+    def test_convergence_interrupted_round_three_resumes_through_ai_run_with_the_same_round(self):
+        self.three_round_pipeline()
+        self.tool('ai-run', '--approved', '--triage',
+                  MOCK_CONVERGENCE='Convergence: none — findings are in unrelated areas (fixture only)')
+        self.assertIn('This review is round 3.', self.triage_prompts()[-1])
+        self.assertEqual(self.triage_rounds(), 3)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        self.helper('triage-check', '--fresh')
+
+    def convergence_fixture(self, title='a short defect', rounds=3):
+        """Recorded earlier rounds, then the current review (round `rounds`) with M1 accepted (T001)."""
+        self.ready()
+        merge_base = self.run_cmd(['git', 'rev-parse', 'main']).stdout.strip()
+        current = self.project / '.ai/reviews/current.md'
+        for number in range(1, rounds + 1):
+            (self.project / f'round{number}.txt').write_text('work\n')
+            self.commit(f'work for round {number}')
+            head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+            current.write_text(
+                f'<!-- Host evidence: HEAD {head}; merge-base {merge_base}; saved now. -->\n\n'
+                '# Independent review\nOverall verdict: one major finding\n'
+                'Finding counts: BLOCKER=0 MAJOR=1 MINOR=0\n## BLOCKER findings\nNone found.\n'
+                f'## MAJOR findings\n- M1: {title}\n## MINOR findings\nNone found.\n')
+            self.commit('chore(ai): record independent review')
+        self.helper('start-dispositions', head)
+        dispositions = self.project / '.ai/reviews/dispositions.md'
+        rows = dispositions.read_text() + '| M1 | accepted | defect confirmed in the fixture | T001 |\n'
+        dispositions.write_text(rows)
+        return dispositions, rows
+
+    def test_convergence_line_checked_only_with_fresh_from_round_three(self):
+        dispositions, rows = self.convergence_fixture()
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        for bad in ('Convergence:', 'Convergence:   \t', 'Convergence:\n| M9 | rejected | x | none |',
+                    '<!-- Convergence: hidden in a comment -->', 'convergence: lower case'):
+            dispositions.write_text(rows + bad + '\n')
+            result = self.helper('triage-check', '--fresh', expected=1)
+            self.assertIn('Round 3 triage needs a Convergence: line (see the triage prompt)', result.stderr)
+            self.helper('triage-check')  # without --fresh: unchanged
+        dispositions.write_text(rows + 'Convergence: T014 design note "the sync model lacks an edited marker"\n')
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_convergence_round_two_needs_no_line(self):
+        self.convergence_fixture(rounds=2)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '1')
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_convergence_history_over_the_cap_still_counts_round_three(self):
+        dispositions, rows = self.convergence_fixture(title='a very long defect ' * 250)
+        history = self.helper('review-history', '--current').stdout
+        self.assertIn('(1 earlier rounds omitted)', history)
+        self.assertLessEqual(len(history.rstrip('\n')), 6000)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        result = self.helper('triage-check', '--fresh', expected=1)
+        self.assertIn('Round 3 triage needs a Convergence: line', result.stderr)
+        dispositions.write_text(rows + 'Convergence: none — findings are in unrelated areas (fixture)\n')
+        self.helper('triage-check', '--fresh')
 
     def test_task_model_line_overrides_run_model(self):
         self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +
