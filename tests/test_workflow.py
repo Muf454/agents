@@ -3336,6 +3336,42 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('1. Nothing to test by hand (2 automated checks in the PR)', notes)
         self.assertNotIn('manual step', notes)
 
+    WRAPPED_HANDOFF = ('# Handoff\n\n## Manual testing for the human\n### Needs you\n'
+                       '1. Check it.\n2. Check it again.\n\n'
+                       '### Covered by automated tests\n'
+                       '- Drag fails and the card snaps back:\n  `test_drag_fails`.\n'
+                       '- Resize works,\n  continues here, and names\n  `test_resize`.\n'
+                       '- Nothing names a test here\n  even on this line.\n'
+                       '- Lone backtick ` only\n  on the next line.\n\n## Next action\nNone.\n')
+
+    def test_manual_testing_wrapped_name_on_continuation_line_is_not_flagged(self):
+        self.setup_project()
+        body = self.pr_body_for(self.WRAPPED_HANDOFF)
+        self.assertIn('<details><summary>4 automated checks</summary>', body)
+        self.assertIn('  `test_drag_fails`.\n', body)
+        self.assertIn('  `test_resize`.\n', body)
+        self.assertEqual(body.count('⚠ no test named'), 2)
+
+    def test_manual_testing_wrapped_unnamed_and_lone_backtick_are_flagged_on_the_last_line(self):
+        self.setup_project()
+        body = self.pr_body_for(self.WRAPPED_HANDOFF)
+        self.assertIn('- Nothing names a test here\n  even on this line. ⚠ no test named\n', body)
+        self.assertIn('- Lone backtick ` only\n  on the next line. ⚠ no test named\n', body)
+
+    def test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets(self):
+        self.setup_project()
+        body = self.pr_body_for((ROOT / '.ai/handoff.md').read_text())
+        flagged = [line for line in body.splitlines() if line.endswith('⚠ no test named')]
+        self.assertEqual(flagged, ['- Further scenarios are added by the remaining tasks. ⚠ no test named'])
+
+    def test_manual_testing_wrapped_finish_summary_counts_needs_you_steps(self):
+        self.setup_project()
+        (self.project / '.ai/handoff.md').write_text(
+            self.WRAPPED_HANDOFF.replace('## Next action', '## Human todos\nNone.\n\n## Next action'))
+        out = self.helper('finish-summary', 'https://example.test/pr/1', '0', '0').stdout
+        self.assertIn('Test: 2 manual step(s) in the PR', out)
+        self.assertNotIn('automated checks', out)
+
     def test_manual_testing_render_legacy_handoff_is_unchanged(self):
         self.setup_project()
         body = self.pr_body_for('# Handoff\n\n## Manual testing for the human\n1. Try it.\n2. Again.\n\n## Next action\nNone.\n')

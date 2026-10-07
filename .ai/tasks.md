@@ -520,7 +520,7 @@ the foreground exceeded the 600 s tool limit and was auto-backgrounded, so it wa
 confirmed in-session; the runner's recovery validation recorded PASS (2026-10-07T02:23:53Z).
 
 ## T010 — Wrapped automated test bullets are not flagged; FINISHED count regression (review N1)
-Status: TODO
+Status: BLOCKED
 Dependencies: T004
 Model: sonnet
 
@@ -553,4 +553,10 @@ Targeted: `python3 -m unittest discover -s tests -k manual_testing_wrapped` (out
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Implemented `flag_unnamed` (scripts/lib/workflow.py) and used it in `pr_body`: items are a bullet
+plus continuation lines, flagged unless a paired nonempty backtick span exists, warning appended
+to the last line. Added four `manual_testing_wrapped` tests (wrapped name, unnamed/lone backtick,
+this repo's handoff, finish-summary P12). Targeted `-k manual_testing_wrapped`: Ran 4 tests, OK;
+`-k manual_testing`: Ran 10 tests, OK. BLOCKED only on the gate: `.ai/bin/ai-check` in the
+foreground exceeded the 600 s tool limit (same wall-time issue as T009), so a full PASS was not
+confirmed in-session; the runner's validation of the checkpoint is the evidence.

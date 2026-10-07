@@ -1828,6 +1828,32 @@ def manual_testing(handoff):
     return found.get('Needs you', ''), found.get('Covered by automated tests', ''), False
 
 
+NAMED_TEST = re.compile(r'`[^`\n]+`')
+
+
+def flag_unnamed(automated):
+    """Return (lines, count) for the automated section. A list item is a bullet line plus its
+    continuation lines; one without a paired backtick span gets a warning on its last line."""
+    items, current = [], None
+    for line in automated.splitlines():
+        if BULLET.match(line):
+            current = [line]
+            items.append(current)
+        elif current is not None and line.strip():
+            current.append(line)
+        else:
+            current = None
+            items.append([line])
+    lines, count = [], 0
+    for item in items:
+        if BULLET.match(item[0]):
+            count += 1
+            if not NAMED_TEST.search('\n'.join(item)):
+                item = item[:-1] + [item[-1] + ' ⚠ no test named']
+        lines += item
+    return lines, count
+
+
 def pr_title(arguments):
     """PR title: first line of the spec objective, else the branch name."""
     objective = section(Path('.ai/project-spec.md').read_text(), 'Objective') if Path('.ai/project-spec.md').exists() else ''
@@ -1913,9 +1939,7 @@ def pr_body(arguments):
         else:
             lines += [needs_you, '']
         if automated:
-            flagged = [line + ('' if '`' in line or not BULLET.match(line) else ' ⚠ no test named')
-                       for line in automated.splitlines()]
-            count = sum(bool(BULLET.match(line)) for line in flagged)
+            flagged, count = flag_unnamed(automated)
             lines += ['### Covered by automated tests', '',
                       f'<details><summary>{count} automated checks</summary>', '', *flagged, '', '</details>', '']
     lines += ['---', 'Opened by `ai-pipeline`. Merging and deployment remain with the human.', '',
