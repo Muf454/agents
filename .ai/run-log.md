@@ -79,3 +79,4 @@
 | 2026-10-06T21:48:04Z | runner | triage | review triaged into dispositions/tasks | n/a | 8d6adec | Fix tasks run next |
 | 2026-10-07T01:51Z | claude | T008 | DONE (review M1): resumed interrupted diff; `tree_snapshot` walks uninitialised submodule dirs, records link/file at gitlink paths; 2 new tests | targeted OK; gate PASS 224 tests (611 s) | (this commit) | gate exceeded 600 s tool limit (auto-backgrounded, exit 0) |
 | 2026-10-07T02:02:25Z | runner | T008 | completed | PASS | 26668c7 | Claude checkpointed; continuing queue |
+| 2026-10-07T02:13:10Z | runner | T009 | stopped (exit 1); inspect state/diff before resuming | see local logs | b440ec5 | No merge or deployment performed |

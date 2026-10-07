@@ -3414,6 +3414,24 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / 'vendor-deps').rmdir()
         self.assertEqual(self.deps(), 'stale missing output vendor-deps')
 
+    def test_deps_status_output_kind(self):
+        self.deps_fixture('#!/usr/bin/env bash\n# ai-deps-outputs: vendor-deps\ntrue\n')
+        self.helper('deps-record')
+        out = self.project / 'vendor-deps'
+        out.write_text('not a dir\n')
+        self.assertEqual(self.deps(), 'stale output vendor-deps is not a directory')
+        out.unlink()
+        out.symlink_to(self.project / 'nowhere')
+        self.assertEqual(self.deps(), 'stale output vendor-deps is not a directory')
+        out.unlink()
+        target = self.project / 'real-deps'
+        target.mkdir()
+        out.symlink_to(target)
+        self.assertEqual(self.deps(), 'current')
+        out.unlink()
+        out.mkdir()
+        self.assertEqual(self.deps(), 'current')
+
     def test_deps_status_default_lockfiles_and_node_modules(self):
         self.deps_fixture((ROOT / 'templates/.ai/ci-setup').read_text())
         (self.project / 'package.json').write_text('{}\n')

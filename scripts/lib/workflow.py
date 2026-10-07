@@ -1585,8 +1585,14 @@ def deps_status(arguments):
                         if inputs[p] != recorded[p]]
             reason = 'inputs changed: ' + ', '.join(changes)
         else:
-            missing = [token for token in outputs if not (root / token).exists()]
-            reason = 'missing output ' + ', '.join(missing) if missing else None
+            missing = [t for t in outputs if not os.path.lexists(root / t)]
+            wrong = [t for t in outputs if t not in missing and not (root / t).is_dir()]
+            if missing:
+                reason = 'missing output ' + ', '.join(missing)
+            elif wrong:
+                reason = 'output ' + ', '.join(wrong) + ' is not a directory'
+            else:
+                reason = None
     print(f'stale {reason}' if reason else 'current')
 
 

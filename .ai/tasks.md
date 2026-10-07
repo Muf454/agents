@@ -485,7 +485,7 @@ nested dir and symlink, dir mode, replaced by symlink, by file, removed; untouch
 tool limit; it was auto-moved to the background and completed with exit 0.
 
 ## T009 — Dependency outputs must be directories (review N2)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T001
 Model: sonnet
 
