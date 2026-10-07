@@ -14,9 +14,12 @@ Hub decisions respected: risk-based models with no usage-saving downgrades (2026
 roles vs providers, "auto-recovery never changes the gate", gate files are never edited by
 a pipeline session.
 
-Branch note: planned on top of `feature/flow-batch-2` (PR #15, open) because T003/T004 touch
-the same files. Start only after PR #15 is merged; then merge `master` into this branch so
-its PR shows only this batch (no stacked PRs, hub decision 2026-10-04).
+Branch note: planned on top of `feature/flow-batch-2` (PR #15) because T003/T004 touch the
+same files. PR #15 is merged (`0818f20`). This branch contains its last commit `55383d7` and
+`git diff 55383d7 0818f20` is empty, but the merge commit itself is not an ancestor (a
+`git merge`/`rebase` of `master` was denied by the session's permissions on 2026-10-07).
+The PR against `master` therefore shows only this batch's commits; the review base is
+`master` (merge-base `55383d7`, same tree).
 
 ## Requirements
 - **FL-11 Gate speed.** The full test suite (224+ tests, 611 s serial on 2026-10-07, over the
@@ -26,15 +29,21 @@ its PR shows only this batch (no stacked PRs, hub decision 2026-10-04).
   with `python3 -m unittest`, and reports one summary line `Ran N tests in S s` plus
   `OK` / `FAILED (failures=…, errors=…)`. Exit status non-zero on any failure, error, crash,
   or when zero tests were collected or the collected count differs from the count run. The
-  output of failing tests is shown in full. Serial `python3 -m unittest discover -s tests`
-  keeps working unchanged (CI and humans can still use it).
+  output of failing tests is shown in full. Every worker gets the resolved discovery
+  directory on `PYTHONPATH` (test IDs like `test_workflow.…` do not import otherwise).
+  Serial `python3 -m unittest discover -s tests` keeps working unchanged (CI and humans can
+  still use it).
 - **Gate switch is a human step.** `.ai/validate` is a gate file. No pipeline session edits
   it. After the batch is reviewed, Zack (or the coordinating Claude session with Zack's
   approval) changes its last line to `python3 tests/run_parallel.py` in the same PR. Until
   then the gate stays serial (host `ai-check` timeout is 1800 s, so the host gate passes).
-- **Review history helper.** `workflow.py review-history BASE` prints a compact Markdown
-  summary of earlier review rounds on this branch: for each host commit
-  `chore(ai): record independent review` in `BASE..HEAD` that changed
+- **Review history helper.** One shared routine finds earlier review rounds and returns them
+  uncapped; a renderer applies the cap. `review-history --base B --head H` (before a new
+  review) uses `B..H`; `review-history --current` (triage, convergence check) uses the
+  current review's host header (`HEAD H; merge-base M`) and `M..H`, which excludes the
+  current review by construction and gives the same answer in every caller; `--count`
+  prints the uncapped number. It prints a compact Markdown summary: for each host commit
+  `chore(ai): record independent review` in the range that changed
   `.ai/reviews/current.md` (oldest first, numbered from 1): the reviewed HEAD, the BLOCKER and
   MAJOR finding IDs with their one-line titles, and each finding's disposition from the
   `.ai/reviews/dispositions.md` committed in the following `chore(ai): record review triage`
@@ -48,13 +57,15 @@ its PR shows only this batch (no stacked PRs, hub decision 2026-10-04).
   The review prompt (template `review.md`) says: verify that every earlier accepted finding is
   really fixed, do not re-raise rejected findings without new evidence, and still review the
   whole range (cross-cutting defects; Codex's objection to delta-only reviews).
-- **FL-03 Convergence rule.** `ai-run --triage` appends the same `PREVIOUS ROUNDS` section to
-  the triage prompt. Template `triage.md` gains the rule: when the same area (module, data
+- **FL-03 Convergence rule.** `ai-run --triage` appends the same `PREVIOUS ROUNDS` section
+  (`--current`) and the round number to the triage prompt; `--since` stays only the triage
+  scope boundary. Template `triage.md` gains the rule: when the same area (module, data
   model or concern) has had BLOCKER/MAJOR findings in three consecutive rounds counting the
   current one, do not add another symptom fix: add one design task first ("the model lacks
   X": a short design note in `.ai/current-plan.md` plus the change) and point the accepted
-  findings at it. Deterministic part: when the current review is round 3 or later,
-  `triage-check --fresh` requires a line `Convergence: <text>` in `dispositions.md`
+  findings at it. Deterministic part: `triage-check --fresh` computes the round from the
+  same routine; when it is round 3 or later it requires a line `Convergence: <text>` (text
+  on the same line) in `dispositions.md`
   (naming the design task, or saying why no area repeats); missing → the existing triage
   failure path.
 
@@ -64,9 +75,10 @@ its PR shows only this batch (no stacked PRs, hub decision 2026-10-04).
 - No E3 (Codex effort per review type) and no E5 (validation reuse): separate backlog items.
 
 ## Acceptance
-- `python3 tests/run_parallel.py` runs the full suite with the same test count as the serial
-  run, passes three consecutive times locally, and takes under 200 s on this machine
-  (16 cores) with default workers.
+- Before the `.ai/validate` switch (coordinator evidence, not a session task: sessions may
+  not run the runner): `python3 tests/run_parallel.py` runs the full suite with the same test
+  count as the serial run in three consecutive runs, each finishing under 200 s on this
+  machine (16 cores) with default workers; counts and wall times recorded in the run log.
 - New tests cover `review-history` (no rounds, two rounds with dispositions, missing triage,
   cap), the `ai-review` prompt content (history present only for implementation review),
   the triage prompt content, and `triage-check --fresh` with and without `Convergence:` at

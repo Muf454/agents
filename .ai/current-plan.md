@@ -18,12 +18,16 @@
   dispositions as `chore(ai): record review triage`, so history is in Git.
 
 ## Approach
-1. T001 (sonnet) FL-11 parallel runner in `tests/` + its tests; docs mention. No gate edit.
-2. T002 (sonnet) `review-history` helper in workflow.py + tests.
+1. T001 (opus, concurrency: P4) FL-11 parallel runner in `tests/` (PYTHONPATH per worker,
+   P1) + its tests; docs mention. No gate edit. Full-suite timing is coordinator evidence
+   (P2/P6).
+2. T002 (sonnet) one shared `review_rounds` routine + `review-history` (`--base/--head`,
+   `--current` from the review header, `--count`, `--last-head`) + tests (P3).
 3. T003 (sonnet) B3: `ai-review --base` appends the history and the delta; `review.md`
    template wording. Flow chart note.
-4. T004 (sonnet) FL-03: triage prompt gets the history; `triage.md` rule; `triage-check
-   --fresh` requires `Convergence:` from round 3. Flow chart.
+4. T004 (opus) FL-03: triage prompt gets `--current` history and the round; `triage.md`
+   rule; `triage-check --fresh` derives the round itself and requires a same-line
+   `Convergence:` from round 3 (P5); end-to-end three-round test. Flow chart.
 5. T005 (haiku) docs audit (README, docs/workflow.md, docs_consistency sentences).
 
 ## Risks
@@ -37,13 +41,18 @@
 - Context size: capped at 6000 characters.
 
 ## Human steps
-- Before the run: Codex plan review, Zack approves; PR #15 merged; merge `master` into
-  this branch.
-- After the run: Zack approves switching `.ai/validate` to `python3 tests/run_parallel.py`
-  (gate file) in this PR, then the toolkit upgrade to the project repos as its own PR.
+- Before the run: Codex plan review, Zack approves; PR #15 merged (done, `0818f20`; see the
+  spec's branch note on why `master` is not merged in).
+- After the run, coordinator (host, no session): run `python3 tests/run_parallel.py` three
+  times; each must pass with the serial count and finish under 200 s; record counts and wall
+  times in `.ai/run-log.md` (P2/P6).
+- Then Zack approves switching `.ai/validate` to `python3 tests/run_parallel.py` (gate
+  file) in this PR, and later the toolkit upgrade to the project repos as its own PR.
 
 ## Authorization
 Approved by Zack on 2026-10-07 in chat with Claude: run T001–T005 unattended via
 `ai-pipeline` (the pipeline's Codex plan review gates the start). PR #15 merged first
-(`0818f20`); this branch already contains it. Switching `.ai/validate` and merging stay
-with Zack.
+(`0818f20`); this branch contains its content (`55383d7`, identical tree) but not the merge
+commit (corrected after plan review P7). Switching `.ai/validate` and merging stay with Zack.
+Plan revised after Codex plan review 1 (P1–P7) and re-approved by Zack the same day ("go
+ahead").
