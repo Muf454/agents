@@ -485,7 +485,7 @@ nested dir and symlink, dir mode, replaced by symlink, by file, removed; untouch
 tool limit; it was auto-moved to the background and completed with exit 0.
 
 ## T009 — Dependency outputs must be directories (review N2)
-Status: BLOCKED
+Status: DONE
 Dependencies: T001
 Model: sonnet
 
@@ -520,7 +520,7 @@ the foreground exceeded the 600 s tool limit and was auto-backgrounded, so it wa
 confirmed in-session; the runner's recovery validation recorded PASS (2026-10-07T02:23:53Z).
 
 ## T010 — Wrapped automated test bullets are not flagged; FINISHED count regression (review N1)
-Status: BLOCKED
+Status: DONE
 Dependencies: T004
 Model: sonnet
 
