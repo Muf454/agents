@@ -1603,11 +1603,28 @@ def snapshot_put(digest, *parts):
         digest.update(len(part).to_bytes(8, 'big') + part)
 
 
+def snapshot_path(digest, name, path, walk=False):
+    """Kind, mode and bytes or link target of one path, symlinks never followed; with walk,
+    a directory's contents too, read from the filesystem without ignore rules."""
+    if path.is_symlink():
+        snapshot_put(digest, name, b'link', os.fsencode(os.readlink(path)))
+    elif path.is_file():
+        snapshot_put(digest, name, b'file', path.stat().st_mode, file_sha(path.read_bytes()))
+    elif path.is_dir():
+        snapshot_put(digest, name, b'dir', path.stat().st_mode)
+        for child in sorted(os.listdir(path)) if walk else ():
+            snapshot_path(digest, name + b'/' + os.fsencode(child), path / child, walk)
+    else:
+        snapshot_put(digest, name, b'missing')
+
+
 def tree_snapshot(root):
     """One hash over HEAD, the index and every non-ignored path (kind, mode, bytes) outside
     .ai/local/; submodules recursively. Equal before/after a command proves it changed no
     tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
-    Ignored paths (installed dependencies) are deliberately not covered."""
+    Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
+    under an uninitialised submodule, so its directory is walked on the filesystem instead;
+    a symlink at a submodule path is recorded as a link, never followed."""
     digest = hashlib.sha256()
     try:
         head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
@@ -1625,16 +1642,13 @@ def tree_snapshot(root):
             continue
         path = Path(root) / os.fsdecode(name)
         if name in gitlinks or raw.endswith(b'/'):  # submodule or untracked nested repository
-            initialised = (path / '.git').exists() and not path.is_symlink()
-            snapshot_put(digest, name, b'repo', tree_snapshot(path) if initialised else b'uninitialised')
-        elif path.is_symlink():
-            snapshot_put(digest, name, b'link', os.fsencode(os.readlink(path)))
-        elif path.is_file():
-            snapshot_put(digest, name, b'file', path.stat().st_mode, file_sha(path.read_bytes()))
-        elif path.is_dir():
-            snapshot_put(digest, name, b'dir', path.stat().st_mode)
+            if path.is_dir() and not path.is_symlink() and (path / '.git').exists():
+                snapshot_put(digest, name, b'repo', tree_snapshot(path))
+                continue
+            snapshot_put(digest, name, b'uninitialised')
+            snapshot_path(digest, name, path, walk=True)
         else:
-            snapshot_put(digest, name, b'missing')
+            snapshot_path(digest, name, path)
     return digest.hexdigest()
 
 

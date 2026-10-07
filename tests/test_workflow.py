@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -305,6 +306,8 @@ case "${MOCK_DEPS:-ok}" in
   fail-later) [[ $first == yes ]] || exit 1 ;;
   change-later) [[ $first == yes ]] || echo changed >> tracked.txt ;;
   untracked) echo new > new.txt ;;
+  submodule) echo new > sub/new.txt ;;
+  submodule-fail) echo new > sub/new.txt; exit 1 ;;
   commit) echo changed >> tracked.txt; git commit -qam 'installer commit' ;;
 esac
 mkdir -p vendor-deps
@@ -3515,6 +3518,42 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         changed(lambda: (sub / 'file.txt').write_text('modified again\n'))
         changed(lambda: (sub_git(sub, 'add', 'file.txt'), sub_git(sub, 'commit', '-qm', 'move')))
 
+    def test_tree_snapshot_uninitialised_submodule(self):
+        origin = self.base / 'sub-origin'
+        origin.mkdir()
+        for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'sub']):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=origin, env=self.env,
+                           check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), 'sub'])
+        self.commit('add submodule')
+        self.run_cmd(['git', 'submodule', '--quiet', 'deinit', '-f', 'sub'])
+        sub = self.project / 'sub'
+        self.assertEqual(list(sub.iterdir()), [])
+        seen = [self.tree_snapshot()]
+        self.assertEqual(self.tree_snapshot(), seen[0])
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+            self.assertEqual(self.tree_snapshot(), seen[-1])
+
+        changed(lambda: (sub / 'new.txt').write_text('created\n'))
+        changed(lambda: (sub / 'new.txt').write_text('overwritten\n'))
+        changed(lambda: (sub / 'new.txt').chmod(0o755))
+        changed(lambda: (sub / 'nested').mkdir())
+        changed(lambda: (sub / 'nested/link').symlink_to('../new.txt'))
+        changed(lambda: sub.chmod(0o700))
+
+        def replace_with_link():
+            shutil.rmtree(sub)
+            sub.symlink_to(self.base)
+        changed(replace_with_link)
+        changed(lambda: (sub.unlink(), sub.write_text('file\n')))
+        changed(lambda: sub.unlink())
+
     def test_deps_status_template_ci_setup(self):
         template = ROOT / 'templates/.ai/ci-setup'
         self.run_cmd(['bash', '-n', str(template)])
@@ -3591,6 +3630,22 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.tool('ai-run', '--approved', expected=1, MOCK_DEPS=mode, **env)
                 self.assert_deps_stopped(message)
                 self.assertEqual(self.deps_calls(), 1)
+                self.run_cmd(['git', 'reset', '-q', '--hard', base])
+                self.run_cmd(['git', 'clean', '-fdq'])
+                (self.base / 'deps-calls').unlink()
+
+    def test_deps_runner_installer_writing_into_uninitialised_submodule_stops(self):
+        base = self.deps_ready()
+        self.run_cmd(['git', 'update-index', '--add', '--cacheinfo', f'160000,{base},sub'])
+        (self.project / 'sub').mkdir()
+        self.commit('uninitialised submodule')
+        base = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        for mode in ('submodule', 'submodule-fail'):
+            with self.subTest(mode=mode):
+                self.tool('ai-run', '--approved', expected=1, MOCK_DEPS=mode)
+                self.assert_deps_stopped('Dependency setup changed project files')
+                self.assertEqual(self.deps_calls(), 1)
+                (self.project / 'sub/new.txt').unlink()
                 self.run_cmd(['git', 'reset', '-q', '--hard', base])
                 self.run_cmd(['git', 'clean', '-fdq'])
                 (self.base / 'deps-calls').unlink()

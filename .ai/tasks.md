@@ -434,7 +434,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 Pending.
 
 ## T008 — Tree snapshot covers uninitialised submodule paths (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T001, T002
 Model: opus
 
@@ -474,7 +474,15 @@ Targeted: `python3 -m unittest discover -s tests -k tree_snapshot_uninitialised_
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+Done 2026-10-07. `tree_snapshot` now uses `snapshot_path` (link target / file mode+bytes /
+dir mode / missing, symlinks never followed); a gitlink or nested-repo path that is not an
+initialised repository directory records `uninitialised` plus a filesystem walk of its
+contents. Tests: `test_tree_snapshot_uninitialised_submodule` (create, overwrite, chmod,
+nested dir and symlink, dir mode, replaced by symlink, by file, removed; untouched equal) and
+`test_deps_runner_installer_writing_into_uninitialised_submodule_stops` (exit 0 and 1: stop
+"Dependency setup changed project files", no `deps.json`). Targeted: Ran 1 test OK. Gate:
+`.ai/bin/ai-check` PASS, 224 tests in 611 s. Limitation: the gate now exceeds the 600 s Bash
+tool limit; it was auto-moved to the background and completed with exit 0.
 
 ## T009 — Dependency outputs must be directories (review N2)
 Status: TODO

@@ -19,6 +19,11 @@
   get "⚠ no test named"); `finish-summary` counts only Needs-you steps or says "Nothing to
   test by hand (N automated checks in the PR)". Vault flow chart updated.
 
+- T008 (review M1): `tree_snapshot` walks an uninitialised submodule directory on the
+  filesystem (path, kind, mode, bytes or link target; no ignore rules; symlinks never
+  followed) and records a symlink/file at a gitlink path as such, so installer writes there
+  are caught.
+
 OR-01/OR-02 were merged via PR #14 (records in Git history).
 This branch (`feature/flow-batch-2`, from origin/master 9e11a11) plans FL-01 (host runs
 `.ai/ci-setup` when dependencies are missing/stale), FL-07 (watchdog timer at setup, start
@@ -36,6 +41,8 @@ After T002: `.ai/bin/ai-check` PASS, 202 tests OK (2026-10-06), but it took 579 
 suite is close to the 600 s Bash tool limit sessions use for the gate.
 After T003: `.ai/bin/ai-check` PASS, 205 tests OK (2026-10-06, 555 s).
 After T004: `.ai/bin/ai-check` PASS, 209 tests OK (2026-10-06, 564 s).
+After T008: `.ai/bin/ai-check` PASS, 224 tests OK (2026-10-07, 611 s): now over the 600 s
+Bash tool limit, so sessions see the gate moved to the background before it finishes.
 
 ## Assumptions
 - FL-07: timer install is opt-in (`setup-project --watchdog`); the pipeline only warns.
@@ -73,6 +80,10 @@ and watchdog timer (status check, setup option, start warning).
 - Tree snapshot (dirty overwrite, mode with `core.filemode=false`, index, commit, untracked;
   ignored dirs and `.ai/local/` not covered): `test_deps_status_tree_snapshot_covers_project_files`.
 - Submodule snapshot: `test_deps_status_tree_snapshot_covers_submodules`.
+- Uninitialised submodule path (file created, overwritten, chmod, nested dir/symlink, dir
+  mode, replaced by symlink/file, removed; untouched = equal):
+  `test_tree_snapshot_uninitialised_submodule`; installer writing into it (exit 0 and 1)
+  stops with no stamp: `test_deps_runner_installer_writing_into_uninitialised_submodule_stops`.
 - Template ci-setup: `test_deps_status_template_ci_setup`.
 - Host install before the first task, once; reinstall after a lockfile change:
   `test_deps_runner_installs_once_before_the_first_task`.

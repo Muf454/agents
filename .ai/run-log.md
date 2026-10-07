@@ -77,3 +77,4 @@
 | 2026-10-06T21:32:32Z | runner | T007 | completed | PASS | c18aa77 | Claude checkpointed; continuing queue |
 | 2026-10-06T21:42:47Z | runner | none | queue complete; ready for independent review | PASS | 7e14e4a | Human acceptance remains |
 | 2026-10-06T21:48:04Z | runner | triage | review triaged into dispositions/tasks | n/a | 8d6adec | Fix tasks run next |
+| 2026-10-07T01:51Z | claude | T008 | DONE (review M1): resumed interrupted diff; `tree_snapshot` walks uninitialised submodule dirs, records link/file at gitlink paths; 2 new tests | targeted OK; gate PASS 224 tests (611 s) | (this commit) | gate exceeded 600 s tool limit (auto-backgrounded, exit 0) |
