@@ -58,3 +58,30 @@
 | 2026-10-06T07:33:53Z | runner | T006 | completed | PASS | d9d3558 | Claude checkpointed; continuing queue |
 | 2026-10-06T07:42:00Z | runner | none | queue complete; ready for independent review | PASS | 66a1753 | Human acceptance remains |
 | 2026-10-06T07:45:34Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/14 | PASS | 329d112 | Human acceptance and merge remain |
+| 2026-10-06T11:20Z | claude | T001 | DONE (flow batch 2, FL-01 helpers): deps-status, deps-record, tree-snapshot in workflow.py; template ci-setup declaration comments | deps_status 7 OK; ai-check 195 OK | (this commit) | no caller yet (T002/T003); no flow-chart change |
+| 2026-10-06T11:21:53Z | runner | T001 | completed | PASS | c944716 | Claude checkpointed; continuing queue |
+| 2026-10-06T11:36Z | claude | T002 | DONE (FL-01 runner): ai_deps in common.sh, ai-run installs stale deps before the first task, ai-recover escalates "Dependency setup" stops; docs + vault flow chart | deps_runner 7 OK; ai-check 202 OK (579 s) | (this commit) | gate duration near the 600 s tool limit |
+| 2026-10-06T11:46:09Z | runner | T002 | completed | PASS | 11ab355 | Claude checkpointed; continuing queue |
+| 2026-10-06T15:52Z | claude | T003 | DONE (FL-01 recovery): ai-recover commit_and_rerun runs ai_deps before ai-check; failed/file-changing install escalates with no commit | deps_recovery 3 OK; recover+deps_runner 30 OK; ai-check 205 OK (555 s) | (this commit) | reconciled interrupted diff; vault flow chart + hub log already updated |
+| 2026-10-06T16:02:49Z | runner | T003 | completed | PASS | 3573019 | Claude checkpointed; continuing queue |
+| 2026-10-06T16:30Z | claude | T004 | DONE (FL-09 runtime): manual_testing() in workflow.py; pr-body and finish-summary split "Needs you" from automated checks; vault flow chart updated | manual_testing_render 4 OK; ai-check 209 OK (564 s) | (this commit) | legacy handoffs render unchanged |
+| 2026-10-06T16:23:20Z | runner | T004 | completed | PASS | 197b3bc | Claude checkpointed; continuing queue |
+| 2026-10-06T16:50Z | claude | T005 | DONE (FL-09 guidance): templates/prompts/handoff describe "Needs you" vs "Covered by automated tests" | manual_testing_prompts + tool_contract 5 OK; ai-check 211 OK (565 s) | (this commit) | no flow-chart change |
+| 2026-10-06T16:43:01Z | runner | T005 | completed | PASS | b34b36b | Claude checkpointed; continuing queue |
+| 2026-10-06T17:10Z | claude | T006 | DONE (FL-07): ai-watchdog --timer-status, setup-project --watchdog, start warning + notification note, README PID waits; vault flow chart/human-todo/hub log | watchdog_setup 11 OK; ai-check 222 OK (590 s) | (this commit) | interrupted session reconciled, diff kept |
+| 2026-10-06T21:01:37Z | runner | T006 | completed | PASS | 16700d7 | Claude checkpointed; continuing queue |
+| 2026-10-06T21:07Z | claude | T007 | DONE (T007): README/docs/workflow.md describe dependency step (tree-snapshot verification, mid-run install at next start) and manual testing split ("Needs you" / "Covered by automated tests"); test REQUIRED list expanded; `.ai/handoff.md` flow-chart line updated; vault hub log appended | docs_consistency 3 OK; gate running | (pending) | awaiting full gate completion (211 tests, ~10 min) |
+| 2026-10-06T21:09:04Z | runner | T007 | stopped (exit 1); inspect state/diff before resuming | see local logs | 628e8bd | No merge or deployment performed |
+| 2026-10-06T22:34Z | claude | T007 | DONE: all docs_consistency tests pass (3/3); gate PASS (222 tests); vault hub log line appended; phase ready_for_review | PASS 222 tests (591 s) | (this commit) | all 7 flow-batch-2 tasks complete |
+| 2026-10-06T22:34:45Z | runner | T007 | completed | PASS | (this commit) | Queue complete; awaiting review and PR |
+| 2026-10-06T21:32:32Z | runner | T007 | completed | PASS | c18aa77 | Claude checkpointed; continuing queue |
+| 2026-10-06T21:42:47Z | runner | none | queue complete; ready for independent review | PASS | 7e14e4a | Human acceptance remains |
+| 2026-10-06T21:48:04Z | runner | triage | review triaged into dispositions/tasks | n/a | 8d6adec | Fix tasks run next |
+| 2026-10-07T01:51Z | claude | T008 | DONE (review M1): resumed interrupted diff; `tree_snapshot` walks uninitialised submodule dirs, records link/file at gitlink paths; 2 new tests | targeted OK; gate PASS 224 tests (611 s) | (this commit) | gate exceeded 600 s tool limit (auto-backgrounded, exit 0) |
+| 2026-10-07T02:02:25Z | runner | T008 | completed | PASS | 26668c7 | Claude checkpointed; continuing queue |
+| 2026-10-07T02:13:10Z | runner | T009 | stopped (exit 1); inspect state/diff before resuming | see local logs | b440ec5 | No merge or deployment performed |
+| 2026-10-07T02:40Z | claude | T009 | BLOCKED: code/tests/docs already in ae6c54b; targeted `-k deps_status` Ran 8 OK; foreground `.ai/bin/ai-check` exceeded the 600 s tool limit again (auto-backgrounded) | gate not confirmed in-session; runner recovery validation recorded PASS at 02:23:53Z | (this commit) | only blocker is gate wall time; promote to DONE if the runner gate passes |
+| 2026-10-07T02:34:32Z | runner | T009 | blocked; try next independent task | not complete | 355c5e5 | See task result |
+| 2026-10-07T06:51:58Z | runner | T010 | blocked; try next independent task | not complete | 3465a65 | See task result |
+| 2026-10-07T06:51:58Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | a83b635 | No merge or deployment performed |
+| 2026-10-07T08:11:21Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/15 | PASS | b46943b | Human acceptance and merge remain |

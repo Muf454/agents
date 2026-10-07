@@ -2,7 +2,9 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -60,6 +62,8 @@ if knowledge:
 else:
     assert '--add-dir' not in args
 mode = os.environ.get('MOCK_CLAUDE', 'success')
+if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
+    assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
@@ -282,6 +286,32 @@ if args[:2] in (['pr', 'create'], ['pr', 'edit']):
     if args[1] == 'create': print('https://github.com/example/project/pull/7')
     sys.exit(0)
 sys.exit(2)
+'''
+
+# .ai/ci-setup fixture for the host dependency step; MOCK_DEPS picks a misbehaviour.
+DEPS_SETUP = r'''#!/usr/bin/env bash
+# ai-deps-inputs: deps.lock
+# ai-deps-outputs: vendor-deps
+set -euo pipefail
+printf 'call\n' >> "$MOCK_STATE_DIR/deps-calls"
+first=no
+[[ -e "$MOCK_STATE_DIR/deps-once" ]] || { first=yes; touch "$MOCK_STATE_DIR/deps-once"; }
+case "${MOCK_DEPS:-ok}" in
+  fail) exit 1 ;;
+  fail-once) [[ $first == no ]] || exit 1 ;;
+  sleep) sleep 60 ;;
+  overwrite) echo changed >> tracked.txt ;;
+  overwrite-fail) echo changed >> tracked.txt; exit 1 ;;
+  change-once) [[ $first == no ]] || echo changed >> tracked.txt ;;
+  fail-later) [[ $first == yes ]] || exit 1 ;;
+  change-later) [[ $first == yes ]] || echo changed >> tracked.txt ;;
+  untracked) echo new > new.txt ;;
+  submodule) echo new > sub/new.txt ;;
+  submodule-fail) echo new > sub/new.txt; exit 1 ;;
+  commit) echo changed >> tracked.txt; git commit -qam 'installer commit' ;;
+esac
+mkdir -p vendor-deps
+cp deps.lock vendor-deps/
 '''
 
 MOCK_SLEEP = r'''#!/usr/bin/env bash
@@ -655,6 +685,143 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.mock_bin / 'systemctl').write_text('#!/usr/bin/env bash\n[[ "$2" != disable ]]\n')
         self.watchdog('--uninstall-timer', expected=1)
         self.assertEqual(len(list((self.config / 'systemd/user').iterdir())), 2)
+
+    def mock_systemctl(self):
+        # Records calls; enable --now makes the timer enabled+active unless MOCK_SYSTEMCTL=fail.
+        # MOCK_SYSTEMCTL=broken answers queries with an error and no output (no user bus).
+        (self.mock_bin / 'systemctl').write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n'
+            'case "$MOCK_SYSTEMCTL:$2" in\n'
+            '  fail:enable) echo "Failed to enable" >&2; exit 1 ;;\n'
+            '  broken:is-*) echo "Failed to connect to bus" >&2; exit 1 ;;\n'
+            'esac\n'
+            'case "$2" in\n'
+            '  enable) echo enabled > "$MOCK_STATE_DIR/sc-enabled"; echo active > "$MOCK_STATE_DIR/sc-active" ;;\n'
+            '  disable) rm -f "$MOCK_STATE_DIR"/sc-enabled "$MOCK_STATE_DIR"/sc-active ;;\n'
+            '  is-enabled) cat "$MOCK_STATE_DIR/sc-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;\n'
+            '  is-active) cat "$MOCK_STATE_DIR/sc-active" 2>/dev/null || { echo inactive; exit 3; } ;;\n'
+            'esac\n'
+            'exit 0\n')
+        (self.mock_bin / 'systemctl').chmod(0o755)
+
+    def timer_status(self, expected, **env):
+        result = self.watchdog('--timer-status', expected=expected, **env)
+        return result.stdout.strip()
+
+    def test_watchdog_setup_flag_installs_files_and_timer(self):
+        self.mock_systemctl()
+        result = self.setup_project('--watchdog')
+        units = sorted((self.config / 'systemd/user').iterdir())
+        self.assertEqual([u.suffix for u in units], ['.service', '.timer'])
+        self.assertTrue((self.base / 'xdg-data/ai-toolkit/watchdog' / units[0].stem / 'bin/ai-watchdog').is_file())
+        self.assertIn('--user enable --now ' + units[1].name, (self.base / 'systemctl.log').read_text())
+        self.assertNotIn('Next: install the watchdog timer', result.stdout)
+        self.assertTrue(self.timer_status(0).startswith('installed '))
+
+    def test_watchdog_setup_flag_is_rejected_with_dry_run_and_upgrade(self):
+        self.mock_systemctl()
+        for option in ('--dry-run', '--upgrade'):
+            with self.subTest(option=option):
+                result = self.run_cmd([str(ROOT / 'scripts/setup-project'), '--watchdog', option,
+                                       str(self.project)], expected=1)
+                self.assertIn('--watchdog', result.stderr + result.stdout)
+        self.assertFalse((self.project / '.ai').exists())
+        self.assertFalse((self.base / 'systemctl.log').exists())
+
+    def test_watchdog_setup_flag_reports_a_failing_systemctl(self):
+        self.mock_systemctl()
+        result = self.run_cmd([str(ROOT / 'scripts/setup-project'), '--watchdog', str(self.project)],
+                              expected=1, env=dict(self.env, MOCK_SYSTEMCTL='fail'))
+        self.assertIn('the timer was not', result.stderr + result.stdout)
+        self.assertIn('enable', result.stderr + result.stdout)
+        self.assertTrue((self.project / '.ai/bin/ai-watchdog').is_file())
+
+    def test_watchdog_setup_plain_prints_next_step_and_writes_no_units(self):
+        self.mock_systemctl()
+        result = self.setup_project()
+        self.assertIn('Next: install the watchdog timer: .ai/bin/ai-watchdog --install-timer --diagnose --recover',
+                      result.stdout)
+        self.assertFalse((self.config / 'systemd').exists())
+        self.assertFalse((self.base / 'systemctl.log').exists())
+
+    def test_watchdog_setup_timer_status_missing_installed_partial_stopped_unknown(self):
+        self.setup_project()
+        self.mock_systemctl()
+        self.assertIn('no unit files', self.timer_status(1))
+        self.watchdog('--install-timer')
+        self.assertTrue(self.timer_status(0).startswith('installed ai-watchdog-'))
+        (self.base / 'sc-enabled').unlink()  # unit files present, enable --now never took effect
+        self.assertTrue(self.timer_status(1).startswith('missing '))
+        self.assertIn('not enabled', self.timer_status(1))
+        (self.base / 'sc-enabled').write_text('enabled\n')
+        (self.base / 'sc-active').write_text('inactive\n')
+        self.assertIn('not active', self.timer_status(1))
+        (self.base / 'sc-active').write_text('active\n')
+        self.assertTrue(self.timer_status(0).startswith('installed '))
+        self.assertTrue(self.timer_status(2, MOCK_SYSTEMCTL='broken').startswith('unknown '))
+        (self.mock_bin / 'systemctl').unlink()
+        empty = self.base / 'empty-bin'
+        empty.mkdir()
+        result = self.run_cmd([sys.executable, '-I', str(self.project / '.ai/bin/lib/watchdog.py'),
+                               str(self.project), '--timer-status'], expected=2,
+                              env=dict(self.env, PATH=str(empty)))
+        self.assertTrue(result.stdout.startswith('unknown '), result.stdout)
+        self.watchdog('--timer-status', '--install-timer', expected=2)
+
+    def pipeline_ready(self):
+        self.ready()
+        self.mock_systemctl()
+
+    def test_watchdog_setup_pipeline_warns_when_timer_is_missing(self):
+        self.pipeline_ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('No watchdog timer for this checkout', result.stdout)
+        self.assertIn('▶ STARTED on feature/test. (no watchdog timer for this checkout)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_warns_when_timer_is_stopped(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        (self.base / 'sc-active').write_text('inactive\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('No watchdog timer for this checkout', result.stdout)
+        self.assertIn('(no watchdog timer for this checkout)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_is_quiet_with_an_installed_timer(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertNotIn('watchdog timer', result.stdout)
+        self.assertIn('▶ STARTED on feature/test.\n', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_pipeline_notes_unknown_status_and_continues(self):
+        self.pipeline_ready()
+        self.watchdog('--install-timer')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_SYSTEMCTL='broken')
+        self.assertIn('Watchdog timer status unknown', result.stdout)
+        self.assertIn('(watchdog timer status unknown)', self.notifications())
+        self.helper('tasks', 'complete')
+
+    def test_watchdog_setup_recovery_resume_notification_carries_the_note(self):
+        self.pipeline_ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        self.assertIn('▶ RESUMED on feature/test after auto-recovery (1). (no watchdog timer for this checkout)',
+                      self.notifications())
+
+    def test_watchdog_setup_no_pgrep_f_waits_in_executable_code_and_readme_documents_pids(self):
+        for directory in ('scripts', 'templates'):
+            for path in sorted((ROOT / directory).rglob('*')):
+                if path.is_file() and path.suffix != '.md':
+                    self.assertNotRegex(path.read_text(errors='replace'), r'pgrep\s+(-\w*f|--full)',
+                                        str(path))
+        readme = (ROOT / 'README.md').read_text()
+        self.assertIn('while kill -0 "$pid" 2>/dev/null; do sleep 60; done', readme)
+        self.assertIn('pgrep -f', readme)
+        self.assertIn('matches itself', readme)
 
     def assert_install(self, cwd, expected, **env):
         # Installs the timer for self.project while the caller's directory is cwd.
@@ -3139,6 +3306,96 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertLess(body.index('Flow chart updated'), body.index('## Tasks'))
         self.assertEqual(body.replace('Flow chart updated: audited.\n\n', ''), plain)
 
+    SPLIT_HANDOFF = ('# Handoff\n\n## Manual testing for the human\n### Needs you\n{needs}\n\n'
+                     '### Covered by automated tests\n1. Drag fails: `test_drag_fails`\n'
+                     '2. Resize works without a name\n\n## Next action\nNone.\n')
+
+    def test_manual_testing_render_pr_body_splits_needs_you_from_automated(self):
+        self.setup_project()
+        body = self.pr_body_for(self.SPLIT_HANDOFF.format(needs='1. Check it on your phone.'))
+        self.assertLess(body.index('### Needs you'), body.index('Check it on your phone.'))
+        self.assertLess(body.index('Check it on your phone.'), body.index('### Covered by automated tests'))
+        self.assertIn('<details><summary>2 automated checks</summary>', body)
+        self.assertIn('</details>', body)
+        self.assertIn('`test_drag_fails`\n', body)
+        self.assertIn('Resize works without a name ⚠ no test named', body)
+        self.assertNotIn('test_drag_fails` ⚠', body)
+
+    def test_manual_testing_render_none_says_everything_is_automated(self):
+        self.setup_project()
+        body = self.pr_body_for(self.SPLIT_HANDOFF.format(needs='None.'))
+        self.assertIn('None — everything below is automated.', body)
+
+    def test_manual_testing_render_finish_summary_counts_only_needs_you(self):
+        self.ready()
+        self.add_origin()
+        (self.project / '.ai/handoff.md').write_text(self.SPLIT_HANDOFF.format(needs='None'))
+        self.commit('handoff with only automated steps')
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        notes = self.notifications()
+        self.assertIn('1. Nothing to test by hand (2 automated checks in the PR)', notes)
+        self.assertNotIn('manual step', notes)
+
+    WRAPPED_HANDOFF = ('# Handoff\n\n## Manual testing for the human\n### Needs you\n'
+                       '1. Check it.\n2. Check it again.\n\n'
+                       '### Covered by automated tests\n'
+                       '- Drag fails and the card snaps back:\n  `test_drag_fails`.\n'
+                       '- Resize works,\n  continues here, and names\n  `test_resize`.\n'
+                       '- Nothing names a test here\n  even on this line.\n'
+                       '- Lone backtick ` only\n  on the next line.\n\n## Next action\nNone.\n')
+
+    def test_manual_testing_wrapped_name_on_continuation_line_is_not_flagged(self):
+        self.setup_project()
+        body = self.pr_body_for(self.WRAPPED_HANDOFF)
+        self.assertIn('<details><summary>4 automated checks</summary>', body)
+        self.assertIn('  `test_drag_fails`.\n', body)
+        self.assertIn('  `test_resize`.\n', body)
+        self.assertEqual(body.count('⚠ no test named'), 2)
+
+    def test_manual_testing_wrapped_unnamed_and_lone_backtick_are_flagged_on_the_last_line(self):
+        self.setup_project()
+        body = self.pr_body_for(self.WRAPPED_HANDOFF)
+        self.assertIn('- Nothing names a test here\n  even on this line. ⚠ no test named\n', body)
+        self.assertIn('- Lone backtick ` only\n  on the next line. ⚠ no test named\n', body)
+
+    def test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets(self):
+        self.setup_project()
+        body = self.pr_body_for((ROOT / '.ai/handoff.md').read_text())
+        flagged = [line for line in body.splitlines() if line.endswith('⚠ no test named')]
+        self.assertEqual(flagged, ['- Further scenarios are added by the remaining tasks. ⚠ no test named'])
+
+    def test_manual_testing_wrapped_finish_summary_counts_needs_you_steps(self):
+        self.setup_project()
+        (self.project / '.ai/handoff.md').write_text(
+            self.WRAPPED_HANDOFF.replace('## Next action', '## Human todos\nNone.\n\n## Next action'))
+        out = self.helper('finish-summary', 'https://example.test/pr/1', '0', '0').stdout
+        self.assertIn('Test: 2 manual step(s) in the PR', out)
+        self.assertNotIn('automated checks', out)
+
+    def test_manual_testing_render_legacy_handoff_is_unchanged(self):
+        self.setup_project()
+        body = self.pr_body_for('# Handoff\n\n## Manual testing for the human\n1. Try it.\n2. Again.\n\n## Next action\nNone.\n')
+        self.assertIn('## How to test\n\n1. Try it.\n2. Again.\n\n---', body)
+        self.assertNotIn('Needs you', body)
+        self.assertNotIn('<details>', body)
+
+    def test_manual_testing_prompts_describe_the_split(self):
+        handoff = (ROOT / 'templates/.ai/handoff.md').read_text()
+        self.assertIn('### Needs you', handoff)
+        self.assertIn('### Covered by automated tests', handoff)
+        for name in ('.ai/prompts/runner.md', '.ai/prompts/triage.md', '.ai/prompts/fix-review.md',
+                     '.ai/prompts/review.md', 'CLAUDE.md', 'AGENTS.md'):
+            with self.subTest(file=name):
+                text = ' '.join((ROOT / 'templates' / name).read_text().split())
+                self.assertIn('Needs you', text)
+                self.assertIn('Covered by automated tests', text)
+
+    def test_manual_testing_prompts_fresh_handoff_renders_in_pr_body(self):
+        self.setup_project()
+        body = self.helper('pr-body', '0', '0').stdout
+        self.assertIn('## Summary', body)
+        self.assertIn('## Tasks', body)
+
     def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
         handoff = (ROOT / '.ai/handoff.md').read_text()
         self.assertIn('## Flow chart\nFlow chart updated', handoff)
@@ -3156,6 +3413,395 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     # Has shebang: must be executable
                     self.assertTrue(os.access(script, os.X_OK),
                                     f'{script.name} has shebang but is not executable')
+
+    def deps_fixture(self, setup_text):
+        (self.project / '.ai').mkdir(exist_ok=True)
+        (self.project / '.ai/ci-setup').write_text(setup_text)
+
+    def deps(self):
+        return self.helper('deps-status').stdout.strip()
+
+    def test_deps_status_declared_inputs_and_outputs(self):
+        self.deps_fixture('#!/usr/bin/env bash\n# ai-deps-inputs: deps.lock extra/*.lock\n'
+                          '# ai-deps-outputs: vendor-deps\nmkdir -p vendor-deps\n')
+        (self.project / 'deps.lock').write_text('one\n')
+        (self.project / 'vendor-deps').mkdir()
+        self.assertEqual(self.deps(), 'stale no dependency stamp (.ai/local/deps.json)')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        recorded = json.loads((self.project / '.ai/local/deps.json').read_text())
+        self.assertEqual(list(recorded['inputs']), ['deps.lock'])
+        (self.project / 'deps.lock').write_text('two\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: changed deps.lock')
+        self.helper('deps-record')
+        (self.project / 'extra').mkdir()
+        (self.project / 'extra/a.lock').write_text('a\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: added extra/a.lock')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'extra/a.lock').unlink()
+        self.assertEqual(self.deps(), 'stale inputs changed: removed extra/a.lock')
+        self.helper('deps-record')
+        with (self.project / '.ai/ci-setup').open('a') as file:
+            file.write('true\n')
+        self.assertEqual(self.deps(), 'stale .ai/ci-setup changed')
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'vendor-deps').rmdir()
+        self.assertEqual(self.deps(), 'stale missing output vendor-deps')
+
+    def test_deps_status_output_kind(self):
+        self.deps_fixture('#!/usr/bin/env bash\n# ai-deps-outputs: vendor-deps\ntrue\n')
+        self.helper('deps-record')
+        out = self.project / 'vendor-deps'
+        out.write_text('not a dir\n')
+        self.assertEqual(self.deps(), 'stale output vendor-deps is not a directory')
+        out.unlink()
+        out.symlink_to(self.project / 'nowhere')
+        self.assertEqual(self.deps(), 'stale output vendor-deps is not a directory')
+        out.unlink()
+        target = self.project / 'real-deps'
+        target.mkdir()
+        out.symlink_to(target)
+        self.assertEqual(self.deps(), 'current')
+        out.unlink()
+        out.mkdir()
+        self.assertEqual(self.deps(), 'current')
+
+    def test_deps_status_default_lockfiles_and_node_modules(self):
+        self.deps_fixture((ROOT / 'templates/.ai/ci-setup').read_text())
+        (self.project / 'package.json').write_text('{}\n')
+        (self.project / 'package-lock.json').write_text('{"lockfileVersion": 3}\n')
+        (self.project / 'requirements-dev.txt').write_text('pytest\n')
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'stale missing output node_modules')
+        recorded = json.loads((self.project / '.ai/local/deps.json').read_text())
+        self.assertEqual(sorted(recorded['inputs']), ['package-lock.json', 'requirements-dev.txt'])
+        (self.project / 'node_modules').mkdir()
+        (self.project / '.ai/local/deps.json').unlink()
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        (self.project / 'package-lock.json').write_text('{"lockfileVersion": 3, "x": 1}\n')
+        self.assertEqual(self.deps(), 'stale inputs changed: changed package-lock.json')
+
+    def test_deps_status_installer_without_lockfiles_runs_once(self):
+        self.deps_fixture('#!/usr/bin/env bash\necho installing\n')
+        self.assertTrue(self.deps().startswith('stale no dependency stamp'))
+        self.helper('deps-record')
+        self.assertEqual(self.deps(), 'current')
+        self.assertEqual(self.deps(), 'current')
+        self.assertEqual(json.loads((self.project / '.ai/local/deps.json').read_text())['inputs'], {})
+
+    def test_deps_status_rejects_paths_outside_the_checkout(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'secret.lock').write_text('x\n')
+        (self.project / 'escape.lock').symlink_to(outside / 'secret.lock')
+        (self.project / 'escape-dir').symlink_to(outside)
+        cases = (('# ai-deps-inputs: ../outside/secret.lock', 'must be relative'),
+                 (f'# ai-deps-inputs: {outside}/secret.lock', 'must be relative'),
+                 ('# ai-deps-outputs: ../vendor', 'must be relative'),
+                 ('# ai-deps-inputs: escape.lock', 'leaves the checkout'),
+                 ('# ai-deps-inputs: *.lock', 'leaves the checkout'),
+                 ('# ai-deps-outputs: escape-dir', 'leaves the checkout'))
+        for declaration, message in cases:
+            with self.subTest(declaration=declaration):
+                self.deps_fixture(f'#!/usr/bin/env bash\n{declaration}\n')
+                for command in ('deps-status', 'deps-record'):
+                    result = self.helper(command, expected=1)
+                    self.assertIn(message, result.stderr)
+                self.assertFalse((self.project / '.ai/local/deps.json').exists())
+
+    def tree_snapshot(self):
+        return self.helper('tree-snapshot').stdout.strip()
+
+    def test_deps_status_tree_snapshot_covers_project_files(self):
+        (self.project / '.gitignore').write_text('ignored/\n')
+        (self.project / 'a.txt').write_text('one\n')
+        self.commit()
+        self.run_cmd(['git', 'config', 'core.filemode', 'false'])
+        (self.project / 'a.txt').write_text('dirty\n')
+        seen = [self.tree_snapshot()]
+        self.assertEqual(self.tree_snapshot(), seen[0])
+        (self.project / 'ignored').mkdir()
+        (self.project / 'ignored/dep.js').write_text('installed\n')
+        (self.project / '.ai/local').mkdir(parents=True)
+        (self.project / '.ai/local/deps.log').write_text('log\n')
+        self.assertEqual(self.tree_snapshot(), seen[0])
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+
+        changed(lambda: (self.project / 'a.txt').write_text('dirty again\n'))
+        changed(lambda: (self.project / 'a.txt').chmod(0o755))
+        changed(lambda: self.run_cmd(['git', 'add', '--', 'a.txt']))
+        changed(lambda: self.run_cmd(['git', 'commit', '-qm', 'change']))
+        changed(lambda: (self.project / 'new.txt').write_text('untracked\n'))
+        changed(lambda: (self.project / 'a.txt').unlink())
+
+    def test_deps_status_tree_snapshot_covers_submodules(self):
+        origin = self.base / 'sub-origin'
+        origin.mkdir()
+
+        def sub_git(cwd, *args):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=cwd, env=self.env,
+                           check=True, capture_output=True)
+        sub_git(origin, 'init', '-q', '-b', 'main')
+        (origin / 'file.txt').write_text('committed\n')
+        sub_git(origin, 'add', 'file.txt')
+        sub_git(origin, 'commit', '-qm', 'sub')
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), 'sub'])
+        self.commit('add submodule')
+        first = self.tree_snapshot()
+        self.assertEqual(self.tree_snapshot(), first)
+        seen = [first]
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+
+        sub = self.project / 'sub'
+        changed(lambda: (sub / 'file.txt').write_text('modified\n'))
+        changed(lambda: (sub / 'file.txt').write_text('modified again\n'))
+        changed(lambda: (sub_git(sub, 'add', 'file.txt'), sub_git(sub, 'commit', '-qm', 'move')))
+
+    def test_tree_snapshot_uninitialised_submodule(self):
+        origin = self.base / 'sub-origin'
+        origin.mkdir()
+        for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'sub']):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=origin, env=self.env,
+                           check=True, capture_output=True)
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), 'sub'])
+        self.commit('add submodule')
+        self.run_cmd(['git', 'submodule', '--quiet', 'deinit', '-f', 'sub'])
+        sub = self.project / 'sub'
+        self.assertEqual(list(sub.iterdir()), [])
+        seen = [self.tree_snapshot()]
+        self.assertEqual(self.tree_snapshot(), seen[0])
+
+        def changed(action):
+            action()
+            seen.append(self.tree_snapshot())
+            self.assertNotIn(seen[-1], seen[:-1])
+            self.assertEqual(self.tree_snapshot(), seen[-1])
+
+        changed(lambda: (sub / 'new.txt').write_text('created\n'))
+        changed(lambda: (sub / 'new.txt').write_text('overwritten\n'))
+        changed(lambda: (sub / 'new.txt').chmod(0o755))
+        changed(lambda: (sub / 'nested').mkdir())
+        changed(lambda: (sub / 'nested/link').symlink_to('../new.txt'))
+        changed(lambda: sub.chmod(0o700))
+
+        def replace_with_link():
+            shutil.rmtree(sub)
+            sub.symlink_to(self.base)
+        changed(replace_with_link)
+        changed(lambda: (sub.unlink(), sub.write_text('file\n')))
+        changed(lambda: sub.unlink())
+
+    def test_deps_status_template_ci_setup(self):
+        template = ROOT / 'templates/.ai/ci-setup'
+        self.run_cmd(['bash', '-n', str(template)])
+        result = self.run_cmd(['bash', str(template)])
+        self.assertIn('installing nothing', result.stdout)
+        text = template.read_text()
+        self.assertIn('# ai-deps-inputs:', text)
+        self.assertIn('# ai-deps-outputs:', text)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ['.git'])
+
+    # ---------------------------------------------------------------- host dependency setup
+    def deps_ready(self, queue=None):
+        self.ready(queue)
+        (self.project / '.ai/ci-setup').write_text(DEPS_SETUP)
+        (self.project / 'deps.lock').write_text('dep 1\n')
+        (self.project / 'tracked.txt').write_text('tracked\n')
+        with (self.project / '.gitignore').open('a') as file:
+            file.write('/vendor-deps/\n')
+        self.commit('dependency fixture')
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def deps_calls(self):
+        calls = self.base / 'deps-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def assert_deps_stopped(self, message):
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn(message, error)
+        self.assertIn('.ai/ci-setup', error)
+        self.assertRegex(error, r'see \.ai/local/deps-\w{8}\.log')
+        self.assertFalse((self.project / '.ai/local/deps.json').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_deps_runner_installs_once_before_the_first_task(self):
+        base = self.deps_ready()
+        result = self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertIn('Dependency setup (.ai/ci-setup): no dependency stamp', result.stdout)
+        self.assertIn('Dependencies installed', result.stdout)
+        self.assertEqual(self.deps_calls(), 1)
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.helper('tasks', 'complete')
+        # The install changed no project file: only the task and runner commits follow.
+        subjects = self.run_cmd(['git', 'log', '--format=%s', f'{base}..HEAD']).stdout.splitlines()
+        self.assertEqual(subjects, ['chore(ai): record review handoff',
+                                    'chore(ai): record T001 runner checkpoint', 'implement T001'])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+        def add_task(task_id, lock=None):
+            if lock:
+                (self.project / 'deps.lock').write_text(lock)
+            with (self.project / '.ai/tasks.md').open('a') as file:
+                file.write('\n' + task(task_id))
+            self.commit('add ' + task_id)
+        # Unchanged inputs: the next ai-run does not install again.
+        add_task('T002')
+        self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(self.deps_calls(), 1)
+        # A changed lockfile installs again at the next start that runs a task.
+        add_task('T003', 'dep 2\n')
+        self.tool('ai-run', '--approved', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(self.deps_calls(), 2)
+        self.assertEqual((self.project / 'vendor-deps/deps.lock').read_text(), 'dep 2\n')
+
+    def test_deps_runner_failed_or_changing_installer_stops_before_claude(self):
+        base = self.deps_ready()
+        cases = (('fail', {}, 'Dependency setup (.ai/ci-setup) failed (exit 1)'),
+                 ('sleep', {'AI_DEPS_TIMEOUT': '1'}, 'failed (exit 124, timeout after 1s)'),
+                 ('overwrite', {}, 'Dependency setup changed project files'),
+                 ('untracked', {}, 'Dependency setup changed project files'),
+                 ('commit', {}, 'Dependency setup changed project files'),
+                 ('overwrite-fail', {}, 'Dependency setup changed project files'))
+        for mode, env, message in cases:
+            with self.subTest(mode=mode):
+                self.tool('ai-run', '--approved', expected=1, MOCK_DEPS=mode, **env)
+                self.assert_deps_stopped(message)
+                self.assertEqual(self.deps_calls(), 1)
+                self.run_cmd(['git', 'reset', '-q', '--hard', base])
+                self.run_cmd(['git', 'clean', '-fdq'])
+                (self.base / 'deps-calls').unlink()
+
+    def test_deps_runner_installer_writing_into_uninitialised_submodule_stops(self):
+        base = self.deps_ready()
+        self.run_cmd(['git', 'update-index', '--add', '--cacheinfo', f'160000,{base},sub'])
+        (self.project / 'sub').mkdir()
+        self.commit('uninitialised submodule')
+        base = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        for mode in ('submodule', 'submodule-fail'):
+            with self.subTest(mode=mode):
+                self.tool('ai-run', '--approved', expected=1, MOCK_DEPS=mode)
+                self.assert_deps_stopped('Dependency setup changed project files')
+                self.assertEqual(self.deps_calls(), 1)
+                (self.project / 'sub/new.txt').unlink()
+                self.run_cmd(['git', 'reset', '-q', '--hard', base])
+                self.run_cmd(['git', 'clean', '-fdq'])
+                (self.base / 'deps-calls').unlink()
+
+    def test_deps_runner_install_is_capped_by_the_run_time(self):
+        import time
+        self.deps_ready()
+        started = time.monotonic()
+        self.tool('ai-run', '--approved', '--run-timeout', '5', expected=1,
+                  MOCK_DEPS='sleep', AI_DEPS_TIMEOUT='600')
+        self.assertLess(time.monotonic() - started, 15)
+        self.assert_deps_stopped('timeout after')
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the stop's run-log line
+        self.tool('ai-run', '--approved', expected=1, AI_DEPS_TIMEOUT='soon')
+        self.assertIn('invalid AI_DEPS_TIMEOUT', (self.project / '.ai/local/last-error').read_text())
+
+    def test_deps_runner_complete_queue_installs_nothing(self):
+        self.deps_ready(task('T001', 'DONE'))
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.deps_calls(), 0)
+
+    def deps_recovery(self, mode):
+        self.deps_ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_DEPS=mode)
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', notes)
+        self.assertIn('Dependency setup', notes)
+        self.assertIn('this kind of stop always needs a human', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertFalse(any(c[:2] == ['pr', 'create'] for c in self.gh_calls()))
+        self.assertEqual(self.deps_calls(), 1)
+
+    def test_deps_runner_failed_install_escalates_without_recovery(self):
+        self.deps_recovery('fail-once')
+
+    def test_deps_runner_changing_install_escalates_without_recovery(self):
+        self.deps_recovery('change-once')
+
+    def deps_recovery_run(self, mode, expected):
+        """The session dies leaving a changed deps.lock; recovery decides commit_and_rerun.
+        The gate passes only when vendor-deps/ matches deps.lock."""
+        self.deps_ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt, deps.lock\n'))
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\ncmp -s deps.lock vendor-deps/deps.lock\n')
+        self.commit('gate that needs installed dependencies')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun',
+                  MOCK_EXTRA_FILE='deps.lock', MOCK_DEPS=mode, MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertEqual(self.deps_calls(), 2)  # ai-run's first install, then recovery's
+        return self.notifications()
+
+    def assert_deps_recovery_escalated(self, notes, message):
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', notes)
+        self.assertIn('but dependency setup failed: Dependency setup', notes)
+        self.assertIn(message, notes)
+        self.assertIn('Next: inspect .ai/ci-setup and the log', notes)
+        self.assertNotIn('🔧 Recovered', notes)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        self.assertIn('deps.lock', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_deps_recovery_installs_before_the_gate_and_resumes(self):
+        notes = self.deps_recovery_run('ok', 0)
+        self.assertEqual(notes.count('🔧 Recovered'), 1)
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        log = self.run_cmd(['git', 'log', '--format=%H %s']).stdout.splitlines()
+        checkpoint = next(line.split()[0] for line in log if 'recovery checkpoint (validated leftover work)' in line)
+        files = self.run_cmd(['git', 'show', '--name-only', '--format=', checkpoint]).stdout.split()
+        self.assertIn('deps.lock', files)
+        self.assertIn('partial.txt', files)
+        self.assertNotIn('vendor-deps/deps.lock', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertEqual((self.project / 'vendor-deps/deps.lock').read_text(), 'not in the plan')
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_deps_recovery_failed_install_escalates_without_a_commit(self):
+        notes = self.deps_recovery_run('fail-later', 1)
+        self.assert_deps_recovery_escalated(notes, 'failed (exit 1)')
+
+    def test_deps_recovery_changing_install_escalates_without_a_commit(self):
+        notes = self.deps_recovery_run('change-later', 1)
+        self.assert_deps_recovery_escalated(notes, 'changed project files')
+
+    def test_deps_runner_pipeline_end_to_end(self):
+        self.deps_ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main',
+                           MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.deps_calls(), 1)
+        self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
+        self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
 
 class DocsConsistencyTest(unittest.TestCase):
@@ -3181,6 +3827,10 @@ class DocsConsistencyTest(unittest.TestCase):
         'usage limits pause and resume',
         'committed bytes equal to the validated files',
         'outside the checkout',
+        'tree-snapshot',
+        'dependencies a task changes mid-run are installed at the next start',
+        'needs you',
+        'covered by automated tests',
     )
 
     def text(self, name):

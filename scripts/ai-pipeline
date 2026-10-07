@@ -259,10 +259,20 @@ reconcile_disputes() {
   if (( added > 0 )); then printf 'Recorded %s disputed finding(s); the PR will be a draft.\n' "$added"; fi
 }
 
+# A missing watchdog timer never stops the run, but the human should know at the start.
+timer_note=''
+timer_state=$("$AI_BIN/ai-watchdog" "$PWD" --timer-status 2>/dev/null </dev/null) && timer_rc=0 || timer_rc=$?
+case "$timer_rc" in
+  0) ;;
+  1) printf 'No watchdog timer for this checkout; a crash or restart would go unnoticed. Install it: .ai/bin/ai-watchdog --install-timer --diagnose --recover\n'
+     timer_note=' (no watchdog timer for this checkout)' ;;
+  *) printf 'Watchdog timer status unknown: %s\n' "${timer_state:-no answer}"
+     timer_note=' (watchdog timer status unknown)' ;;
+esac
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
-  ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT)."
+  ai_notify "▶ RESUMED on $branch after auto-recovery ($AI_RECOVERY_ATTEMPT).$timer_note"
 else
-  ai_notify "▶ STARTED on $branch."
+  ai_notify "▶ STARTED on $branch.$timer_note"
 fi
 if [[ -n "$open_stage" ]]; then
   step 'Completing the interrupted review triage'

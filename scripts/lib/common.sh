@@ -142,6 +142,48 @@ ai_guard_verify() {
   [[ "$actual" == "$AI_APPROVED_GATE" ]] || \
     ai_die 'Approved workflow gate changed during this run. Stop, inspect the diff, and explicitly reapprove before resuming.'
 }
+# Host-side dependency install (FL-01): run .ai/ci-setup when deps-status says stale.
+# Usage: ai_deps EXPECTED_GATE LIMIT_SECONDS. Returns 1 with AI_DEPS_ERROR set (every
+# message starts with "Dependency setup", which ai-recover always escalates). The installer
+# may only add ignored files: the gate and the tree snapshot must be unchanged afterwards,
+# checked after every exit and reported before the exit status. Writes no tracked file.
+ai_deps() {
+  local gate=$1 limit=$2 status before after code log started
+  AI_DEPS_ERROR=''
+  if ! status=$(ai_helper deps-status 2>&1); then
+    AI_DEPS_ERROR="Dependency setup (.ai/ci-setup): ${status#Error: }"; return 1
+  fi
+  [[ "$status" == stale* ]] || return 0
+  printf 'Dependency setup (.ai/ci-setup): %s\n' "${status#stale }"
+  if ! [[ "$limit" =~ ^-?[0-9]+$ ]] || (( limit <= 0 )); then
+    AI_DEPS_ERROR='Dependency setup (.ai/ci-setup) not run: run time limit reached.'; return 1
+  fi
+  if ! before=$(ai_helper tree-snapshot 2>&1); then
+    AI_DEPS_ERROR="Dependency setup: cannot snapshot the checkout: ${before#Error: }"; return 1
+  fi
+  log=$(mktemp .ai/local/deps-XXXXXXXX.log)
+  started=$SECONDS
+  set +e
+  timeout --signal=TERM --kill-after=10s "$limit" bash .ai/ci-setup < /dev/null > "$log" 2>&1
+  code=$?
+  set -e
+  if [[ "$(ai_guard_digest 2>/dev/null)" != "$gate" ]]; then
+    AI_DEPS_ERROR="Dependency setup (.ai/ci-setup) changed the approved workflow gate; see $log"
+  elif ! after=$(ai_helper tree-snapshot 2>&1) || [[ "$after" != "$before" ]]; then
+    AI_DEPS_ERROR="Dependency setup changed project files (.ai/ci-setup must only install ignored dependencies); see $log"
+  elif (( code != 0 )); then
+    AI_DEPS_ERROR="Dependency setup (.ai/ci-setup) failed (exit $code"
+    (( code != 124 && code != 137 )) || AI_DEPS_ERROR+=", timeout after ${limit}s"
+    AI_DEPS_ERROR+="); see $log"
+  elif ! after=$(ai_helper deps-record 2>&1); then
+    AI_DEPS_ERROR="Dependency setup: cannot record the stamp: ${after#Error: }"
+  fi
+  if [[ -n "$AI_DEPS_ERROR" ]]; then
+    tail -n 5 -- "$log" | sed 's/^/  | /'
+    return 1
+  fi
+  printf 'Dependencies installed in %ss (log %s).\n' "$(( SECONDS - started ))" "$log"
+}
 ai_lock() {
   # One writer/reviewer per checkout. Kernel releases locks on exit or crash.
   # ai-pipeline holds this lock for its whole run; its direct children skip it.

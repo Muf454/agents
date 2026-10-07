@@ -73,7 +73,10 @@ When implementation is authorized, do not request approval between ordinary task
 7. Continue to the next unblocked task. Completing one task is not a reason to stop.
 
 Keep `.ai/handoff.md` → "Manual testing for the human" current: `ai-pipeline` puts it
-into the pull request as the human's test instructions.
+into the pull request as the human's test instructions. Write it in two parts: `### Needs you`
+only for things a human must do (look and feel, phone/real devices, live accounts, external
+services, decisions) or "None"; every step a test can reproduce goes under
+`### Covered by automated tests` with its test name in backticks.
 
 The bounded runner may request ONE task per invocation. In that mode, checkpoint
 and return after that task: the runner launches a fresh session for the next task.

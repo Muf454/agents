@@ -1,445 +1,420 @@
 # Task queue
 
 Edit `scripts/`, `templates/`, `tests/`, docs and the vault notes named below. Never edit
-`.ai/bin`, `.ai/prompts` or other gate files. This run is started with
-`--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the vault flow
-chart and hub Log can be updated. Source: vault backlog "Epic EV — Evidence integrity",
-OR-01 and OR-02. Every task leaves `.ai/bin/ai-check` passing. Revised after two Codex plan
-reviews (`.ai/reviews/plan.md`). Flow-chart rule (AGENTS.md, CLAUDE.md): every task that
-changes workflow behaviour updates the vault `agents-flow.md` (diagram/notes and its
-`updated:` frontmatter date) in the SAME task; T006 is only the final docs audit.
+`.ai/bin`, `.ai/prompts` or other gate files (this repo's `.ai/ci-setup` included). This run is
+started with `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` (absolute path) so the
+vault flow chart, hub Log and human todos can be updated. Source: vault backlog "Run flow
+improvements (approved by Zack 2026-10-06)", FL-01, FL-07, FL-09 (FL-03 dropped from this
+batch, still in the backlog). Every task leaves
+`.ai/bin/ai-check` passing. Flow-chart rule (AGENTS.md, CLAUDE.md): every task that changes
+workflow behaviour updates the vault `agents-flow.md` (diagram/notes and its `updated:`
+frontmatter date) in the SAME task; T007 is only the final docs audit. Revised after the Codex plan review
+(`.ai/reviews/plan.md`, P1–P7): FL-01 simplified (host installs only at the start of
+`ai-run` and before recovery validation; no tracked-file logging) and tasks split.
 
-## T001 — Byte-check every accepted DONE checkpoint in ai-run (OR-01)
+## T001 — Dependency freshness, stamp and tree snapshot helpers (FL-01)
 Status: DONE
 Dependencies: none
 Model: opus
 
 ### Goal
-OR-01, runner part: an ordinary agent commit accepted as DONE (and the final handoff
-commit) must contain exactly the bytes validation hashed. Today only the tier-1 checkpoint
-(scripts/ai-run ~line 280) and ai-recover's `commit_and_rerun` check this.
+FL-01 building blocks: decide whether `.ai/ci-setup` must run, record that it ran, and
+prove an install changed no project file. Helpers only; no caller yet (T002, T003).
 
 ### Implementation notes
-In scripts/ai-run, `DONE` branch: after the runner's bookkeeping commit
-`chore(ai): record $active_task runner checkpoint` (~line 296) and its `ai_guard_verify`,
-when the task was DONE require: clean tree (`git status --porcelain --untracked-files=all`
-empty), `ai_helper stamp verify`, and `ai_helper committed-matches-worktree`. On failure
-`ai_die "The checkpoint of $active_task differs from the validated content: <detail>"`,
-where detail is the helper's message (capture stderr, strip `Error: `) or "uncommitted
-changes after the checkpoint" / "validation stamp not current". Keep the phrase
-"differs from the validated content" (ai-recover's hard rules escalate on it). Do the same
-after the final `chore(ai): record review handoff` commit (~line 236), before
-`finished=yes` and before the "All tasks done" notification, with the label "final handoff".
-Do NOT check BLOCKED tasks (unvalidated by design). Never reset, amend or change task
-status on this stop. Keep the existing tier-1 check as is. The check compares every
-tracked file, which is why it runs after the bookkeeping commit (workflow records
-committed). Add a short comment saying so.
-Test fixtures (P4): the mode case sets `git config core.filemode false` in the fixture
-(as `test_committed_mode_must_match_validated_file` does) so the executable file on disk
-does not show as a change; the mock session (new MOCK_CLAUDE mode in tests/test_workflow.py)
-writes the file executable and commits it with mode 100644 (e.g. `git update-index
---chmod=-x` after `git add`). The final-handoff case needs a mismatch that ONLY the final
-handoff commit introduces: a clean filter on `.ai/state.md` that rewrites only the phase
-field line, e.g. `sed -E 's/^Phase: ready_for_review$/Phase: tampered/'` (the phases
-comment in the state template also contains `ready_for_review`, so a global token filter
-would fire earlier; task checkpoints have `Phase: implementing`).
-Cleanliness (P4): the runner's EXIT handler appends a stop line to tracked
-`.ai/run-log.md`, so after a stop the tree is not fully clean. Tests assert cleanliness at
-the check boundary (the integrity check itself requires an empty `git status`; the stop
-reason must be the byte mismatch, not "uncommitted changes") and afterwards assert that
-`git status --porcelain` lists only `.ai/run-log.md`.
-Flow chart (same task): in the vault `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
-add to "Inside one task" (or the build/checks part) that every accepted task and the final
-handoff commit must contain exactly the validated bytes, else ⛔ stop; bump `updated:`.
+scripts/lib/workflow.py:
+- `deps_spec()`: read `.ai/ci-setup`; inputs from `# ai-deps-inputs: <paths/globs>` lines,
+  else the default lockfile list (package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml,
+  yarn.lock, bun.lock, bun.lockb, requirements*.txt, poetry.lock, uv.lock, Pipfile.lock,
+  Gemfile.lock, go.sum, Cargo.lock, composer.lock) that exist at the repo root; outputs from
+  `# ai-deps-outputs: <dirs>`, else `node_modules` when `package.json` exists. Declared paths
+  must be relative and inside the checkout (reject absolute and `..`; resolve symlinks).
+- `deps-status`: `current` or `stale <reason>`. Stale when: no stamp `.ai/local/deps.json`;
+  the SHA-256 of `.ai/ci-setup` differs; the input map (path → SHA-256) differs (added,
+  removed, changed); a declared/default output is missing. No shortcut: an empty input map
+  with no stamp is stale (a configured installer without lockfiles runs once) (P5).
+- `deps-record`: atomically write `{setup, inputs}` for the current files.
+- `tree-snapshot`: one SHA-256 over HEAD's sha, the staged diff (`git diff --cached
+  --binary`), and every non-ignored path (`git ls-files --cached --others
+  --exclude-standard -z`, excluding `.ai/local/`) with its kind, mode and bytes (symlink:
+  target; missing tracked file: a marker). Submodules (P9): a gitlink entry (mode 160000)
+  is snapshotted recursively by the same function run inside the submodule (its HEAD,
+  staged diff and all non-ignored files, nested submodules likewise); an uninitialised
+  submodule records a marker. Unchanged submodules give equal snapshots, so projects with
+  submodules keep working. Equal snapshots before/after an install prove
+  that no tracked or untracked project file, mode, index entry or commit changed, even
+  when the tree was already dirty (P2). Ignored paths (the installed dependencies) are not
+  covered by design.
+templates/.ai/ci-setup: comment lines only (behaviour stays "installing nothing"): the host
+runs this file at the start of `ai-run` and before recovery validation when dependencies are
+missing or stale; `# ai-deps-inputs:` / `# ai-deps-outputs:` with one npm example
+(`npm ci`, `package-lock.json`, `node_modules`) and the defaults; it must only install
+ignored dependencies. No flow-chart change (no behaviour yet).
 
 ### Likely affected modules
-scripts/ai-run, tests/test_workflow.py, vault agents-flow.md
+scripts/lib/workflow.py, templates/.ai/ci-setup, tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `committed_bytes_run`:
-  - filter case: `.gitattributes` with a clean filter on `*.txt` (as in
-    `test_committed_content_must_match_validated_files`) and the default (self-committing)
-    mock with a two-task queue → `ai-run` exits 1, last-error contains "differs from the
-    validated content" and `T001.txt`; exactly one mock invocation (T002 never starts); the
-    agent's commit and the bookkeeping commit are still in `git log` (nothing reset); T001
-    stays DONE;
-  - mode case: with `core.filemode=false`; `ai-run` exits 1 with "differs from the
-    validated content" and the message names the mode (so the check ran on a clean tree,
-    not the "uncommitted changes" branch); afterwards `git status --porcelain` lists only
-    `.ai/run-log.md` (the EXIT handler's stop line); `git ls-tree HEAD` shows 100644 for the
-    file while it is executable on disk (`os.access(..., os.X_OK)`); no tier-1 "the session
-    did not commit" checkpoint commit exists;
-  - final handoff only: the phase-line filter on `.ai/state.md` with a two-task queue;
-    first assert both ordinary task checkpoints passed (both `chore(ai): record T00N runner
-    checkpoint` commits exist, both tasks DONE, two "✅ Done" notifications); then `ai-run`
-    exits 1 at the final handoff with "differs from the validated content" naming
-    `.ai/state.md`; the `chore(ai): record review handoff` commit is still HEAD (not reset);
-    afterwards only `.ai/run-log.md` is dirty; no "All tasks done" notification;
-  - valid repo: a committed relative symlink plus a submodule (fixture repo added with
-    `git -c protocol.file.allow=always submodule add`, committed before the run) → the queue
-    completes (`tasks complete`), tree clean.
-- Existing `test_committed_content_must_match_validated_files` and
-  `test_committed_mode_must_match_validated_file` still pass.
-- Vault flow chart shows the per-task/final-handoff byte check; `updated:` date bumped.
+- Tests named `deps_status`:
+  - declared inputs/outputs: stale without stamp; `current` after `deps-record`; stale after
+    editing the input, adding/removing a declared input, editing `.ai/ci-setup`, or removing
+    the output dir;
+  - defaults: `package.json` + `package-lock.json` → stale until `node_modules` exists and a
+    stamp is recorded;
+  - configured installer without lockfiles or package.json: stale without stamp, `current`
+    after `deps-record`, still `current` on the next check (P5);
+  - an input with `..`, an absolute path, or a symlink leaving the checkout → clear error;
+  - `tree-snapshot` changes when: an already modified tracked file is overwritten, a file's
+    mode changes (also with `core.filemode=false`), a commit is made, the index changes, an
+    untracked non-ignored file appears; it does NOT change for writes under an ignored dir
+    or `.ai/local/`;
+  - submodules (P9, fixture added with `git -c protocol.file.allow=always submodule add`,
+    containing a committed file): snapshot equal when nothing changes; it changes when the
+    submodule HEAD moves, a submodule file is overwritten, or an already modified submodule
+    file is overwritten again;
+  - template ci-setup passes `bash -n`, still installs nothing, contains both keywords.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k committed_bytes_run` (output must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k deps_status` (output must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-2026-10-06 (Claude, opus): `scripts/ai-run` gained `verify_checkpoint` (clean tree, `stamp
-verify`, `committed-matches-worktree`; else `ai_die "The checkpoint of <label> differs from
-the validated content: <detail>"`), called after each DONE task's bookkeeping commit and
-after the `record review handoff` commit (label "final handoff"), before `finished=yes`.
-BLOCKED tasks are not checked; tier-1 check unchanged. The "✅ Done" notification moved
-after the check, so a rejected checkpoint never reports Done. New MOCK_CLAUDE mode
-`exec-committed-644`; 4 tests `committed_bytes_run` (filter, mode, final handoff only,
-symlink + submodule accepted). Targeted: `Ran 4 tests … OK`. Gate: `.ai/bin/ai-check` PASS,
-172 tests (2026-10-06T05:36:13Z). Vault `agents-flow.md` "Inside one task" diagram + note
-updated, `updated: 2026-10-06`.
+Done 2026-10-06. scripts/lib/workflow.py: `deps_spec`, `deps-status`, `deps-record`,
+`tree-snapshot` (+ `checkout_root`). Declarations are lines starting `# ai-deps-inputs:` /
+`# ai-deps-outputs:` (`^# ?ai-deps-…`; indented example lines in the template do not count);
+inputs may be paths, globs or directories (every file below); missing declared inputs are
+simply absent from the map, so adding them makes it stale. Missing `.ai/ci-setup` → error.
+Stale reasons: `no dependency stamp (.ai/local/deps.json)`, `unreadable dependency stamp …`,
+`.ai/ci-setup changed`, `inputs changed: added/removed/changed <path>`, `missing output <dir>`.
+`tree-snapshot` hashes `git rev-parse HEAD`, `git diff --cached --binary`, and each
+`ls-files --cached --others --exclude-standard` path (kind, st_mode, content sha / link
+target / missing marker) except `.ai/local/`; gitlinks and untracked nested repos are
+snapshotted recursively (uninitialised → marker). Template ci-setup: comment lines only.
+Tests: 7 `deps_status` tests (declared, defaults, no lockfiles, outside paths, tree snapshot,
+submodules, template). Evidence: `-k deps_status` Ran 7 OK; `.ai/bin/ai-check` Ran 195 OK.
 
-## T002 — Byte-check before review and in the publish checks (OR-01)
+## T002 — ai-run installs dependencies before its first task (FL-01)
 Status: DONE
 Dependencies: T001
 Model: opus
 
 ### Goal
-OR-01, pipeline part: `ai-pipeline` never sends to Codex review, and never publishes, a
-HEAD whose committed bytes differ from the validated files on disk, including mismatches
-introduced during a push attempt (push hooks run project code).
+FL-01: a fresh worktree or a stale install no longer stops the run (2026-10-05 23:06): at the
+start of every `ai-run` invocation that will run a task, the host (never an agent session)
+runs `.ai/ci-setup` when `deps-status` says stale.
 
 ### Implementation notes
-scripts/ai-pipeline: (1) in the main loop, right after `ensure_validated` and before
-`ai-review --base` (~line 300), require a clean tree and `ai_helper committed-matches-worktree`;
-on failure write `Committed content differs from the validated content: <detail>` to
-`.ai/local/last-error` and `stop review` (ai-recover escalates on the phrase). (2) In
-`publish_ready` (~line 127) add a clause right after the clean-tree check:
-`elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"`.
-Order: guard, review-info, disputes, clean tree, committed bytes, tasks, review current,
-stamp (committed bytes before "review current", so a hook commit with filtered bytes is
-reported as a byte mismatch). (3) `push()` (~line 157): today a failed attempt goes
-straight to the retry wait, and the third failure writes `git push failed (3 tries)` and
-stops WITHOUT re-checking, so a hook that changed committed bytes during the last attempt
-is reported as a plain push failure (which recovery may treat as transient). Restructure
-so `publish_ready "$stage"` runs after EVERY push outcome (success or failure), before
-the retry wait and before the terminal "3 tries" failure handling; e.g. per attempt:
-`publish_ready; if git push …; then ok=1; fi; publish_ready; (( ok )) && break; try 3 →
-failure stop; sleep`. Keep the pre-attempt check and the remote-equals-HEAD check after
-success.
-Test ideas: publish case: commit (before the run) a `.gitattributes` clean filter that
-applies only to `.ai/reviews/current.md`; the pre-review check passes, the host commit
-`record independent review` stores filtered bytes, so `publish_ready` must stop before any
-push. Push-hook cases (P2): `.gitattributes` clean filter on `hooked.txt`; a
-`.git/hooks/pre-push` that, once (marker file), writes `hooked.txt` on disk, commits it
-(the filter changes the committed bytes; tree stays clean) and logs each invocation to a
-file; variant A exits 1 (failed push → the retry's `publish_ready` must stop), variant B
-exits 0 (successful push → the post-push `publish_ready` must stop); variant C: the hook
-counts invocations and exits 1 unchanged on the first two, and on the third writes and
-commits `hooked.txt` (filtered) and exits 1. Use the bare origin from `add_origin()` and
-mock gh; `AI_SLEEP` is already mocked. Run variant C with `AI_AUTO_RECOVER=1` so the test
-proves the stop escalates without a recovery Claude session (ai-recover's hard rule on
-"differs from the validated content").
-Flow chart (same task): vault `agents-flow.md` publish-checks node and bullet gain
-"committed bytes = validated files", checked before every review and after every push
-attempt (failed or successful); bump `updated:`.
+scripts/lib/common.sh `ai_deps EXPECTED_GATE LIMIT`: `deps-status`; current → return 0.
+Else print `Dependency setup (.ai/ci-setup): <reason>`; `before=$(ai_helper tree-snapshot)`;
+run `timeout --signal=TERM --kill-after=10s "$LIMIT" bash .ai/ci-setup < /dev/null` with
+output to `.ai/local/deps-XXXXXXXX.log` (ignored) and a short summary on the terminal; no
+write to any tracked file (no run-log line: P1). Then require: exit 0 (else message
+"Dependency setup (.ai/ci-setup) failed (exit N[, timeout after Ns]); see <log>"),
+`ai_guard_digest` equal to EXPECTED_GATE, `tree-snapshot` equal to `before` (else
+"Dependency setup changed project files (.ai/ci-setup must only install ignored
+dependencies); see <log>"); only then `deps-record`. The gate and snapshot checks run after
+EVERY installer exit, successful or not, and a preservation violation is reported in
+preference to the exit status (P8). On failure print the message and
+return 1 (callers decide: ai-run uses `ai_die`; recovery escalates, T003). Limit:
+`AI_DEPS_TIMEOUT` (plain environment variable, default 1200 s), capped by the run's
+remaining time (`remaining_time` in ai-run; a non-positive remainder stops before running).
+Recovery category (P8): every dependency-setup stop message starts with "Dependency setup";
+scripts/ai-recover's hard-rule `case` (~line 102) gains `*'Dependency setup'*`, so these
+stops always escalate before any recovery decision or checkpoint (never `commit_and_rerun`
+or `rerun`).
+scripts/ai-run: after the start checks (clean tree, gate approved) and before the loop, when
+`tasks next` is not `none` (a task will run): `ai_deps "$AI_APPROVED_GATE" "$limit" ||
+ai_die "$(cat .ai/local/last-error …)"` (or equivalent). Not in `--triage`, not later in the
+loop, not before later gates. Scope limit (P3): dependencies changed by a task mid-run are
+NOT installed by this run; that task's in-session gate failure follows the existing rules
+(it can't be DONE without a passing gate). The next `ai-run` start (pipeline restart or
+resume) or recovery validation (T003) installs them. No prompt change claims otherwise.
+Flow chart (same task): vault `agents-flow.md` gets a host step "dependencies (.ai/ci-setup)
+if missing/stale" at the start of implementation, with its ⛔ stop; bump `updated:`.
 
 ### Likely affected modules
-scripts/ai-pipeline, tests/test_workflow.py, vault agents-flow.md
-
-### Acceptance criteria
-- Tests named `committed_bytes_pipeline`:
-  - all tasks DONE but HEAD holds filtered bytes (fixture commit through a clean filter) →
-    `ai-pipeline --approved --base main` stops during review; no codex call was made; message
-    contains "differs from the validated content";
-  - filter on `.ai/reviews/current.md` → stops with "Publish check failed at pull request
-    preparation: committed content differs …"; nothing pushed to the bare origin, no gh call,
-    no FINISHED notification;
-  - push hook, failed push (variant A): last-error says "Publish check failed at push:
-    committed content differs from the validated content" and names `hooked.txt`; the hook
-    ran exactly once (no further push attempt after the failing check); the branch is not on
-    origin; the hook's commit and every task commit are preserved (`git log`), all tasks
-    DONE; no `gh pr create`/`gh pr edit` call; no FINISHED notification;
-  - push hook, successful push (variant B): the same reason is recorded at stage `push`
-    (after the push); hook ran once; no gh PR call; no FINISHED notification; commits and
-    queue preserved;
-  - push hook, third attempt (variant C): the hook ran exactly 3 times; last-error is the
-    file-specific integrity reason ("committed content differs from the validated content"
-    naming `hooked.txt`), NOT "git push failed (3 tries)"; no `recover-calls` file (no
-    recovery Claude invocation); the hook's commit, every task commit and all DONE tasks
-    preserved; branch not on origin; no gh PR call; no FINISHED notification;
-  - valid repo with a committed symlink and a submodule → pipeline finishes and opens the PR
-    (mock gh).
-- Existing `publish` / `disputed_findings` / `triage_completion` tests still pass
-  (including the push-retry tests: a harmless failed attempt still retries).
-- Vault flow chart publish checks updated; `updated:` date bumped.
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k committed_bytes_pipeline` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
-
-### Result / notes
-2026-10-06 (Claude, opus): `scripts/ai-pipeline` (1) before `ai-review --base` (after
-`ensure_validated`) requires a clean tree and `committed-matches-worktree`, else writes
-"Committed content differs from the validated content: <detail>" and `stop review`;
-(2) `publish_ready` gained the committed-bytes clause right after the clean-tree check
-(before tasks/review-current/stamp); (3) `push()` runs `publish_ready` after every attempt,
-failed or successful, before the retry wait and before the terminal "3 tries" handling (the
-separate post-loop check is now inside the loop; remote-equals-HEAD unchanged). 7 tests
-`committed_bytes_pipeline` (pre-review filter, filtered review at PR preparation, push hook
-variants A/B/C incl. C with `AI_AUTO_RECOVER=1` → escalated, no `recover-calls`; harmless
-failed push still retries; symlink + submodule → PR). Existing
-`test_publish_ready_failed_push_that_changes_checkout_stops_before_retry` now asserts no
-retry wait (the check runs before it, as this task requires). README/docs/workflow.md
-publish-check paragraphs updated. Targeted: `Ran 7 tests … OK`; `-k publish_ready` 5 OK.
-Gate: `.ai/bin/ai-check` PASS, 179 tests. Vault `agents-flow.md` (pre-review byte check node,
-publish-checks node + bullets; `updated: 2026-10-06`) and hub Log updated.
-
-## T003 — Refuse state roots that overlap the checkout or knowledge dir (OR-02)
-Status: DONE
-Dependencies: none
-Model: opus
-
-### Goal
-OR-02 core: host authority state (`binding_dir()`, scripts/lib/workflow.py ~line 768) must
-never live where agent sessions can write: inside (or around) the checkout or the
-`--knowledge-dir`. Refused before any agent launches; defaults unchanged.
-
-### Implementation notes
-scripts/lib/workflow.py:
-- `state_root()`: `AI_STATE_DIR` if non-empty, else `XDG_STATE_HOME` + `/ai-toolkit` if
-  non-empty, else `~/.local/state/ai-toolkit`. A relative `AI_STATE_DIR`/`XDG_STATE_HOME` →
-  `fail('AI_STATE_DIR must be an absolute path: …')` (resp. XDG_STATE_HOME).
-- `overlap(a, b)`: True when either path equals or is inside the other
-  (`Path.is_relative_to` both ways), checked for the lexical absolute paths
-  (`os.path.abspath`) AND the real paths (`os.path.realpath`, which resolves an existing
-  prefix of a not-yet-created path).
-- `check_state_root(checkout, knowledge=None)`: the checkout is an EXPLICIT argument (never
-  discovered from the current directory inside this function), so callers such as the
-  watchdog (T005) can pass the target project. Refuse overlap with the checkout and, when
-  given, with the knowledge dir. Message: `Host state directory <root> overlaps the checkout
-  <path> (agent sessions can write there); set AI_STATE_DIR to a directory outside it.`
-  (analogous: "overlaps the knowledge directory"). Do not claim OS isolation.
-- `binding_dir()` uses `state_root()` and calls `check_state_root(<git toplevel>)`.
-- New helper command `state-root-check [--checkout PATH] [KNOWLEDGE_DIR]` in `main()`
-  (default checkout: `git rev-parse --show-toplevel` of the current directory).
-Callers: scripts/ai-run right after `ai_root` (before the clean-tree check):
-`ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"}` with `ai_die` on failure
-(also covers `--triage`). scripts/ai-pipeline: resolve `--knowledge-dir` at parsing like
-ai-run (`[[ -d ]]`, `cd -- "$2" && pwd -P`), store the resolved path in `run_args` and in
-`orig_args` (rebuild it so the manifest records the absolute path), and after `ai_root`
-run the same check before anything else (before the plan review's Codex call).
-ai-recover is T004; the watchdog is T005.
-Flow chart (same task): vault `agents-flow.md` gains the start check ("host state directory
-must be outside the checkout and the knowledge dir; else ⛔ stop before any agent");
-bump `updated:`.
-
-### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflow.py,
+scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.py,
 vault agents-flow.md
 
 ### Acceptance criteria
-- Tests named `state_root`:
-  - `AI_STATE_DIR` inside the checkout (direct path) → `ai-run --approved` and
-    `ai-pipeline --approved` exit 1 with "overlaps the checkout"; no mock claude/codex
-    invocation; nothing written under that directory;
-  - `AI_STATE_DIR` = a symlink outside the checkout pointing into it → refused; a symlink
-    inside the checkout pointing outside → refused;
-  - `AI_STATE_DIR` inside / equal to / containing the `--knowledge-dir` → refused with
-    "overlaps the knowledge directory" (both ai-run and ai-pipeline);
-  - relative `AI_STATE_DIR` and (with AI_STATE_DIR unset) relative `XDG_STATE_HOME` →
-    refused with "must be an absolute path";
-  - the helpers `review-info`/`run-manifest gate` fail closed with the same message
-    (binding_dir); `state-root-check --checkout <project>` run from another directory
-    checks that project;
-  - default: AI_STATE_DIR unset, `XDG_STATE_HOME` an absolute dir outside → works; and
-    ai-pipeline with a relative `--knowledge-dir` records the absolute real path in the run
-    manifest `args`.
-- All existing tests still pass (fixture state root is a sibling of the project).
-- Vault flow chart shows the start check; `updated:` date bumped.
+- Tests named `deps_runner` (fixture ci-setup declares `# ai-deps-inputs: deps.lock` and
+  `# ai-deps-outputs: vendor-deps`, creates the git-ignored `vendor-deps/` and appends to a
+  call log outside the checkout):
+  - `ai-run --approved`: ci-setup runs once before the first mock claude call (the mock
+    checks `vendor-deps/` exists), stamp written, no tracked file changed by the install;
+    a second `ai-run` with unchanged inputs does not run it;
+  - ci-setup exits 1, or times out (`AI_DEPS_TIMEOUT=1`, it sleeps) → `ai-run` exits 1 before
+    any mock claude call; last-error names `.ai/ci-setup` and the log; no stamp;
+  - ci-setup overwriting a tracked file, creating a non-ignored file, or committing a
+    tracked change → stop "changed project files", no stamp, no claude call (P2); the same
+    when it changes a file AND exits 1 (the violation is reported, P8);
+  - run-time cap (P11): `--run-timeout 5`, `AI_DEPS_TIMEOUT=600`, an installer that sleeps
+    60 s → `ai-run` exits 1 within the run budget (well under the 25 s test timeout), no
+    stamp, no mock claude call;
+  - auto-recovery (P8, `ai-pipeline --approved` with `AI_AUTO_RECOVER=1`): a fail-once
+    installer (exits 1 on the first call only) and a change-once installer (modifies a
+    tracked file on the first call only) → each escalates ("STOPPED, needs you" naming
+    dependency setup); no recovery Claude call (`recover-calls` absent), no recovery
+    checkpoint commit, no implementation session, no PR (`gh` log has no `pr create`);
+  - queue already complete (`tasks next` = none) → ci-setup not run;
+  - end to end (P1): `ai-pipeline --approved` on a fresh checkout with a stale stamp, a
+    successful installer, mock codex clean review, bare origin and mock gh → install runs
+    before the first task, the run finishes and opens the PR, `git status` clean at the end.
+- Existing ai-run/pipeline tests pass (their template ci-setup runs once, harmlessly).
+- Vault flow chart shows the dependency step; `updated:` date bumped.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k state_root` (output must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k deps_runner` (output must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-2026-10-06: `state_root()`, `overlap()`, `check_state_root(checkout, knowledge)` and the
-`state-root-check [--checkout PATH] [KNOWLEDGE_DIR]` helper in scripts/lib/workflow.py;
-`binding_dir()` checks against the git toplevel (key unchanged). ai-run and ai-pipeline run the
-check right after `ai_root` (before lock, clean-tree check and any Codex/Claude call);
-ai-pipeline resolves `--knowledge-dir` like ai-run and writes the absolute real path into
-`orig_args` (run manifest) and `run_args`. Six `state_root` tests (inside/equal/containing
-checkout, symlinks both ways, knowledge dir inside/equal/containing for both tools, relative
-AI_STATE_DIR/XDG_STATE_HOME, helpers fail closed + `--checkout` from another dir, default XDG
-path with relative `--knowledge-dir` recorded absolute). Targeted: `Ran 6 tests … OK`;
-`.ai/bin/ai-check`: 185 tests OK, exit 0. docs/workflow.md and vault agents-flow.md updated
-(start check node + bullet). Limitation: path check only, not OS isolation; ai-recover (T004)
-and the watchdog (T005) not yet covered.
+Done 2026-10-06. scripts/lib/common.sh `ai_deps GATE LIMIT`: returns 1 with `AI_DEPS_ERROR`
+set (callers print it: ai-run `ai_die "$AI_DEPS_ERROR"`; T003 can reuse it). Order after
+every installer exit: gate digest ("…changed the approved workflow gate"), tree snapshot
+("Dependency setup changed project files …"), exit status ("failed (exit N[, timeout after
+Ns])"), then `deps-record`. A `deps-status` error (bad declaration) or a non-positive limit
+also stops with a "Dependency setup" message. Log `.ai/local/deps-XXXXXXXX.log`; terminal
+gets the stale reason, then "Dependencies installed in Ns" or the log's last 5 lines.
+scripts/ai-run: after the triage block, before the loop, only when `tasks next` ≠ none;
+`AI_DEPS_TIMEOUT` must be 1–7 digits, capped by `remaining_time`; usage text mentions it.
+scripts/ai-recover: hard rule `*'Dependency setup'*`. Docs: README CI section,
+docs/workflow.md; vault agents-flow.md (deps node + ⛔ stop, note, recovery hard rule).
+Tests: 7 `deps_runner` tests (installs once + reinstall on lock change; fail/timeout/
+overwrite/untracked/commit/overwrite+fail; run-time cap + invalid timeout; complete queue;
+fail-once and change-once recovery escalate; pipeline end to end). Mock claude gained
+`MOCK_REQUIRE`. Evidence: `-k deps_runner` Ran 7 OK; `.ai/bin/ai-check` Ran 202 OK (579 s,
+close to the 600 s tool limit).
 
-## T004 — ai-recover refuses an overlapping state root before reading the manifest (OR-02)
+## T003 — Recovery installs dependencies before its validation (FL-01)
 Status: DONE
-Dependencies: T003
+Dependencies: T002
 Model: opus
 
 ### Goal
-OR-02, recovery part (P3): auto-recovery must not read authority from, or act on, a host
-state directory the agents could write, and the human must learn why.
+FL-01, recovery part (P4): `ai-recover`'s `commit_and_rerun` validates leftover work with
+`ai-check`; when a lockfile changed, it must install first so valid work isn't escalated.
 
 ### Implementation notes
-scripts/ai-recover: insert the check AFTER `escalate()` (and `resume()`) are defined and
-`branch`/`reason` are initialised (~line 45), and BEFORE the first manifest read
-(`approved_gate=$(ai_helper run-manifest gate …)`, ~line 52). On failure
-(`check=$(ai_helper state-root-check 2>&1)`), keep the configuration error in the persisted
-stop reason: set `reason="${check#Error: } (stopped during $stage: $reason)"` (or an
-equivalent that contains both), then `escalate 'the host state directory is not safe for
-recovery.' 'set AI_STATE_DIR to an absolute directory outside the checkout, then rerun
-ai-pipeline.'`. `escalate` writes `$reason` to `.ai/local/last-error`, notifies once and
-clears the marker. No Claude session, no commit, no `ai-pipeline` exec. The checkout is
-checked (the knowledge dir is unknown here); the resumed ai-pipeline checks the knowledge
-dir (T003).
-Flow chart (same task): the auto-recovery diagram in vault `agents-flow.md` gains the
-check before the run manifest is read (unsafe state dir → escalate to you); bump
-`updated:`.
+scripts/ai-recover `commit_and_rerun` (~line 159): before `"$AI_BIN/ai-check"`, run
+`ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}"` (the tree is dirty here; the
+`tree-snapshot` check from T001/T002 covers dirty trees). On failure `escalate "$why; but
+dependency setup failed: <message>." 'inspect .ai/ci-setup and the log, then rerun
+ai-pipeline.'`. Attempt reservation, hard rules, the gate comparisons and the checkpoint
+integrity checks (`stamp verify`, `committed-matches-worktree`) stay unchanged and in order.
+A dependency-setup stop that reaches ai-recover escalates via the hard rule added in T002.
+Flow chart (same task): the recovery diagram's `commit_and_rerun` branch notes "installs
+dependencies if stale, then the full gate"; bump `updated:`.
 
 ### Likely affected modules
 scripts/ai-recover, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
-- Tests named `recover_state_root`: with an approved run recorded in a safe state dir, then
-  `AI_STATE_DIR` pointing inside the checkout (and, separately, a relative `AI_STATE_DIR`),
-  `ai-recover --stage implementation` (with `AI_AUTO_RECOVER=1`) exits 1; stderr says
-  "escalated to the human"; `.ai/local/last-error` contains "overlaps the checkout" (resp.
-  "must be an absolute path") AND the original stop reason; exactly one "STOPPED, needs you"
-  notification containing the configuration error; no `recover-calls` file (no recovery
-  Claude session); no new commit; `pipeline.active` removed; the attempt budget in the safe
-  state dir is unchanged.
-- Existing `recover` tests still pass.
+- Tests named `deps_recovery` (`AI_AUTO_RECOVER=1`, MOCK_RECOVER=commit_and_rerun, an
+  approved run, uncommitted leftover work that changes `deps.lock`; `.ai/validate` passes
+  only when `vendor-deps/` matches `deps.lock`):
+  - recovery runs ci-setup, the gate passes, the recovery checkpoint commit exists and
+    verifies, the pipeline resumes; attempt counter incremented once;
+  - ci-setup fails → escalation notification naming dependency setup; no commit; no resume;
+  - ci-setup changes a project file → escalation "changed project files"; no commit.
+- Existing `recover` tests pass.
 - Vault recovery diagram updated; `updated:` date bumped.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k recover_state_root` (output must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k deps_recovery` (output must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-2026-10-06: scripts/ai-recover runs `ai_helper state-root-check` (checkout = git toplevel)
-after `escalate()`/`resume()` are defined and before the first `run-manifest` read; on
-failure `reason="<config error> (stopped during S: <original reason>)"` and it escalates
-("the host state directory is not safe for recovery." / "set AI_STATE_DIR to an absolute
-directory outside the checkout, then rerun ai-pipeline."). Test
-`test_recover_state_root_unsafe_escalates_before_reading_the_manifest` (subtests: inside the
-checkout, relative): exit 1, "escalated to the human", last-error holds both messages, one
-new ⛔ containing the config error, no extra recover call, HEAD unchanged, marker removed,
-run.json (attempt budget) byte-identical, nothing created inside the checkout. Targeted:
-`Ran 1 test … OK`; `.ai/bin/ai-check`: 186 tests OK. docs/workflow.md recovery contract and
-vault agents-flow.md recovery diagram + bullet updated. The test's recover-calls file
-already exists from the earlier pipeline stop, so "no recovery session" is asserted as an
-unchanged call count. Limitation: path check only, not OS isolation; knowledge dir is
-checked by the resumed ai-pipeline, the watchdog is T005.
+Done 2026-10-06. scripts/ai-recover `commit_and_rerun`: after the dirty-tree check, before
+`ai-check`, `ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}"`; failure escalates
+"$why; but dependency setup failed: $AI_DEPS_ERROR." / 'inspect .ai/ci-setup and the log,
+then rerun ai-pipeline.' Gate comparisons and checkpoint integrity checks unchanged and in
+order. Tests: 3 `deps_recovery` (install + gate + checkpoint + resume, attempt 1/2; fail-later
+and change-later installers escalate with no commit, no resume, deps.lock still dirty); mock
+ci-setup gained `fail-later`/`change-later`. Docs: README CI paragraph, docs/workflow.md
+(deps section + recovery paragraph); vault flow chart recovery diagram + hub log.
+Evidence: `-k deps_recovery` Ran 3 OK; `-k recover -k deps_runner` Ran 30 OK;
+`.ai/bin/ai-check` Ran 205 OK (555 s).
 
-## T005 — Same check for the watchdog host copy, install and runtime (OR-02)
+## T004 — PR body and notification split "Needs you" from automated checks (FL-09)
 Status: DONE
-Dependencies: T003
-Model: opus
-
-### Goal
-OR-02, watchdog part: the timer's host copy of the scripts and the state root it uses must
-not overlap the TARGET checkout (the `project` argument, not the caller's directory), so
-the code that verifies the gate before crash recovery can't be agent-editable.
-
-### Implementation notes
-scripts/lib/watchdog.py `timer()` (~line 128) runs before `os.chdir(root)` (~line 267), so
-the check must use the supplied `root` explicitly (P1): import `check_state_root`/`overlap`
-from the sibling `workflow.py` (`sys.path` insert of `Path(__file__).resolve().parent`) and
-call `check_state_root(root)`, or run `python3 <lib>/workflow.py state-root-check
---checkout <root>` with `cwd=root`; never rely on the caller's current directory. Install
-path only, before `rmtree`/`copytree` and before writing any unit: refuse a relative
-`XDG_DATA_HOME`; refuse when the host copy dir overlaps `root` (lexical and real paths,
-both directions); run the state-root check for the environment the timer will forward.
-Report as a clear error (exit 2 like other `parser.error`s), writing nothing.
-`start_recovery()` (~line 190): replace the lexical `bin_dir.is_relative_to(root)` with
-the real-path overlap check (both directions), and run the state-root check for `root`
-BEFORE the gate digest / `run-manifest gate` calls; on failure return a reason that
-contains the configuration error (e.g. `auto-recovery refused: Host state directory …
-overlaps the checkout …`), so the human is notified and `systemd-run` is never called.
-Uninstall stays unchanged. The watchdog does not check the knowledge dir (the resumed
-ai-pipeline does, T003).
-Flow chart (same task): the watchdog part of vault `agents-flow.md` notes that install and
-auto-recovery refuse a host copy or state dir overlapping the checkout (⛔ notified, no
-recovery started); bump `updated:`.
-
-### Likely affected modules
-scripts/lib/watchdog.py, tests/test_workflow.py, vault agents-flow.md
-
-### Acceptance criteria
-- Tests named `watchdog_host_root` (mock `systemctl` as in
-  `test_watchdog_install_and_uninstall_timer`):
-  - install launched from OUTSIDE any Git repository (cwd = a plain temp dir) with
-    `AI_STATE_DIR` inside the target project → refused, message names the state dir and
-    the project; no unit files under `XDG_CONFIG_HOME/systemd/user`, no host copy, no
-    systemctl call; control: from outside Git with a safe state dir → installs;
-  - install launched from ANOTHER checkout (cwd = a second git repo) with `AI_STATE_DIR`
-    inside the target project only (not inside the caller's repo) → refused, nothing
-    written; control: launched from another checkout with a safe state dir → installs;
-  - `XDG_DATA_HOME` inside the target checkout, or a symlink pointing into it → refused,
-    nothing written; relative `XDG_DATA_HOME` → refused;
-  - runtime (P3): host copy (`host_watchdog`) with `--recover`, a crashed marker, an
-    approved run, then `AI_STATE_DIR` inside the checkout → exit 1, one notification that
-    contains the configuration error ("overlaps the checkout"), no `systemd-run.log`, no
-    `recover-calls` (no Claude);
-  - existing `test_watchdog_install_and_uninstall_timer` and watchdog recovery tests pass
-    unchanged (default layout accepted).
-- Vault watchdog part updated; `updated:` date bumped.
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k watchdog_host_root` (output must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
-
-### Result / notes
-2026-10-06: scripts/lib/watchdog.py imports `check_state_root`/`overlap` from the sibling
-workflow.py (`sys.dont_write_bytecode`: no `__pycache__` in the digested `.ai/bin`). Install
-path (before `rmtree`/`copytree`/units) raises `Refused` for a relative `XDG_DATA_HOME`, a
-host copy overlapping `root`, or `check_state_root(root)` failing → `parser.error('refusing
-to install the timer: …')`, exit 2. `start_recovery()` uses `overlap(bin_dir, root)` and
-runs `check_state_root(root)` before the digest/`run-manifest gate`, returning `auto-recovery
-refused: Host state directory … overlaps the checkout …`. Uninstall unchanged. Tests
-`test_watchdog_host_root_install_checks_the_target_checkout` (subtests: plain dir and another
-checkout as cwd, refused + safe control; XDG_DATA_HOME inside / symlink into checkout;
-relative) and `test_watchdog_host_root_recovery_refuses_a_state_dir_in_the_checkout`.
-`python3 -m unittest discover -s tests -k watchdog_host_root`: Ran 2 tests OK; `-k watchdog`:
-19 OK (existing install/recovery tests unchanged). `.ai/bin/ai-check`: Ran 188 tests OK.
-Docs: docs/workflow.md, README.md; vault agents-flow.md watchdog node + note.
-
-## T006 — Final docs audit for the new checks
-Status: DONE
-Dependencies: T002, T004, T005
+Dependencies: none
 Model: sonnet
 
 ### Goal
-README and docs/workflow.md describe the OR-01/OR-02 stop points accurately; final audit
-and consolidation of the vault flow chart that T001–T005 already updated task by task,
-plus the PR's flow-chart line and manual testing instructions.
+FL-09, runtime part: the PR says exactly what Zack must check by hand; automated fault
+injections are listed separately with their test names (PR #14 listed 10 automated steps
+as manual).
 
 ### Implementation notes
-docs/workflow.md: next to the review-provenance paragraph (~line 234) say the state root
-must be an absolute path outside the checkout and the knowledge directory (checked at
-every start, by every host-state read, by ai-recover before it reads the run manifest and
-by the watchdog against the target project at install and before recovery; a
-configuration check, not OS isolation); in the runner/pipeline sections say every
-accepted DONE checkpoint, the final handoff commit, the pre-review step and the publish
-checks (before and after every push) require committed bytes = validated files on disk;
-add the limitation: repositories whose content passes clean/smudge or eol filters (Git
-LFS, `text=auto` with CRLF files, `ident`) stop with "differs from the validated content".
-README: same in the pipeline/publish description and the watchdog install section (~line
-630: the host copy and state directory must be outside the checkout). Add
-`docs_consistency` required-sentence assertions for the two key sentences. Vault
-`~/zWiki/zWiki/20 Projects/agents/agents-flow.md`: audit the per-task changes of T001–T005
-against the final code (consistent wording, no duplicates, `updated:` date current); fix
-only what is wrong or missing. Append a dated line to the hub `agents.md` Log (never tick
-vault checkboxes). PR description: replace the handoff `## Flow chart` placeholder with a line
-that still starts "Flow chart updated" (test
-`test_pr_body_flow_this_repo_declares_the_flow_chart` requires it), e.g.
-"Flow chart updated: OR-01/OR-02 checks added to agents-flow.md (date)". Update the
-handoff's "Manual testing for the human" with scratch-project steps (watchdog install from
-another directory, refusal before agents launch, final-handoff mismatch diagnostics).
+scripts/lib/workflow.py: `manual_testing(handoff)` returns `(needs_you, automated, legacy)`
+from "Manual testing for the human": subsections `### Needs you` and `### Covered by
+automated tests`; without them the whole section is "needs you" (legacy). `pr_body`: the
+"How to test" section renders `### Needs you` first ("None — everything below is automated"
+when None/empty), then `### Covered by automated tests` inside `<details><summary>N
+automated checks</summary>`; a bullet without a backticked name gets " ⚠ no test named".
+`finish_summary`: counts only needs-you steps: "Test: N manual step(s) in the PR", or
+"Nothing to test by hand (N automated checks in the PR)" when None; legacy unchanged.
+Flow chart (same task): the PR/FINISHED part says the PR separates "Needs you" from
+automated checks and the notification counts only "Needs you"; bump `updated:`.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `manual_testing_render`:
+  - pr-body: needs-you steps appear before the automated list; automated list inside
+    `<details>` with its count; an automated bullet without a backticked name is flagged;
+  - "None" under Needs you → PR says so; finish-summary says "Nothing to test by hand (N
+    automated checks in the PR)" and does not count automated steps;
+  - legacy handoff (no subsections) → output identical to today's (existing tests unchanged).
+- Existing `finish_summary` and `pr_body` tests pass.
+- Vault flow chart updated; `updated:` date bumped.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k manual_testing_render` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+`manual_testing()` added; `pr_body` and `finish_summary` use it (legacy output unchanged).
+`manual_testing_render` Ran 4 OK; `.ai/bin/ai-check` Ran 209 OK (564 s). Vault flow chart
+(PR and FINISHED nodes, notification table) updated; `updated:` was already 2026-10-06.
+
+## T005 — Prompts and templates describe the "Needs you" split (FL-09)
+Status: DONE
+Dependencies: T004
+Model: sonnet
+
+### Goal
+FL-09, guidance part: agents write the two-part section that T004 renders.
+
+### Implementation notes
+`templates/.ai/handoff.md`: "Manual testing for the human" with `### Needs you` and
+`### Covered by automated tests` and short comments. Prompts: runner.md and triage.md (keep
+the shared "How to work here" section identical), fix-review.md, review.md ("Manual testing
+recommendations": what a human must check vs what is or should be an automated test);
+templates/CLAUDE.md (~line 75) and templates/AGENTS.md (~line 29). Rule text: "Needs you"
+only for things a human must do (look and feel, phone/real devices, live accounts, external
+services, decisions) or "None"; every step reproducible by a test goes under "Covered by
+automated tests" with its test name in backticks. No flow-chart change (T004 covers the
+visible behaviour).
+
+### Likely affected modules
+templates/.ai/handoff.md, templates/.ai/prompts/{runner,triage,fix-review,review}.md,
+templates/CLAUDE.md, templates/AGENTS.md, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `manual_testing_prompts`: handoff template has both subsections; runner,
+  triage, fix-review, review prompts and the CLAUDE.md/AGENTS.md templates mention "Needs
+  you" and "Covered by automated tests"; runner/triage "How to work here" sections still
+  identical (`tool_contract` tests pass); a fresh `setup-project` handoff renders through
+  `pr-body` without error.
+- Existing `tool_contract` and template tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k manual_testing_prompts` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+DONE. Handoff template, runner/triage/fix-review/review prompts, review template, and
+templates CLAUDE.md/AGENTS.md describe "Needs you" vs "Covered by automated tests"; shared
+"How to work here" untouched. Tests `manual_testing_prompts` (2) added. Targeted run with
+`tool_contract`: Ran 5 tests OK; `.ai/bin/ai-check`: Ran 211 tests OK.
+
+## T006 — Watchdog timer at setup, start warning, PID-based waits (FL-07)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+FL-07: every checkout that runs a pipeline has its watchdog timer, missing timers are
+visible at start, and documented waits loop on a PID (two `pgrep -f` waits died on
+2026-10-05/06 by matching themselves).
+
+### Implementation notes
+scripts/lib/watchdog.py: `--timer-status` (mutually exclusive with install/uninstall), using
+the same unit-name logic as `timer()` (factor out `unit_name(root)`). Defined check (P10):
+`installed <timer>` (exit 0) only when both unit files exist AND `systemctl --user
+is-enabled <timer>` prints `enabled` AND `systemctl --user is-active <timer>` prints
+`active`; `missing <timer> (<reason>: no unit files / not enabled / not active)` (exit 1)
+otherwise; `unknown <timer> (<reason>)` (exit 2) when systemctl is unavailable or errors
+for another reason. scripts/lib/workflow.py
+`setup`: new `--watchdog` (not with `--dry-run`/`--upgrade`): after a successful install run
+`<root>/.ai/bin/ai-watchdog <root> --install-timer --diagnose --recover` (stdin /dev/null);
+a failure exits non-zero with its output ("files were installed; the timer was not"). Without
+the flag, the final message adds "Next: install the watchdog timer: .ai/bin/ai-watchdog
+--install-timer --diagnose --recover". scripts/ai-pipeline at start: if `ai-watchdog
+--timer-status` exits 1, print "No watchdog timer for this checkout; …" and append
+"(no watchdog timer for this checkout)" to the STARTED/RESUMED notification; exit 2 →
+"(watchdog timer status unknown)" likewise; never stop.
+README: "Waiting for a run" (coordinator/scripts): wait on the pipeline PID
+(`while kill -0 "$pid" 2>/dev/null; do sleep 60; done`, or `.ai/local/pipeline.active`
+contents), never `pgrep -f <pattern>` loops (the loop's own command line matches); remove
+the timer with `--uninstall-timer` before deleting a worktree. Test (P6): no executable
+`pgrep -f` wait in scripts/ and templates/ (shell/python code; docs may explain the
+pitfall), and README contains the PID-based example and the self-matching warning. Vault `agents-human-todo.md`: add one open item
+(don't tick anything): "Watchdog timers: confirm/install for agents, raid-planner,
+family-planner and each new run worktree (Claude can do it: `.ai/bin/ai-watchdog
+--install-timer --diagnose --recover`)".
+Flow chart (same task): setup step mentions the optional timer and the start warning;
+bump `updated:`.
+
+### Likely affected modules
+scripts/lib/watchdog.py, scripts/lib/workflow.py, scripts/ai-pipeline, README.md,
+tests/test_workflow.py, vault agents-flow.md, vault agents-human-todo.md
+
+### Acceptance criteria
+- Tests named `watchdog_setup` (mock systemctl):
+  - `setup-project --watchdog` installs files and the timer units (unit files exist, host
+    copy exists, systemctl enable called); `--watchdog --dry-run` and `--watchdog --upgrade`
+    are rejected; a failing systemctl → non-zero exit with the message, files installed;
+  - plain setup prints the "Next: install the watchdog timer" line and writes no units;
+  - `--timer-status` (mock systemctl answering is-enabled/is-active): `missing` exit 1
+    before install; `installed` exit 0 after a full install; unit files present but
+    `enable --now` failed (partial install) → `missing … not enabled`; enabled but stopped
+    → `missing … not active`; systemctl absent from PATH → `unknown` exit 2 (P10);
+  - ai-pipeline with a missing/partial/stopped timer prints the warning and the STARTED
+    notification carries the note; a recovery resume's RESUMED notification carries it too;
+    unknown status → "(watchdog timer status unknown)"; the run continues in every case;
+  - no `pgrep -f` in executable files under scripts/ and templates/; README has the
+    `kill -0` example and the warning that `pgrep -f` waits match themselves.
+- Existing watchdog tests pass.
+- Vault flow chart and human-todo updated; `updated:` date bumped.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k watchdog_setup` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Done. `--timer-status` (unit_name/units_dir factored out), `setup-project --watchdog` and the
+"Next" line, ai-pipeline start warning plus STARTED/RESUMED note, README "Waiting for a run".
+`python3 -m unittest discover -s tests -k watchdog_setup`: Ran 11 tests, OK. `.ai/bin/ai-check`:
+Ran 222 tests, OK (590 s). Vault flow chart (updated 2026-10-06), hub Log and human-todo item
+done. Limit: the real systemd path is only exercised through a mock systemctl.
+
+## T007 — Final docs audit for batch 2
+Status: DONE
+Dependencies: T001, T002, T003, T004, T005, T006
+Model: haiku
+
+### Goal
+README, docs/workflow.md and the vault notes describe batch 2 accurately; the PR carries
+the flow-chart line and the two-part manual testing section.
+
+### Implementation notes
+Cross-check against the code and the T001–T006 results: docs/workflow.md (dependency step:
+when it runs (start of `ai-run`, recovery validation), inputs/outputs, declaration lines,
+stamp, timeout, snapshot check, stops, the limit that dependencies changed mid-run install at
+the next start, the risk that ci-setup runs package-manager code on the host; Needs you vs
+automated; timer status/warning; waits), README (CI section ~line 374: the host also runs
+`.ai/ci-setup`; modes table and setup steps if affected; `AI_DEPS_TIMEOUT`). Add
+`docs_consistency` required sentences for the dependency step and the "Needs you" split.
+Vault `agents-flow.md`: consistent wording, no duplicates, `updated:` current; fix only what
+is wrong. Hub `agents.md`: append a dated Log line (never tick vault checkboxes). This repo's
+`.ai/handoff.md`: `## Flow chart` line starting "Flow chart updated" (required by
+`test_pr_body_flow_this_repo_declares_the_flow_chart`), and "Manual testing for the human"
+in the new format: "Needs you" only for real human checks (e.g. a real overnight run with a
+fresh worktree, phone notification wording), every scripted scenario under "Covered by
+automated tests" with its test name.
 
 ### Likely affected modules
 README.md, docs/workflow.md, tests/test_workflow.py, .ai/handoff.md, vault agents-flow.md,
@@ -447,20 +422,141 @@ vault agents.md (Log)
 
 ### Acceptance criteria
 - Tests named `docs_consistency` pass, including the new required sentences.
-- Docs describe only implemented behaviour (cross-check against T001–T005 results) and do
-  not call the state-root check isolation or sandboxing.
-- Vault flow chart audited (consistent with the code, `updated:` date current) and hub
-  Log updated; handoff "Flow chart" section starts with "Flow chart updated" and states
-  what changed.
+- Docs describe only implemented behaviour; no FL-02/03/04/05/06 promises.
+- Vault chart audited, hub Log line added; handoff flow-chart line and two-part manual
+  testing present (every automated bullet names a test).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k docs_consistency` (output must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-README and docs/workflow.md now state the committed-bytes check on every accepted DONE
-checkpoint and the final handoff, the clean/smudge/eol filter limitation, and the absolute
-state root outside the checkout (configuration check, not isolation). Two required
-sentences added to `docs_consistency` (3 tests pass). Vault agents-flow.md audited against
-T001–T005 (no change needed, `updated:` 2026-10-06); hub Log line appended. `.ai/bin/ai-check`
-PASS, 188 tests.
+Pending.
+
+## T008 — Tree snapshot covers uninitialised submodule paths (review M1)
+Status: DONE
+Dependencies: T001, T002
+Model: opus
+
+### Goal
+Codex review M1: `tree_snapshot` (scripts/lib/workflow.py ~1627) records every gitlink
+without `.git` as the constant `uninitialised`, before its symlink/file checks. An installer
+that creates or overwrites files under an uninitialised submodule path, or replaces it with a
+symlink, leaves the snapshot unchanged, so FL-01's "installer changed no project file" check
+passes and the stamp is recorded.
+
+### Implementation notes
+Determine the real kind first: a symlink at a gitlink/nested-repo path is recorded as `link`
+plus its target (never followed); an initialised repository recurses as today; an
+uninitialised gitlink directory records its mode plus a recursive filesystem walk of its
+contents (relative path, kind, mode, bytes or link target; symlinks not followed); a
+non-directory file at that path records `file` with bytes; absence records `missing`. Git
+reports no untracked files under a gitlink path, so the walk must be filesystem-based; no
+ignore rules apply inside (an uninitialised submodule should be empty). Keep the docstring
+accurate. Prefer direct `tree-snapshot` calls in tests over full runner fixtures: the gate is
+already near the 600 s session limit; at most one runner-level regression.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `tree_snapshot_uninitialised_submodule`: with a real repository containing a
+  committed but uninitialised gitlink, the snapshot changes when a file is created inside the
+  path, when an existing file there is overwritten, when its mode changes, and when the
+  directory is replaced by a symlink; it is unchanged when nothing is touched.
+- One runner regression: an installer that creates a file inside an uninitialised submodule
+  path (exit 0 and exit 1) stops with "Dependency setup changed project files" and records no
+  stamp.
+- Existing `deps_status` / `deps_runner` / `deps_recovery` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k tree_snapshot_uninitialised_submodule` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Done 2026-10-07. `tree_snapshot` now uses `snapshot_path` (link target / file mode+bytes /
+dir mode / missing, symlinks never followed); a gitlink or nested-repo path that is not an
+initialised repository directory records `uninitialised` plus a filesystem walk of its
+contents. Tests: `test_tree_snapshot_uninitialised_submodule` (create, overwrite, chmod,
+nested dir and symlink, dir mode, replaced by symlink, by file, removed; untouched equal) and
+`test_deps_runner_installer_writing_into_uninitialised_submodule_stops` (exit 0 and 1: stop
+"Dependency setup changed project files", no `deps.json`). Targeted: Ran 1 test OK. Gate:
+`.ai/bin/ai-check` PASS, 224 tests in 611 s. Limitation: the gate now exceeds the 600 s Bash
+tool limit; it was auto-moved to the background and completed with exit 0.
+
+## T009 — Dependency outputs must be directories (review N2)
+Status: DONE
+Dependencies: T001
+Model: sonnet
+
+### Goal
+Codex review N2: `deps_status` (scripts/lib/workflow.py ~1588) treats any existing path as
+a present output, so a regular file or a broken symlink at `node_modules` reports `current`.
+
+### Implementation notes
+Use `is_dir()` for declared outputs; report `stale missing output <p>` when absent and
+`stale output <p> is not a directory` when something else is there (a symlink to a directory
+counts as present). Unit-level tests only (no runner fixtures).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (only if it describes the
+output check)
+
+### Acceptance criteria
+- Tests named `deps_status_output_kind`: matching stamp with a regular file at the output →
+  stale "not a directory"; broken symlink → stale; symlink to a directory → current; real
+  directory → current.
+- Existing `deps_status` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k deps_status_output_kind` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+BLOCKED (gate wall time only). Implemented in ae6c54b: `deps_status` uses `lexists` for
+missing and `is_dir()` for kind; test `test_deps_status_output_kind` covers file, broken
+symlink, dir symlink, real dir. Targeted run: `-k deps_status` Ran 8, OK. Full `ai-check` in
+the foreground exceeded the 600 s tool limit and was auto-backgrounded, so it was not
+confirmed in-session; the runner's recovery validation recorded PASS (2026-10-07T02:23:53Z).
+
+## T010 — Wrapped automated test bullets are not flagged; FINISHED count regression (review N1)
+Status: DONE
+Dependencies: T004
+Model: sonnet
+
+### Goal
+Codex review N1: `pr_body` (scripts/lib/workflow.py ~1896) checks only a bullet's first
+physical line for a backtick, so this branch's own handoff gets five false "⚠ no test named"
+warnings for test names on continuation lines; a lone backtick also passes. Also add the
+missing plan-review P12 regression (FINISHED counting with both subsections populated).
+
+### Implementation notes
+Group the automated section into list items (a bullet line plus its indented continuation
+lines); flag an item unless it contains a nonempty paired backtick span (e.g.
+`` `[^`\n]+` `` across the joined item). Append the warning to the item's last line so the
+Markdown stays valid. Item count logic unchanged. Unit-level tests only.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `manual_testing_wrapped`: a bullet whose test name is on a continuation line
+  gets no warning; an unnamed bullet and a bullet with an unmatched single backtick are
+  flagged; the count of automated checks is unchanged; rendering this repo's own
+  `.ai/handoff.md` flags only bullets that truly name no test.
+- A `finish_summary` test with two "Needs you" steps and three automated checks reports
+  "Test: 2 manual step(s)" (P12).
+- Existing `manual_testing_render` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k manual_testing_wrapped` (output must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+Implemented `flag_unnamed` (scripts/lib/workflow.py) and used it in `pr_body`: items are a bullet
+plus continuation lines, flagged unless a paired nonempty backtick span exists, warning appended
+to the last line. Added four `manual_testing_wrapped` tests (wrapped name, unnamed/lone backtick,
+this repo's handoff, finish-summary P12). Targeted `-k manual_testing_wrapped`: Ran 4 tests, OK;
+`-k manual_testing`: Ran 10 tests, OK. BLOCKED only on the gate: `.ai/bin/ai-check` in the
+foreground exceeded the 600 s tool limit (same wall-time issue as T009), so a full PASS was not
+confirmed in-session; the runner's validation of the checkpoint is the evidence.

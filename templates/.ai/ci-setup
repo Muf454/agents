@@ -4,4 +4,19 @@ set -euo pipefail
 # Install what .ai/validate needs on a fresh CI machine (GitHub Actions, ubuntu-latest).
 # Example for an npm project:  npm ci
 # Keep it non-interactive. Secrets and production access do not belong here.
+#
+# The host runs this file too: at the start of ai-run and before recovery validation, when
+# dependencies are missing or stale (stamp: ignored .ai/local/deps.json). It must only
+# install ignored dependencies (e.g. node_modules); if it changes any tracked or untracked
+# project file, the run stops.
+# Stale means: no stamp, this file changed, an input file was added/removed/changed, or an
+# output directory is missing. Declare them on lines that start with "# ai-deps-inputs:" and
+# "# ai-deps-outputs:" (relative paths or globs inside the checkout), e.g. for npm:
+#     # ai-deps-inputs: package-lock.json
+#     # ai-deps-outputs: node_modules
+#     npm ci
+# Defaults without declarations: inputs are the lockfiles at the repo root (package-lock.json,
+# npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock, bun.lockb, requirements*.txt,
+# poetry.lock, uv.lock, Pipfile.lock, Gemfile.lock, go.sum, Cargo.lock, composer.lock);
+# the output is node_modules when package.json exists.
 printf '%s\n' 'No CI setup configured in .ai/ci-setup; installing nothing.'

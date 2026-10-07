@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 6ce64ff07420b37532932fcf693ade0b5a736bdefe00f3cdd2271e00be4047b9; saved 2026-10-06T05:27:14Z. -->
+<!-- Plan review of plan digest 158d34543c9a722093a850185f30f3534023994a62efead0f28d7550e000fd9f; saved 2026-10-06T10:52:56Z. -->
 
 # Plan review
 
-Overall verdict: APPROVE WITH MINOR adjustment to T002’s regression-test instructions.
+Overall verdict: PROCEED with one minor regression-test improvement.
 Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
 
-Reviewed HEAD: `783bd2248aae40f9aa151ff8b583235a69046e0a`
+Reviewed HEAD: `02a910dae69a159f05ee3086c340bfb9903490ff`
 
-Scope: OR-01/OR-02 spec, plan, tasks, affected scripts and helpers, integration tests, validation configuration and evidence, documentation, and vault workflow notes. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, spec, plan, all seven tasks, state/handoff, affected source and templates, relevant tests, documentation, Git history, vault notes, and validation evidence. No files modified; no network or MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -19,29 +19,36 @@ None.
 
 ## MINOR findings
 
-- P7: Update the existing retry-sleep assertion for the intentionally earlier integrity stop.
+- P12: Explicitly test notification counting for a mixed handoff.
 
-  **Location:** `.ai/tasks.md:115–118`, `.ai/tasks.md:163–164`; `tests/test_workflow.py:1728–1734`.
+  **Location:** `.ai/tasks.md:227`; `tests/test_workflow.py:1274`; `tests/test_workflow.py:1850`.
 
-  T002 correctly requires `publish_ready` after every failed push, before the retry wait. However, the existing dirty-push regression test explicitly expects a 20-second sleep. With the planned implementation, its hook dirties the checkout, the immediate post-push check stops, and `sleep.log` is never created. The existing assertion therefore fails despite correct behavior.
+  T004 explicitly tests PR ordering for the split and FINISHED wording when “Needs you” is None. It does not explicitly require a notification assertion when both subsections contain steps. Existing notification tests use legacy handoffs, so they cannot establish that the new format counts human steps correctly while excluding automated checks.
 
-  **Concrete plan change:** Explicitly include updating this test to assert no retry sleep and exactly one push-hook invocation. Preserve its assertions for the cleanliness diagnostic, absent remote branch, and absent PR creation. Keep separate coverage proving harmless failed pushes still sleep and retry.
+  **Concrete plan change:** Add a `manual_testing_render` case with two human steps and three named automated checks. Assert that `finish-summary` reports exactly two manual steps, excludes the automated checks from that count, and does not say “Nothing to test by hand.” This verifies FL-09’s central notification requirement.
+
+## Assessment
+
+The revision addresses P8–P11 at the planning level: dependency setup stops must escalate, preservation checks run after unsuccessful installers, submodule snapshots recurse, timer status requires enabled and active units, and the remaining-run-time cap has a regression scenario.
+
+Task dependencies are coherent, every task specifies a model, and the integrity-sensitive dependency work uses `opus`. No failed implementation attempt is recorded for these TODO tasks. The frozen `.ai/bin` boundary and same-task flow-chart updates remain explicit.
+
+No additional security or architecture finding was identified in the inspected scope. Host execution of package-manager code, the writable dependency stamp, and the limits on mid-run dependency installation are acknowledged design choices.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean.
+- Requested HEAD confirmed; working tree clean; `git diff --check` passed.
 - Task-queue validation passed.
-- Documentation consistency tests: **3 passed**.
-- Shell syntax: **13 files passed**.
 - Python syntax: **3 files passed**.
-- Stored baseline evidence records **168 tests passing** at `d6038f6`; this was not rerun.
+- Bash syntax: **12 files passed**.
+- Documentation consistency: **3 tests passed**.
+- Stored baseline log reports **188 tests passed** at `9e11a11`, before planning.
 - Current validation-stamp verification failed as stale.
-- Full gate and integration tests were not run because they create writable fixtures and validation artifacts.
 
-## Security and architecture concerns
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not rerun because they require writable fixtures, locks, logs, and validation artifacts. The stored baseline does not validate this revision.
 
-The revised plan addresses prior findings P1–P6 in the inspected paths. Explicit models fit the tasks’ risks, dependencies are coherent, and workflow changes now include flow-chart updates in the same task. Authority-root checks remain configuration checks and do not establish OS isolation.
+## Validation and human acceptance
 
-## Manual testing recommendations
+Implement the planned regressions plus P12, then run the required full gate. Human acceptance should include a fresh-worktree run, confirmation that the opted-in timer is active, and inspection of the PR testing split and phone notifications.
 
-After implementation, verify watchdog installation from outside Git and another checkout, refusal before agent launch, final-handoff mismatch diagnostics, and integrity escalation on the third failed push. Confirm the vault chart’s date and the handoff’s flow-chart statement.
+This plan review does not constitute implementation verification or human acceptance.

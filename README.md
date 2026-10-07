@@ -54,7 +54,9 @@ and adds local-log/local-settings exclusions to `.gitignore`. Existing files,
 including CLAUDE.md, AGENTS.md, docs, Claude settings, and validation, are preserved.
 If a KEEP file contains different guidance, reconcile it with the toolkit template
 manually. Re-running setup fills missing files; it does **not** upgrade existing
-copies. Symlinked workflow destinations are rejected before copying.
+copies. Symlinked workflow destinations are rejected before copying. Setup ends by
+suggesting the watchdog timer; `setup-project --watchdog "$PWD"` installs it too (see
+[Optional checkout watchdog](#optional-checkout-watchdog)).
 
 ### Upgrading an installed project
 
@@ -291,6 +293,10 @@ commits. `--no-pr` stops after the review;
 
 The finish summary lists: deciding unresolved findings (draft PR), the manual test
 steps from `.ai/handoff.md`, merging, and every item under the handoff's "Human todos".
+Manual testing is split into `### Needs you` (steps only a human can verify, e.g. look
+and feel, phone notifications, external services) and `### Covered by automated tests`
+(scenarios with deterministic test names); the PR shows only "Needs you" steps in the
+summary.
 
 ### Auto-recovery
 
@@ -376,6 +382,11 @@ Setup installs `.github/workflows/ai-validate.yml`, which runs `.ai/ci-setup`
 to `main`, so the PR shows an independent green/red check. Add toolchain setup steps
 there if needed. Both files are protected like the rest of the gate. Hosting
 platforms such as Vercel add a preview deploy per PR, which is where you test.
+`ai-run` also runs `.ai/ci-setup` on the host before its first task when dependencies
+are missing or stale (a fresh worktree, a changed lockfile; `AI_DEPS_TIMEOUT`, default
+1200 s); a tree-snapshot before and after verifies no project files were changed by the
+install, or the run stops. Auto-recovery does the same before validating leftover work
+that changed a lockfile. Dependencies a task changes mid-run are installed at the next start.
 
 ## Optional project knowledge base
 
@@ -633,6 +644,15 @@ systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
 
+`ai-watchdog --timer-status` prints `installed`, `missing (reason)` or `unknown (reason)`
+(exit 0, 1, 2); `installed` needs both unit files, `enabled` and `active`. `ai-pipeline`
+checks it at every start and says so in the screen output and the STARTED/RESUMED
+notification when the timer is missing or unknown; the run continues. `setup-project
+--watchdog` installs the timer right after the files (not with `--dry-run` or
+`--upgrade`); plain setup ends with a "Next: install the watchdog timer" line. Each new
+run worktree is its own checkout and needs its own timer; remove it with
+`--uninstall-timer` before deleting the worktree.
+
 `--install-timer` writes `ai-watchdog-<project>-<hash>.{service,timer}` to
 `~/.config/systemd/user/` with the absolute checkout path, the given options and the
 installing shell's `PATH`, `XDG_*`, `AI_STATE_DIR` and `AI_*` settings, and runs a copy of
@@ -644,6 +664,17 @@ user config). Notification
 settings come from the user config described above. Existing projects need the new
 `ai-watchdog` and `lib/watchdog.py` copied into `.ai/bin/` deliberately, because setup
 preserves existing files.
+
+### Waiting for a run
+
+Wait on the pipeline's PID (the contents of `.ai/local/pipeline.active`), never on a
+`pgrep -f <pattern>` loop: the waiting shell's own command line contains the pattern, so
+the loop matches itself and never ends (or ends wrongly).
+
+```bash
+pid=$(cat .ai/local/pipeline.active)
+while kill -0 "$pid" 2>/dev/null; do sleep 60; done
+```
 
 ## License
 

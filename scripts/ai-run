@@ -14,6 +14,8 @@ dispositions are already complete (an interrupted triage), it records the round
 without a new session. --since (ai-pipeline's stage start) bounds what triage may
 have changed: only workflow records, committed or not.
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
+Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
+(time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
 EOF
 }
@@ -228,6 +230,16 @@ if [[ -f .ai/prompts/runner.md ]]; then
   base_prompt=$(cat .ai/prompts/runner.md)
 else
   base_prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
+fi
+
+# Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,
+# once, before a task runs. Dependencies a task changes mid-run wait for the next start.
+if [[ "$(ai_helper tasks next)" != none ]]; then
+  deps_limit=${AI_DEPS_TIMEOUT:-1200}
+  [[ "$deps_limit" =~ ^[1-9][0-9]{0,6}$ ]] || ai_die "Dependency setup: invalid AI_DEPS_TIMEOUT: $deps_limit"
+  remaining=$(remaining_time)
+  (( deps_limit <= remaining )) || deps_limit=$remaining
+  ai_deps "$AI_APPROVED_GATE" "$deps_limit" || ai_die "$AI_DEPS_ERROR"
 fi
 
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do

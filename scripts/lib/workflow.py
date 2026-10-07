@@ -279,9 +279,13 @@ def setup(arguments):
                         help='plan an upgrade of toolkit-owned files (.ai/bin, .ai/prompts); changes nothing')
     parser.add_argument('--apply', action='store_true', help='with --upgrade: apply the plan')
     parser.add_argument('--force', action='store_true', help='with --upgrade --apply: overwrite locally edited files')
+    parser.add_argument('--watchdog', action='store_true',
+                        help='after installing, install the watchdog timer for this checkout')
     args = parser.parse_args(arguments)
     if (args.apply or args.force) and not args.upgrade:
         fail('--apply and --force only make sense with --upgrade.')
+    if args.watchdog and (args.dry_run or args.upgrade):
+        fail('--watchdog cannot be combined with --dry-run or --upgrade.')
     root = args.project.expanduser().resolve()
     if not root.is_dir():
         fail('Target directory must exist. Create it and run git init first.')
@@ -369,6 +373,16 @@ def setup(arguments):
     if created or not (root / STAMP_FILE).exists():  # a no-op repeat must not move the recorded commit
         write_stamp(root, toolkit, stamp)
     print('Installed. Existing files were preserved: reconcile KEEP entries manually before running.')
+    if not args.watchdog:
+        print('Next: install the watchdog timer: .ai/bin/ai-watchdog --install-timer --diagnose --recover')
+        return
+    result = subprocess.run([str(root / '.ai/bin/ai-watchdog'), str(root), '--install-timer',
+                             '--diagnose', '--recover'],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    print(result.stdout, end='')
+    if result.returncode:
+        fail('The watchdog timer was not installed (files were installed; the timer was not): '
+             + (result.stderr.strip() or result.stdout.strip() or f'exit {result.returncode}'))
 
 
 def task_blocks(text):
@@ -1488,14 +1502,172 @@ def committed_matches_worktree(arguments):
                 fail(f'Committed content of {name} differs from the validated file on disk.')
 
 
+DEPS_STAMP = '.ai/local/deps.json'
+DEPS_LOCKFILES = ('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock',
+                  'bun.lock', 'bun.lockb', 'requirements*.txt', 'poetry.lock', 'uv.lock',
+                  'Pipfile.lock', 'Gemfile.lock', 'go.sum', 'Cargo.lock', 'composer.lock')
+DEPS_DECLARATION = re.compile(r'^# ?ai-deps-(inputs|outputs):(.*)$', re.M)
+
+
+def checkout_root():
+    return Path(git('rev-parse', '--show-toplevel').decode().strip()).resolve()
+
+
+def deps_inside(root, token, path):
+    """Declared paths stay inside the checkout, also after resolving symlinks."""
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        fail(f'Dependency path {token!r} in .ai/ci-setup leaves the checkout.')
+
+
+def deps_files(root, tokens):
+    """Existing files matched by relative paths/globs (directories: every file below)."""
+    found = set()
+    for token in tokens:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        matches = sorted(root.glob(token)) if re.search(r'[*?[]', token) else [root / token]
+        for match in matches:
+            if not match.exists():
+                continue
+            deps_inside(root, token, match)
+            below = [match] if not match.is_dir() else \
+                [Path(top) / name for top, _, names in os.walk(match) for name in names]
+            for path in below:
+                deps_inside(root, token, path)
+                if path.is_file():
+                    found.add(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def deps_spec(root):
+    """(setup sha, {input path: sha}, [output dirs]) from .ai/ci-setup's declarations."""
+    setup = root / '.ai/ci-setup'
+    if not setup.is_file():
+        fail('Missing .ai/ci-setup.')
+    data = setup.read_bytes()
+    declared = {'inputs': [], 'outputs': []}
+    for kind, value in DEPS_DECLARATION.findall(data.decode(errors='replace')):
+        declared[kind] += value.split()
+    inputs = deps_files(root, declared['inputs'] or DEPS_LOCKFILES)
+    outputs = declared['outputs'] or (['node_modules'] if (root / 'package.json').is_file() else [])
+    for token in outputs:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        deps_inside(root, token, root / token)
+    return file_sha(data), {path: file_sha((root / path).read_bytes()) for path in inputs}, outputs
+
+
+def deps_status(arguments):
+    """'current' or 'stale <reason>': must the host run .ai/ci-setup? No stamp is always
+    stale, even without inputs, so a configured installer runs at least once."""
+    root = checkout_root()
+    setup, inputs, outputs = deps_spec(root)
+    try:
+        stamp = json.loads((root / DEPS_STAMP).read_text())
+    except FileNotFoundError:
+        stamp = None
+        reason = 'no dependency stamp (.ai/local/deps.json)'
+    except (OSError, ValueError):
+        stamp = None
+        reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+    if stamp is not None:
+        recorded = stamp.get('inputs') if isinstance(stamp, dict) else None
+        if not isinstance(recorded, dict):
+            reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+        elif stamp.get('setup') != setup:
+            reason = '.ai/ci-setup changed'
+        elif recorded != inputs:
+            changes = [f'added {p}' for p in sorted(inputs.keys() - recorded.keys())]
+            changes += [f'removed {p}' for p in sorted(recorded.keys() - inputs.keys())]
+            changes += [f'changed {p}' for p in sorted(inputs.keys() & recorded.keys())
+                        if inputs[p] != recorded[p]]
+            reason = 'inputs changed: ' + ', '.join(changes)
+        else:
+            missing = [t for t in outputs if not os.path.lexists(root / t)]
+            wrong = [t for t in outputs if t not in missing and not (root / t).is_dir()]
+            if missing:
+                reason = 'missing output ' + ', '.join(missing)
+            elif wrong:
+                reason = 'output ' + ', '.join(wrong) + ' is not a directory'
+            else:
+                reason = None
+    print(f'stale {reason}' if reason else 'current')
+
+
+def deps_record(arguments):
+    root = checkout_root()
+    setup, inputs, _ = deps_spec(root)
+    (root / '.ai/local').mkdir(parents=True, exist_ok=True)
+    atomic(root / DEPS_STAMP, json.dumps({'setup': setup, 'inputs': inputs}, indent=2, sort_keys=True) + '\n')
+
+
+def snapshot_put(digest, *parts):
+    for part in parts:
+        part = part if isinstance(part, bytes) else str(part).encode()
+        digest.update(len(part).to_bytes(8, 'big') + part)
+
+
+def snapshot_path(digest, name, path, walk=False):
+    """Kind, mode and bytes or link target of one path, symlinks never followed; with walk,
+    a directory's contents too, read from the filesystem without ignore rules."""
+    if path.is_symlink():
+        snapshot_put(digest, name, b'link', os.fsencode(os.readlink(path)))
+    elif path.is_file():
+        snapshot_put(digest, name, b'file', path.stat().st_mode, file_sha(path.read_bytes()))
+    elif path.is_dir():
+        snapshot_put(digest, name, b'dir', path.stat().st_mode)
+        for child in sorted(os.listdir(path)) if walk else ():
+            snapshot_path(digest, name + b'/' + os.fsencode(child), path / child, walk)
+    else:
+        snapshot_put(digest, name, b'missing')
+
+
+def tree_snapshot(root):
+    """One hash over HEAD, the index and every non-ignored path (kind, mode, bytes) outside
+    .ai/local/; submodules recursively. Equal before/after a command proves it changed no
+    tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
+    Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
+    under an uninitialised submodule, so its directory is walked on the filesystem instead;
+    a symlink at a submodule path is recorded as a link, never followed."""
+    digest = hashlib.sha256()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
+    except subprocess.CalledProcessError:
+        head = b'no HEAD'
+    snapshot_put(digest, b'head', head, b'index', git('diff', '--cached', '--binary', cwd=root))
+    gitlinks = set()
+    for entry in git('ls-files', '--stage', '-z', cwd=root).split(b'\0'):
+        if entry.startswith(b'160000 '):
+            gitlinks.add(entry.split(b'\t', 1)[1])
+    listed = git('ls-files', '--cached', '--others', '--exclude-standard', '-z', cwd=root)
+    for raw in sorted({entry for entry in listed.split(b'\0') if entry}):
+        name = raw.rstrip(b'/')
+        if name == b'.ai/local' or name.startswith(b'.ai/local/'):
+            continue
+        path = Path(root) / os.fsdecode(name)
+        if name in gitlinks or raw.endswith(b'/'):  # submodule or untracked nested repository
+            if path.is_dir() and not path.is_symlink() and (path / '.git').exists():
+                snapshot_put(digest, name, b'repo', tree_snapshot(path))
+                continue
+            snapshot_put(digest, name, b'uninitialised')
+            snapshot_path(digest, name, path, walk=True)
+        else:
+            snapshot_path(digest, name, path)
+    return digest.hexdigest()
+
+
 def finish_summary(arguments):
     """The final notification: what was delivered and the human's todo list."""
     url, reviews, unresolved = arguments[0], arguments[1], arguments[2] == '1'
     blocks = tasks()
     done = sum(task['status'] == 'DONE' for task in blocks)
     handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
-    steps = [line for line in section(handoff, 'Manual testing for the human').splitlines()
-             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    needs_you, automated, legacy = manual_testing(handoff)
+    steps = [line for line in needs_you.splitlines() if BULLET.match(line)]
+    steps = [line for line in steps if legacy or not NONE_TEXT.match(BULLET_PREFIX.sub('', line).strip())]
+    checks = sum(bool(BULLET.match(line)) for line in automated.splitlines())
     extra = [re.sub(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?', '', line).strip()
              for line in section(handoff, 'Human todos').splitlines()
              if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
@@ -1514,7 +1686,12 @@ def finish_summary(arguments):
         todos.append(f'Resolve {disputes} disputed finding(s) at the PR (Codex upheld what Claude rejected)')
     if unresolved:
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
-    todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
+    if steps:
+        todos.append(f'Test: {len(steps)} manual step(s) in the PR')
+    elif legacy:
+        todos.append('Test the change (no manual steps were written)')
+    else:
+        todos.append(f'Nothing to test by hand ({checks} automated checks in the PR)')
     todos.append('Merge the PR')
     todos += extra[:10]
     if len(extra) > 10:
@@ -1635,6 +1812,48 @@ def section(text, heading):
     return body
 
 
+BULLET = re.compile(r'^\s*(\d+[.)]|[-*])\s+\S')
+BULLET_PREFIX = re.compile(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?')
+
+
+def manual_testing(handoff):
+    """Split "Manual testing for the human" into (needs_you, automated, legacy).
+    Without the `### Needs you` / `### Covered by automated tests` subsections the whole
+    section is "needs you" and legacy is True."""
+    body = section(handoff, 'Manual testing for the human')
+    parts = re.split(r'^###\s+(Needs you|Covered by automated tests)\s*$', body, flags=re.M)
+    if len(parts) == 1:
+        return body, '', True
+    found = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
+    return found.get('Needs you', ''), found.get('Covered by automated tests', ''), False
+
+
+NAMED_TEST = re.compile(r'`[^`\n]+`')
+
+
+def flag_unnamed(automated):
+    """Return (lines, count) for the automated section. A list item is a bullet line plus its
+    continuation lines; one without a paired backtick span gets a warning on its last line."""
+    items, current = [], None
+    for line in automated.splitlines():
+        if BULLET.match(line):
+            current = [line]
+            items.append(current)
+        elif current is not None and line.strip():
+            current.append(line)
+        else:
+            current = None
+            items.append([line])
+    lines, count = [], 0
+    for item in items:
+        if BULLET.match(item[0]):
+            count += 1
+            if not NAMED_TEST.search('\n'.join(item)):
+                item = item[:-1] + [item[-1] + ' ⚠ no test named']
+        lines += item
+    return lines, count
+
+
 def pr_title(arguments):
     """PR title: first line of the spec objective, else the branch name."""
     objective = section(Path('.ai/project-spec.md').read_text(), 'Objective') if Path('.ai/project-spec.md').exists() else ''
@@ -1710,8 +1929,19 @@ def pr_body(arguments):
     else:
         lines.append('No review recorded.')
     lines.append('')
-    manual = section(handoff, 'Manual testing for the human')
-    lines += ['## How to test', '', manual or 'See `.ai/handoff.md`.', '']
+    needs_you, automated, legacy = manual_testing(handoff)
+    if legacy:
+        lines += ['## How to test', '', needs_you or 'See `.ai/handoff.md`.', '']
+    else:
+        lines += ['## How to test', '', '### Needs you', '']
+        if not needs_you or NONE_TEXT.match(BULLET_PREFIX.sub('', needs_you)):
+            lines += ['None — everything below is automated.', '']
+        else:
+            lines += [needs_you, '']
+        if automated:
+            flagged, count = flag_unnamed(automated)
+            lines += ['### Covered by automated tests', '',
+                      f'<details><summary>{count} automated checks</summary>', '', *flagged, '', '</details>', '']
     lines += ['---', 'Opened by `ai-pipeline`. Merging and deployment remain with the human.', '',
               '🤖 Generated with [Claude Code](https://claude.com/claude-code)']
     print('\n'.join(lines))
@@ -1771,6 +2001,12 @@ def main():
         committed_matches_worktree(arguments)
     elif command == 'recover-decision':
         recover_decision(arguments)
+    elif command == 'deps-status':
+        deps_status(arguments)
+    elif command == 'deps-record':
+        deps_record(arguments)
+    elif command == 'tree-snapshot':
+        print(tree_snapshot(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':

@@ -59,6 +59,18 @@ of unchanged content don't invalidate evidence. Environment/dependency/service
 changes are not represented by the digest: rerun checks when those change or when
 evidence is old. This is a local convenience gate, not tamper-proof attestation or CI.
 
+Dependencies (FL-01): when `ai-run` starts and a task will run (not `--triage`), the host
+runs `.ai/ci-setup` if `deps-status` reports it missing/stale (no `.ai/local/deps.json`
+stamp, `.ai/ci-setup` changed, an `# ai-deps-inputs:`/default lockfile changed, or an
+`# ai-deps-outputs:`/`node_modules` dir is missing or is not a directory). Limit `AI_DEPS_TIMEOUT` (default 1200 s)
+capped by the remaining run time; output in `.ai/local/deps-*.log`; no tracked file written.
+After every installer exit the gate digest and `tree-snapshot` (HEAD, index, every
+non-ignored file) must be unchanged, reported ahead of the exit status; only then is the
+stamp recorded. These stops start with "Dependency setup" and `ai-recover` always
+escalates them. Dependencies a task changes mid-run are installed at the next start;
+`ai-recover`'s `commit_and_rerun` also runs this step (on the dirty tree) before its
+`ai-check`, and a failed or file-changing install escalates with no commit.
+
 The runner independently reruns validation after each DONE task and at the end.
 If a post-task gate fails, it restores that task to IN_PROGRESS and leaves evidence
 for repair. If no progress was checkpointed, it stops rather than spending an
@@ -324,8 +336,11 @@ protected branches are refused earlier); `gh pr view` decides create vs. edit;
 significant findings remain after the round limit, or while any dispute is recorded. The
 PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
-"Manual testing for the human" section. An optional handoff section `## Flow chart` (one
-line: "Flow chart updated" or "Flow unchanged") is copied under Summary. State becomes `ready_for_acceptance`.
+"Manual testing for the human" section (split into subsections `### Needs you` for steps
+only a human can perform and `### Covered by automated tests` for deterministic test
+scenarios; the PR summary counts only "Needs you" steps). An optional handoff section
+`## Flow chart` (one line: "Flow chart updated" or "Flow unchanged") is copied under
+Summary. State becomes `ready_for_acceptance`.
 
 Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
@@ -356,8 +371,8 @@ session and the pipeline completes the stage; bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
 the decision counts only with a zero exit, a success envelope and exactly one valid
-`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree and a passing
-`ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
+`{"action","reason"}` object; `commit_and_rerun` requires a dirty tree, installs stale
+dependencies (as `ai-run` does) and requires a passing `ai-check`, then commits all non-ignored changes, re-verifies the gate and requires the
 committed tree to match the validation stamp (a commit hook can't sneak content in); `rerun` requires a clean tree. Resumes run
 `ai-pipeline` with the saved arguments and `AI_RECOVERY_ATTEMPT=n`, which refuses to
 start if the gate digest differs from the approved one. Escalation sends one

@@ -18,7 +18,9 @@ MAJOR finding needs a row: accepted rows reference an existing fix task ID,
 rejected rows need concrete evidence, and deferred findings make the PR a draft. For each accepted finding, append a new task
 to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
-practical. Update `.ai/handoff.md` if test steps change.
+practical. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
+human must do, everything a test reproduces under "Covered by automated tests" with the
+test name in backticks.
 
 Do not edit source, tests, docs, validation, prompts, permissions, or tooling in
 this session; the runner rejects triage commits that touch anything except
