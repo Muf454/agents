@@ -271,8 +271,8 @@ every host commit and push; draft conversion of an existing PR is verified, not 
 Re-check of rejected findings (`ai-review --recheck`): its own preflight needs a clean
 tree, a verified review, dispositions bound to it, at least one rejected BLOCKER/MAJOR,
 the reviewed commit an ancestor of HEAD and only workflow records changed since it
-(triage records plus `.ai/reviews/{current,recheck,disputes}.md`; pending accepted fix
-tasks are fine). Codex (read-only, `AI_REVIEW_MODEL` at `AI_RECHECK_EFFORT`, default
+(triage records plus `.ai/reviews/{current,recheck,disputes,fallback-log}.md`; pending
+accepted fix tasks are fine). Codex (read-only, `AI_REVIEW_MODEL` at `AI_RECHECK_EFFORT`, default
 medium, prompt `.ai/prompts/recheck.md`) gets the rejected IDs with Claude's evidence and
 must answer one JSON object `{"answers": [{"id", "verdict": "withdrawn|upheld", "reason"}]}`.
 Parsing is strict: anything missing, duplicated, extra or malformed counts as upheld, and
@@ -492,10 +492,11 @@ arguments/checkout/dedupe record. Notifications use common.sh's best-effort
 cause repeated alerts.
 
 `--diagnose` reserves one attempt for each new incident batch before starting
-`timeout ... codex exec` (default; read-only sandbox, never-approve, medium effort,
-answer via an mkstemp output file) or, with `--diagnosis-agent claude`,
-`timeout ... claude -p` with dontAsk, Read/Glob/Grep only, project setting sources,
-empty strict MCP configuration and `AI_MODEL` when set. Stdin is `/dev/null`. It asks
+`timeout ... codex exec` (read-only sandbox, never-approve, medium effort, answer via an
+mkstemp output file) and, when that fails or is empty (`--diagnosis-agent auto`, the
+default) or with `--diagnosis-agent claude`, `timeout ... claude -p` with dontAsk,
+Read/Glob/Grep only, project setting sources, empty strict MCP configuration and
+`--model ${AI_DIAGNOSIS_MODEL:-claude-sonnet-5-5}`. Stdin is `/dev/null`. It asks
 for evidence and human recovery advice, never writes or repairs through Claude tools.
 The host saves stdout (or failure information) to `.ai/local/diagnosis.md` and adds a
 one-line summary to the alert. Existing acknowledged incidents are not diagnosed later
@@ -505,3 +506,48 @@ merely because the option is enabled. No diagnosis runs by default.
 10-minute timer with systemd-quoted absolute paths and the current `PATH`, then
 enables it; `--uninstall-timer` disables and removes it. `SuccessExitStatus=1` treats
 an incident as a successful probe. Nothing is installed by `setup-project`.
+
+## Reviewer selection and the Claude fallback
+
+`ai-review` (all three modes) runs `run_review`: with `AI_REVIEWER=auto` (default) or
+`codex` it starts Codex. A Codex exit that `limit-check` classifies as a usage limit
+pauses and retries under `codex`; under `auto` it switches to `claude_attempt` for this
+review (any other Codex failure stops as before; a missing Codex CLI goes straight to
+Claude). `claude_attempt`: `claude -p --permission-mode dontAsk --output-format json
+--tools Read,Glob,Grep,Bash,Edit,Write --allowedTools $(workflow.py review-allowlist)
+--setting-sources project --strict-mcp-config --model M --effort E`, stdin `/dev/null`,
+the mode prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` keeps Read/Glob/
+Grep, read-only git subcommands and the project's `Bash(...)` entries except writers,
+runners and open interpreters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`), and
+adds `Edit(./.ai/local/review-probes/**)` (verified live: in dontAsk mode this rule lets
+the Write tool create files there and nowhere else). The probe directory is recreated
+before and removed after the session. A Claude usage limit pauses (`ai_limit_pause
+Claude`) and the loop starts again with Codex. The final text (`claude-text`) becomes
+the report (denials go to `.ai/local/review-denials.log`; the allowlist it got to
+`.ai/local/review-*.allowlist`); the usual "checkout unchanged" check and publish
+helpers follow.
+
+Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching (whole
+words) RLS, row-level, auth/authn/authz/authentication/authorization, permission, policy,
+lock(s/ing/ed), lock order, concurrency, deadlock, race condition, data race, migration,
+delete/deletion, drop, irreversible or payment → `claude-fable-5-1`; else `claude-opus-5-5`;
+re-checks `claude-opus-5-5`; effort `high`; `AI_CLAUDE_REVIEW_MODEL`/`_EFFORT` override.
+
+Records: the publish helpers add `> **Reviewer: <AI_REVIEW_LABEL>**` under the host
+header (plan/code) or put `AI_REVIEW_BY` in the re-check title; the binding covers the
+label. `fallback-record` appends a row to `.ai/reviews/fallback-log.md`, which
+`ai-pipeline` commits with the review record (and a hand-run plan review or re-check
+commits with its own record). `pr-body` titles the review section "Claude fallback,
+<model>" with a catch-up note. `outcome review …` appends to the host outcome log.
+
+## Outcome log
+
+`workflow.py outcome task|review` appends one JSON line to `<state root>/outcomes.jsonl`
+(checked with `check_state_root`: never inside the checkout). `ai-run` writes `done`,
+`blocked`, `validation_failed` or `no_checkpoint` per task attempt with the session
+model and the seconds from session start to result; the attempt number counts earlier
+lines for the same project (main repository name, shared by worktrees), branch and task.
+Failures to write are reported and never stop the run. `outcomes-report` (`ai-status
+--outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
+minutes) by model, category and both, and reviews by reviewer/model/mode.
+
