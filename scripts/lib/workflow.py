@@ -658,7 +658,16 @@ def claude_text(arguments):
     """Write the final text of a successful `claude -p --output-format json` run to OUT."""
     source, target = arguments
     claude_result(source, check_only=True)
-    text = json.loads(Path(source).read_text()).get('result')
+    data = json.loads(Path(source).read_text())
+    denials = data.get('permission_denials') or []
+    if denials:
+        # The reviewer's attempts at its boundary are the audit signal: keep them.
+        with open('.ai/local/review-denials.log', 'a') as log:
+            for denial in denials:
+                log.write(f"{now()} {denial.get('tool_name')} {json.dumps(denial.get('tool_input', {}))[:300]}\n")
+        print(f'Note: {len(denials)} denied reviewer tool call(s) logged in .ai/local/review-denials.log',
+              file=sys.stderr)
+    text = data.get('result')
     if not isinstance(text, str) or not text.strip():
         fail('Claude returned no text.')
     Path(target).write_text(text.strip() + '\n')
@@ -667,6 +676,15 @@ def claude_text(arguments):
 # Read-only git subcommands a reviewer may run; every other git entry of the project's
 # allowlist (add, commit, rm, mv, ...) is dropped for reviews.
 REVIEW_GIT = ('status', 'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'rev-parse', 'merge-base')
+
+
+# Commands that write, delete, fetch or run anything by themselves: never for a reviewer.
+REVIEW_DROP_FIRST = (r'(?:git|sudo|su|rm|rmdir|mv|cp|ln|chmod|chown|touch|mkdir|tee|dd|install|truncate|'
+                     r'sed|awk|perl|ruby|find|xargs|env|eval|exec|curl|wget|ssh|scp|rsync|tar|unzip|docker)\b')
+# An interpreter or package runner followed only by a wildcard runs arbitrary code
+# (`bash *`, `node *`, `npx *`, `npm run *`); fixed check commands (`npm test`,
+# `npx vitest run *`) stay.
+REVIEW_DROP_OPEN = r'(?:bash|sh|zsh|python3?|node|deno|bun|npx|pnpm|yarn|npm(?: run| exec)?)(?: \*)?'
 
 
 def review_allowlist(arguments):
@@ -683,7 +701,7 @@ def review_allowlist(arguments):
         if not match or entry in entries:
             continue
         command = match.group(1)
-        if re.match(r'(?:git|sudo|rm|mv|cp|chmod|chown|curl|wget|ssh|scp)\b', command) or \
+        if re.match(REVIEW_DROP_FIRST, command) or re.fullmatch(REVIEW_DROP_OPEN, command) or \
                 re.search(r'ai-task|ai-check|ai-run|ai-pipeline|\.ai/validate|\bpush\b|deploy|supabase|vercel', command):
             continue
         entries.append(entry)
@@ -1789,8 +1807,9 @@ def plan_review_info(arguments):
 
 
 RISK_TITLE = re.compile(
-    r'\bRLS\b|row[- ]level|\bauth|permission|\bpolic(?:y|ies)\b|\block|concurren|deadlock|\brace\b|'
-    r'migrat|\bdelet|\bdrop\b|irreversib|payment', re.I)
+    r'\bRLS\b|row[- ]level|\bauth(?:n|z|entication|enticate|orization|orisation|orize|orise)?\b|'
+    r'permission|\bpolic(?:y|ies)\b|\block(?:s|ing|ed)?\b|lock order|concurren|deadlock|race condition|'
+    r'\bdata race\b|migrat|\bdelet(?:e|es|ed|ing|ion)\b|\bdrop\b|irreversib|payment', re.I)
 
 
 def review_risk(arguments):
@@ -1846,8 +1865,9 @@ def project_name():
     return (common.parent if common.name == '.git' else common).name
 
 
-CATEGORIES = (('security', r'\bRLS\b|row[- ]level|\bauth|permission|\bpolic(?:y|ies)\b|secur|secret'),
-              ('concurrency', r'\block|concurren|deadlock|\brace\b'),
+CATEGORIES = (('security', r'\bRLS\b|row[- ]level|\bauth(?:n|z|entication|orization|orisation)?\b|permission|'
+                           r'\bpolic(?:y|ies)\b|secur|secret'),
+              ('concurrency', r'\block(?:s|ing|ed)?\b|concurren|deadlock|race condition|\bdata race\b'),
               ('migration', r'migrat|schema|\bdrop\b'),
               ('tests', r'\btests?\b|e2e|playwright'),
               ('docs', r'\bdocs?\b|readme|documentation|rename|copy\b|wording'),
@@ -1964,7 +1984,7 @@ def outcomes_report(arguments):
             lines.append(f'| {reviewer} | {model} | {mode} | {len(rows)} | {total("blocker")} | {total("major")} | '
                          f'{total("minor")} | {total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
-        fallback = [r for r in reviews if r.get('reviewer') == 'claude-fallback']
+        fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
         if fallback:
             lines += ['## Claude-only reviews (Codex catch-up pending)', '']
             lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
@@ -2141,10 +2161,10 @@ def pr_body(arguments):
     else:
         lines.append('No local validation evidence recorded.')
     lines.append('')
-    fallback = re.search(r'^> \*\*Reviewer: (Claude fallback \(([^,;)]+)[^*]*)\*\*', review, re.M)
-    lines += [f'## Independent review ({"Claude fallback, " + fallback.group(2) if fallback else "Codex"})', '']
+    fallback = re.search(r'^> \*\*Reviewer: (Claude(?: fallback)?) \(([^,;)]+), effort [^;]*; ([^)]*)\)', review, re.M)
+    lines += [f'## Independent review ({fallback.group(1) + ", " + fallback.group(2) if fallback else "Codex"})', '']
     if fallback:
-        lines += ['> [!NOTE]', '> Codex was at its usage limit, so a read-only Claude session reviewed this. '
+        lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
     if review:
         verdict = re.search(r'^Overall verdict:\s*(.*)$', review, re.M)

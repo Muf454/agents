@@ -183,3 +183,29 @@ README.md, docs/*.md, templates/*.md, vault agents-flow.md
 ### Result / notes
 DONE 2026-10-07: README (fallback reviewer, outcome log, config keys, diagnosis), docs/workflow.md (reviewer selection, outcome log), templates/CLAUDE.md wording, ai-pipeline usage; vault agents-flow.md reviewer chart + roles (updated 2026-10-07).
 Validation: ./scripts/ai-check 244 tests OK (2026-10-07, 674 s).
+
+## T008 — Fixes from the Claude (Fable) bootstrap review N1–N5
+Status: DONE
+Dependencies: T007
+Model: opus
+
+### Goal
+Fix the five MINOR findings of `.ai/reviews/current.md` (see `.ai/reviews/dispositions.md`).
+
+### Implementation notes
+N1 stricter reviewer allowlist + saved allowlist; N2 reviewer denials logged; N3 whole-word
+risk patterns; N4 reason in the PR note, forced reviews labelled and reported; N5 vault
+decision/log/human todo. Also: `ai-pipeline` validates `AI_REVIEWER` first.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_workflow.py, README.md, docs/workflow.md, vault
+
+### Acceptance criteria
+- Each finding's reproduction is covered by a test or (N5) the vault notes exist.
+
+### Validation
+targeted tests; ./scripts/ai-check
+
+### Result / notes
+DONE 2026-10-07: see dispositions; new/extended tests listed there.
+

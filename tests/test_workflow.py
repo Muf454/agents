@@ -2149,13 +2149,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.helper('review-risk').stdout.strip(), 'high T002 title names rls')
         (self.project / '.ai/tasks.md').write_text(task('T001'))
         self.assertEqual(self.helper('review-risk').stdout.strip(), 'normal')
+        wf = self.recheck_module()
+        for title in ('Add author column to notes', 'Lockfile update', 'Authoring guide for docs', 'Race results page',
+                      'Locksmith icon'):
+            self.assertIsNone(wf.RISK_TITLE.search(title), title)
+        for title in ('Auth callback', 'Fix lock order', 'Account deletion cleanup', 'Data migration', 'Authorization per role',
+                      'Race condition in refresh'):
+            self.assertIsNotNone(wf.RISK_TITLE.search(title), title)
 
     def test_reviewer_setting_codex_and_claude_only(self):
         self.ready()
         self.tool('ai-run', '--approved')
         self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
         self.assertFalse((self.base / 'codex-calls').exists())
-        self.assertIn('AI_REVIEWER=claude', (self.project / '.ai/reviews/current.md').read_text())
+        self.assertIn('> **Reviewer: Claude (claude-opus-5-5, effort high; AI_REVIEWER=claude)',
+                      (self.project / '.ai/reviews/current.md').read_text())
         self.assertIn('| AI_REVIEWER=claude |', (self.project / '.ai/reviews/fallback-log.md').read_text())
         self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='gemini')
         self.commit('record review')
@@ -2218,6 +2226,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         body = (self.base / 'gh.log.body.md').read_text()
         self.assertIn('## Independent review (Claude fallback, claude-opus-5-5)', body)
         self.assertIn('Codex reviews it later in one catch-up review', body)
+        self.assertIn('instead of Codex (Codex usage limit', body)
         self.assertIn('↪ Codex usage limit', self.notifications())
 
     def test_pipeline_fallback_recheck_is_committed_with_the_log(self):
@@ -2241,19 +2250,72 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main')
         self.assertIn('Codex CLI not found', result.stdout)
         self.assertIn('Codex CLI not installed', (self.project / '.ai/reviews/fallback-log.md').read_text())
+        self.assertIn('instead of Codex (Codex CLI not installed)', (self.base / 'gh.log.body.md').read_text())
         self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_REVIEWER='codex')
+
+    def test_claude_review_failure_or_write_keeps_the_prior_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main')
+        self.commit('record review')
+        before = (self.project / '.ai/reviews/current.md').read_text()
+        result = self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='claude', MOCK_CLAUDE_REVIEW='error')
+        self.assertIn('Claude review failed (exit 3); prior review preserved', result.stderr)
+        self.assertEqual((self.project / '.ai/reviews/current.md').read_text(), before)
+        self.assertFalse((self.project / '.ai/local/review-probes').exists())
+        # A reviewer that changes the checkout is never published.
+        mock = self.mock_bin / 'claude'
+        mock.write_text(mock.read_text().replace("pathlib.Path('.ai/local/review-probes/probe.txt').write_text('scenario probe')",
+                                                 "pathlib.Path('stray.txt').write_text('outside the probe dir')"))
+        result = self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='claude')
+        self.assertIn('Checkout changed during review', result.stderr)
+        self.assertEqual((self.project / '.ai/reviews/current.md').read_text(), before)
+
+    def test_claude_review_denials_and_allowlist_are_recorded(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        mock = self.mock_bin / 'claude'
+        mock.write_text(mock.read_text().replace(
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],'result':text}))",
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':text,"
+            "'permission_denials':[{'tool_name':'Bash','tool_input':{'command':'git push origin x'}}]}))"))
+        result = self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        self.assertIn('1 denied reviewer tool call(s)', result.stderr)
+        self.assertIn('git push origin x', (self.project / '.ai/local/review-denials.log').read_text())
+        allowlists = list((self.project / '.ai/local').glob('review-*.allowlist'))
+        self.assertEqual(len(allowlists), 1)
+        self.assertIn('Edit(./.ai/local/review-probes/**)', allowlists[0].read_text())
+
+    def test_pipeline_rejects_an_invalid_reviewer_setting_first(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_REVIEWER='gemini')
+        self.assertIn('Invalid AI_REVIEWER: gemini', result.stderr)
+        self.assertNotIn('Plan review', result.stdout)
+
+    def test_watchdog_codex_diagnosis_does_not_fall_back(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\ntouch "$MOCK_STATE_DIR/claude-called"\n')
+        self.watchdog('--diagnose', '--diagnosis-agent', 'codex', expected=1)
+        self.assertFalse((self.base / 'claude-called').exists())
+        self.assertIn('Diagnosis unavailable (exit 1)', (self.project / '.ai/local/diagnosis.md').read_text())
 
     def test_review_allowlist_keeps_only_read_and_check_commands(self):
         self.setup_project()
         allow = self.project / '.ai/permissions.allow'
         allow.write_text(allow.read_text() + 'Bash(npm test)\nBash(npx vitest run *)\nBash(git push *)\n'
-                         'Bash(npx supabase db push)\nBash(rm -rf *)\nBash(npm run deploy)\n')
+                         'Bash(npx supabase db push)\nBash(rm -rf *)\nBash(npm run deploy)\nBash(npm run lint)\n'
+                         'Bash(bash *)\nBash(python3 *)\nBash(node *)\nBash(npx *)\nBash(npm run *)\nBash(tee *)\n'
+                         'Bash(sed *)\nBash(find *)\n')
         entries = self.helper('review-allowlist').stdout.splitlines()
-        for entry in ('Read', 'Bash(npm test)', 'Bash(npx vitest run *)', 'Bash(git log *)', 'Bash(git blame *)',
+        for entry in ('Read', 'Bash(npm test)', 'Bash(npx vitest run *)', 'Bash(npm run lint)', 'Bash(git log *)', 'Bash(git blame *)',
                       'Edit(./.ai/local/review-probes/**)'):
             self.assertIn(entry, entries)
         for entry in ('Edit', 'Write', 'Bash(git push *)', 'Bash(npx supabase db push)', 'Bash(rm -rf *)',
-                      'Bash(npm run deploy)', 'Bash(git commit *)', 'Bash(.ai/bin/ai-task *)'):
+                      'Bash(npm run deploy)', 'Bash(git commit *)', 'Bash(.ai/bin/ai-task *)', 'Bash(bash *)',
+                      'Bash(python3 *)', 'Bash(node *)', 'Bash(npx *)', 'Bash(npm run *)', 'Bash(tee *)',
+                      'Bash(sed *)', 'Bash(find *)'):
             self.assertNotIn(entry, entries)
 
     def test_setup_installs_the_claude_review_prompt(self):
@@ -2278,6 +2340,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('## Tasks by category', report)
         self.assertIn('| claude-fallback | claude-opus-5-5 | code | 1 | 0 | 0 | 0 |', report)
         self.assertIn('Codex catch-up pending', report)
+        self.commit('record review')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        report = self.tool('ai-status', '--outcomes').stdout
+        catch_up = report.split('Codex catch-up pending')[1]
+        self.assertEqual(catch_up.count('code HEAD'), 2)  # forced Claude reviews are listed too
 
     def test_runner_logs_blocked_and_failed_validation_attempts(self):
         self.ready(task('T001') + task('T002'))
@@ -3598,9 +3665,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets(self):
         self.setup_project()
-        body = self.pr_body_for((ROOT / '.ai/handoff.md').read_text())
+        handoff = (ROOT / '.ai/handoff.md').read_text()
+        body = self.pr_body_for(handoff)
         flagged = [line for line in body.splitlines() if line.endswith('⚠ no test named')]
-        self.assertEqual(flagged, ['- Further scenarios are added by the remaining tasks. ⚠ no test named'])
+        # The live handoff changes per branch: exactly its automated bullets without a test name.
+        automated = handoff.split('### Covered by automated tests', 1)[1].split('\n## ', 1)[0]
+        unnamed = [line + ' ⚠ no test named' for line in automated.splitlines()
+                   if line.startswith('- ') and '`' not in line]
+        self.assertEqual(flagged, unnamed)
 
     def test_manual_testing_wrapped_finish_summary_counts_needs_you_steps(self):
         self.setup_project()

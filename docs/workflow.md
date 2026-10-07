@@ -517,16 +517,20 @@ Claude). `claude_attempt`: `claude -p --permission-mode dontAsk --output-format 
 --tools Read,Glob,Grep,Bash,Edit,Write --allowedTools $(workflow.py review-allowlist)
 --setting-sources project --strict-mcp-config --model M --effort E`, stdin `/dev/null`,
 the mode prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` keeps Read/Glob/
-Grep, read-only git subcommands and the project's non-writing `Bash(...)` entries, and
+Grep, read-only git subcommands and the project's `Bash(...)` entries except writers,
+runners and open interpreters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`), and
 adds `Edit(./.ai/local/review-probes/**)` (verified live: in dontAsk mode this rule lets
 the Write tool create files there and nowhere else). The probe directory is recreated
 before and removed after the session. A Claude usage limit pauses (`ai_limit_pause
 Claude`) and the loop starts again with Codex. The final text (`claude-text`) becomes
-the report; the usual "checkout unchanged" check and publish helpers follow.
+the report (denials go to `.ai/local/review-denials.log`; the allowlist it got to
+`.ai/local/review-*.allowlist`); the usual "checkout unchanged" check and publish
+helpers follow.
 
-Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching RLS,
-row-level, auth, permission, policy, lock, concurrency, deadlock, race, migration,
-delete, drop, irreversible or payment → `claude-fable-5-1`; else `claude-opus-5-5`;
+Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching (whole
+words) RLS, row-level, auth/authn/authz/authentication/authorization, permission, policy,
+lock(s/ing/ed), lock order, concurrency, deadlock, race condition, data race, migration,
+delete/deletion, drop, irreversible or payment → `claude-fable-5-1`; else `claude-opus-5-5`;
 re-checks `claude-opus-5-5`; effort `high`; `AI_CLAUDE_REVIEW_MODEL`/`_EFFORT` override.
 
 Records: the publish helpers add `> **Reviewer: <AI_REVIEW_LABEL>**` under the host

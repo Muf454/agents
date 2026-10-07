@@ -77,6 +77,8 @@ claude_attempt() {
     ai_die 'Missing .ai/prompts/claude-review.md; upgrade the toolkit copy (setup-project --upgrade).'
   mapfile -t allowed < <(ai_helper review-allowlist)
   (( ${#allowed[@]} )) || ai_die 'Cannot build the reviewer allowlist from .ai/permissions.allow.'
+  # What the reviewer was allowed, next to its log, for the human to inspect.
+  printf '%s\n' "${allowed[@]}" > "${report%.md}.allowlist"
   prompt+=$'\n\n'"$(cat .ai/prompts/claude-review.md)"
   prompt+=$'\n\nCLAUDE REVIEWER: you are the independent reviewer for this run (wherever the instructions above say Codex, they mean you). Scratch probes may be written only under .ai/local/review-probes/ (ignored, deleted afterwards). Your final response must follow the output contract above exactly.'
   log="${report%.md}.claude.json"
@@ -155,8 +157,10 @@ run_review() {
     fi
     review_by=$([[ "$reviewer" == claude ]] && printf claude || printf claude-fallback)
     review_model=$claude_model; review_effort=$claude_effort
-    export AI_REVIEW_BY="Claude fallback, $claude_model"
-    export AI_REVIEW_LABEL="Claude fallback ($claude_model, effort $claude_effort; $fallback). Codex catch-up review pending: see .ai/reviews/fallback-log.md."
+    local who='Claude fallback'
+    [[ "$reviewer" != claude ]] || who='Claude'
+    export AI_REVIEW_BY="$who, $claude_model"
+    export AI_REVIEW_LABEL="$who ($claude_model, effort $claude_effort; $fallback). Codex catch-up review pending: see .ai/reviews/fallback-log.md."
     break
   done
   review_seconds=$(( SECONDS - started ))

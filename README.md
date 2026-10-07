@@ -347,11 +347,16 @@ old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried a
 every later review, so it takes over as soon as it has usage.
 
 The Claude reviewer is a separate `claude -p` session with no access to the
-implementing session: tools Read/Glob/Grep/Bash/Edit/Write, but allowed only to read,
-run read-only git and the project's own approved check commands from
-`.ai/permissions.allow` (git writes, `ai-task`, `ai-check`, `.ai/validate`, pushes,
-deploys and `supabase` are dropped), and write scratch probes under the ignored
-`.ai/local/review-probes/` (deleted afterwards). No MCP; project settings only. It gets
+implementing session: tools Read/Glob/Grep/Bash/Edit/Write. Its allowlist is built from
+`.ai/permissions.allow`: Read/Glob/Grep, read-only git, and the project's fixed check
+commands (e.g. `npm test`, `npx vitest run *`). Dropped: Edit/Write, git writes, `ai-task`,
+`ai-check`, `.ai/validate`, pushes, deploys, `supabase`, `vercel`, writers and runners
+(`rm`, `tee`, `sed`, `find`, `curl`, ...), and open interpreters (`bash *`, `node *`,
+`npx *`, `npm run *`, `python3 *`). Writes are allowed only for scratch probes under the
+ignored `.ai/local/review-probes/` (deleted afterwards). The list it got is saved next
+to the review log (`.ai/local/review-*.allowlist`), denied attempts go to
+`.ai/local/review-denials.log`. The approved test commands still run project code, and
+Read is not limited to the checkout. No MCP; project settings only. It gets
 the mode's usual prompt plus `.ai/prompts/claude-review.md` (sceptical stance, scenario
 probes, a checklist of failure types seen in these projects) and returns the same
 format, so the host saves it to the same file with the same bindings; dispositions,
@@ -359,13 +364,16 @@ re-checks and disputes work unchanged. The allowlist is not an OS sandbox: the
 checkout-unchanged check after the review and the gate check still apply.
 
 Model by risk: `claude-fable-5-1` for plan and code reviews when any task runs on opus
-or a task title names RLS, auth, permissions, locks/concurrency, migrations, deletion,
-payments or irreversible work; otherwise `claude-opus-5-5`; re-checks on
+or a task title names RLS/row-level, auth/authentication/authorization, permissions,
+policies, locks/lock order, concurrency, deadlocks, race conditions, migrations,
+deletion, drop, payments or irreversible work (whole words: "author" or "Lockfile" don't
+count); otherwise `claude-opus-5-5`; re-checks on
 `claude-opus-5-5`; effort `high`. Override with `AI_CLAUDE_REVIEW_MODEL` and
 `AI_CLAUDE_REVIEW_EFFORT`. Claude reviews draw from the same allowance as
 implementation.
 
-Every Claude-written review starts with a `Reviewer: Claude fallback (…)` line, is
+Every Claude-written review starts with a `Reviewer: Claude fallback (…)` line
+(`Reviewer: Claude (…)` when forced with `AI_REVIEWER=claude`), is
 listed in `.ai/reviews/fallback-log.md` (committed with the review) and is named in the
 PR. When Codex has usage again, run one catch-up Codex review over the listed work
 (e.g. `AI_REVIEWER=codex .ai/bin/ai-review --base <oldest listed base>` on the merged
