@@ -336,6 +336,54 @@ sleep, and retry the same step. Total waiting per command is capped by
 `AI_LIMIT_MAX_WAIT` (default 28800 s); a weekly limit beyond that stops with a
 notification so you can rerun after the reset. Pauses are logged in the ignored
 `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
+
+### Claude fallback reviewer
+
+`AI_REVIEWER` picks the reviewer for plan reviews, code reviews and re-checks:
+`auto` (default) asks Codex first and, only when Codex reports a usage limit (or the
+Codex CLI is missing), runs a fresh read-only Claude review instead; `codex` keeps the
+old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried again on
+every later review, so it takes over as soon as it has usage.
+
+The Claude reviewer is a separate `claude -p` session with no access to the
+implementing session: tools Read/Glob/Grep/Bash/Edit/Write, but allowed only to read,
+run read-only git and the project's own approved check commands from
+`.ai/permissions.allow` (git writes, `ai-task`, `ai-check`, `.ai/validate`, pushes,
+deploys and `supabase` are dropped), and write scratch probes under the ignored
+`.ai/local/review-probes/` (deleted afterwards). No MCP; project settings only. It gets
+the mode's usual prompt plus `.ai/prompts/claude-review.md` (sceptical stance, scenario
+probes, a checklist of failure types seen in these projects) and returns the same
+format, so the host saves it to the same file with the same bindings; dispositions,
+re-checks and disputes work unchanged. The allowlist is not an OS sandbox: the
+checkout-unchanged check after the review and the gate check still apply.
+
+Model by risk: `claude-fable-5-1` for plan and code reviews when any task runs on opus
+or a task title names RLS, auth, permissions, locks/concurrency, migrations, deletion,
+payments or irreversible work; otherwise `claude-opus-5-5`; re-checks on
+`claude-opus-5-5`; effort `high`. Override with `AI_CLAUDE_REVIEW_MODEL` and
+`AI_CLAUDE_REVIEW_EFFORT`. Claude reviews draw from the same allowance as
+implementation.
+
+Every Claude-written review starts with a `Reviewer: Claude fallback (…)` line, is
+listed in `.ai/reviews/fallback-log.md` (committed with the review) and is named in the
+PR. When Codex has usage again, run one catch-up Codex review over the listed work
+(e.g. `AI_REVIEWER=codex .ai/bin/ai-review --base <oldest listed base>` on the merged
+branch) and note the result in the log.
+
+### Outcome log (tuning the model rules)
+
+`ai-run` appends one JSON line per task attempt and `ai-review` one per review to
+`outcomes.jsonl` in the host state directory (`AI_STATE_DIR`, default
+`~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
+branch, task, title, category (security, concurrency, migration, tests, docs, ui,
+feature; from the title), model, result (done, blocked, validation_failed,
+no_checkpoint), attempt, first-time pass, duration; for reviews: mode, reviewer
+(codex, claude-fallback, claude), model, effort, finding counts, duration.
+`.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
+model, category and model/category, findings per reviewer and model, and the
+Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
+move to haiku and which keep failing on sonnet.
 
 ### Models
 
@@ -359,8 +407,9 @@ Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$
 and can never break the workflow. For phone notifications, install the free ntfy app,
 subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
-`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`;
-environment variables win):
+`AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
+`AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
+`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`; environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>
@@ -473,7 +522,7 @@ Latest uncommitted edits may need reconciliation after a crash; previous commits
 and checkpoint records remain recoverable. Local validation evidence may be lost
 on another machine: rerun the gate there.
 
-## Review with Codex
+## Review with Codex (Claude fallback)
 
 When Claude finishes, inspect the handoff, ensure the task queue is complete,
 checkpoint any final updates, and run the full gate. Use an explicit review base:
@@ -491,6 +540,8 @@ or stale/failed validation is rejected. Codex independently checks requirements,
 plan/tasks, diff/history, relevant source, tests, and validation evidence. Its
 shell sandbox is read-only, approvals are disabled, and its final Markdown is
 saved by the host script. Codex must not edit the application during this step.
+At a Codex usage limit the same command runs the Claude fallback reviewer (see
+"Claude fallback reviewer"); `AI_REVIEWER` chooses.
 User Codex configuration is omitted by the script to reduce incidental integrations;
 project configuration and CLI capabilities should still be inspected in trusted repos.
 
@@ -572,7 +623,7 @@ Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the f
 | `scripts/ai-status` | Compact status derived from records, task queue, Git, validation |
 | `scripts/ai-check` | Bounded full gate, logs, and content-bound evidence |
 | `scripts/ai-run` | Bounded fresh-session implementation loop and checkpoint checks |
-| `scripts/ai-review` | Revision-bound, read-only Codex review and report preservation |
+| `scripts/ai-review` | Revision-bound, read-only Codex review (Claude fallback at its limit) and report preservation |
 | `scripts/ai-pipeline` | Hands-off implement → review → triage/fix → PR → notify, resumable |
 | `scripts/lib/` | Small Bash helpers and standard-library Python Markdown/copy/evidence helpers |
 | `tests/` | Offline integration tests; mock CLI agents, no model calls |
@@ -628,10 +679,12 @@ It never restarts or repairs the workflow.
 
 `--diagnose` opts into one headless, read-only diagnosis per newly detected
 incident batch, bounded by `--diagnosis-timeout` (default 120 seconds, plus 10
-seconds kill grace). By default Codex diagnoses (`codex exec --sandbox read-only`,
-medium effort), because Codex has its own limit while Claude's is shared with your
-interactive sessions. `--diagnosis-agent claude` uses Claude instead: Read/Glob/Grep
-only, project settings, MCP disabled, `AI_MODEL` applies. Stdin is `/dev/null`. The watchdog saves the response to
+seconds kill grace). By default (`--diagnosis-agent auto`) Codex diagnoses (`codex exec
+--sandbox read-only`, medium effort), because Codex has its own limit while Claude's is
+shared with your interactive sessions; when Codex fails (e.g. at its usage limit) Claude
+diagnoses instead. `--diagnosis-agent codex|claude` forces one. Claude: Read/Glob/Grep
+only, project settings, MCP disabled, model `AI_DIAGNOSIS_MODEL` (default
+`claude-sonnet-5-5`). Reinstall the timer after upgrading so it uses the new default. Stdin is `/dev/null`. The watchdog saves the response to
 ignored `.ai/local/diagnosis.md` and includes its first line in the notification.
 Inspect trusted project settings/hooks before opting in; tool restrictions are not
 an OS sandbox. Failed or interrupted attempts are not retried for that incident.

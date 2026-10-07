@@ -10,6 +10,7 @@ Hands-off delivery of an approved plan on a feature branch:
   Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
   -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
+  Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
 --base is the review base (default main); --pr-base is the PR target branch
 (default: --base when it is a local or origin/ branch).
@@ -57,7 +58,10 @@ while (( $# )); do
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
-command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first.'
+case "${AI_REVIEWER:-auto}" in
+  codex) command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first (or set AI_REVIEWER=auto).' ;;
+  auto) command -v codex >/dev/null || printf '%s\n' 'Codex CLI not found: reviews run on the Claude fallback reviewer.' ;;
+esac
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.
 state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
@@ -93,7 +97,7 @@ fi
 # and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
 open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
-    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md')" ]] || \
+    ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
@@ -137,6 +141,13 @@ host_commit() {
   git add -- "${@:2}"
   git commit -m "$1" >/dev/null
   ai_guard_verify
+}
+# A Claude fallback review appends to the fallback log: commit it with the review record.
+review_record() {
+  local paths=("$@")
+  [[ -z "$(git status --porcelain --untracked-files=all -- .ai/reviews/fallback-log.md)" ]] || \
+    paths+=(.ai/reviews/fallback-log.md)
+  printf '%s\n' "${paths[@]}"
 }
 # Review is current if nothing but workflow records changed since the reviewed commit.
 review_current() {
@@ -232,17 +243,18 @@ recheck_fail() {
 reconcile_disputes() {
   local status added paths=() file
   status=$(ai_helper recheck-status 2>&1) || recheck_fail "$status"
-  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  # The fallback log is appended by every Claude review and committed with the next record.
+  if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all -- . ':!.ai/reviews/fallback-log.md')" ]]; then
     recheck_fail 'uncommitted .ai/reviews/recheck.md or disputes.md that do not verify; inspect them.'
   fi
   [[ "$status" != none ]] || return 0
   if [[ "$status" == pending ]]; then
-    step 'Re-check of rejected findings (Codex)'
+    step 'Re-check of rejected findings (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
     ai_guard_verify
   fi
   added=$(ai_helper disputes-record 2>&1) || recheck_fail "$added"
-  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md; do
+  for file in .ai/reviews/recheck.md .ai/reviews/disputes.md .ai/reviews/fallback-log.md; do
     [[ -z "$(git status --porcelain --untracked-files=all -- "$file")" ]] || paths+=("$file")
   done
   if (( ${#paths[@]} )); then
@@ -284,10 +296,11 @@ reconcile_disputes
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
   if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
-    step 'Plan review (Codex)'
+    step 'Plan review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --plan "${review_args[@]}" || stop 'plan review'
     ai_guard_verify
-    host_commit 'chore(ai): record plan review' .ai/reviews/plan.md
+    mapfile -t records < <(review_record .ai/reviews/plan.md)
+    host_commit 'chore(ai): record plan review' "${records[@]}"
     plan_info=$(ai_helper plan-review-info) || stop 'plan review'
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$plan_info" == current* ]] || \
@@ -318,10 +331,11 @@ while true; do
       printf 'Committed content differs from the validated content: %s\n' "${why#Error: }" > .ai/local/last-error
       stop review
     fi
-    step 'Independent review (Codex)'
+    step 'Independent review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
     ai_guard_verify
-    host_commit 'chore(ai): record independent review' .ai/reviews/current.md
+    mapfile -t records < <(review_record .ai/reviews/current.md)
+    host_commit 'chore(ai): record independent review' "${records[@]}"
   fi
   read -r _ blockers majors minors < <(ai_helper review-info)
   printf 'Review: BLOCKER %s, MAJOR %s, MINOR %s\n' "$blockers" "$majors" "$minors"

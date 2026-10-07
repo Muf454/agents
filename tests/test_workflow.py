@@ -50,6 +50,30 @@ if 'RECOVERY CONTRACT' in prompt:
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
                       'result': json.dumps(decision)}))
     sys.exit(0)
+if 'CLAUDE REVIEWER' in prompt:
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'claude-review-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
+    with open(state / 'claude-review-prompts.log', 'a') as f: f.write(prompt + '\n=====\n')
+    assert pathlib.Path('.ai/local/review-probes').is_dir(), 'no probe directory'
+    pathlib.Path('.ai/local/review-probes/probe.txt').write_text('scenario probe')
+    review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success')
+    if review_mode == 'limit-once' and not (state / 'claude-review-limit').exists():
+        (state / 'claude-review-limit').touch()
+        print(json.dumps({'type':'result','subtype':'error','is_error':True,
+                          'result':"You've hit your usage limit. Try again in 2 minutes."}))
+        sys.exit(1)
+    if review_mode == 'error':
+        sys.exit(3)
+    if 'RECHECK SCOPE' in prompt:
+        text = os.environ.get('MOCK_RECHECK', '{"answers": [{"id": "M1", "verdict": "withdrawn", "reason": "Claude agrees"}]}')
+    else:
+        major = review_mode == 'major' and 'REVIEW SCOPE' in prompt
+        text = ('# Review by Claude\nOverall verdict: ' + ('one major finding' if major else 'no demonstrated findings') + '\n'
+                'Finding counts: BLOCKER=0 MAJOR=' + ('1' if major else '0') + ' MINOR=0\n'
+                '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- M1: demonstrated by a probe.\n' if major else 'None.\n') +
+                '## MINOR findings\nNone.\n')
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],'result':text}))
+    sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
 assert '--strict-mcp-config' in args
@@ -200,6 +224,10 @@ assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
 with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
+if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
+    with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
+    print('ERROR: You have hit your usage limit. Try again in 7 days.')
+    sys.exit(1)
 if 'Diagnose this workflow incident' in args[-1]:
     path = pathlib.Path(args[args.index('--output-last-message')+1])
     path.write_text('Codex: the runner was killed.\nEvidence follows.')
@@ -2057,10 +2085,220 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
         self.tool('ai-run', '--approved')
-        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', AI_REVIEWER='codex')
         self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
         self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
         self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    # ------------------------------------------------------- reviewer fallback
+    def claude_review_args(self):
+        return [json.loads(line) for line in (self.base / 'claude-review-args.log').read_text().splitlines()]
+
+    def test_review_falls_back_to_claude_at_the_codex_limit(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        result = self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1')
+        self.assertIn('Codex usage limit', result.stdout)
+        self.assertIn('Review by Claude (claude-opus-5-5) saved', result.stdout)
+        self.assertFalse((self.base / 'sleep.log').exists())  # no pause for a 7-day limit
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('> **Reviewer: Claude fallback (claude-opus-5-5, effort high; Codex usage limit', review)
+        self.assertIn('BLOCKER 0', self.notifications() or 'BLOCKER 0')
+        self.helper('review-info')  # bound like a Codex review
+        args = self.claude_review_args()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'claude-opus-5-5')
+        self.assertEqual(args[args.index('--effort') + 1], 'high')
+        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep,Bash,Edit,Write')
+        allowed = args[args.index('--allowedTools') + 1:args.index('--setting-sources')]
+        self.assertIn('Edit(./.ai/local/review-probes/**)', allowed)
+        self.assertIn('Bash(git diff *)', allowed)
+        self.assertIn('Bash(cat *)', allowed)
+        for entry in ('Edit', 'Write', 'Bash(git add *)', 'Bash(git commit *)', 'Bash(git rm *)',
+                      'Bash(.ai/bin/ai-task *)', 'Bash(.ai/bin/ai-check)', 'Bash(bash .ai/validate)'):
+            self.assertNotIn(entry, allowed)
+        self.assertIn('--strict-mcp-config', args)
+        self.assertFalse((self.project / '.ai/local/review-probes').exists())
+        prompt = (self.base / 'claude-review-prompts.log').read_text()
+        self.assertIn('REVIEW SCOPE', prompt)
+        self.assertIn('Lock order and deadlocks', prompt)
+        self.assertIn('Main/alt identity changes', prompt)
+        log = (self.project / '.ai/reviews/fallback-log.md').read_text()
+        self.assertIn('| code | feature/test |', log)
+        self.assertIn('| claude-opus-5-5 | high | Codex usage limit', log)
+        outcome = json.loads((self.base / 'host-state/outcomes.jsonl').read_text().splitlines()[-1])
+        self.assertEqual((outcome['kind'], outcome['reviewer'], outcome['model'], outcome['mode']),
+                         ('review', 'claude-fallback', 'claude-opus-5-5', 'code'))
+        self.assertEqual(outcome['major'], 0)
+
+    def test_claude_reviewer_model_follows_risk_and_overrides(self):
+        self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: opus'))
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1')
+        args = self.claude_review_args()[-1]
+        self.assertEqual(args[args.index('--model') + 1], 'claude-fable-5-1')
+        self.assertIn('claude-fable-5-1', (self.project / '.ai/reviews/current.md').read_text())
+        self.commit('record review')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1',
+                  AI_CLAUDE_REVIEW_MODEL='claude-opus-5-5', AI_CLAUDE_REVIEW_EFFORT='max')
+        args = self.claude_review_args()[-1]
+        self.assertEqual((args[args.index('--model') + 1], args[args.index('--effort') + 1]), ('claude-opus-5-5', 'max'))
+        self.tool('ai-review', '--base', 'main', expected=1, AI_CLAUDE_REVIEW_EFFORT='huge', AI_REVIEWER='claude')
+
+    def test_review_risk_helper(self):
+        self.ready(task('T001') + task('T002', dependencies='T001').replace('Verify T002', 'Add the RLS policy'))
+        self.assertEqual(self.helper('review-risk').stdout.strip(), 'high T002 title names rls')
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        self.assertEqual(self.helper('review-risk').stdout.strip(), 'normal')
+
+    def test_reviewer_setting_codex_and_claude_only(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        self.assertFalse((self.base / 'codex-calls').exists())
+        self.assertIn('AI_REVIEWER=claude', (self.project / '.ai/reviews/current.md').read_text())
+        self.assertIn('| AI_REVIEWER=claude |', (self.project / '.ai/reviews/fallback-log.md').read_text())
+        self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='gemini')
+        self.commit('record review')
+        # Codex reviews carry no label; other Codex errors never fall back.
+        self.tool('ai-review', '--base', 'main')
+        self.commit('record review')
+        self.assertNotIn('Reviewer:', (self.project / '.ai/reviews/current.md').read_text())
+        before = len(self.claude_review_args())
+        self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='error')
+        self.assertEqual(len(self.claude_review_args()), before)
+        # The setting also comes from the user config.
+        (self.config / 'ai-toolkit').mkdir()
+        (self.config / 'ai-toolkit/config').write_text('AI_REVIEWER=claude\n')
+        calls = (self.base / 'codex-calls').read_text().count('call')
+        self.tool('ai-review', '--base', 'main')
+        self.commit('record review')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), calls)
+
+    def test_claude_review_usage_limit_pauses_then_retries_codex_first(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='limit-once')
+        self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 2)
+        self.assertEqual(len(self.claude_review_args()), 2)
+        self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
+        self.helper('review-info')
+
+    def test_plan_review_and_recheck_fall_back_to_claude(self):
+        self.ready()
+        result = self.tool('ai-review', '--plan', MOCK_CODEX_LIMIT='1')
+        self.assertIn('Plan review by Claude (claude-opus-5-5)', result.stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        shown = self.run_cmd(['git', 'show', '--stat', 'HEAD']).stdout
+        self.assertIn('.ai/reviews/fallback-log.md', shown)
+        self.assertIn('Reviewer: Claude fallback', (self.project / '.ai/reviews/plan.md').read_text())
+        self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+
+    def test_recheck_falls_back_to_claude(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n'])
+        result = self.tool('ai-review', '--recheck', MOCK_CODEX_LIMIT='1')
+        self.assertIn('Re-check by Claude (claude-opus-5-5) saved', result.stdout)
+        self.assertIn('1 withdrawn', result.stdout)
+        report = (self.project / '.ai/reviews/recheck.md').read_text()
+        self.assertIn('# Re-check of rejected findings (Claude fallback, claude-opus-5-5)', report)
+        self.assertEqual(self.helper('recheck-verify').stdout.splitlines(), ['M1\twithdrawn\tClaude agrees'])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('| recheck |', (self.project / '.ai/reviews/fallback-log.md').read_text())
+
+    def test_pipeline_runs_on_the_claude_fallback_reviewer(self):
+        self.ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX_LIMIT='1')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        log = (self.project / '.ai/reviews/fallback-log.md').read_text()
+        self.assertIn('| plan |', log)
+        self.assertIn('| code |', log)
+        tracked = self.run_cmd(['git', 'ls-files', '.ai/reviews']).stdout
+        self.assertIn('fallback-log.md', tracked)
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('## Independent review (Claude fallback, claude-opus-5-5)', body)
+        self.assertIn('Codex reviews it later in one catch-up review', body)
+        self.assertIn('↪ Codex usage limit', self.notifications())
+
+    def test_pipeline_fallback_recheck_is_committed_with_the_log(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX_LIMIT='1',
+                  MOCK_CLAUDE_REVIEW='major', MOCK_CLAUDE='triage-reject')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertIn('Claude fallback, claude-opus-5-5', (self.project / '.ai/reviews/recheck.md').read_text())
+        log = (self.project / '.ai/reviews/fallback-log.md').read_text()
+        self.assertIn('| recheck |', log)
+        shown = self.run_cmd(['git', 'log', '-1', '--stat', '--format=%s', '--grep', 'record review re-check']).stdout
+        self.assertIn('fallback-log.md', shown)
+
+    def test_pipeline_without_codex_cli_uses_claude(self):
+        self.ready()
+        self.add_origin()
+        (self.mock_bin / 'codex').unlink()
+        # Only the mocks and system tools: a real Codex CLI on this machine must not be found.
+        self.env['PATH'] = os.pathsep.join((str(self.mock_bin), '/usr/bin', '/bin'))
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertIn('Codex CLI not found', result.stdout)
+        self.assertIn('Codex CLI not installed', (self.project / '.ai/reviews/fallback-log.md').read_text())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_REVIEWER='codex')
+
+    def test_review_allowlist_keeps_only_read_and_check_commands(self):
+        self.setup_project()
+        allow = self.project / '.ai/permissions.allow'
+        allow.write_text(allow.read_text() + 'Bash(npm test)\nBash(npx vitest run *)\nBash(git push *)\n'
+                         'Bash(npx supabase db push)\nBash(rm -rf *)\nBash(npm run deploy)\n')
+        entries = self.helper('review-allowlist').stdout.splitlines()
+        for entry in ('Read', 'Bash(npm test)', 'Bash(npx vitest run *)', 'Bash(git log *)', 'Bash(git blame *)',
+                      'Edit(./.ai/local/review-probes/**)'):
+            self.assertIn(entry, entries)
+        for entry in ('Edit', 'Write', 'Bash(git push *)', 'Bash(npx supabase db push)', 'Bash(rm -rf *)',
+                      'Bash(npm run deploy)', 'Bash(git commit *)', 'Bash(.ai/bin/ai-task *)'):
+            self.assertNotIn(entry, entries)
+
+    def test_setup_installs_the_claude_review_prompt(self):
+        self.setup_project()
+        self.assertIn('Checklist of failure types', (self.project / '.ai/prompts/claude-review.md').read_text())
+
+    # ------------------------------------------------------------ outcome log
+    def test_runner_logs_task_outcomes_and_report(self):
+        self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +
+                   task('T002', dependencies='T001').replace('Verify T002', 'Docs for T002'))
+        self.tool('ai-run', '--approved')
+        lines = [json.loads(x) for x in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        self.assertEqual([(r['task'], r['model'], r['result'], r['attempt'], r['first_pass']) for r in lines],
+                         [('T001', 'sonnet', 'done', 1, True), ('T002', 'default', 'done', 1, True)])
+        self.assertEqual(lines[1]['category'], 'docs')
+        self.assertEqual(lines[0]['project'], 'project with spaces')
+        self.assertEqual(lines[0]['branch'], 'feature/test')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1')
+        report = self.tool('ai-status', '--outcomes').stdout
+        self.assertIn('## Tasks by model', report)
+        self.assertIn('| sonnet | 1 | 1/1 (100%) | 1 | 0 | 1.0 |', report)
+        self.assertIn('## Tasks by category', report)
+        self.assertIn('| claude-fallback | claude-opus-5-5 | code | 1 | 0 | 0 | 0 |', report)
+        self.assertIn('Codex catch-up pending', report)
+
+    def test_runner_logs_blocked_and_failed_validation_attempts(self):
+        self.ready(task('T001') + task('T002'))
+        self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='blocked-first')
+        lines = [json.loads(x) for x in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        self.assertEqual([(r['task'], r['result']) for r in lines], [('T001', 'blocked'), ('T002', 'done')])
+        self.assertFalse(lines[0]['first_pass'])
+        empty = self.tool('ai-status', '--outcomes', str(self.base / 'missing.jsonl')).stdout
+        self.assertIn('No outcomes recorded yet', empty)
+
+    def test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env python3\nimport os, sys\n'
+                                              'a = sys.argv[1:]\n'
+                                              "open(os.environ['MOCK_STATE_DIR'] + '/diag-model', 'w').write(a[a.index('--model')+1])\n"
+                                              "print('Claude: the runner was killed.')\n")
+        self.watchdog('--diagnose', expected=1)
+        self.assertEqual((self.base / 'diag-model').read_text(), 'claude-sonnet-5-5')
+        self.assertIn('Claude: the runner was killed.', self.notifications())
 
     def test_task_model_line_overrides_run_model(self):
         self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +
@@ -2930,7 +3168,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=json.dumps({'answers': [
             {'id': 'M1', 'verdict': 'upheld', 'reason': 'still broken'},
             {'id': 'M2', 'verdict': 'withdrawn', 'reason': 'the gate covers it'}]}))
-        self.assertIn('Re-check of rejected findings (Codex)', result.stdout)
+        self.assertIn('Re-check of rejected findings (Codex; Claude fallback)', result.stdout)
         self.assertEqual(len(self.recheck_calls()), 1)
         self.assertEqual(self.triage_calls(), 0)
         self.assertEqual(self.disputes(), 1)

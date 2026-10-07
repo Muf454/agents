@@ -1,82 +1,37 @@
-# Plan: Run flow batch 2 (FL-01, FL-07, FL-09)
+# Plan: Reviewer fallback and model-choice data
 
-## Assessment (origin/master 9e11a11, after PR #14)
-- `.ai/ci-setup` (template: installs nothing) runs only in GitHub CI
-  (`templates/.github/workflows/ai-validate.yml`). It is a protected gate file
-  (`ai_guard_digest` roots in scripts/lib/common.sh ~106). No host step installs
-  dependencies; the runner may not run `npm ci`, hence the 2026-10-05 23:06 stop.
-- `ai-recover` `commit_and_rerun` (~line 159) runs `ai-check` on uncommitted leftovers.
-- `ai-run` (scripts/ai-run) loop: `ai_guard_verify` → `tasks next` → session → post-task
-  `ai-check`; final `ai-check` when the queue is complete. `ai-pipeline`'s
-  `ensure_validated` (~line 190) runs `ai-check` before review and publication.
-- Watchdog: `ai-watchdog --install-timer` exists (scripts/lib/watchdog.py `timer()`);
-  setup-project never installs it; nothing tells the coordinator when a checkout (e.g. a
-  new worktree) has no timer. `grep -rn pgrep scripts docs templates README.md` finds
-  nothing: the self-matching waits were coordinator shell loops, so FL-07's wait part is
-  documentation plus a regression test.
-- PR body (`pr_body`, ~1647) copies the handoff's "Manual testing for the human" verbatim;
-  `finish_summary` (~1491) counts every bullet there as a manual step.
-- FL-03 (convergence) is out of this batch (stays in the backlog, not started).
-- Tests: `tests/test_workflow.py`, 188 tests (unittest, mock claude/codex/gh/systemctl).
+## Assessment (master 0818f20, after PR #15)
+- `scripts/ai-review` `codex_review()` loops: Codex exit != 0 and `limit-check` finds a limit
+  → `ai_limit_pause Codex` → retry; a reset beyond `AI_LIMIT_MAX_WAIT` dies.
+- Publish helpers (`workflow.py publish-review`, `publish-plan-review`, `publish-recheck`)
+  validate format and bind the saved file's SHA-256 outside the checkout; reviewer-neutral.
+- `ai-pipeline` requires `codex` on PATH and commits `.ai/reviews/{plan,current,recheck}.md`
+  after each review; `.ai/reviews/` is already excluded from the validation fingerprint,
+  the plan digest and `review_current`; `RECHECK_RECORDS` needs the fallback log.
+- `ai-run` `claude_session` knows each task's model and outcome (DONE/BLOCKED/validation
+  failure) but logs nothing structured.
+- `watchdog.py` has `--diagnosis-agent codex|claude`; Claude uses `AI_MODEL`.
+- Claude CLI 2.1.291: `--model claude-fable-5-1|claude-opus-5-5|claude-sonnet-5-5` and
+  `--effort high` verified live; in dontAsk mode `Edit(./dir/**)` allows the Write tool
+  inside dir only (verified: writes elsewhere denied; `Write(...)` rules did not match).
 
-## Approach (revised after Codex plan reviews 1 (P1–P7) and 2 (P8–P11); FL-03 dropped earlier)
-FL-01 was simplified instead of extended: the host installs only at the start of `ai-run`
-and before recovery validation, writes nothing tracked (P1), proves the install changed no
-project file with a full tree snapshot (P2), does not claim mid-run dependency changes are
-handled (P3), covers recovery (P4) and has no "no lockfile" shortcut (P5).
-1. T001 (opus) FL-01 helpers: `deps-status`, `deps-record`, `tree-snapshot` (submodules
-   snapshotted recursively, P9) in workflow.py;
-   template ci-setup comment lines. No caller yet.
-2. T002 (opus) FL-01 runner: `ai_deps` in common.sh; ai-run calls it once before its first
-   task; end-to-end pipeline test. Flow chart: dependency step.
-   Dependency-setup stops are hard escalations in ai-recover (P8); preservation is checked
-   after failed installer runs too; the run-time cap is tested (P11).
-3. T003 (opus) FL-01 recovery: `commit_and_rerun` installs before `ai-check`; escalates on
-   failure. Flow chart: recovery branch.
-4. T004 (sonnet) FL-09 runtime: `pr_body` "How to test" split with flagged bullets,
-   `finish_summary` counts "Needs you" only. Flow chart: PR/FINISHED.
-5. T005 (sonnet) FL-09 guidance: handoff template, prompts, CLAUDE.md/AGENTS.md templates.
-6. T006 (sonnet) FL-07: `setup-project --watchdog`, `ai-watchdog --timer-status` (unit files +
-   enabled + active; unknown when systemd can't answer, P10), pipeline
-   start warning, README waits section, no executable `pgrep -f` waits (docs may explain it),
-   vault human-todo entry. Flow chart: setup and start warning.
-7. T007 (haiku) final docs audit.
-
-Dependencies: T001 → T002 → T003; T004 → T005; T006 independent; T007 after all six.
-
-## API / data changes
-- New helpers: `deps-status` (prints `current` or `stale <reason>`), `deps-record`,
-  `tree-snapshot`.
-- New files: `.ai/local/deps.json`, `.ai/local/deps-*.log` (ignored, host-written).
-- New options: `setup-project --watchdog`, `ai-watchdog --timer-status`; environment
-  variable `AI_DEPS_TIMEOUT` (not a config/manifest setting).
-- Handoff format: `### Needs you` / `### Covered by automated tests` under "Manual testing
-  for the human" (legacy format still accepted).
+## Approach
+1. T001 `workflow.py`: `review-risk` (risk + reason from tasks), outcome log append and
+   report helpers (`outcome-task`, `outcome-review`, `outcomes-report`), `fallback-record`,
+   reviewer label support in the publish helpers (env `AI_REVIEW_LABEL`).
+2. T002 `ai-review`: reviewer selection (`AI_REVIEWER`), `claude_review()` with the read-only
+   allowlist, model by risk, fallback on Codex limit, Claude limit pause, probe dir cleanup,
+   label + fallback log + review outcome; settings plumbing (config, recovery manifest).
+3. T003 Prompt template `templates/.ai/prompts/claude-review.md`.
+4. T004 `ai-pipeline`: Codex optional in auto/claude mode, commit the fallback log with each
+   review, neutral step names; `RECHECK_RECORDS`; PR body names fallback reviews.
+5. T005 `ai-run` per-task outcome lines; `ai-status --outcomes`.
+6. T006 Watchdog `--diagnosis-agent auto` + `AI_DIAGNOSIS_MODEL` (default sonnet 5.5).
+7. T007 Docs (README, docs/workflow.md, docs/decisions.md), vault flow chart.
+Then: Claude fallback review (Fable) of this branch, dispositions, fixes.
 
 ## Risks
-- Running `.ai/ci-setup` on the host executes package-manager code (lifecycle scripts) from
-  lockfiles an agent may have changed in a task. Same exposure as CI and the gate, which
-  already run project code; documented, not sandboxed.
-- `.ai/local/deps.json` is agent-writable: a forged stamp can only skip an install, which
-  makes validation fail or pass on the actually installed tree (validation stays the
-  authority). Accepted.
-- A task that adds a dependency: its in-session gate may fail (sessions can't install); it
-  is handled by the existing rules (BLOCKED or a stop), and the next `ai-run` start or
-  recovery validation installs. Deliberately not solved in this batch.
-- A completed queue validated only by ai-pipeline's `ensure_validated` (no `ai-run` start,
-  e.g. a review-only restart in a fresh worktree) does not install; it stops at validation
-  as today. Documented limitation.
-- Watchdog timers of removed worktrees keep firing (exit 2); out of scope, documented
-  (`--uninstall-timer` before removing a worktree).
-- The pipeline running this batch uses the frozen `.ai/bin`; new behaviour applies after
-  merge/upgrade.
-
-## Choices for Zack (defaults chosen)
-- FL-07 timer install is opt-in (`--watchdog`) rather than default, since it writes systemd
-  units outside the project; the pipeline warns when missing.
-- FL-01 runs only at `ai-run` start and in recovery validation (not before every gate),
-  to keep it small; mid-run dependency changes install at the next start.
-
-## Validation
-Each task names its `-k` test pattern (must report `Ran N tests`, N ≥ 1), then
-`.ai/bin/ai-check` in the foreground (600000 ms Bash timeout; the gate takes ~7 min).
+- A Claude reviewer with Bash can run project code (tests); mitigated by the allowlist
+  (project-approved commands only), the existing post-review clean-checkout/HEAD check and
+  the gate digest check. Not an OS sandbox (documented).
+- Claude reviews use Zack's Max allowance: only on Codex limit or when forced.
