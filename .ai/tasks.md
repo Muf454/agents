@@ -16,7 +16,10 @@ change a run. Observation writers are best effort and never change a run's outco
 Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
 into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
-Revised after plan review 5 (`.ai/reviews/plan.md`, P26–P27, all accepted): recovery
+Revised after plan review 6 (`.ai/reviews/plan.md`, P28–P29, all accepted): registration
+uses `$AI_START_BRANCH` after the start/resume block; terminal sanitising moved into the opus
+task T005.
+Revised after plan review 5 (P26–P27, all accepted): recovery
 escalation keeps the recorded substage; Setup is recorded inside `ai_deps`, also during
 recovery.
 Revised after plan review 4 (P23–P25, all accepted): recovery's
@@ -188,8 +191,10 @@ review → `review`; review triage and "Completing the interrupted review triage
 (detail `round <n>`); re-check → `recheck`; pull request → `pr`. `stop STAGE` →
 `ai_observe stop "$STAGE" "$reason"` before notifying or exec'ing ai-recover; the
 pipeline-shell `ai_die` path (marker set) → `ai_observe stop '' "$*"` (keeps the stage);
-`finish` → `ai_observe done "<url or 'no PR'>"`. After `run-manifest start` and on resume:
-`ai_helper pipeline-register "$AI_ROOT" "$branch" || true`.
+`finish` → `ai_observe done "<url or 'no PR'>"`. Registration (P28): one call placed after
+the manifest start/resume block and after `branch=$AI_START_BRANCH` (both initial start and
+recovery resume pass through it): `ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH"
+|| printf 'Warning: …\n' >&2` (no unset variable can reach it under `set -u`).
 Vault `agents-flow.md`: extend the T002 note: the scripts also record the current stage in
 `.ai/local/observation.json` and each pipeline registers its checkout in the host state
 directory (`pipelines/`); `updated:`.
@@ -203,8 +208,9 @@ scripts/ai-pipeline, tests/test_workflow.py, vault agents-flow.md
   - a normal run records `plan_review`, `build`, `review`, `pr`, then `done` with the PR URL;
   - a review failure → `stage=review, state=stopped` with the reason; a plan-review stop →
     `plan_review`;
-  - the registry entry exists after a run; `pipelines` replaced by a regular file in the
-    state root: warning, run outcome unchanged, run manifest still written;
+  - the registry entry exists after an initial start and after a recovery resume (P28);
+    `pipelines` replaced by a regular file in the state root: warning, run outcome unchanged
+    on both start and resume, run manifest still written;
   - terminal output of `step` unchanged (existing tests pass unchanged).
 
 ### Validation
@@ -302,6 +308,13 @@ and read unbounded); reimplement their semantics:
   same (pid, mtime) (a run finishing during the snapshot is not a crash; an orphaned child
   runner does not make a dead pipeline alive). No marker: alive iff `runners` is not empty
   (legacy versions without `pipeline.active`), else gone.
+- `sanitize(text, limit=200)` (P29, security: agent-writable text reaches the terminal):
+  remove ESC-introduced sequences (CSI, OSC, DCS, APC/PM/SOS, single-char escapes) including
+  their parameters, every remaining C0/C1 control and DEL, bidi override/isolate characters
+  (U+202A–U+202E, U+2066–U+2069); collapse whitespace; cap by length with `…`. Applied to
+  every checkout-derived string before it leaves the snapshot layer (T006 must call it for
+  project, branch, observation detail/note, checkout path, notifications, last error, task
+  titles).
 
 ### Likely affected modules
 scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_workflow.py
@@ -319,6 +332,10 @@ scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_work
     (not alive, not crashed), no exception;
   - discovery: registry entries with a relative path, a missing directory, a symlinked `.ai`
     or invalid JSON are skipped; duplicates from the registry and `/proc` merge into one.
+  - Tests named `dashboard_sanitize_*`: CSI colour/cursor moves, OSC 8 hyperlinks and OSC 52
+    clipboard writes (BEL- and ST-terminated), DCS, 8-bit C1 CSI (U+009B), a bare ESC at the
+    end, CR/backspace overwrite tricks, DEL and bidi overrides are all removed; plain UTF-8
+    (emoji, accents) is kept; the length cap holds.
 - No file is written (directory listing with mtimes unchanged; no `__pycache__`).
 
 ### Validation
@@ -349,8 +366,9 @@ cannot be read safely shows as `unknown` while the others render:
   that; alive → `running`; state `stopped`, or a `last-error` newer than the observation,
   with nothing alive → `needs_you`; state `done` → `finished`; else `idle`. Legacy (no
   observation): stage `unknown`; alive → `running`.
-- `sanitize(text, limit=200)`: drop C0/C1 controls and ESC sequences, collapse whitespace,
-  cap length with `…`.
+- Pass every checkout-derived string (project, branch, observation detail/note, checkout
+  path, notifications, last error, task titles) through T005's `sanitize()` before it enters
+  the snapshot (P29).
 - `snapshot(all_runs=False)`: list sorted needs_you → crashed → running/paused/recovering →
   finished → idle, then by `updated`; hides only `finished`, `needs_you` and `idle` entries
   whose `updated` is older than 24 h unless `all_runs` (crashed and live runs always show).
@@ -378,8 +396,9 @@ tests/test_dashboard.py (new) or tests/test_workflow.py
     stage unknown (process identity cases are T005's tests);
   - malformed `observation.json`, malformed log lines and an unreadable tasks file → no
     exception, fields unknown;
-  - an ESC/OSC sequence in a notification and in `last-error` is absent from `--once` and
-    `--json` output;
+  - an ESC/OSC sequence planted in each checkout-derived field (branch name via a crafted
+    HEAD ref, observation detail and note, a notification, `last-error`, a task title,
+    checkout path via a registry entry) is absent from `--once` and `--json` output (P29);
   - a checkout with a FIFO marker, a FIFO observation and a 10 MiB notification log, next to
     a healthy checkout: `--once` returns within 5 s and shows the healthy run correctly;
   - old (> 24 h) finished, needs_you and idle runs are hidden without `--all` and shown with

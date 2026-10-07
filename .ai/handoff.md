@@ -6,7 +6,7 @@ Zack asked for on 2026-10-07: safe record writers and readers (T001), stage
 writers in common.sh, ai-pipeline and ai-run/ai-recover (T002–T004), discovery and liveness (T005),
 a read-only snapshot of all pipelines (T006), a curses TUI showing the flow as boxes with the
 active stage highlighted (T007), docs (T008). Revised after Codex plan review 1
-(P1–P10), 2 (P11–P18) 3 (P19–P22) 4 (P23–P25) and 5 (P26–P27), all accepted. See `.ai/project-spec.md`, `.ai/current-plan.md`,
+(P1–P10), 2 (P11–P18) 3 (P19–P22) 4 (P23–P25) 5 (P26–P27) and 6 (P28–P29), all accepted. See `.ai/project-spec.md`, `.ai/current-plan.md`,
 `.ai/tasks.md`. The previous batch (FL-01, FL-07, FL-09) shipped in PR #15.
 
 ## Validation run

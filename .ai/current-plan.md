@@ -14,7 +14,7 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach (revised after Codex plan reviews 1–5, P1–P27; all accepted)
+## Approach (revised after Codex plan reviews 1–6, P1–P29; all accepted)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
    normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
    (flock, race-safe prune), plus the shared safe I/O (pinned directory descriptors,
@@ -27,14 +27,15 @@
    recovery stage, P19; substage precedence end to end, P11; unexpected recovery exit, P23; escalation keeps the substage, P26; Setup recorded in
    `ai_deps`, also during recovery, P27).
 5. T005 (opus) discovery and liveness: registry + `/proc` runners, marker/process identity
-   with the watchdog semantics on bounded descriptor reads (P3, P14, P20, P24).
+   with the watchdog semantics on bounded descriptor reads (P3, P14, P20, P24); terminal
+   sanitising of agent-writable text (P29).
 6. T006 (sonnet) snapshot model, status rules, `--once`/`--json`, wrapper, setup install;
    age filter keeps crashed runs (P7); no bytecode (P8); symlinked wrapper (P10).
 7. T007 (sonnet) curses TUI and the shared renderer; writer-to-renderer tests (P1, P17, P18);
    pty interaction test (P25).
 8. T008 (haiku) docs and final audit.
 
-Dependencies: linear, T001 → T008. Plan reviews 1–5 (P1–P27): all findings accepted.
+Dependencies: linear, T001 → T008. Plan reviews 1–6 (P1–P29): all findings accepted.
 
 ## Sequencing (Zack, 2026-10-07)
 Implementation starts only after `feature/efficiency-batch` is merged: both runs edit
