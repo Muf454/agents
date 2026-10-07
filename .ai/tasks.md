@@ -16,7 +16,10 @@ change a run. Observation writers are best effort and never change a run's outco
 Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
 into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
-Revised after plan review 4 (`.ai/reviews/plan.md`, P23–P25, all accepted): recovery's
+Revised after plan review 5 (`.ai/reviews/plan.md`, P26–P27, all accepted): recovery
+escalation keeps the recorded substage; Setup is recorded inside `ai_deps`, also during
+recovery.
+Revised after plan review 4 (P23–P25, all accepted): recovery's
 unexpected-exit handler records the stop; liveness split into its own opus task (T005);
 pty test covers navigation, overflow, resize and an injected exception.
 Revised after plan review 3 (P19–P22, all accepted): explicit
@@ -220,19 +223,27 @@ Setup, build, checks and recovery inside `ai-run`/`ai-recover` show on the right
 including after failures.
 
 ### Implementation notes
-scripts/ai-run: `ai_observe step setup` only when `ai_deps` actually installs (stale);
-`ai_observe step build "<id> · <model or default> · <done+1>/<total>"` when a task starts;
-`ai_observe step checks "<id>"` before its post-task `ai-check` (~line 292) and
+scripts/lib/common.sh `ai_deps` (P27): at the real stale-install boundary (after
+`deps-status` says stale, before running `.ai/ci-setup`) record Setup: when
+`AI_OBSERVE_RECOVERY` is set → `ai_observe recovering "$AI_OBSERVE_RECOVERY" setup`
+(state stays recovering), else `ai_observe step setup`. Nothing is recorded when
+dependencies are current.
+scripts/ai-run: `ai_observe step build "<id> · <model or default> · <done+1>/<total>"` when a
+task starts; `ai_observe step checks "<id>"` before its post-task `ai-check` (~line 292) and
 `ai_observe step checks final` before the final one (~257); `--triage` → `step triage`.
-scripts/ai-recover: `ai_observe recovering "<attempt>/<max>"` when recovery starts;
-`ai_observe recovering "<attempt>/<max>" checks` before its leftover validation (explicit
-stage key, P19); `escalate` → `ai_observe stop "$stage" "<reason>"`; in `on_exit`'s existing
+scripts/ai-recover: set `AI_OBSERVE_RECOVERY="<attempt>/<max>"` (not exported to the resumed
+pipeline: unset it before the `exec` into ai-pipeline) and `ai_observe recovering
+"$AI_OBSERVE_RECOVERY"` when recovery starts (keeps the stage the pipeline stop recorded);
+`ai_observe recovering "$AI_OBSERVE_RECOVERY" checks` before its leftover validation
+(explicit stage key, P19). `escalate` → `ai_observe stop '' "<reason> (stopped during
+$stage)"` (P26): the empty label keeps the substage recovery last recorded (the original
+stop stage, setup or checks); the original label is only text. In `on_exit`'s existing
 failure branch (P23) → `ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"`
 before the notification (keeps the substage; best effort).
 No new flow-chart change (T003's note covers stage records).
 
 ### Likely affected modules
-scripts/ai-run, scripts/ai-recover, tests/test_workflow.py
+scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.py
 
 ### Acceptance criteria
 - Tests named `observation_runner_*` (fixture pipeline, observations captured inside the mock
@@ -247,7 +258,15 @@ scripts/ai-run, scripts/ai-recover, tests/test_workflow.py
     with `state=stopped` (P19);
   - unexpected recovery exits (P23): TERM and an injected failing command during recovery
     end with `state=stopped`, the substage kept, the same exit code as today and exactly one
-    STOPPED notification.
+    STOPPED notification;
+  - recovery validation failing after original stops `review`, `re-check` and `pull
+    request` (P26) ends with `stage=checks, state=stopped` (dashboard input for
+    `needs_you`), the original label in the note;
+  - the existing recovery-install fixtures (`fail-later`, `change-later`, see
+    `test_deps_recovery_*`) additionally assert `stage=setup, state=recovering` during the
+    install and `stage=setup, state=stopped` after the failure (P27); their existing exit,
+    notification and checkpoint assertions are unchanged; a run with current dependencies
+    records no Setup.
 - All existing tests pass unchanged.
 
 ### Validation

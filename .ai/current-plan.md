@@ -14,7 +14,7 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach (revised after Codex plan reviews 1–4, P1–P25; all accepted)
+## Approach (revised after Codex plan reviews 1–5, P1–P27; all accepted)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
    normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
    (flock, race-safe prune), plus the shared safe I/O (pinned directory descriptors,
@@ -24,7 +24,8 @@
 2. T002 (sonnet) notification mirror + pause overlay (common.sh); vault note.
 3. T003 (sonnet) ai-pipeline stage records, stop/finish, registration; vault note extended.
 4. T004 (sonnet) ai-run/ai-recover stage records (checks inside ai-run, P2; explicit
-   recovery stage, P19; substage precedence end to end, P11; unexpected recovery exit, P23).
+   recovery stage, P19; substage precedence end to end, P11; unexpected recovery exit, P23; escalation keeps the substage, P26; Setup recorded in
+   `ai_deps`, also during recovery, P27).
 5. T005 (opus) discovery and liveness: registry + `/proc` runners, marker/process identity
    with the watchdog semantics on bounded descriptor reads (P3, P14, P20, P24).
 6. T006 (sonnet) snapshot model, status rules, `--once`/`--json`, wrapper, setup install;
@@ -33,7 +34,7 @@
    pty interaction test (P25).
 8. T008 (haiku) docs and final audit.
 
-Dependencies: linear, T001 → T008. Plan reviews 1–4 (P1–P25): all findings accepted.
+Dependencies: linear, T001 → T008. Plan reviews 1–5 (P1–P27): all findings accepted.
 
 ## API / data changes
 - New files (ignored, host-written): `.ai/local/observation.json`,
