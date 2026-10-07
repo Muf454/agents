@@ -1,13 +1,15 @@
-<!-- Plan review of plan digest 158d34543c9a722093a850185f30f3534023994a62efead0f28d7550e000fd9f; saved 2026-10-06T10:52:56Z. -->
+<!-- Plan review of plan digest 98f198555ec77bcf27a5d2805ec0c1af15a463361c8b84082798bd1d73b5b4d4; saved 2026-10-07T12:09:29Z. -->
 
 # Plan review
 
-Overall verdict: PROCEED with one minor regression-test improvement.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
+Overall verdict: APPROVE WITH MINOR IMPROVEMENTS
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=3
 
-Reviewed HEAD: `02a910dae69a159f05ee3086c340bfb9903490ff`
+Reviewed HEAD: `df0aefd1f762808bcf2d2914ad3357c40e40f243`
 
-Inspected repository instructions, spec, plan, all seven tasks, state/handoff, affected source and templates, relevant tests, documentation, Git history, vault notes, and validation evidence. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, specification, plan, task queue, state/handoff, affected source and tests, prompt templates, validation configuration/evidence, relevant documentation, Git history/diff, and the vault flow chart.
+
+T001 is already partially implemented at this revision; T002–T005 remain planned. Findings retain the earlier review’s IDs. No files were modified, and no network or MCP integrations were invoked.
 
 ## BLOCKER findings
 
@@ -19,36 +21,60 @@ None.
 
 ## MINOR findings
 
-- P12: Explicitly test notification counting for a mixed handoff.
+- P8: Runner acceptance does not enforce the required failure/error summary.
 
-  **Location:** `.ai/tasks.md:227`; `tests/test_workflow.py:1274`; `tests/test_workflow.py:1850`.
+  **Location:** `.ai/project-spec.md:29`, `.ai/tasks.md:37`, `.ai/tasks.md:50`; existing implementation: `tests/run_parallel.py:112`, `tests/test_workflow.py:3860`.
 
-  T004 explicitly tests PR ordering for the split and FINISHED wording when “Needs you” is None. It does not explicitly require a notification assertion when both subsections contain steps. Existing notification tests use legacy handoffs, so they cannot establish that the new format counts human steps correctly while excluding automated checks.
+  The spec requires an aggregate `FAILED (failures=…, errors=…)` summary. T001’s acceptance criteria check failure exit status and traceback output without asserting those totals. The implemented runner instead prints `FAILED (failing shards: 1)`, and its regression explicitly expects that format.
 
-  **Concrete plan change:** Add a `manual_testing_render` case with two human steps and three named automated checks. Assert that `finish-summary` reports exactly two manual steps, excludes the automated checks from that count, and does not say “Nothing to test by hand.” This verifies FL-09’s central notification requirement.
+  An in-memory probe using an actual unittest error summary confirmed that the runner exits 1 and prints the traceback, but omits aggregate error/failure counts. This is a localized reporting gap; failure still closes the gate.
 
-## Assessment
+  **Concrete plan change:** Amend T001 to aggregate and assert failure/error totals, retaining separate diagnostics for crashes and count mismatches. Add ordinary exception, mixed failure/error, and skipped-test cases. The skipped summary is currently accepted correctly, but lacks regression coverage.
 
-The revision addresses P8–P11 at the planning level: dependency setup stops must escalate, preservation checks run after unsuccessful installers, submodule snapshots recurse, timer status requires enabled and active units, and the remaining-run-time cap has a regression scenario.
+- P9: History truncation leaves oversized-round behavior undefined.
 
-Task dependencies are coherent, every task specifies a model, and the integrity-sensitive dependency work uses `opus`. No failed implementation attempt is recorded for these TODO tasks. The frozen `.ai/bin` boundary and same-task flow-chart updates remain explicit.
+  **Location:** `.ai/tasks.md:118`, `.ai/tasks.md:132`, `.ai/tasks.md:215`.
 
-No additional security or architecture finding was identified in the inspected scope. Host execution of package-manager code, the writable dependency stamp, and the limits on mid-run dependency installation are acknowledged design choices.
+  Dropping whole oldest rounds does not specify what happens when the newest round alone exceeds 6000 characters. Dropping it removes the most relevant context; retaining it exceeds the cap. Existing planned tests do not require a useful fallback or explain how triage obtains omitted evidence.
+
+  **Concrete plan change:** Define a capped fallback preserving the round number and review commit reference. Tell reviewers and triage to inspect original reports when omitted context affects their assessment. Add a single oversized newest-round regression checking the cap, fallback reference, and unchanged uncapped count.
+
+- P10: T005 could remove outstanding coordinator timing requirements from the handoff.
+
+  **Location:** `.ai/tasks.md:239`; required evidence: `.ai/current-plan.md:46`, `.ai/project-spec.md:78`.
+
+  T005 instructs the handoff to list approving/applying the gate switch and timing one gate run, with everything else classified as automated. The spec requires three consecutive full parallel runs, matching the serial count and each finishing under 200 seconds, before switching the gate.
+
+  The current handoff correctly retains that requirement. The run log reports one coordinator measurement, so the final task must preserve the remaining obligation.
+
+  **Concrete plan change:** Require T005 to retain the three-run requirement until qualifying evidence is recorded. Once complete, link the counts and wall times and list only the remaining human steps.
+
+## Missing test coverage
+
+Add aggregate runner-summary and oversized-history cases described above. The planned pipeline and interrupted-triage tests otherwise cover the important convergence-counting paths.
+
+## Security and architecture concerns
+
+No additional demonstrated concern in the inspected scope. Explicit task models fit their risks, including the interrupted T001 retry. Preserve frozen gate files, host-owned fix-round accounting, triage scope restrictions, and full-range implementation review.
+
+The convergence check validates that an explanation exists; assessing repeated areas remains agent judgment, as specified. Planned same-task flow-chart updates cover T003 and T004.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean; `git diff --check` passed.
-- Task-queue validation passed.
-- Python syntax: **3 files passed**.
-- Bash syntax: **12 files passed**.
-- Documentation consistency: **3 tests passed**.
-- Stored baseline log reports **188 tests passed** at `9e11a11`, before planning.
-- Current validation-stamp verification failed as stale.
+- Discovery collected **236 tests**.
+- **Three documentation consistency tests passed**.
+- Python syntax checks passed for four relevant files.
+- Bash syntax checks passed for six relevant scripts/gates.
+- Task-queue validation and scoped `git diff --check` passed.
+- In-memory runner probes exercised real summary parsing and aggregation with mocked subprocess I/O.
+- The checkout remained clean.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not rerun because they require writable fixtures, locks, logs, and validation artifacts. The stored baseline does not validate this revision.
+Stored host validation reports **FAIL** at predecessor `d92c621`: one handoff assertion failed among 236 tests. HEAD changes that assertion; a passing full gate at HEAD was not independently observed. The run log reports a coordinator parallel run of 236 tests in 129 seconds.
 
-## Validation and human acceptance
+The full gate and writable integration fixtures were not rerun because they create files and workflow artifacts.
 
-Implement the planned regressions plus P12, then run the required full gate. Human acceptance should include a fresh-worktree run, confirmation that the opted-in timer is active, and inspection of the PR testing split and phone notifications.
+## Manual testing recommendations
 
-This plan review does not constitute implementation verification or human acceptance.
+Retain and record the required coordinator timing evidence before approving the gate switch. Run the full gate in a writable environment after implementation.
+
+This review is plan approval with minor improvements, not implementation verification or human acceptance.

@@ -783,6 +783,8 @@ def review_counts(content):
 
 DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
                              r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+# Text on the same line: `\s` would cross the newline into the table.
+CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
 
 def start_dispositions(arguments):
@@ -797,7 +799,8 @@ Review HEAD: {head}
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
-explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
+explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
+with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
@@ -806,7 +809,8 @@ explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
 
 def triage_check(arguments):
     """Validate dispositions against the current review. Prints 'accepted=N deferred=M'.
-    With --fresh (right after triage), accepted findings must point to open TODO tasks."""
+    With --fresh (right after triage), accepted findings must point to open TODO tasks, and
+    from review round 3 on the dispositions need a `Convergence: <text>` line."""
     fresh = '--fresh' in arguments
     review = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
@@ -837,7 +841,139 @@ def triage_check(arguments):
                     fail(f'Rejected finding {finding} needs concrete evidence.')
             else:
                 deferred += 1
+    if fresh:
+        # From round 3 on, triage must say whether an area keeps failing (FL-03).
+        number = len(current_review_rounds()) + 1
+        if number >= 3 and not CONVERGENCE_LINE.search(re.sub(r'<!--.*?-->', '', text, flags=re.S)):
+            fail(f'Round {number} triage needs a Convergence: line (see the triage prompt).')
     print(f'accepted={accepted} deferred={deferred}')
+
+
+REVIEW_SUBJECT = 'chore(ai): record independent review'
+TRIAGE_SUBJECT = 'chore(ai): record review triage'
+HISTORY_CAP = 6000
+
+
+def committed_file(commit, path):
+    try:
+        return git('show', f'{commit}:{path}').decode(errors='replace')
+    except subprocess.CalledProcessError:
+        return ''
+
+
+def finding_title(body, match):
+    """The one-line title of the finding whose ID `match` starts (ID and markup stripped)."""
+    line = body[match.start():].split('\n', 1)[0]
+    line = re.sub(r'^[#*\-\s]+', '', line)
+    line = line[len(match.group(1)):] if line.startswith(match.group(1)) else line
+    return re.sub(r'^[\s*:.—–-]+|[\s*]+$', '', line).replace('**', '') or '(untitled)'
+
+
+def review_rounds(base, head):
+    """Earlier review rounds in base..head, oldest first and uncapped. Context only, never
+    authority: commit subjects can be imitated, so nothing here may approve, count or skip
+    anything; the one use beyond context only adds a requirement (triage's Convergence line).
+    A round is a commit titled REVIEW_SUBJECT that changed .ai/reviews/current.md; its
+    disposition per finding comes from dispositions.md at the first later triage commit
+    before the next round."""
+    log = git('log', '--reverse', '--format=%H%x00%s', f'{base}..{head}').decode().splitlines()
+    commits = [line.split('\0', 1) for line in log if '\0' in line]
+    rounds = []
+    for sha, subject in commits:
+        if subject == REVIEW_SUBJECT and '.ai/reviews/current.md' in git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha).decode().split('\n'):
+            review = committed_file(sha, '.ai/reviews/current.md')
+            reviewed = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
+            findings = []
+            for level in ('BLOCKER', 'MAJOR'):
+                body = section(review, f'{level} findings')
+                seen = set()
+                for match in FINDING_ID.finditer(body):
+                    if match.group(1) not in seen:
+                        seen.add(match.group(1))
+                        findings.append((match.group(1), level, finding_title(body, match)))
+            rounds.append({'head': reviewed.group(1) if reviewed else sha, 'findings': findings,
+                           'rows': None})
+        elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
+            text = committed_file(sha, '.ai/reviews/dispositions.md')
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+                                  for m in DISPOSITION_ROW.finditer(text)}
+    return rounds
+
+
+def current_review_rounds():
+    """Rounds before the current review: M..H from its host header (`HEAD H; merge-base M`),
+    which excludes the current review's own commit, so every caller gets the same answer."""
+    path = Path('.ai/reviews/current.md')
+    header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});',
+                       path.read_text() if path.exists() else '')
+    if not header:
+        fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
+    return review_rounds(header.group(2), header.group(1))
+
+
+def render_round(number, entry):
+    lines = [f'### Round {number} (HEAD {entry["head"][:7]})']
+    for finding, level, title in entry['findings']:
+        if entry['rows'] is None:
+            outcome = 'no triage recorded'
+        elif finding not in entry['rows']:
+            outcome = 'no disposition'
+        else:
+            disposition, task_ref = entry['rows'][finding]
+            tasks_found = ', '.join(dict.fromkeys(re.findall(r'T\d{3,}', task_ref)))
+            outcome = f'{disposition} ({tasks_found})' if tasks_found else disposition
+        lines.append(f'- {finding} [{level}] {title} — {outcome}')
+    if not entry['findings']:
+        lines.append('- no BLOCKER or MAJOR findings')
+    return '\n'.join(lines)
+
+
+def render_rounds(rounds, cap=HISTORY_CAP):
+    """'## Previous review rounds' with the oldest rounds dropped until it fits the cap."""
+    if not rounds:
+        return ''
+    blocks = [render_round(number, entry) for number, entry in enumerate(rounds, 1)]
+    for omitted in range(len(blocks)):
+        parts = ['## Previous review rounds']
+        if omitted:
+            parts.append(f'({omitted} earlier rounds omitted)')
+        text = '\n\n'.join(parts + blocks[omitted:])
+        if len(text) <= cap:
+            return text
+    return '\n\n'.join(['## Previous review rounds', f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
+
+
+def review_history(arguments):
+    """Summarise earlier review rounds (context only, never authority).
+    --base B --head H: rounds in B..H. --current: rounds in M..H from the current review's
+    host header. --count: only the uncapped number; --last-head: only the newest reviewed HEAD."""
+    options = {}
+    flags = set()
+    queue = list(arguments)
+    while queue:
+        item = queue.pop(0)
+        if item in ('--base', '--head'):
+            if not queue:
+                fail(f'review-history: {item} needs a value.')
+            options[item] = queue.pop(0)
+        elif item in ('--current', '--count', '--last-head'):
+            flags.add(item)
+        else:
+            fail(f'review-history: unknown argument {item}.')
+    if '--current' in flags:
+        rounds = current_review_rounds()
+    elif '--base' in options and '--head' in options:
+        rounds = review_rounds(options['--base'], options['--head'])
+    else:
+        fail('review-history needs --current or both --base and --head.')
+    if '--count' in flags:
+        print(len(rounds))
+    elif '--last-head' in flags:
+        if rounds:
+            print(rounds[-1]['head'])
+    elif rounds:
+        print(render_rounds(rounds))
 
 
 def state_root():
@@ -2225,6 +2361,8 @@ def main():
         start_dispositions(arguments)
     elif command == 'triage-check':
         triage_check(arguments)
+    elif command == 'review-history':
+        review_history(arguments)
     elif command == 'review-info':
         review_info(arguments)
     elif command == 'recheck-prepare':

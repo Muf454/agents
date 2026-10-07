@@ -45,6 +45,13 @@ root with Bash error propagation and GNU timeout (default 1800 seconds;
 non-watch tests. Tests may write ignored build/cache artifacts. Nonignored project
 changes during the gate cause a failure, even if the command itself exits zero.
 
+Gate speed (FL-11): test suites can run in parallel shards. A stdlib-only runner
+`tests/run_parallel.py` discovers every test ID, splits them round-robin into
+`AI_TEST_WORKERS` shards (default `min(8, cpu count)`), and runs each shard with
+`python3 -m unittest`. It exits non-zero when a shard fails, crashes, collects zero
+tests, or when the shards ran a different number of tests than it collected.
+Switching `.ai/validate` to the parallel runner is a gate change that a human approves.
+
 Evidence in ignored `.ai/local/validation.json` includes outcome, timestamp, exit
 code, log path, HEAD at check time, and a SHA-256 digest of project file paths,
 contents, modes, and symlinks. It includes tracked and nonignored untracked files,
@@ -229,6 +236,17 @@ reviews need exactly one counts line that agrees with the listed finding IDs, pl
 verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks for are
 optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
+
+Convergence (FL-03): the triage prompt gets `This review is round <n>.` and, from round 2,
+`PREVIOUS ROUNDS:` (`review-history --current`: earlier recorded reviews in
+`merge-base..HEAD` of the current review's host header, with finding IDs, titles and
+dispositions; context only). When one area has had BLOCKER/MAJOR findings in three
+consecutive rounds, triage adds a design task instead of another symptom fix. From round 3
+on (only reachable with `--max-fix-rounds` ≥ 3), `triage-check --fresh` requires a line
+`Convergence: <text>` (text on the same line, outside HTML comments) in
+`dispositions.md`; without it the triage stops with "Round <n> triage needs a Convergence:
+line". It computes the round from the same routine as the prompt (uncapped count + 1), so
+every caller agrees; plain `triage-check` and rounds 1–2 are unchanged.
 
 Triage completion (one counted round, even across stops and crashes): before each triage
 the pipeline records `stage = {name: triage, start_head, review_digest}` per branch in

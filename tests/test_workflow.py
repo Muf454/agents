@@ -1,6 +1,7 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -101,10 +102,17 @@ if mode == 'limit-far':
     sys.exit(1)
 if 'TRIAGE CONTRACT' in prompt:
     with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-calls', 'a') as f: f.write('call\n')
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-prompts.log', 'a') as f:
+        f.write('=== PROMPT ===\n' + prompt + '\n')
     tasks_file = pathlib.Path('.ai/tasks.md')
     text = tasks_file.read_text()
     review = pathlib.Path('.ai/reviews/dispositions.md')
-    if mode == 'triage-rewrites-review':
+    convergence = os.environ.get('MOCK_CONVERGENCE')
+    if convergence is not None and '| M1 |' in review.read_text():
+        # Resuming a triage whose rows are recorded: only the convergence line is missing.
+        review.write_text(review.read_text() + convergence + '\n')
+        subprocess.run(['git','add','--','.ai/reviews/dispositions.md'],check=True)
+    elif mode == 'triage-rewrites-review':
         current = pathlib.Path('.ai/reviews/current.md')
         current.write_text(current.read_text().replace('MAJOR=1', 'MAJOR=0'))
         subprocess.run(['git','add','--','.ai/reviews/current.md'],check=True)
@@ -126,7 +134,8 @@ if 'TRIAGE CONTRACT' in prompt:
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
-                             if mode == 'triage-mixed-reject' else ''))
+                             if mode == 'triage-mixed-reject' else '')
+                          + (convergence + '\n' if convergence else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
             pathlib.Path('src.txt').write_text('not allowed in triage')
@@ -224,6 +233,7 @@ assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
 with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
+with open(state / 'codex-prompts.log', 'a') as log: log.write('=== PROMPT ===\n' + args[-1] + '\n')
 if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
     with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
     print('ERROR: You have hit your usage limit. Try again in 7 days.')
@@ -843,6 +853,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_watchdog_setup_no_pgrep_f_waits_in_executable_code_and_readme_documents_pids(self):
         for directory in ('scripts', 'templates'):
             for path in sorted((ROOT / directory).rglob('*')):
+                # Bytecode is not source, and parallel shards write it concurrently.
+                if '__pycache__' in path.parts:
+                    continue
                 if path.is_file() and path.suffix != '.md':
                     self.assertNotRegex(path.read_text(errors='replace'), r'pgrep\s+(-\w*f|--full)',
                                         str(path))
@@ -2089,6 +2102,166 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
         self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
         self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    # ---------------------------------------------------------------- review context (B3)
+    def prompts(self):
+        path = self.base / 'codex-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def first_review_round(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('chore(ai): record independent review')
+        first_head = self.run_cmd(['git', 'rev-parse', 'HEAD~1']).stdout.strip()
+        (self.project / '.ai/reviews/dispositions.md').write_text(
+            f'Review HEAD: {first_head}\n\n'
+            '| Finding | Disposition | Evidence / reason | Fix task |\n| --- | --- | --- | --- |\n'
+            '| M1 | rejected | fixture defect is intended by the test | none |\n')
+        self.commit('chore(ai): record review triage')
+        return first_head
+
+    def test_review_context_first_review_has_no_previous_rounds(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main')
+        prompt = self.prompts()[-1]
+        self.assertIn('REVIEW SCOPE', prompt)
+        self.assertNotIn('PREVIOUS ROUNDS:', prompt)
+        self.assertNotIn('CHANGED SINCE THE LAST REVIEW: inspect', prompt)
+
+    def test_review_context_second_review_gets_rounds_and_delta(self):
+        first_head = self.first_review_round()
+        self.tool('ai-review', '--base', 'main')
+        prompt = self.prompts()[-1]
+        self.assertIn('PREVIOUS ROUNDS:', prompt)
+        self.assertIn('### Round 1', prompt)
+        self.assertIn('M1', prompt)
+        self.assertIn('rejected', prompt)
+        self.assertIn(f'CHANGED SINCE THE LAST REVIEW: inspect git diff {first_head}..', prompt)
+
+    def test_review_context_plan_review_and_recheck_prompts_have_neither(self):
+        self.first_review_round()
+        self.tool('ai-review', '--recheck')
+        self.tool('ai-review', '--plan')
+        recheck, plan = self.prompts()[-2:]
+        self.assertIn('PLAN SCOPE', plan)
+        self.assertIn('RECHECK SCOPE', recheck)
+        for prompt in (plan, recheck):
+            self.assertNotIn('PREVIOUS ROUNDS:', prompt)
+            self.assertNotIn('CHANGED SINCE THE LAST REVIEW: inspect', prompt)
+
+    def test_review_context_failing_helper_still_produces_a_review(self):
+        self.first_review_round()
+        helper = self.project / '.ai/bin/lib/workflow.py'
+        text = helper.read_text()
+        marker = 'def review_history(arguments):\n'
+        self.assertIn(marker, text)
+        helper.write_text(text.replace(marker, marker + "    fail('review-history: forced failure')\n", 1))
+        self.commit('fixture: helper that fails')
+        self.tool('ai-check')
+        result = self.tool('ai-review', '--base', 'main')
+        self.assertIn('review-history failed', result.stderr)
+        self.assertNotIn('PREVIOUS ROUNDS:', self.prompts()[-1])
+        self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_review_prompt_template_explains_previous_rounds(self):
+        text = (ROOT / 'templates/.ai/prompts/review.md').read_text()
+        self.assertIn('PREVIOUS ROUNDS', text)
+        self.assertIn('CHANGED SINCE THE LAST REVIEW', text)
+        self.assertIn('full range', text)
+
+    # ---------------------------------------------------------------- review convergence (FL-03)
+    def triage_prompts(self):
+        path = self.base / 'triage-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def three_round_pipeline(self):
+        """Rounds 1 and 2 triage without a Convergence: line; round 3 stops for lack of it."""
+        self.ready()
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                         expected=1, MOCK_CODEX='major-always')
+
+    def test_convergence_pipeline_requires_the_line_from_round_three(self):
+        result = self.three_round_pipeline()
+        self.assertIn('Round 3 triage needs a Convergence: line', result.stderr)
+        self.assertIn('Round 3 triage needs a Convergence: line', self.notifications())
+        self.assertEqual(self.triage_rounds(), 2)
+        prompts = self.triage_prompts()
+        self.assertEqual(len(prompts), 3)
+        self.assertIn('This review is round 1.', prompts[0])
+        self.assertNotIn('PREVIOUS ROUNDS:', prompts[0])
+        self.assertIn('This review is round 2.', prompts[1])
+        self.assertIn('- M1 [MAJOR] fixture defect at T001.txt:1. — accepted (T002)', prompts[1])
+        self.assertIn('This review is round 3.', prompts[2])
+        self.assertIn('### Round 1', prompts[2])
+        self.assertIn('### Round 2', prompts[2])
+        self.assertIn('accepted (T003)', prompts[2])
+        # The rerun completes the interrupted round 3 once the line is there.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                  MOCK_CODEX='major-always',
+                  MOCK_CONVERGENCE='Convergence: T004 design note "the fixture lacks a marker"')
+        self.assertEqual(self.triage_rounds(), 3)
+        self.assertIn('This review is round 3.', self.triage_prompts()[-1])
+        self.assertEqual(self.helper('tasks', 'status', 'T004').stdout.strip(), 'DONE')
+
+    def test_convergence_interrupted_round_three_resumes_through_ai_run_with_the_same_round(self):
+        self.three_round_pipeline()
+        self.tool('ai-run', '--approved', '--triage',
+                  MOCK_CONVERGENCE='Convergence: none — findings are in unrelated areas (fixture only)')
+        self.assertIn('This review is round 3.', self.triage_prompts()[-1])
+        self.assertEqual(self.triage_rounds(), 3)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        self.helper('triage-check', '--fresh')
+
+    def convergence_fixture(self, title='a short defect', rounds=3):
+        """Recorded earlier rounds, then the current review (round `rounds`) with M1 accepted (T001)."""
+        self.ready()
+        merge_base = self.run_cmd(['git', 'rev-parse', 'main']).stdout.strip()
+        current = self.project / '.ai/reviews/current.md'
+        for number in range(1, rounds + 1):
+            (self.project / f'round{number}.txt').write_text('work\n')
+            self.commit(f'work for round {number}')
+            head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+            current.write_text(
+                f'<!-- Host evidence: HEAD {head}; merge-base {merge_base}; saved now. -->\n\n'
+                '# Independent review\nOverall verdict: one major finding\n'
+                'Finding counts: BLOCKER=0 MAJOR=1 MINOR=0\n## BLOCKER findings\nNone found.\n'
+                f'## MAJOR findings\n- M1: {title}\n## MINOR findings\nNone found.\n')
+            self.commit('chore(ai): record independent review')
+        self.helper('start-dispositions', head)
+        dispositions = self.project / '.ai/reviews/dispositions.md'
+        rows = dispositions.read_text() + '| M1 | accepted | defect confirmed in the fixture | T001 |\n'
+        dispositions.write_text(rows)
+        return dispositions, rows
+
+    def test_convergence_line_checked_only_with_fresh_from_round_three(self):
+        dispositions, rows = self.convergence_fixture()
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        for bad in ('Convergence:', 'Convergence:   \t', 'Convergence:\n| M9 | rejected | x | none |',
+                    '<!-- Convergence: hidden in a comment -->', 'convergence: lower case'):
+            dispositions.write_text(rows + bad + '\n')
+            result = self.helper('triage-check', '--fresh', expected=1)
+            self.assertIn('Round 3 triage needs a Convergence: line (see the triage prompt)', result.stderr)
+            self.helper('triage-check')  # without --fresh: unchanged
+        dispositions.write_text(rows + 'Convergence: T014 design note "the sync model lacks an edited marker"\n')
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_convergence_round_two_needs_no_line(self):
+        self.convergence_fixture(rounds=2)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '1')
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_convergence_history_over_the_cap_still_counts_round_three(self):
+        dispositions, rows = self.convergence_fixture(title='a very long defect ' * 250)
+        history = self.helper('review-history', '--current').stdout
+        self.assertIn('(1 earlier rounds omitted)', history)
+        self.assertLessEqual(len(history.rstrip('\n')), 6000)
+        self.assertEqual(self.helper('review-history', '--current', '--count').stdout.strip(), '2')
+        result = self.helper('triage-check', '--fresh', expected=1)
+        self.assertIn('Round 3 triage needs a Convergence: line', result.stderr)
+        dispositions.write_text(rows + 'Convergence: none — findings are in unrelated areas (fixture)\n')
+        self.helper('triage-check', '--fresh')
 
     # ------------------------------------------------------- reviewer fallback
     def claude_review_args(self):
@@ -3670,8 +3843,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         flagged = [line for line in body.splitlines() if line.endswith('⚠ no test named')]
         # The live handoff changes per branch: exactly its automated bullets without a test name.
         automated = handoff.split('### Covered by automated tests', 1)[1].split('\n## ', 1)[0]
-        unnamed = [line + ' ⚠ no test named' for line in automated.splitlines()
-                   if line.startswith('- ') and '`' not in line]
+        # A bullet wraps onto indented continuation lines; the warning goes on its last line.
+        items = []
+        for line in automated.splitlines():
+            if line.startswith('- '):
+                items.append([line])
+            elif items and line.startswith(' ') and line.strip():
+                items[-1].append(line)
+        unnamed = [item[-1] + ' ⚠ no test named' for item in items if '`' not in '\n'.join(item)]
         self.assertEqual(flagged, unnamed)
 
     def test_manual_testing_wrapped_finish_summary_counts_needs_you_steps(self):
@@ -3707,10 +3886,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('## Tasks', body)
 
     def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
+        # AGENTS.md allows either line; a batch that leaves the flow alone says "Flow unchanged".
         handoff = (ROOT / '.ai/handoff.md').read_text()
-        self.assertIn('## Flow chart\nFlow chart updated', handoff)
+        match = re.search(r'^## Flow chart\n(Flow chart updated|Flow unchanged)', handoff, re.M)
+        self.assertIsNotNone(match, 'the handoff needs a "## Flow chart" line')
         self.setup_project()
-        self.assertIn('Flow chart updated', self.pr_body_for(handoff))
+        self.assertIn(match.group(1), self.pr_body_for(handoff))
 
     def test_script_modes_all_shebang_scripts_are_executable(self):
         scripts_dir = ROOT / 'scripts'
@@ -4114,6 +4295,205 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
 
+class ReviewHistoryTest(unittest.TestCase):
+    """T002: review-history summarises earlier review rounds from Git (context only)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='ai-review-history-')
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        for command in (['init', '-q', '-b', 'main'], ['config', 'user.name', 'T'],
+                        ['config', 'user.email', 't@example.invalid'], ['config', 'commit.gpgsign', 'false']):
+            self.git(*command)
+        (self.repo / '.ai/reviews').mkdir(parents=True)
+        (self.repo / 'code.txt').write_text('0\n')
+        self.commit('base')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.counter = 0
+
+    def git(self, *args, expected=0):
+        result = subprocess.run(['git', *args], cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout
+
+    def commit(self, message, *paths):
+        self.git('add', '--all')
+        self.git('commit', '-q', '--allow-empty', '-m', message)
+
+    def code(self):
+        self.counter += 1
+        (self.repo / 'code.txt').write_text(f'{self.counter}\n')
+        self.commit(f'fix {self.counter}')
+        return self.git('rev-parse', 'HEAD').strip()
+
+    def review(self, head, findings, subject='chore(ai): record independent review'):
+        majors = ''.join(f'### {i} {t}\nbody\n' for i, t in findings)
+        text = (f'<!-- Host evidence: HEAD {head}; merge-base {self.base}; saved now. -->\n\n'
+                f'Overall verdict: x\nFinding counts: BLOCKER=0 MAJOR={len(findings)} MINOR=0\n\n'
+                f'## BLOCKER findings\nNone\n\n## MAJOR findings\n{majors}\n## MINOR findings\nNone\n')
+        (self.repo / '.ai/reviews/current.md').write_text(text)
+        self.commit(subject)
+
+    def triage(self, rows):
+        body = ''.join(f'| {f} | {d} | because of reasons here | {t} |\n' for f, d, t in rows)
+        (self.repo / '.ai/reviews/dispositions.md').write_text(
+            '| Finding | Disposition | Evidence / reason | Fix task |\n| --- | --- | --- | --- |\n' + body)
+        self.commit('chore(ai): record review triage')
+
+    def history(self, *args, expected=0):
+        result = subprocess.run(['python3', str(HELPER), 'review-history', *args], cwd=self.repo,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout if expected == 0 else result.stderr
+
+    def head(self):
+        return self.git('rev-parse', 'HEAD').strip()
+
+    def test_review_history_no_round_is_empty(self):
+        self.code()
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD'), '')
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD', '--count').strip(), '0')
+
+    def test_review_history_two_rounds_with_triage_and_last_head(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync'), ('M2', 'Missing check')])
+        self.triage([('M1', 'accepted', 'T012'), ('M2', 'rejected', '')])
+        second = self.code()
+        self.review(second, [('M3', 'Still broken')])
+        self.triage([('M3', 'deferred', '')])
+        end = self.code()
+        out = self.history('--base', self.base, '--head', end)
+        self.assertIn('## Previous review rounds', out)
+        self.assertIn(f'### Round 1 (HEAD {first[:7]})', out)
+        self.assertIn('- M1 [MAJOR] Race in sync — accepted (T012)', out)
+        self.assertIn('- M2 [MAJOR] Missing check — rejected', out)
+        self.assertIn(f'### Round 2 (HEAD {second[:7]})', out)
+        self.assertIn('- M3 [MAJOR] Still broken — deferred', out)
+        self.assertEqual(self.history('--base', self.base, '--head', end, '--last-head').strip(), second)
+
+    def test_review_history_round_without_triage(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync')])
+        out = self.history('--base', self.base, '--head', 'HEAD')
+        self.assertIn('- M1 [MAJOR] Race in sync — no triage recorded', out)
+
+    def test_review_history_ignores_review_subject_without_current_change(self):
+        self.code()
+        self.commit('chore(ai): record independent review')
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD'), '')
+
+    def test_review_history_cap_drops_oldest_and_count_is_uncapped(self):
+        for number in range(8):
+            reviewed = self.code()
+            self.review(reviewed, [(f'M{number}', 'x' * 400), (f'N{number}', 'y' * 400)])
+            self.triage([(f'M{number}', 'accepted', 'T001'), (f'N{number}', 'accepted', 'T002')])
+        out = self.history('--base', self.base, '--head', 'HEAD')
+        self.assertLessEqual(len(out), 6000)
+        self.assertRegex(out, r'\(\d+ earlier rounds omitted\)')
+        self.assertIn('### Round 8', out)
+        self.assertNotIn('### Round 1 ', out)
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD', '--count').strip(), '8')
+
+    def test_review_history_current_excludes_the_current_review(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync')])
+        self.triage([('M1', 'accepted', 'T012')])
+        second = self.code()
+        self.review(second, [('M2', 'Another')])  # committed as the current review, after its HEAD
+        out = self.history('--current')
+        self.assertIn('M1', out)
+        self.assertNotIn('M2', out)
+        self.assertEqual(self.history('--current', '--count').strip(), '1')
+
+    def test_review_history_current_without_header_fails(self):
+        self.code()
+        self.assertIn('host evidence header', self.history('--current', expected=1))
+        (self.repo / '.ai/reviews/current.md').write_text('no header\n')
+        self.assertIn('host evidence header', self.history('--current', expected=1))
+
+
+class ParallelRunnerTest(unittest.TestCase):
+    """FL-11: tests/run_parallel.py shards the suite without changing what is tested."""
+
+    RUNNER = ROOT / 'tests/run_parallel.py'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ai-parallel-test-')
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.suite = self.base / 'suite'
+        self.suite.mkdir()
+        self.elsewhere = self.base / 'elsewhere'
+        self.elsewhere.mkdir()
+        # No PYTHONPATH: the runner must give each shard the discovery directory itself.
+        self.env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'AI_TEST_WORKERS')}
+        self.env['AI_TEST_WORKERS'] = '2'
+
+    def write(self, name, body):
+        (self.suite / name).write_text('import os, unittest\n\n\nclass Sample(unittest.TestCase):\n' + body)
+
+    def runner(self, *args, cwd=None, workers=None, expected=0):
+        env = dict(self.env)
+        if workers is not None:
+            env['AI_TEST_WORKERS'] = workers
+        result = subprocess.run([sys.executable, str(self.RUNNER), *args], cwd=cwd or ROOT, env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        if expected is not None:
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def test_parallel_runner_all_pass_from_repo_root_and_unrelated_cwd(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n')
+        self.write('test_two.py', '    def test_c(self): pass\n')
+        for cwd in (ROOT, self.elsewhere):
+            result = self.runner('--start-dir', str(self.suite), cwd=cwd)
+            self.assertIn('Ran 3 tests', result.stdout)
+            self.assertIn('2 shards, 3 collected', result.stdout)
+            self.assertNotIn('ModuleNotFoundError', result.stdout)
+        relative = self.runner('--start-dir', 'suite', cwd=self.base)
+        self.assertIn('Ran 3 tests', relative.stdout)
+
+    def test_parallel_runner_failing_test_prints_traceback(self):
+        self.write('test_one.py', '    def test_a(self): pass\n'
+                   '    def test_b(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('Traceback', result.stdout)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertIn('FAILED (failing shards:', result.stdout)
+        self.assertNotIn('count mismatch', result.stdout)
+
+    def test_parallel_runner_zero_tests_fail(self):
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('no tests collected', result.stdout)
+
+    def test_parallel_runner_crashed_shard_fails_with_count_mismatch(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): os._exit(3)\n'
+                   '    def test_c(self): pass\n    def test_d(self): pass\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('crashed (exit code 3)', result.stdout)
+        self.assertRegex(result.stdout, r'count mismatch: ran \d of 4 collected tests')
+
+    def test_parallel_runner_import_error_fails(self):
+        (self.suite / 'test_broken.py').write_text('import no_such_module_for_this_test\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('no_such_module_for_this_test', result.stdout)
+        self.assertIn('test discovery failed', result.stdout)
+
+    def test_parallel_runner_rejects_invalid_workers(self):
+        self.write('test_one.py', '    def test_a(self): pass\n')
+        for value in ('0', 'x', '-2'):
+            result = self.runner('--start-dir', str(self.suite), workers=value, expected=1)
+            self.assertIn('AI_TEST_WORKERS must be a positive integer', result.stderr)
+        self.runner('--start-dir', str(self.suite), workers='')  # empty means the default
+
+    def test_parallel_runner_collect_only_matches_serial_discovery(self):
+        # A fresh loader: `unittest -k` sets name patterns on the default loader of this process.
+        expected = unittest.TestLoader().discover(str(ROOT / 'tests')).countTestCases()
+        result = self.runner('--collect-only', cwd=self.elsewhere)
+        self.assertEqual(result.stdout.strip(), f'Collected {expected} tests')
+
+
 class DocsConsistencyTest(unittest.TestCase):
     """R10: README.md and docs/workflow.md must describe what the code does."""
 
@@ -4141,6 +4521,10 @@ class DocsConsistencyTest(unittest.TestCase):
         'dependencies a task changes mid-run are installed at the next start',
         'needs you',
         'covered by automated tests',
+        'context only',
+        'round-robin into `ai_test_workers` shards',
+        'convergence',
+        'convergence: <text>',
     )
 
     def text(self, name):

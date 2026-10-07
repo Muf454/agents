@@ -1,49 +1,90 @@
 # Handoff
 
 ## What has been implemented?
-Reviewer fallback and model-choice data (`feature/reviewer-fallback`, from master 0818f20),
-interactive session 2026-10-07, T001–T007 (see `.ai/tasks.md`):
-- `ai-review` (plan, code, re-check): `AI_REVIEWER=auto|codex|claude` (default auto). Auto
-  uses Codex and, only on a Codex usage limit (or a missing Codex CLI), a fresh read-only
-  `claude -p` reviewer: read-only git, the project's non-writing allowlisted commands,
-  writes only in `.ai/local/review-probes/` (verified live: `Edit(./dir/**)` lets Write
-  create files there only). Model by risk: claude-fable-5-1 (a task on opus or a risky
-  title), else claude-opus-5-5; re-checks claude-opus-5-5; effort high; overrides
-  `AI_CLAUDE_REVIEW_MODEL/EFFORT`. Prompt addendum `.ai/prompts/claude-review.md`.
-- Every Claude review is labelled in its file, listed in `.ai/reviews/fallback-log.md`
-  (committed with the review), named in the PR body.
-- Host-side outcome log `<state root>/outcomes.jsonl` (tasks: model, result, attempt,
-  first-time pass, seconds; reviews: reviewer, model, findings); `ai-status --outcomes`.
-- Watchdog `--diagnosis-agent auto` (default): Codex, then Claude `claude-sonnet-5-5`.
+Branch `feature/efficiency-batch`: FL-11 (parallel test runner), B3 (Codex review context),
+FL-03 (review convergence rule). See `.ai/project-spec.md`, `.ai/current-plan.md`,
+`.ai/tasks.md` (T001–T005). The previous batch (FL-01, FL-07, FL-09) shipped in PR #15.
 
-## Flow chart
-Flow chart updated: vault `agents-flow.md` (reviewer choice chart, fallback reviewer and outcome log notes, roles table; `updated: 2026-10-07`).
+- T001 (FL-11): `tests/run_parallel.py` discovers the same tests as
+  `python3 -m unittest discover -s tests`, deals sorted IDs round-robin into
+  `AI_TEST_WORKERS` shards (default min(8, CPU count)) and runs each as
+  `python3 -m unittest <ids>` with `PYTHONPATH` = the discovery directory. Fails on a
+  failing/crashed shard, zero tests, a count mismatch or an import error. `--start-dir`,
+  `--collect-only`. One isolation race fixed (a `scripts/` scan skipped `__pycache__`).
+  README `## Running the tests`. `.ai/validate` is unchanged (still serial).
+
+- T002 (B3 helper): `review-history` in `scripts/lib/workflow.py` (context only, never authority).
+- T003 (B3): `ai-review --base` appends `PREVIOUS ROUNDS:` and `CHANGED SINCE THE LAST REVIEW:
+  inspect git diff <last>..<head>` to the implementation review prompt (not plan review or
+  re-check); a helper failure warns and reviews without history. `review.md` template explains it.
+- T004 (FL-03): the triage prompt gets `This review is round <n>.` and `PREVIOUS ROUNDS:`
+  (`review-history --current`); `triage.md` has the convergence rule; `triage-check --fresh`
+  requires a same-line `Convergence: <text>` from round 3 (round from the same routine; HTML
+  comments ignored). `ai-run --triage` stops with the helper's exact reason.
 
 ## Validation run
-`./scripts/ai-check` (bash -n of scripts + full unittest suite): 244 tests OK in 674 s
-(2026-10-07, T001–T007); after T008 see the run log. Live CLI checks: model IDs claude-fable-5-1 / claude-opus-5-5 /
-claude-sonnet-5-5 with `--effort high` answered; path-scoped write permission verified.
+After T004: targeted `-k convergence` Ran 5 OK; `.ai/bin/ai-check` Ran 253 tests in 112.5s OK.
 
-## Known limitations
-- The allowlist is not an OS sandbox: approved test commands run project code. The
-  existing "checkout unchanged after review" check and the gate digest still apply.
-- Projects get the new scripts/prompt only through `setup-project --upgrade` (after Zack
-  inspects the diff); reinstall watchdog timers after upgrading.
-- Codex couldn't review this branch: Claude fallback (Fable) bootstrap review, 0/0/5,
-  all five accepted and fixed in T008 (`.ai/reviews/dispositions.md`); Codex catch-up when
-  it has usage (~2026-10-14).
+After T003: targeted `-k review_context -k review_prompt_template` Ran 5 OK; `.ai/bin/ai-check`
+Ran 248 tests in 106.6s (8 shards) OK.
+
+After T001 (resumed after the coordinator's flow-chart test fix df0aefd): targeted
+`-k parallel_runner -k flow_this_repo` Ran 8 OK; foreground `.ai/bin/ai-check` Ran 236 tests
+in 598.682s OK. The serial gate sits right at the 600 s session tool limit, so later tasks
+may still time out in-session (gate note in `.ai/tasks.md`).
+
+## Assumptions
+- An empty `AI_TEST_WORKERS` means the default; any other non-positive or non-integer value
+  stops with "AI_TEST_WORKERS must be a positive integer".
+
+## Flow chart
+Flow chart updated (T003): the "Codex reviews the code" node notes the earlier rounds and the
+diff since the last review. Flow chart updated (T004): triage node (round number, earlier
+rounds, Convergence: line from round 3) and a convergence note.
 
 ## Manual testing for the human
+
 ### Needs you
-- Inspect the diff summary and approve upgrading the projects.
-- After upgrading a project, watch the first real fallback review (notification "↪ Codex
-  usage limit …", label in the review file, row in `.ai/reviews/fallback-log.md`).
+None. (The `.ai/validate` switch to `python3 tests/run_parallel.py` was approved and applied
+2026-10-07.)
 
 ### Covered by automated tests
-- Fallback at the Codex limit: `test_review_falls_back_to_claude_at_the_codex_limit`
-- Model by risk and overrides: `test_claude_reviewer_model_follows_risk_and_overrides`
-- AI_REVIEWER codex/claude/config: `test_reviewer_setting_codex_and_claude_only`
-- Pipeline on the fallback: `test_pipeline_runs_on_the_claude_fallback_reviewer`, `test_pipeline_fallback_recheck_is_committed_with_the_log`
-- Outcome log/report: `test_runner_logs_task_outcomes_and_report`
-- Watchdog fallback: `test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet`, `test_watchdog_codex_diagnosis_does_not_fall_back`
-- Reviewer allowlist, denials, failures: `test_review_allowlist_keeps_only_read_and_check_commands`, `test_claude_review_denials_and_allowlist_are_recorded`, `test_claude_review_failure_or_write_keeps_the_prior_review`
+- Parallel runner passes from the repo root, an unrelated cwd and a relative `--start-dir`
+  without `PYTHONPATH`: `test_parallel_runner_all_pass_from_repo_root_and_unrelated_cwd`.
+- A failing test exits 1 and prints its traceback:
+  `test_parallel_runner_failing_test_prints_traceback`.
+- Zero tests exit 1: `test_parallel_runner_zero_tests_fail`.
+- A crashing shard (`os._exit`) exits 1 with a count mismatch:
+  `test_parallel_runner_crashed_shard_fails_with_count_mismatch`.
+- An import error in a test module exits 1: `test_parallel_runner_import_error_fails`.
+- `AI_TEST_WORKERS=0`, `x`, `-2` rejected: `test_parallel_runner_rejects_invalid_workers`.
+- `--collect-only` matches serial discovery:
+  `test_parallel_runner_collect_only_matches_serial_discovery`.
+- First review has no PREVIOUS ROUNDS: `test_review_context_first_review_has_no_previous_rounds`.
+- Second review gets earlier rounds and the delta:
+  `test_review_context_second_review_gets_rounds_and_delta`.
+- Plan review and re-check prompts carry neither:
+  `test_review_context_plan_review_and_recheck_prompts_have_neither`.
+- A failing helper still yields a review: `test_review_context_failing_helper_still_produces_a_review`.
+- Template explains the context: `test_review_prompt_template_explains_previous_rounds`.
+- Three review rounds through `ai-pipeline --max-fix-rounds 3`: round 2 triage passes without
+  `Convergence:`, round 3 stops with "Round 3 triage needs a Convergence: line", the rerun with
+  the line completes; prompts say round 1/2/3 and list earlier finding IDs:
+  `test_convergence_pipeline_requires_the_line_from_round_three`.
+- Interrupted round 3 resumed through `ai-run --triage` reports round 3:
+  `test_convergence_interrupted_round_three_resumes_through_ai_run_with_the_same_round`.
+- History over the 6000-character cap still counts round 3:
+  `test_convergence_history_over_the_cap_still_counts_round_three`.
+- Empty, whitespace-only, next-line, commented-out and lowercase `Convergence:` fail; a real
+  line passes; plain `triage-check` unchanged: `test_convergence_line_checked_only_with_fresh_from_round_three`.
+- Round 2 needs no line: `test_convergence_round_two_needs_no_line`.
+- Live handoff with wrapped bullets flags only unnamed bullets (last line), and the fixture
+  still flags an unnamed and a lone-backtick bullet:
+  `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets`,
+  `test_manual_testing_wrapped_unnamed_and_lone_backtick_are_flagged_on_the_last_line`.
+
+## Human todos
+None.
+
+## Next action
+T006 done (merge with master reconciled); a new independent review follows.

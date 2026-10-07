@@ -1,74 +1,87 @@
-# Spec: Reviewer fallback and model-choice data
+# Spec: Efficiency batch: gate speed (FL-11), review context (B3), review convergence (FL-03)
 
 ## Objective
-Reviewer fallback and model-choice data: when Codex is at its usage limit, reviews fall
-back to a read-only headless Claude reviewer instead of pausing for days; every task and
-review outcome is logged so the risk-based model rules can be tuned from data.
+Efficiency batch: gate speed (FL-11), review context (B3), review convergence (FL-03)
+Cut wasted time and tokens in every pipeline run without touching safety rules: a full gate
+that fits inside one session tool call, Codex reviews that start from what earlier rounds
+already found, and triage that stops patching symptoms when the same area keeps failing.
 
-Source: Zack's brief of 2026-10-07 (interactive session). Codex is out of usage until about
-2026-10-14; today `ai-review` would pause on its limit (and stop when the reset is beyond
-`AI_LIMIT_MAX_WAIT`). Zack is on Claude Max 5x: Claude reviews draw from the same allowance
-as implementation, so the fallback is used only when Codex can't review (or when forced).
+Source: vault [[agents-backlog]]: FL-11 (new, 2026-10-07), B3 ("Better for both agents",
+P2, S) and FL-03 ("Run flow improvements", P1, S; next in line after batch 2). Chosen by Zack
+on 2026-10-07 as high-impact, low-investment work. Planned by Claude as Zack's delegate on
+2026-10-07; the pipeline's Codex plan review gates it.
+Hub decisions respected: risk-based models with no usage-saving downgrades (2026-10-06),
+roles vs providers, "auto-recovery never changes the gate", gate files are never edited by
+a pipeline session.
+
+Branch note: planned on top of `feature/flow-batch-2` (PR #15) because T003/T004 touch the
+same files. PR #15 is merged (`0818f20`). This branch contains its last commit `55383d7` and
+`git diff 55383d7 0818f20` is empty, but the merge commit itself is not an ancestor (a
+`git merge`/`rebase` of `master` was denied by the session's permissions on 2026-10-07).
+The PR against `master` therefore shows only this batch's commits; the review base is
+`master` (merge-base `55383d7`, same tree).
 
 ## Requirements
-### Goal 1: reviewer fallback
-- R1 `ai-review` (plan, code and recheck modes) uses Codex first. When Codex reports a usage
-  limit (the existing `limit-check` detection), it falls back to a headless Claude review
-  instead of pausing. Codex is tried again on every later review (no sticky state).
-  Setting `AI_REVIEWER=auto|codex|claude` (default `auto`): `codex` keeps today's pause
-  behaviour, `claude` skips Codex. Settable in the user config and kept by recovery.
-- R2 The Claude reviewer is a fresh `claude -p` session: tools Read, Grep, Glob, Bash, Write;
-  allowed: read-only git commands, the project's own allowlisted test/check commands (from
-  `.ai/permissions.allow`, minus writes: Edit/Write, git add/commit/rm/mv, ai-task,
-  ai-check/validate), and Write/Edit only under `.ai/local/review-probes/` (scratch probes,
-  ignored, removed afterwards). No MCP, project setting sources only, stdin /dev/null. It
-  returns the review as its final text; the host saves it through the same publish helpers,
-  so the format, file locations and bindings are unchanged (findings, dispositions,
-  re-checks and disputes keep working). The existing "checkout changed during review" check
-  stays and covers Claude too.
-- R3 Reviewer model by risk: `claude-fable-5-1` for plan and code reviews of risky work,
-  `claude-opus-5-5` for other plan/code reviews and all re-checks, effort `high`.
-  Risky = any task with `Model: opus` (the planning rules already put RLS/permissions,
-  auth, locking/concurrency, data-moving migrations and irreversible operations there), or
-  a task title naming RLS, auth, permissions, locks/concurrency, migrations, deletion or
-  irreversible operations. Overrides: `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`.
-  Watchdog diagnosis: `--diagnosis-agent auto` (new default) uses Codex and falls back to
-  Claude on any Codex failure; the Claude diagnosis runs on `claude-sonnet-5-5`
-  (`AI_DIAGNOSIS_MODEL`). Model IDs and `--effort` were verified live with CLI 2.1.291.
-- R4 A stricter Claude review prompt (`.ai/prompts/claude-review.md`, appended to the mode
-  prompt): sceptical, don't trust handoff notes or DONE labels, prove findings with
-  scenario probes (e.g. real migrations in the project's in-memory PGlite test setup,
-  small scripts against the code), and a checklist of past failure types: lock order and
-  deadlocks; account/user deletion with FK cleanup and triggers; attribution/timestamp
-  spoofing; stale async results; realtime/refresh wiring; cross-guild/tenant isolation;
-  who may do what per role; data hidden from views (e.g. assignments to non-mains);
-  main/alt identity changes.
-- R5 Every fallback review is labelled in its file ("Reviewer: Claude fallback (model,
-  effort) …") and appended to `.ai/reviews/fallback-log.md` (date, mode, branch, HEAD,
-  base, model, effort, reason), committed with the review. The PR body names a fallback
-  review. Codex does ONE catch-up review of all Claude-only-reviewed work when back (human
-  todo with the date).
+- **FL-11 Gate speed.** The full test suite (224+ tests, 611 s serial on 2026-10-07, over the
+  600 s Bash tool limit that sessions use for `.ai/bin/ai-check`) runs in parallel shards.
+  A stdlib-only runner `tests/run_parallel.py` collects every test ID, splits them across
+  worker processes (`AI_TEST_WORKERS`, default `min(8, cpu count)`), each running its share
+  with `python3 -m unittest`, and reports one summary line `Ran N tests in S s` plus
+  `OK` / `FAILED (failures=…, errors=…)`. Exit status non-zero on any failure, error, crash,
+  or when zero tests were collected or the collected count differs from the count run. The
+  output of failing tests is shown in full. Every worker gets the resolved discovery
+  directory on `PYTHONPATH` (test IDs like `test_workflow.…` do not import otherwise).
+  Serial `python3 -m unittest discover -s tests` keeps working unchanged (CI and humans can
+  still use it).
+- **Gate switch is a human step.** `.ai/validate` is a gate file. No pipeline session edits
+  it. After the batch is reviewed, Zack (or the coordinating Claude session with Zack's
+  approval) changes its last line to `python3 tests/run_parallel.py` in the same PR. Until
+  then the gate stays serial (host `ai-check` timeout is 1800 s, so the host gate passes).
+- **Review history helper.** One shared routine finds earlier review rounds and returns them
+  uncapped; a renderer applies the cap. `review-history --base B --head H` (before a new
+  review) uses `B..H`; `review-history --current` (triage, convergence check) uses the
+  current review's host header (`HEAD H; merge-base M`) and `M..H`, which excludes the
+  current review by construction and gives the same answer in every caller; `--count`
+  prints the uncapped number. It prints a compact Markdown summary: for each host commit
+  `chore(ai): record independent review` in the range that changed
+  `.ai/reviews/current.md` (oldest first, numbered from 1): the reviewed HEAD, the BLOCKER and
+  MAJOR finding IDs with their one-line titles, and each finding's disposition from the
+  `.ai/reviews/dispositions.md` committed in the following `chore(ai): record review triage`
+  commit (accepted + task ID / rejected / deferred / "no triage recorded"). Output capped at
+  6000 characters (oldest rounds dropped first, with a line saying how many were dropped).
+  Prints nothing when there is no earlier round. It is context only: it never authorizes,
+  counts or skips anything (fix-round counting stays with `fix-rounds`).
+- **B3 Codex review context.** `ai-review --base` (implementation review only, not plan
+  review or recheck) appends a `PREVIOUS ROUNDS` section from `review-history` and, when an
+  earlier round exists, `CHANGED SINCE THE LAST REVIEW: git diff <last reviewed HEAD>..HEAD`.
+  The review prompt (template `review.md`) says: verify that every earlier accepted finding is
+  really fixed, do not re-raise rejected findings without new evidence, and still review the
+  whole range (cross-cutting defects; Codex's objection to delta-only reviews).
+- **FL-03 Convergence rule.** `ai-run --triage` appends the same `PREVIOUS ROUNDS` section
+  (`--current`) and the round number to the triage prompt; `--since` stays only the triage
+  scope boundary. Template `triage.md` gains the rule: when the same area (module, data
+  model or concern) has had BLOCKER/MAJOR findings in three consecutive rounds counting the
+  current one, do not add another symptom fix: add one design task first ("the model lacks
+  X": a short design note in `.ai/current-plan.md` plus the change) and point the accepted
+  findings at it. Deterministic part: `triage-check --fresh` computes the round from the
+  same routine; when it is round 3 or later it requires a line `Convergence: <text>` (text
+  on the same line) in `dispositions.md`
+  (naming the design task, or saying why no area repeats); missing → the existing triage
+  failure path.
 
-### Goal 2: model choice data
-- R6 Per-task outcome log: one JSON line per task attempt in a host-side file
-  (`$AI_STATE_DIR/outcomes.jsonl`, outside every checkout, so agents can't edit it and one
-  report covers all projects): time, project, branch, task, title, category, model, result
-  (done/blocked/validation_failed), attempt number, first-time pass, duration. Review
-  events go to the same file: mode, reviewer (codex/claude-fallback/claude), model, effort,
-  finding counts by severity, duration.
-- R7 `ai-status --outcomes` prints first-pass rate, attempts and duration per model and per
-  category, and reviews/findings per reviewer and model, plus the list of Claude-only
-  reviews awaiting the Codex catch-up.
-- R8 The reviewer model is chosen by the same risk rules (R3) and logged (R6).
-- No external routing library. Existing risk rules stay as they are.
+## Non-goals
+- No change to `.ai/validate`, `.ai/bin`, `.ai/prompts`, permissions or the CI workflow in
+  the run itself. No change to fix-round limits, dispute handling or review authority.
+- No E3 (Codex effort per review type) and no E5 (validation reuse): separate backlog items.
 
-## Out of scope
-- Upgrading other projects (done after Zack inspects the diff, via `setup-project --upgrade`).
-- Codex as implementer; automatic model escalation in the runner.
-
-## Constraints
-- Gate files of this repo (`.ai/bin`, `.ai/prompts`, `.ai/validate`, …) are not edited;
-  changes go to `scripts/`, `templates/`, `tests/`, docs.
-- Tests for every script change; `./scripts/ai-check` passes.
-- Codex can't review this change: once the fallback works, the Claude fallback (Fable)
-  reviews it; findings get dispositions; Codex catch-up later.
+## Acceptance
+- Before the `.ai/validate` switch (coordinator evidence, not a session task: sessions may
+  not run the runner): `python3 tests/run_parallel.py` runs the full suite with the same test
+  count as the serial run in three consecutive runs, each finishing under 200 s on this
+  machine (16 cores) with default workers; counts and wall times recorded in the run log.
+- New tests cover `review-history` (no rounds, two rounds with dispositions, missing triage,
+  cap), the `ai-review` prompt content (history present only for implementation review),
+  the triage prompt content, and `triage-check --fresh` with and without `Convergence:` at
+  round 3.
+- README / `docs/workflow.md` describe the parallel runner, the review context and the
+  convergence rule; vault flow chart updated in the task that changes the flow.

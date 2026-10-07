@@ -200,6 +200,11 @@ if [[ "$triage" == yes ]]; then
     ai_guard_verify
     prompt=$(cat .ai/prompts/triage.md)
     prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+    # Same routine as triage-check --fresh, so the prompt and the check agree on the round.
+    rounds=$(ai_helper review-history --current --count) || ai_die 'Triage stage: cannot count the earlier review rounds.'
+    history=$(ai_helper review-history --current) || ai_die 'Triage stage: cannot summarise the earlier review rounds.'
+    prompt+=$'\n\nThis review is round '"$(( rounds + 1 ))."
+    [[ -z "$history" ]] || prompt+=$'\n\nPREVIOUS ROUNDS:\n'"$history"
     prompt+=$(knowledge_prompt)
     claude_session "$prompt" "$model"
     ai_branch
@@ -208,7 +213,7 @@ if [[ "$triage" == yes ]]; then
   fi
   ai_helper tasks check
   triage_scope ''
-  ai_helper triage-check --fresh >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
+  error=$(ai_helper triage-check --fresh 2>&1 >/dev/null) || ai_die "Triage incomplete: ${error#Error: }"
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
   # The one counted commit of this round, including leftovers of an interrupted triage.

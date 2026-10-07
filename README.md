@@ -243,10 +243,19 @@ tmux new -s my-app-ai
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
    read-only review. The review must contain `Finding counts: BLOCKER=n MAJOR=n MINOR=n`.
+   On subsequent review rounds, Codex's implementation review appends earlier round history
+   and the delta since the last review as context only (history never gates anything); the
+   review prompt explains that Codex should verify accepted findings are really fixed, not
+   re-raise rejected findings without new evidence, and still review the full range for
+   cross-cutting defects.
 3. **Fix**: with BLOCKER/MAJOR findings, `ai-run --triage` has Claude record one
    row per finding in `.ai/reviews/dispositions.md` (accepted with a fix task,
-   rejected with evidence, or deferred) and append fix tasks. Triage may only touch
-   workflow records; the host validates that every significant finding has a valid
+   rejected with evidence, or deferred) and append fix tasks. When one area has had
+   BLOCKER/MAJOR findings in three consecutive review rounds, the triage prompt advises
+   adding a design task instead of another symptom fix. From round 3 on, triage requires
+   a `Convergence: <text>` line in dispositions.md (naming the design task or explaining
+   why no area repeats); without it the triage stops with a clear message. Triage may only
+   touch workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
    from commit messages). Codex's report is never edited by Claude:
@@ -654,6 +663,23 @@ This checks Bash syntax and runs offline integration tests for setup, task parsi
 validation evidence, runner behavior, and review safety. It does not spend tokens
 or validate the models' reasoning. Do a short supervised real CLI run in your first
 project before trusting long unattended execution.
+
+## Running the tests
+
+```bash
+python3 tests/run_parallel.py                 # parallel shards, works from any directory
+AI_TEST_WORKERS=4 python3 tests/run_parallel.py
+python3 tests/run_parallel.py --collect-only  # print the number of tests only
+python3 -m unittest discover -s tests         # serial, what the gate runs today
+python3 -m unittest discover -s tests -k parallel_runner   # one group by name
+```
+
+`tests/run_parallel.py` discovers the same tests as the serial command and splits them
+round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
+runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
+crashes, when it collects no tests, or when the shards ran a different number of tests than
+it collected. Switching `.ai/validate` to the parallel runner is a gate change that a human
+approves.
 
 ## Deliberately manual for now
 

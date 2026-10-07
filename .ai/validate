@@ -5,4 +5,6 @@ while IFS= read -r -d '' file; do bash -n "$file"; done < <(
   find scripts -type f \( -name 'ai-*' -o -name setup-project -o -name '*.sh' \) -print0
 )
 for file in templates/.ai/validate templates/.ai/ci-setup; do bash -n "$file"; done
-python3 -m unittest discover -s tests
+# Parallel shards (tests/run_parallel.py, same tests as `python3 -m unittest discover -s tests`);
+# approved by Zack 2026-10-07: the serial suite hit the 600 s agent tool limit.
+python3 tests/run_parallel.py
