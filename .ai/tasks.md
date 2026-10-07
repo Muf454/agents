@@ -93,7 +93,7 @@ coordinator fix df0aefd accepts either wording. Re-verified: targeted `-k parall
 (inside the 600 s limit, barely). DONE.
 
 ## T002 — Review history helper
-Status: TODO
+Status: BLOCKED
 Dependencies: T001
 Model: sonnet
 
@@ -145,6 +145,13 @@ Targeted: `python3 -m unittest discover -s tests -k review_history` (output must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+Implemented (uncommitted work preserved in the checkpoint): `review_rounds`, `render_rounds`,
+`review_history` and the `review-history` dispatch in scripts/lib/workflow.py; 7
+`ReviewHistoryTest` tests in tests/test_workflow.py. Targeted `-k review_history`: Ran 7 tests, OK.
+BLOCKED: the foreground `.ai/bin/ai-check` hit the 600000 ms Bash tool timeout (T001's gate took
+598.7 s, so the suite is at the limit and the 7 added tests tip it over). No gate result for this
+change; the human or runner must run the gate with a longer limit (or the parallel runner from
+T001) and, if green, set T002 DONE.
 
 ## T003 — Codex reviews get the earlier rounds and the delta (B3)
 Status: TODO

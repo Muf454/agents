@@ -3810,6 +3810,124 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
 
+class ReviewHistoryTest(unittest.TestCase):
+    """T002: review-history summarises earlier review rounds from Git (context only)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='ai-review-history-')
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        for command in (['init', '-q', '-b', 'main'], ['config', 'user.name', 'T'],
+                        ['config', 'user.email', 't@example.invalid'], ['config', 'commit.gpgsign', 'false']):
+            self.git(*command)
+        (self.repo / '.ai/reviews').mkdir(parents=True)
+        (self.repo / 'code.txt').write_text('0\n')
+        self.commit('base')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.counter = 0
+
+    def git(self, *args, expected=0):
+        result = subprocess.run(['git', *args], cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout
+
+    def commit(self, message, *paths):
+        self.git('add', '--all')
+        self.git('commit', '-q', '--allow-empty', '-m', message)
+
+    def code(self):
+        self.counter += 1
+        (self.repo / 'code.txt').write_text(f'{self.counter}\n')
+        self.commit(f'fix {self.counter}')
+        return self.git('rev-parse', 'HEAD').strip()
+
+    def review(self, head, findings, subject='chore(ai): record independent review'):
+        majors = ''.join(f'### {i} {t}\nbody\n' for i, t in findings)
+        text = (f'<!-- Host evidence: HEAD {head}; merge-base {self.base}; saved now. -->\n\n'
+                f'Overall verdict: x\nFinding counts: BLOCKER=0 MAJOR={len(findings)} MINOR=0\n\n'
+                f'## BLOCKER findings\nNone\n\n## MAJOR findings\n{majors}\n## MINOR findings\nNone\n')
+        (self.repo / '.ai/reviews/current.md').write_text(text)
+        self.commit(subject)
+
+    def triage(self, rows):
+        body = ''.join(f'| {f} | {d} | because of reasons here | {t} |\n' for f, d, t in rows)
+        (self.repo / '.ai/reviews/dispositions.md').write_text(
+            '| Finding | Disposition | Evidence / reason | Fix task |\n| --- | --- | --- | --- |\n' + body)
+        self.commit('chore(ai): record review triage')
+
+    def history(self, *args, expected=0):
+        result = subprocess.run(['python3', str(HELPER), 'review-history', *args], cwd=self.repo,
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout if expected == 0 else result.stderr
+
+    def head(self):
+        return self.git('rev-parse', 'HEAD').strip()
+
+    def test_review_history_no_round_is_empty(self):
+        self.code()
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD'), '')
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD', '--count').strip(), '0')
+
+    def test_review_history_two_rounds_with_triage_and_last_head(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync'), ('M2', 'Missing check')])
+        self.triage([('M1', 'accepted', 'T012'), ('M2', 'rejected', '')])
+        second = self.code()
+        self.review(second, [('M3', 'Still broken')])
+        self.triage([('M3', 'deferred', '')])
+        end = self.code()
+        out = self.history('--base', self.base, '--head', end)
+        self.assertIn('## Previous review rounds', out)
+        self.assertIn(f'### Round 1 (HEAD {first[:7]})', out)
+        self.assertIn('- M1 [MAJOR] Race in sync — accepted (T012)', out)
+        self.assertIn('- M2 [MAJOR] Missing check — rejected', out)
+        self.assertIn(f'### Round 2 (HEAD {second[:7]})', out)
+        self.assertIn('- M3 [MAJOR] Still broken — deferred', out)
+        self.assertEqual(self.history('--base', self.base, '--head', end, '--last-head').strip(), second)
+
+    def test_review_history_round_without_triage(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync')])
+        out = self.history('--base', self.base, '--head', 'HEAD')
+        self.assertIn('- M1 [MAJOR] Race in sync — no triage recorded', out)
+
+    def test_review_history_ignores_review_subject_without_current_change(self):
+        self.code()
+        self.commit('chore(ai): record independent review')
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD'), '')
+
+    def test_review_history_cap_drops_oldest_and_count_is_uncapped(self):
+        for number in range(8):
+            reviewed = self.code()
+            self.review(reviewed, [(f'M{number}', 'x' * 400), (f'N{number}', 'y' * 400)])
+            self.triage([(f'M{number}', 'accepted', 'T001'), (f'N{number}', 'accepted', 'T002')])
+        out = self.history('--base', self.base, '--head', 'HEAD')
+        self.assertLessEqual(len(out), 6000)
+        self.assertRegex(out, r'\(\d+ earlier rounds omitted\)')
+        self.assertIn('### Round 8', out)
+        self.assertNotIn('### Round 1 ', out)
+        self.assertEqual(self.history('--base', self.base, '--head', 'HEAD', '--count').strip(), '8')
+
+    def test_review_history_current_excludes_the_current_review(self):
+        first = self.code()
+        self.review(first, [('M1', 'Race in sync')])
+        self.triage([('M1', 'accepted', 'T012')])
+        second = self.code()
+        self.review(second, [('M2', 'Another')])  # committed as the current review, after its HEAD
+        out = self.history('--current')
+        self.assertIn('M1', out)
+        self.assertNotIn('M2', out)
+        self.assertEqual(self.history('--current', '--count').strip(), '1')
+
+    def test_review_history_current_without_header_fails(self):
+        self.code()
+        self.assertIn('host evidence header', self.history('--current', expected=1))
+        (self.repo / '.ai/reviews/current.md').write_text('no header\n')
+        self.assertIn('host evidence header', self.history('--current', expected=1))
+
+
 class ParallelRunnerTest(unittest.TestCase):
     """FL-11: tests/run_parallel.py shards the suite without changing what is tested."""
 

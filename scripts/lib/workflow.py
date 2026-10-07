@@ -779,6 +779,127 @@ def triage_check(arguments):
     print(f'accepted={accepted} deferred={deferred}')
 
 
+REVIEW_SUBJECT = 'chore(ai): record independent review'
+TRIAGE_SUBJECT = 'chore(ai): record review triage'
+HISTORY_CAP = 6000
+
+
+def committed_file(commit, path):
+    try:
+        return git('show', f'{commit}:{path}').decode(errors='replace')
+    except subprocess.CalledProcessError:
+        return ''
+
+
+def finding_title(body, match):
+    """The one-line title of the finding whose ID `match` starts (ID and markup stripped)."""
+    line = body[match.start():].split('\n', 1)[0]
+    line = re.sub(r'^[#*\-\s]+', '', line)
+    line = line[len(match.group(1)):] if line.startswith(match.group(1)) else line
+    return re.sub(r'^[\s*:.—–-]+|[\s*]+$', '', line).replace('**', '') or '(untitled)'
+
+
+def review_rounds(base, head):
+    """Earlier review rounds in base..head, oldest first and uncapped. Context only, never
+    authority: commit subjects can be imitated, so nothing here may gate or approve anything.
+    A round is a commit titled REVIEW_SUBJECT that changed .ai/reviews/current.md; its
+    disposition per finding comes from dispositions.md at the first later triage commit
+    before the next round."""
+    log = git('log', '--reverse', '--format=%H%x00%s', f'{base}..{head}').decode().splitlines()
+    commits = [line.split('\0', 1) for line in log if '\0' in line]
+    rounds = []
+    for sha, subject in commits:
+        if subject == REVIEW_SUBJECT and '.ai/reviews/current.md' in git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha).decode().split('\n'):
+            review = committed_file(sha, '.ai/reviews/current.md')
+            reviewed = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
+            findings = []
+            for level in ('BLOCKER', 'MAJOR'):
+                body = section(review, f'{level} findings')
+                seen = set()
+                for match in FINDING_ID.finditer(body):
+                    if match.group(1) not in seen:
+                        seen.add(match.group(1))
+                        findings.append((match.group(1), level, finding_title(body, match)))
+            rounds.append({'head': reviewed.group(1) if reviewed else sha, 'findings': findings,
+                           'rows': None})
+        elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
+            text = committed_file(sha, '.ai/reviews/dispositions.md')
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+                                  for m in DISPOSITION_ROW.finditer(text)}
+    return rounds
+
+
+def render_round(number, entry):
+    lines = [f'### Round {number} (HEAD {entry["head"][:7]})']
+    for finding, level, title in entry['findings']:
+        if entry['rows'] is None:
+            outcome = 'no triage recorded'
+        elif finding not in entry['rows']:
+            outcome = 'no disposition'
+        else:
+            disposition, task_ref = entry['rows'][finding]
+            tasks_found = ', '.join(dict.fromkeys(re.findall(r'T\d{3,}', task_ref)))
+            outcome = f'{disposition} ({tasks_found})' if tasks_found else disposition
+        lines.append(f'- {finding} [{level}] {title} — {outcome}')
+    if not entry['findings']:
+        lines.append('- no BLOCKER or MAJOR findings')
+    return '\n'.join(lines)
+
+
+def render_rounds(rounds, cap=HISTORY_CAP):
+    """'## Previous review rounds' with the oldest rounds dropped until it fits the cap."""
+    if not rounds:
+        return ''
+    blocks = [render_round(number, entry) for number, entry in enumerate(rounds, 1)]
+    for omitted in range(len(blocks)):
+        parts = ['## Previous review rounds']
+        if omitted:
+            parts.append(f'({omitted} earlier rounds omitted)')
+        text = '\n\n'.join(parts + blocks[omitted:])
+        if len(text) <= cap:
+            return text
+    return '\n\n'.join(['## Previous review rounds', f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
+
+
+def review_history(arguments):
+    """Summarise earlier review rounds (context only, never authority).
+    --base B --head H: rounds in B..H. --current: rounds in M..H from the current review's
+    host header. --count: only the uncapped number; --last-head: only the newest reviewed HEAD."""
+    options = {}
+    flags = set()
+    queue = list(arguments)
+    while queue:
+        item = queue.pop(0)
+        if item in ('--base', '--head'):
+            if not queue:
+                fail(f'review-history: {item} needs a value.')
+            options[item] = queue.pop(0)
+        elif item in ('--current', '--count', '--last-head'):
+            flags.add(item)
+        else:
+            fail(f'review-history: unknown argument {item}.')
+    if '--current' in flags:
+        path = Path('.ai/reviews/current.md')
+        header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});',
+                           path.read_text() if path.exists() else '')
+        if not header:
+            fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
+        head, base = header.group(1), header.group(2)
+    elif '--base' in options and '--head' in options:
+        base, head = options['--base'], options['--head']
+    else:
+        fail('review-history needs --current or both --base and --head.')
+    rounds = review_rounds(base, head)
+    if '--count' in flags:
+        print(len(rounds))
+    elif '--last-head' in flags:
+        if rounds:
+            print(rounds[-1]['head'])
+    elif rounds:
+        print(render_rounds(rounds))
+
+
 def state_root():
     """Host state directory: AI_STATE_DIR, else $XDG_STATE_HOME/ai-toolkit, else
     ~/.local/state/ai-toolkit. A relative setting would depend on the current directory."""
@@ -1971,6 +2092,8 @@ def main():
         start_dispositions(arguments)
     elif command == 'triage-check':
         triage_check(arguments)
+    elif command == 'review-history':
+        review_history(arguments)
     elif command == 'review-info':
         review_info(arguments)
     elif command == 'recheck-prepare':
