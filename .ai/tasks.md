@@ -291,7 +291,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 ## T006 — Reconcile with master after merging PRs #16/#17
-Status: TODO
+Status: DONE
 Dependencies: T005
 Model: sonnet
 
@@ -314,3 +314,9 @@ Targeted: `python3 -m unittest discover -s tests -k manual_testing -k review_con
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+2026-10-07 (Claude, sonnet): `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets`
+now groups wrapped bullets with their continuation lines (warning on the last line), matching
+`flag_unnamed`; the fixture tests for unnamed and lone-backtick bullets stay. Handoff "Needs you"
+is None (validate switch already applied). `tests/run_parallel.py` now clears `FORCE_COLOR` and
+sets `NO_COLOR` for shards: with colored output the summary regexes missed every shard.
+Targeted: Ran 14 OK. `.ai/bin/ai-check`: Ran 272 tests in 125.6s (8 shards) OK. DONE.

@@ -55,6 +55,9 @@ def collect(start_dir):
 
 def run_shard(ids, start_dir):
     env = dict(os.environ)
+    # Colored output (FORCE_COLOR) would hide the summary lines parsed below.
+    env.pop('FORCE_COLOR', None)
+    env['NO_COLOR'] = '1'
     # Discovery IDs (test_workflow.X.test_y) only import with the start directory on the path.
     env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(start_dir), env.get('PYTHONPATH'))))
     result = subprocess.run([sys.executable, '-m', 'unittest', *ids], cwd=ROOT, env=env,

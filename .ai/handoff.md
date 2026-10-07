@@ -45,10 +45,8 @@ rounds, Convergence: line from round 3) and a convergence note.
 ## Manual testing for the human
 
 ### Needs you
-1. Approve and apply switching `.ai/validate` to `python3 tests/run_parallel.py` (the three
-   timed parallel runs are a precondition, recorded by the coordinator in `.ai/run-log.md`
-   after this run completes).
-2. Time one `.ai/bin/ai-check` run with the parallel runner and record the wall time.
+None. (The `.ai/validate` switch to `python3 tests/run_parallel.py` was approved and applied
+2026-10-07.)
 
 ### Covered by automated tests
 - Parallel runner passes from the repo root, an unrelated cwd and a relative `--start-dir`
@@ -80,10 +78,13 @@ rounds, Convergence: line from round 3) and a convergence note.
 - Empty, whitespace-only, next-line, commented-out and lowercase `Convergence:` fail; a real
   line passes; plain `triage-check` unchanged: `test_convergence_line_checked_only_with_fresh_from_round_three`.
 - Round 2 needs no line: `test_convergence_round_two_needs_no_line`.
-- Further scenarios are added by the remaining tasks.
+- Live handoff with wrapped bullets flags only unnamed bullets (last line), and the fixture
+  still flags an unnamed and a lone-backtick bullet:
+  `test_manual_testing_wrapped_this_repo_flags_only_unnamed_bullets`,
+  `test_manual_testing_wrapped_unnamed_and_lone_backtick_are_flagged_on_the_last_line`.
 
 ## Human todos
-- Run the three timed parallel runs and approve the `.ai/validate` switch (see Needs you).
+None.
 
 ## Next action
-Runner continues with T005 (final docs audit: README review context + convergence rule).
+T006 done (merge with master reconciled); a new independent review follows.

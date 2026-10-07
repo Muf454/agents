@@ -3843,8 +3843,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         flagged = [line for line in body.splitlines() if line.endswith('⚠ no test named')]
         # The live handoff changes per branch: exactly its automated bullets without a test name.
         automated = handoff.split('### Covered by automated tests', 1)[1].split('\n## ', 1)[0]
-        unnamed = [line + ' ⚠ no test named' for line in automated.splitlines()
-                   if line.startswith('- ') and '`' not in line]
+        # A bullet wraps onto indented continuation lines; the warning goes on its last line.
+        items = []
+        for line in automated.splitlines():
+            if line.startswith('- '):
+                items.append([line])
+            elif items and line.startswith(' ') and line.strip():
+                items[-1].append(line)
+        unnamed = [item[-1] + ' ⚠ no test named' for item in items if '`' not in '\n'.join(item)]
         self.assertEqual(flagged, unnamed)
 
     def test_manual_testing_wrapped_finish_summary_counts_needs_you_steps(self):
