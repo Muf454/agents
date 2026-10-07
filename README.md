@@ -243,10 +243,19 @@ tmux new -s my-app-ai
    gate after each task).
 2. **Review**: once the queue is complete and validated, `ai-review` asks Codex for a
    read-only review. The review must contain `Finding counts: BLOCKER=n MAJOR=n MINOR=n`.
+   On subsequent review rounds, Codex's implementation review appends earlier round history
+   and the delta since the last review as context only (history never gates anything); the
+   review prompt explains that Codex should verify accepted findings are really fixed, not
+   re-raise rejected findings without new evidence, and still review the full range for
+   cross-cutting defects.
 3. **Fix**: with BLOCKER/MAJOR findings, `ai-run --triage` has Claude record one
    row per finding in `.ai/reviews/dispositions.md` (accepted with a fix task,
-   rejected with evidence, or deferred) and append fix tasks. Triage may only touch
-   workflow records; the host validates that every significant finding has a valid
+   rejected with evidence, or deferred) and append fix tasks. When one area has had
+   BLOCKER/MAJOR findings in three consecutive review rounds, the triage prompt advises
+   adding a design task instead of another symptom fix. From round 3 on, triage requires
+   a `Convergence: <text>` line in dispositions.md (naming the design task or explaining
+   why no area repeats); without it the triage stops with a clear message. Triage may only
+   touch workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
    from commit messages). Codex's report is never edited by Claude:

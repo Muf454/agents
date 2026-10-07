@@ -45,13 +45,10 @@ rounds, Convergence: line from round 3) and a convergence note.
 ## Manual testing for the human
 
 ### Needs you
-1. Parallel runner timing (precondition for the gate switch): on the host, from the repo
-   root, run `python3 tests/run_parallel.py` three times. Expected each time: `OK`, a
-   `Ran N tests` line where N equals `python3 tests/run_parallel.py --collect-only`
-   (and the serial `Ran N tests`), finishing in under 200 s. Record counts and wall times
-   in `.ai/run-log.md`.
-2. Then approve and apply switching `.ai/validate` to `python3 tests/run_parallel.py`, and
-   time one `.ai/bin/ai-check` run.
+1. Approve and apply switching `.ai/validate` to `python3 tests/run_parallel.py` (the three
+   timed parallel runs are a precondition, recorded by the coordinator in `.ai/run-log.md`
+   after this run completes).
+2. Time one `.ai/bin/ai-check` run with the parallel runner and record the wall time.
 
 ### Covered by automated tests
 - Parallel runner passes from the repo root, an unrelated cwd and a relative `--start-dir`

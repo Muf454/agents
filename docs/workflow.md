@@ -45,6 +45,13 @@ root with Bash error propagation and GNU timeout (default 1800 seconds;
 non-watch tests. Tests may write ignored build/cache artifacts. Nonignored project
 changes during the gate cause a failure, even if the command itself exits zero.
 
+Gate speed (FL-11): test suites can run in parallel shards. A stdlib-only runner
+`tests/run_parallel.py` discovers every test ID, splits them round-robin into
+`AI_TEST_WORKERS` shards (default `min(8, cpu count)`), and runs each shard with
+`python3 -m unittest`. It exits non-zero when a shard fails, crashes, collects zero
+tests, or when the shards ran a different number of tests than it collected.
+Switching `.ai/validate` to the parallel runner is a gate change that a human approves.
+
 Evidence in ignored `.ai/local/validation.json` includes outcome, timestamp, exit
 code, log path, HEAD at check time, and a SHA-256 digest of project file paths,
 contents, modes, and symlinks. It includes tracked and nonignored untracked files,

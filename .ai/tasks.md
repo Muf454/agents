@@ -263,7 +263,7 @@ review_context` Ran 26 OK; `.ai/bin/ai-check` Ran 253 tests in 112.5s (8 shards)
 node + note, hub Log line.
 
 ## T005 — Final docs audit for the efficiency batch
-Status: TODO
+Status: DONE
 Dependencies: T001, T003, T004
 Model: haiku
 

@@ -4205,6 +4205,10 @@ class DocsConsistencyTest(unittest.TestCase):
         'dependencies a task changes mid-run are installed at the next start',
         'needs you',
         'covered by automated tests',
+        'context only',
+        'round-robin into `ai_test_workers` shards',
+        'convergence',
+        'convergence: <text>',
     )
 
     def text(self, name):

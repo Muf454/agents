@@ -98,3 +98,5 @@
 | 2026-10-07T17:06:38Z | runner | T003 | completed | PASS | 5bba0c5 | Claude checkpointed; continuing queue |
 | 2026-10-07T17:45Z | claude | T004 | DONE: triage prompt gets round + PREVIOUS ROUNDS; triage-check --fresh requires Convergence: from round 3; triage.md rule; 5 convergence tests | targeted Ran 5 OK; ai-check 253 OK in 112.5 s | (this commit) | next: T005 |
 | 2026-10-07T17:17:31Z | runner | T004 | completed | PASS | 46b7ea2 | Claude checkpointed; continuing queue |
+| 2026-10-07T19:30Z | claude | T005 | DONE (final docs audit): README + docs/workflow.md describe parallel runner (tests/run_parallel.py, AI_TEST_WORKERS shards, gate switch is human approval), review context (earlier rounds + delta as context only), convergence rule (design task from round 3, Convergence: <text> line); 4 new docs_consistency sentences; `.ai/handoff.md` Needs you/Covered split updated; vault hub log appended | docs_consistency 3 OK; ai-check 253 OK in 113.5 s (8 shards) | (this commit) | all 5 tasks complete; ready_for_review phase |
+| 2026-10-07T19:20:00Z | runner | T005 | completed | PASS | (pending) | Claude checkpointed; queue complete |
