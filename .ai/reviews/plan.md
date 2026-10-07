@@ -1,54 +1,114 @@
-<!-- Plan review of plan digest 158d34543c9a722093a850185f30f3534023994a62efead0f28d7550e000fd9f; saved 2026-10-06T10:52:56Z. -->
+<!-- Plan review of plan digest 3b56b21771e979df8c7e819ae7762d0483f8e7f1f5a6399ae777cef6a0854a68; saved 2026-10-07T10:37:12Z. -->
 
 # Plan review
 
-Overall verdict: PROCEED with one minor regression-test improvement.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
+Overall verdict: REVISE BEFORE IMPLEMENTATION
+Finding counts: BLOCKER=1 MAJOR=3 MINOR=3
 
-Reviewed HEAD: `02a910dae69a159f05ee3086c340bfb9903490ff`
+Reviewed HEAD: `dff09092150705c89df22645404c326b9ed60b5e`
 
-Inspected repository instructions, spec, plan, all seven tasks, state/handoff, affected source and templates, relevant tests, documentation, Git history, vault notes, and validation evidence. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, spec, plan, tasks, state/handoff, affected scripts and prompt templates, test fixtures, validation configuration, documentation, and local Git history. No files modified; no network or MCP integrations invoked.
 
 ## BLOCKER findings
 
-None.
+- P1: The specified shard command cannot import the discovered tests.
+
+  **Location:** `.ai/tasks.md:26–33`; `tests/test_workflow.py:1`.
+
+  Discovery produces IDs such as `test_workflow.DocsConsistencyTest.test_docs_consistency_modes_table`. It temporarily adds the discovery directory to the parent process’s import path. A fresh `python3 -m unittest <ids…>` subprocess running at the repository root does not inherit that Python import path. The proposed command therefore fails before executing the intended tests.
+
+  **Evidence:** Read-only discovery collected **229 tests**. Running a discovered documentation-test ID from the repository root failed with `ModuleNotFoundError: No module named 'test_workflow'`. The same test passed with `PYTHONPATH=tests`.
+
+  **Concrete plan change:** Explicitly provide the resolved discovery import root to every worker, including temporary directories supplied through `--start-dir`. Add regressions that launch the runner from both the repository root and an unrelated directory, with no caller-provided `PYTHONPATH`.
 
 ## MAJOR findings
 
-None.
+- P2: Required runner validation is unavailable under the frozen command allowlist.
+
+  **Location:** `.ai/tasks.md:11–14`, `.ai/tasks.md:48–54`; `.ai/permissions.allow:23–27`; `scripts/ai-run:146–149`.
+
+  T001 requires three full `python3 tests/run_parallel.py` runs, and the queue recommends that command after session gate timeouts. The installed allowlist permits `python3 -m unittest …`, but does not permit the runner command. Sessions use `dontAsk`, so they cannot obtain approval interactively. The host’s post-task check remains serial and does not provide the required parallel-run evidence.
+
+  **Concrete plan change:** Add a human preparation step approving the exact runner command before unattended execution, while keeping permission changes outside pipeline sessions. Alternatively, assign the three full runs to the coordinating host and explicitly require its recorded evidence before T001 acceptance.
+
+- P3: Triage history boundaries and round counting do not match the actual pipeline.
+
+  **Location:** `.ai/tasks.md:143–161`; `.ai/tasks.md:68–80`; `scripts/ai-pipeline:216`, `scripts/ai-pipeline:324–346`; `scripts/ai-run:176–205`.
+
+  `--since` is the **triage stage’s starting commit**, not the pipeline comparison base. The pipeline records that start after committing the current review. Consequently, `review-history "$since"` sees no earlier reviews during normal triage. The proposed fallback involving the stage start also does not establish a branch comparison base.
+
+  Conversely, querying the actual branch base through `HEAD` includes the already committed **current** review. Adding one to that count makes round 2 appear to be round 3. `triage-check --fresh` currently receives neither base nor round metadata and is called from several normal and recovery paths; the plan does not define how those calls obtain consistent values.
+
+  **Concrete plan change:** Define one shared routine that uses the current report’s recorded merge-base and reviewed HEAD to select earlier rounds, excludes the current review, and returns an uncapped count separately from rendered history. Use it for the prompt and every convergence-check path. Preserve `--since` exclusively as the triage scope boundary.
+
+  Add an end-to-end three-round pipeline regression using the real host commit order: round 2 must pass without `Convergence:`, round 3 must fail without it and pass with it. Also verify unchanged numbering after interrupted-triage recovery and history truncation.
+
+- P4: T001’s explicit model does not fit its concurrency work.
+
+  **Location:** `.ai/tasks.md:19`, `.ai/tasks.md:26–36`; `CLAUDE.md:60–65`.
+
+  T001 assigns `sonnet` to concurrent worker orchestration, shard crash handling, and shared-state isolation. The requested review policy and repository model rules require `opus` for concurrency work.
+
+  **Concrete plan change:** Set T001 to `Model: opus` and update the plan’s model summary. Mechanical documentation work can remain separate on a cheaper model.
 
 ## MINOR findings
 
-- P12: Explicitly test notification counting for a mixed handoff.
+- P5: The proposed convergence regex accepts an empty line.
 
-  **Location:** `.ai/tasks.md:227`; `tests/test_workflow.py:1274`; `tests/test_workflow.py:1850`.
+  **Location:** `.ai/tasks.md:149–151`; `.ai/project-spec.md:56–58`.
 
-  T004 explicitly tests PR ordering for the split and FINISHED wording when “Needs you” is None. It does not explicitly require a notification assertion when both subsections contain steps. Existing notification tests use legacy handoffs, so they cannot establish that the new format counts human steps correctly while excluding automated checks.
+  In Python, `\s*` includes newlines. The proposed `^Convergence:\s*\S` therefore accepts `Convergence:` with no explanation when the following nonblank line contains the disposition table.
 
-  **Concrete plan change:** Add a `manual_testing_render` case with two human steps and three named automated checks. Assert that `finish-summary` reports exactly two manual steps, excludes the automated checks from that count, and does not say “Nothing to test by hand.” This verifies FL-09’s central notification requirement.
+  **Evidence:** An in-memory check matched `Convergence:\n\n| Finding …` as a valid convergence entry.
 
-## Assessment
+  **Concrete plan change:** Require nonblank content on the same line, using horizontal whitespace explicitly, such as `^Convergence:[ \t]*[^ \t\r\n]`. Add empty, whitespace-only, and following-table regressions.
 
-The revision addresses P8–P11 at the planning level: dependency setup stops must escalate, preservation checks run after unsuccessful installers, submodule snapshots recurse, timer status requires enabled and active units, and the remaining-run-time cap has a regression scenario.
+- P6: T001 weakens the specified performance acceptance criterion.
 
-Task dependencies are coherent, every task specifies a model, and the integrity-sensitive dependency work uses `opus`. No failed implementation attempt is recorded for these TODO tasks. The frozen `.ai/bin` boundary and same-task flow-chart updates remain explicit.
+  **Location:** `.ai/tasks.md:48–49`; `.ai/project-spec.md:67–69`.
 
-No additional security or architecture finding was identified in the inspected scope. Host execution of package-manager code, the writable dependency stamp, and the limits on mid-run dependency installation are acknowledged design choices.
+  The spec requires a runtime under 200 seconds on this machine. T001 calls that threshold a “target,” allowing acceptance without meeting it.
+
+  **Concrete plan change:** Make the threshold mandatory and define how it is assessed—for example, require each of the three consecutive default-worker runs to finish under 200 seconds, recording counts and wall times.
+
+- P7: The authorization record incorrectly says the prerequisite merge is present.
+
+  **Location:** `.ai/current-plan.md:47–49`; `.ai/project-spec.md:17–19`.
+
+  Local `master` contains merge commit `0818f20`, but that commit is not an ancestor of the reviewed HEAD. The branch shares the merged source history through `55383d7`; it has not completed the explicitly required merge of `master`.
+
+  **Concrete plan change:** Correct the record and retain the merge as an outstanding human preparation step before starting the unattended run. Reconfirm the resulting HEAD and comparison base afterward.
+
+## Missing test coverage
+
+The plan should add the worker import-path cases and real pipeline round-count/recovery cases described above. Tiny-suite runner coverage should also include an ordinary test exception and skipped-test output, verifying error counts and summary parsing.
+
+## Security and architecture concerns
+
+The human-controlled gate switch, frozen installed tooling, and separation of review from implementation are appropriate boundaries. P2 must be resolved without an unattended permission change. P3 must preserve the existing triage scope guard and host-owned fix-round accounting.
+
+No additional security finding was demonstrated in the inspected scope.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean; `git diff --check` passed.
-- Task-queue validation passed.
-- Python syntax: **3 files passed**.
-- Bash syntax: **12 files passed**.
-- Documentation consistency: **3 tests passed**.
-- Stored baseline log reports **188 tests passed** at `9e11a11`, before planning.
-- Current validation-stamp verification failed as stale.
+- Discovery collected **229 tests**, exceeding the plan’s historical 224-test baseline.
+- **Three documentation consistency tests passed.**
+- The worker import failure and proposed import-path correction were reproduced.
+- The empty convergence-line regex defect was reproduced.
+- Python syntax checks passed for three inspected files.
+- Bash syntax checks passed for six affected or relevant scripts.
+- Task-queue validation and `git diff --check` passed; the checkout remained clean.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration fixtures were not rerun because they require writable fixtures, locks, logs, and validation artifacts. The stored baseline does not validate this revision.
+The full `./scripts/ai-check` gate and integration suite were not rerun because they require writable fixtures, locks, logs, and validation artifacts. No current `.ai/local/validation.json` was available. Historical handoff evidence does not validate the proposed implementation.
 
-## Validation and human acceptance
+## Manual testing recommendations
 
-Implement the planned regressions plus P12, then run the required full gate. Human acceptance should include a fresh-worktree run, confirmation that the opted-in timer is active, and inspection of the PR testing split and phone notifications.
+### Needs you
 
-This plan review does not constitute implementation verification or human acceptance.
+Complete and record the prerequisite merge and validation-command preparation. After implementation review, approve the `.ai/validate` switch and time a full gate run.
+
+### Covered by automated tests
+
+Worker loading, shard result handling, review prompt isolation, correct triage history and numbering, convergence-line validation, and interrupted-triage recovery should be verified before approval.
+
+This review does not constitute implementation verification or human acceptance.
