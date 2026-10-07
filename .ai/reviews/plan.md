@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 0e0bd79b77e1b623ea1a06fb397fc017cb56c35999dd58030aebd35f0195fd08; saved 2026-10-07T12:17:54Z. -->
+<!-- Plan review of plan digest f7c282817a10bfba66942ee6238c06d62c58bbc47285e8ff9401e2a502e24cc7; saved 2026-10-07T12:20:39Z. -->
 
 # Plan review
 
-Overall verdict: REVISE BEFORE IMPLEMENTATION.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
+Overall verdict: APPROVE PLAN, subject to the recorded efficiency-batch merge prerequisite.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
-Reviewed HEAD: `b64ac77ea93e6b19ae79f1c01708c6f57ad084f9`.
+Reviewed HEAD: `92f860a50613b6cbb6b3c01eabd5ff18dfa2045e`.
 
 ## BLOCKER findings
 
@@ -13,47 +13,42 @@ None.
 
 ## MAJOR findings
 
-- P30: Notification appends can modify files outside `.ai/local` through hard links.
-
-  **Location:** `.ai/tasks.md:70`, `.ai/tasks.md:86`; `.ai/project-spec.md:55`.
-
-  T001 specifies appending directly to an existing `notifications.log`, protected by `O_NOFOLLOW`, a regular-file check, and a lock. These checks permit hard links. If an agent creates `notifications.log` as a hard link to a tracked source or gate file, the next notification appends JSON to that file. Atomic replacement during later trimming does not undo the modification.
-
-  This violates target-file preservation and the requirement that observation failures leave pipeline outcomes unchanged. This is a planned vulnerability; no filesystem reproduction was performed during this read-only review.
-
-  **Concrete plan change:** Update T001 and the spec so notification updates never modify the existing log inode: read the bounded retained records, append and trim in memory, then atomically replace the destination using an exclusively created temporary file under the existing lock and pinned directory descriptor. Add a hard-linked sentinel fixture proving that notifications leave the sentinel’s bytes unchanged and preserve the pipeline’s outcome.
+None.
 
 ## MINOR findings
 
-- P31: T005’s targeted validation excludes its sanitizer tests.
+None.
 
-  **Location:** `.ai/tasks.md:335`, `.ai/tasks.md:342`; `.ai/tasks.md:11`.
+## Assessment
 
-  T005 now requires `dashboard_sanitize_*` tests, but its targeted command selects only `dashboard_liveness`. It can report passing tests without exercising the security-sensitive helper added in this revision. This matters when the session’s full gate times out and targeted checks become its immediate validation evidence. The host’s full gate remains a later safeguard.
+No additional findings in the inspected areas. The plan covers stage transitions, pause and recovery overlays, process identity, malformed records, bounded I/O, concurrent notification writes, terminal sanitising, installation, and TUI interaction.
 
-  **Concrete plan change:** Add a separate targeted invocation with `-k dashboard_sanitize`, requiring at least one test, alongside the liveness invocation.
+P30 is addressed by reading notifications into memory and replacing the log atomically under the lock, with hard-link regression fixtures. P31 is addressed by explicitly running the sanitizer tests.
+
+All eight tasks specify models appropriate to their stated responsibilities. Dependencies are ordered, and no failed implementation retry is recorded. The advisory dashboard and standard-library implementation fit the spec.
+
+Implementation must still wait for the efficiency-batch merge and branch reconciliation described in `.ai/current-plan.md:40`. Reassess affected assumptions and validation after that reconciliation.
 
 ## Validation observed
 
 - Requested HEAD confirmed; working tree clean.
-- Task-queue format/dependency validation passed.
+- Task format and dependency validation passed.
 - Planning diff whitespace check passed.
-- **13 Bash syntax checks** and **3 in-memory Python syntax checks** passed.
-- **3 documentation consistency tests** passed.
+- 13 Bash syntax checks passed.
+- 3 in-memory Python syntax checks passed.
+- 3 documentation consistency tests passed.
 - Validation-stamp verification reported **no validation evidence**.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration suite were not run because they create repositories, locks, logs, and validation artifacts. Dashboard implementation tests do not exist yet.
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration suite were not run because they create filesystem artifacts. Dashboard implementation tests do not exist yet.
 
-## Scope, architecture, and coverage assessment
+## Scope and limitations
 
-Inspected repository guidance, spec, plan, tasks, state/handoff, relevant docs and vault flow chart, Git history/diff, affected source, existing test fixtures, and validation configuration.
+Inspected repository instructions, spec, plan, tasks, state, handoff, relevant documentation and vault flow chart, Git history/diffs, affected scripts and helpers, existing test fixtures, and `.ai/validate`.
 
-The previous P28 registration-placement and P29 model-assignment findings are addressed. Dependencies are ordered, every task specifies a model, and no failed implementation retry is recorded. The advisory dashboard, standard-library dependencies, and frozen gate-file boundary fit the requested scope.
-
-The findings concern proposed behavior and validation, rather than demonstrated regressions in current application code. Flow-chart updates remain scheduled for T002/T003. Implementation also remains subject to the recorded efficiency-batch merge prerequisite.
+The planned security and concurrency safeguards have not yet been implemented or demonstrated. This verdict assesses plan readiness, not implementation correctness or human acceptance.
 
 ## Manual testing recommendations
 
-After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Check stage highlighting, scrolling, expansion, resize, colors, and terminal restoration.
+After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Verify stage highlighting, scrolling, details, resizing, and terminal restoration.
 
-No files were modified; no network or MCP integrations were invoked. This review assesses plan readiness, not implementation correctness or human acceptance.
+No files were modified; no network or MCP integrations were invoked.
