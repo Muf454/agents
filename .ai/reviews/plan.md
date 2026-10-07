@@ -1,114 +1,79 @@
-<!-- Plan review of plan digest 3b56b21771e979df8c7e819ae7762d0483f8e7f1f5a6399ae777cef6a0854a68; saved 2026-10-07T10:37:12Z. -->
+<!-- Plan review of plan digest f18ab505182d458edd64af6d8c9ab8db75094321b0434fee8cd895d356bc14f1; saved 2026-10-07T10:46:58Z. -->
 
 # Plan review
 
-Overall verdict: REVISE BEFORE IMPLEMENTATION
-Finding counts: BLOCKER=1 MAJOR=3 MINOR=3
+Overall verdict: APPROVE WITH MINOR IMPROVEMENTS
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=3
 
-Reviewed HEAD: `dff09092150705c89df22645404c326b9ed60b5e`
+Reviewed HEAD: `f5403df49b78ccf3fa0ea39a25f6c43e2022dbf1`
 
-Inspected repository instructions, spec, plan, tasks, state/handoff, affected scripts and prompt templates, test fixtures, validation configuration, documentation, and local Git history. No files modified; no network or MCP integrations invoked.
+Inspected repository instructions, spec, plan, tasks, state/handoff, affected scripts, prompt templates, tests, validation configuration, documentation, flow chart, and Git history. No files modified; no network or MCP integrations invoked.
+
+The revised plan resolves the earlier worker import-path, permission, round-counting, model-selection, convergence-regex, and performance-acceptance issues. The corrected branch explanation matches local Git history.
 
 ## BLOCKER findings
 
-- P1: The specified shard command cannot import the discovered tests.
-
-  **Location:** `.ai/tasks.md:26–33`; `tests/test_workflow.py:1`.
-
-  Discovery produces IDs such as `test_workflow.DocsConsistencyTest.test_docs_consistency_modes_table`. It temporarily adds the discovery directory to the parent process’s import path. A fresh `python3 -m unittest <ids…>` subprocess running at the repository root does not inherit that Python import path. The proposed command therefore fails before executing the intended tests.
-
-  **Evidence:** Read-only discovery collected **229 tests**. Running a discovered documentation-test ID from the repository root failed with `ModuleNotFoundError: No module named 'test_workflow'`. The same test passed with `PYTHONPATH=tests`.
-
-  **Concrete plan change:** Explicitly provide the resolved discovery import root to every worker, including temporary directories supplied through `--start-dir`. Add regressions that launch the runner from both the repository root and an unrelated directory, with no caller-provided `PYTHONPATH`.
+None.
 
 ## MAJOR findings
 
-- P2: Required runner validation is unavailable under the frozen command allowlist.
-
-  **Location:** `.ai/tasks.md:11–14`, `.ai/tasks.md:48–54`; `.ai/permissions.allow:23–27`; `scripts/ai-run:146–149`.
-
-  T001 requires three full `python3 tests/run_parallel.py` runs, and the queue recommends that command after session gate timeouts. The installed allowlist permits `python3 -m unittest …`, but does not permit the runner command. Sessions use `dontAsk`, so they cannot obtain approval interactively. The host’s post-task check remains serial and does not provide the required parallel-run evidence.
-
-  **Concrete plan change:** Add a human preparation step approving the exact runner command before unattended execution, while keeping permission changes outside pipeline sessions. Alternatively, assign the three full runs to the coordinating host and explicitly require its recorded evidence before T001 acceptance.
-
-- P3: Triage history boundaries and round counting do not match the actual pipeline.
-
-  **Location:** `.ai/tasks.md:143–161`; `.ai/tasks.md:68–80`; `scripts/ai-pipeline:216`, `scripts/ai-pipeline:324–346`; `scripts/ai-run:176–205`.
-
-  `--since` is the **triage stage’s starting commit**, not the pipeline comparison base. The pipeline records that start after committing the current review. Consequently, `review-history "$since"` sees no earlier reviews during normal triage. The proposed fallback involving the stage start also does not establish a branch comparison base.
-
-  Conversely, querying the actual branch base through `HEAD` includes the already committed **current** review. Adding one to that count makes round 2 appear to be round 3. `triage-check --fresh` currently receives neither base nor round metadata and is called from several normal and recovery paths; the plan does not define how those calls obtain consistent values.
-
-  **Concrete plan change:** Define one shared routine that uses the current report’s recorded merge-base and reviewed HEAD to select earlier rounds, excludes the current review, and returns an uncapped count separately from rendered history. Use it for the prompt and every convergence-check path. Preserve `--since` exclusively as the triage scope boundary.
-
-  Add an end-to-end three-round pipeline regression using the real host commit order: round 2 must pass without `Convergence:`, round 3 must fail without it and pass with it. Also verify unchanged numbering after interrupted-triage recovery and history truncation.
-
-- P4: T001’s explicit model does not fit its concurrency work.
-
-  **Location:** `.ai/tasks.md:19`, `.ai/tasks.md:26–36`; `CLAUDE.md:60–65`.
-
-  T001 assigns `sonnet` to concurrent worker orchestration, shard crash handling, and shared-state isolation. The requested review policy and repository model rules require `opus` for concurrency work.
-
-  **Concrete plan change:** Set T001 to `Model: opus` and update the plan’s model summary. Mechanical documentation work can remain separate on a cheaper model.
+None.
 
 ## MINOR findings
 
-- P5: The proposed convergence regex accepts an empty line.
+- P8: Runner acceptance omits error-only and skipped-test summaries.
 
-  **Location:** `.ai/tasks.md:149–151`; `.ai/project-spec.md:56–58`.
+  **Location:** `.ai/tasks.md:37–39`, `.ai/tasks.md:49–57`.
 
-  In Python, `\s*` includes newlines. The proposed `^Convergence:\s*\S` therefore accepts `Convergence:` with no explanation when the following nonblank line contains the disposition table.
+  The runner must parse unittest summaries, but acceptance covers ordinary failures and crashes without exercising `FAILED (errors=1)` or `OK (skipped=1)`. These are distinct output formats; rejecting a valid skipped-test run or misreporting error totals could escape the proposed tests.
 
-  **Evidence:** An in-memory check matched `Convergence:\n\n| Finding …` as a valid convergence entry.
+  **Concrete plan change:** Add temporary-suite cases containing an ordinary test exception and a skipped test. Verify exit status, aggregated error/failure counts, complete exception output, and collected-versus-run count agreement.
 
-  **Concrete plan change:** Require nonblank content on the same line, using horizontal whitespace explicitly, such as `^Convergence:[ \t]*[^ \t\r\n]`. Add empty, whitespace-only, and following-table regressions.
+- P9: History truncation does not define oversized-round behavior.
 
-- P6: T001 weakens the specified performance acceptance criterion.
+  **Location:** `.ai/tasks.md:97–111`, `.ai/tasks.md:169–195`.
 
-  **Location:** `.ai/tasks.md:48–49`; `.ai/project-spec.md:67–69`.
+  Dropping whole oldest rounds handles a long history, but does not define useful output when the newest round alone exceeds 6000 characters. Dropping that round would remove the most relevant context while convergence still requires an explanation based on earlier findings. The planned cap test verifies counting, not this rendering boundary.
 
-  The spec requires a runtime under 200 seconds on this machine. T001 calls that threshold a “target,” allowing acceptance without meeting it.
+  **Concrete plan change:** Define an oversized-round fallback that stays within the cap and preserves a reference to the original report. Tell triage to inspect original reports when truncation removes context needed to assess recurrence. Add a regression with a single oversized newest round, checking the hard cap, fallback reference, and unchanged uncapped count.
 
-  **Concrete plan change:** Make the threshold mandatory and define how it is assessed—for example, require each of the three consecutive default-worker runs to finish under 200 seconds, recording counts and wall times.
+- P10: The handoff instructions omit the required coordinator timing evidence.
 
-- P7: The authorization record incorrectly says the prerequisite merge is present.
+  **Location:** `.ai/tasks.md:218–220`; `.ai/current-plan.md`, “Human steps”; `.ai/project-spec.md`, “Acceptance”.
 
-  **Location:** `.ai/current-plan.md:47–49`; `.ai/project-spec.md:17–19`.
+  T005 instructs the handoff to list approving the gate switch and timing one gate run, with everything else classified as automated. The spec instead requires three consecutive full parallel runs, matching the serial count and each finishing under 200 seconds, **before** the switch. Those runs are explicitly coordinator evidence outside the unattended tasks.
 
-  Local `master` contains merge commit `0818f20`, but that commit is not an ancestor of the reviewed HEAD. The branch shares the merged source history through `55383d7`; it has not completed the explicitly required merge of `master`.
-
-  **Concrete plan change:** Correct the record and retain the merge as an outstanding human preparation step before starting the unattended run. Reconfirm the resulting HEAD and comparison base afterward.
+  **Concrete plan change:** Require the handoff to retain these three runs as outstanding coordinator work until their evidence is recorded. Once completed, link the recorded counts and timings and leave only the remaining approval/application steps under “Needs you.”
 
 ## Missing test coverage
 
-The plan should add the worker import-path cases and real pipeline round-count/recovery cases described above. Tiny-suite runner coverage should also include an ordinary test exception and skipped-test output, verifying error counts and summary parsing.
+Add the runner summary and oversized-history cases above. The planned three-round pipeline and interrupted-triage regressions otherwise address the important round-counting paths.
 
 ## Security and architecture concerns
 
-The human-controlled gate switch, frozen installed tooling, and separation of review from implementation are appropriate boundaries. P2 must be resolved without an unattended permission change. P3 must preserve the existing triage scope guard and host-owned fix-round accounting.
+No additional demonstrated concern in the inspected scope. Preserve frozen gate files, host-owned fix-round accounting, triage scope restrictions, and full-range implementation review. Explicit task models fit the assigned work.
 
-No additional security finding was demonstrated in the inspected scope.
+The convergence design checks that an explanation exists; whether it correctly identifies recurring areas remains an agent judgment, as specified.
 
 ## Validation observed
 
-- Discovery collected **229 tests**, exceeding the plan’s historical 224-test baseline.
+- Discovery collected **229 tests**, matching `countTestCases()`.
 - **Three documentation consistency tests passed.**
-- The worker import failure and proposed import-path correction were reproduced.
-- The empty convergence-line regex defect was reproduced.
-- Python syntax checks passed for three inspected files.
-- Bash syntax checks passed for six affected or relevant scripts.
-- Task-queue validation and `git diff --check` passed; the checkout remained clean.
+- Python syntax checks passed for the workflow helper, watchdog helper, and existing test module.
+- Bash syntax checks passed for eight relevant scripts/gate templates.
+- Task-queue validation and `git diff --check` passed.
+- The checkout remained clean.
 
-The full `./scripts/ai-check` gate and integration suite were not rerun because they require writable fixtures, locks, logs, and validation artifacts. No current `.ai/local/validation.json` was available. Historical handoff evidence does not validate the proposed implementation.
+The full `./scripts/ai-check` and integration suite were not run because they require writable fixtures and workflow artifacts. No current validation stamp was available. These checks assess the existing baseline, not the proposed implementation.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-Complete and record the prerequisite merge and validation-command preparation. After implementation review, approve the `.ai/validate` switch and time a full gate run.
+After implementation review, obtain and record the three required parallel-run measurements before approving the gate switch. Keep gate changes and merge under human control.
 
 ### Covered by automated tests
 
-Worker loading, shard result handling, review prompt isolation, correct triage history and numbering, convergence-line validation, and interrupted-triage recovery should be verified before approval.
+Worker imports and result aggregation, review-history rendering/counting, prompt isolation, convergence enforcement, and interrupted-triage recovery should be verified by the planned tests plus P8–P9.
 
-This review does not constitute implementation verification or human acceptance.
+This is plan approval with minor improvements, not implementation verification or human acceptance.
