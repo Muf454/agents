@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 1c62b82b91e192a4e029c5dc789ff5ca83edea8384cfc0e737363385a0b8d725; saved 2026-10-07T12:13:30Z. -->
+<!-- Plan review of plan digest 0e0bd79b77e1b623ea1a06fb397fc017cb56c35999dd58030aebd35f0195fd08; saved 2026-10-07T12:17:54Z. -->
 
 # Plan review
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
 
-Reviewed HEAD: `b4138fec03e052031c16440220f436f0a3f5fa91`.
+Reviewed HEAD: `b64ac77ea93e6b19ae79f1c01708c6f57ad084f9`.
 
 ## BLOCKER findings
 
@@ -13,52 +13,47 @@ None.
 
 ## MAJOR findings
 
-- P28: Specify a registration hook placement that cannot read an uninitialized branch variable.
+- P30: Notification appends can modify files outside `.ai/local` through hard links.
 
-  **Location:** `.ai/tasks.md:191`; `scripts/ai-pipeline:109`, `scripts/ai-pipeline:113`; `scripts/lib/common.sh:3`.
+  **Location:** `.ai/tasks.md:70`, `.ai/tasks.md:86`; `.ai/project-spec.md:55`.
 
-  T003 specifies calling `ai_helper pipeline-register "$AI_ROOT" "$branch" || true` after `run-manifest start` and on resume. However, the actual script assigns `branch=$AI_START_BRANCH` only after the manifest start/resume block. Placing the hook immediately after the stated boundary therefore expands an unset `$branch` under `set -u`, terminating the pipeline before implementation. `|| true` cannot catch this shell expansion failure, violating the requirement that registration never change a run’s outcome.
+  T001 specifies appending directly to an existing `notifications.log`, protected by `O_NOFOLLOW`, a regular-file check, and a lock. These checks permit hard links. If an agent creates `notifications.log` as a hard link to a tracked source or gate file, the next notification appends JSON to that file. Atomic replacement during later trimming does not undo the modification.
 
-  **Evidence:** A read-only Bash reproduction with the same variable initialization and planned invocation exited 127 with `branch: unbound variable`.
+  This violates target-file preservation and the requirement that observation failures leave pipeline outcomes unchanged. This is a planned vulnerability; no filesystem reproduction was performed during this read-only review.
 
-  **Concrete plan change:** Specify one shared invocation after successful manifest start/resume verification, using the already initialized `$AI_START_BRANCH`, or explicitly place it after `branch=$AI_START_BRANCH`. Extend acceptance coverage to verify registration and unchanged outcomes on both initial start and recovery resume, including a failing registry write.
-
-- P29: T006 assigns security-sensitive terminal sanitization to `sonnet`.
-
-  **Location:** `.ai/tasks.md:333`, `.ai/tasks.md:352`; `.ai/project-spec.md:82`; `.ai/current-plan.md:53`.
-
-  T006 implements removal of terminal controls and escape sequences from agent-writable checkout data. The plan explicitly relies on this protection to prevent forged records from injecting terminal escapes. This is security work, but the task specifies `Model: sonnet`, contrary to the required `opus` assignment for security tasks.
-
-  T001’s safe file readers do not provide this protection: safe filesystem access and safe terminal output are separate responsibilities.
-
-  **Concrete plan change:** Move sanitization and its security tests into an `opus` task, letting T006 consume the completed helper, or change T006 to `Model: opus`. Explicitly verify sanitization of every displayed checkout-derived string, including project, branch, observation detail/note, checkout path, notifications, and last error.
+  **Concrete plan change:** Update T001 and the spec so notification updates never modify the existing log inode: read the bounded retained records, append and trim in memory, then atomically replace the destination using an exclusively created temporary file under the existing lock and pinned directory descriptor. Add a hard-linked sentinel fixture proving that notifications leave the sentinel’s bytes unchanged and preserve the pipeline’s outcome.
 
 ## MINOR findings
 
-None.
+- P31: T005’s targeted validation excludes its sanitizer tests.
+
+  **Location:** `.ai/tasks.md:335`, `.ai/tasks.md:342`; `.ai/tasks.md:11`.
+
+  T005 now requires `dashboard_sanitize_*` tests, but its targeted command selects only `dashboard_liveness`. It can report passing tests without exercising the security-sensitive helper added in this revision. This matters when the session’s full gate times out and targeted checks become its immediate validation evidence. The host’s full gate remains a later safeguard.
+
+  **Concrete plan change:** Add a separate targeted invocation with `-k dashboard_sanitize`, requiring at least one test, alongside the liveness invocation.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean before and after review.
-- Task-queue validation passed.
+- Requested HEAD confirmed; working tree clean.
+- Task-queue format/dependency validation passed.
 - Planning diff whitespace check passed.
 - **13 Bash syntax checks** and **3 in-memory Python syntax checks** passed.
 - **3 documentation consistency tests** passed.
-- Registration-hook shell failure reproduced without writing files.
-- Validation-stamp verification reported **no validation evidence** in this checkout.
+- Validation-stamp verification reported **no validation evidence**.
 
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration tests were not run because they create files, repositories, locks, and validation artifacts. Dashboard implementation tests do not exist yet.
+The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration suite were not run because they create repositories, locks, logs, and validation artifacts. Dashboard implementation tests do not exist yet.
 
 ## Scope, architecture, and coverage assessment
 
-Inspected repository instructions, spec, plan, tasks, state/handoff, relevant documentation, affected source and tests, validation configuration, Git history/diff, prior review, and the vault flow chart.
+Inspected repository guidance, spec, plan, tasks, state/handoff, relevant docs and vault flow chart, Git history/diff, affected source, existing test fixtures, and validation configuration.
 
-The advisory, read-only, standard-library design fits the requested scope. Dependencies are ordered and every task specifies a model. The earlier recovery-substage findings are addressed in the revised plan. No task’s own failed implementation retry is recorded.
+The previous P28 registration-placement and P29 model-assignment findings are addressed. Dependencies are ordered, every task specifies a model, and no failed implementation retry is recorded. The advisory dashboard, standard-library dependencies, and frozen gate-file boundary fit the requested scope.
 
-The findings concern planned changes, not demonstrated regressions in existing code. Flow-chart updates are scheduled for T002/T003 and correctly remain pending. Implementation remains subject to the recorded efficiency-batch merge prerequisite.
+The findings concern proposed behavior and validation, rather than demonstrated regressions in current application code. Flow-chart updates remain scheduled for T002/T003. Implementation also remains subject to the recorded efficiency-batch merge prerequisite.
 
 ## Manual testing recommendations
 
-After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Check highlighted stages, navigation, expansion, scrolling, resize, colors, and terminal restoration.
+After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Check stage highlighting, scrolling, expansion, resize, colors, and terminal restoration.
 
 No files were modified; no network or MCP integrations were invoked. This review assesses plan readiness, not implementation correctness or human acceptance.
