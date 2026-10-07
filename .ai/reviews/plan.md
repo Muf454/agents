@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest b550a05ce26b9da82269aed81db878e1d8f8984ed91f2e8245a129aac498bf0a; saved 2026-10-07T18:51:29Z. -->
+<!-- Plan review of plan digest 5b0bd7758d9d088b8a835aaca8b39e2e10a7dd143e59029918b497ebbffe7ba5; saved 2026-10-07T18:59:58Z. -->
 
 # Plan review
 
-Overall verdict: CHANGES REQUIRED — tighten command screening and distinguish task sessions from triage before implementation.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=2
+Overall verdict: CHANGES REQUIRED — close the remaining Git permission gap before implementation.
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
 
-Reviewed HEAD: `e52ed76de2049b2a25f8aaf3d3e0132b206f9f61`.
+Reviewed HEAD: `fbea454456fe78c1fec67f71e2aa49468dcc68e3`.
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, relevant documentation, affected scripts/tests, validation entry point, reference patches, and vault flow chart. The checkout is clean.
+Inspected repository instructions, spec, plan, tasks, state, handoff, affected source/tests, documentation, validation, reference patches, Git history, and the vault flow chart. The checkout is clean.
 
 ## BLOCKER findings
 
@@ -15,65 +15,56 @@ None.
 
 ## MAJOR findings
 
-- P1: Exact runner entries need argument screening too.
+- P5: Git option abbreviations can bypass the proposed reviewer deny list.
 
-  **Location:** `.ai/tasks.md:15`, `.ai/tasks.md:23`.
+  **Location:** `.ai/tasks.md:15`, `.ai/tasks.md:21`; `scripts/lib/workflow.py:678`.
 
-  The plan permits inheriting exact entries when a runner’s dangerous options cannot all be denied. Absence of a wildcard does not establish that the command is safe. The planned tests need to exercise unsafe exact entries supplied by the project, rather than only dangerous expansions of wildcard entries.
+  T001 retains `Bash(git grep *)` and specifies denial of `--open-files-in-pager` and `-O`. Git also accepts `--open-files` as an abbreviation. Neither reference patch’s deny list matches that spelling, leaving a route to execute a caller-selected pager despite removing all test runners.
 
-  An in-memory probe of the referenced `t001-wip.patch` policy confirmed that all these exact entries are inherited without matching any deny rule:
+  **Evidence:** Git 2.55.0 accepted this read-only probe, returning exit 1 for no matches rather than an unknown-option error:
 
   ```text
-  pytest --basetemp=/outside
-  go test -exec /outside ./...
-  npx tsc --outDir /outside
-  bash -n +n -c "touch /outside"
+  git grep --open-files=/__plan_review_never_execute__ --fixed-strings -- '__plan_review_nonexistent_71510d55e52e4a8f94ad9679cdbce86c__'
   ```
 
-  These permit deletion/writes or program execution, contrary to R1. No dangerous command was executed.
+  No pager was invoked. An in-memory comparison confirmed that the command matches `git grep *` and neither prototype’s deny patterns. With matching files, the abbreviated option launches the supplied program, violating R1.
 
-  **Concrete plan change:** Require argument screening for every inherited entry, including exact commands. When safety cannot be established, drop the entry. Seed the table-driven tests with unsafe exact permissions as well as wildcard permissions, and assert that none grants the dangerous command. Explicitly prohibit treating “no wildcard” as sufficient evidence of safety.
-
-- P2: Opening attempts inside the shared session function can record triage as a failed task.
-
-  **Location:** `.ai/tasks.md:39`; `scripts/ai-run:137`, `scripts/ai-run:209`, `scripts/ai-run:235`, `scripts/ai-run:296`.
-
-  The proposed launch hook belongs inside `claude_session`, but that function serves both implementation and `--triage`. Triage sets `active_task=triage`, invokes the same function, and exits without calling `task_outcome`. Opening an attempt unconditionally there leaves it open even after successful triage; the proposed EXIT handler would consequently emit an erroneous task `error` outcome. Task timing/metadata initialization currently also belongs to the implementation path.
-
-  **Concrete plan change:** Make task-attempt tracking explicitly opt-in for implementation sessions. Keep triage outside that lifecycle. Add regression assertions that successful and failed triage create no task outcomes, and that usage-limit retries within an implementation session still produce exactly one outcome and retain the original attempt start time.
+  **Concrete plan change:** Remove reviewer Bash permission for `git grep` and use native `Grep`, or explicitly cover every accepted abbreviation and clustered short-option form. Add command-policy tests for these forms alongside safe commands, and include them in mission control’s live permission checks. Assertions that canonical deny strings exist are insufficient.
 
 ## MINOR findings
 
-- P3: T001 defers its required flow-chart update to another session.
+- P4: The revised targeted command still misses the primary reviewer-invocation test.
 
-  **Location:** `.ai/tasks.md:18`, `.ai/tasks.md:39`; `AGENTS.md:15`.
+  **Location:** `.ai/tasks.md:26`; `tests/test_workflow.py:2270`.
 
-  T001 changes reviewer policy, while T002 owns both flow-chart updates. The runner executes one task per fresh session, so this contradicts the repository’s same-session update requirement and leaves the chart stale if execution stops after T001.
+  Read-only discovery with the specified filters selects eight existing tests but excludes `test_review_falls_back_to_claude_at_the_codex_limit`. That test contains the invocation assertions the reference patch extends to check `--disallowedTools`. The full gate would cover it, but the targeted command does not satisfy the previous finding’s requested coverage.
 
-  **Concrete plan change:** Put the reviewer-policy chart update and `updated:` date in T001’s affected files and acceptance criteria. Let T002 update the stopped-attempt lifecycle separately. Retain “Flow chart updated” in the PR description.
+  **Concrete plan change:** Add `-k review_falls_back` to the targeted command, or name the invocation test explicitly. Retain the full repository gate.
 
-- P4: T001’s targeted test selection misses relevant reviewer tests.
+- P6: README will describe permissions that T001 removes.
 
-  **Location:** `.ai/tasks.md:26`; `tests/test_workflow.py:2477`.
+  **Location:** `.ai/tasks.md:15`, `.ai/tasks.md:18`; `README.md:360`.
 
-  Filtering with `-k review_allowlist -k fallback` does not select existing tests named `test_claude_review_denials_and_allowlist_are_recorded` or `test_claude_review_failure_or_write_keeps_the_prior_review`. It also misses the reference patch’s new `test_review_policy_denies_every_writing_form_of_inherited_runners`.
+  T001 updates the workflow documentation, reviewer prompt, and flow chart, but omits README. README explicitly promises inherited `npm test` and `npx vitest run *` permissions and describes probes running project code. Those statements contradict the revised policy of inheriting no runners.
 
-  **Concrete plan change:** Specify an executable targeted command selecting the allowlist, policy-matrix, reviewer invocation, denial-recording, and failure-preservation tests. Also run the repository-required `./scripts/ai-check`.
+  **Concrete plan change:** Include README’s Claude fallback reviewer section in T001. Describe reading host validation evidence, the remaining command permissions, and the saved allow/deny lists consistently across the documentation and prompt.
 
 ## Validation observed
 
 - Four affected Python files passed AST parsing.
-- Five relevant shell files passed individual `bash -n` checks.
+- Five relevant shell files passed `bash -n`.
 - Read-only discovery collected 272 tests.
-- In-memory policy probes demonstrated the unsafe exact-entry behavior above.
-- `git diff --check` passed; no files were modified.
+- Targeted discovery demonstrated P4.
+- Git parsing and in-memory policy checks demonstrated P5.
+- `git diff --check` passed.
+- No files were modified.
 
-The full gate and integration tests were not run because they create fixtures and validation artifacts. No current validation result is recorded in `.ai/state.md`. No network/MCP integration or live provider session was invoked.
+The full gate and integration tests were not run because they create fixtures and validation artifacts. No network/MCP integration or live provider session was invoked. `.ai/state.md` records no current validation result.
 
 ## Scope and remaining verification
 
-The timeout, malformed-queue, validation-failure, and pre-launch budget cases are substantially specified. T001’s `opus` model fits its security risk; T002’s routine outcome bookkeeping does not independently establish a model-selection violation.
+The revision addresses the earlier unsafe runner inheritance, triage-attempt tracking, and same-session flow-chart concerns. T002 specifies regression cases for malformed queues, exhausted budgets, usage-limit retries, timeout, interruption, and duplicate outcomes. No additional model-selection finding was established.
 
-After implementation, mission control should perform the planned disposable-repository permission checks using the generated policy, including unsafe exact entries, attached/clustered options, and alternate executable configuration paths. Matcher tests alone do not establish live enforcement. Deferred outcome-report findings remain outside this scope.
+After implementation, mission control should verify the generated policy with the installed Claude CLI in a disposable repository, checking dangerous forms, harmless commands, and absence of outside writes. Mock invocation and glob tests do not establish live permission enforcement.
 
 This review is not human acceptance.
