@@ -13,3 +13,4 @@ this work once in a catch-up review when it has usage again; record the outcome 
   covers the Fable bootstrap review of `26463f1` and its fixes): BLOCKER 0, MAJOR 2, MINOR 3.
   M1/M2 fixed on `fix/catchup-review`; N1–N3 deferred to vault backlog CU-1..3. Catch-up done
   for this entry.
+| 2026-10-07T19:12:03Z | plan | fix/catchup-review | 23ea9385d7af | plan | claude-fable-5-1 | high | Codex usage limit |
