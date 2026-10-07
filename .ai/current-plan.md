@@ -41,3 +41,9 @@
   this branch.
 - After the run: Zack approves switching `.ai/validate` to `python3 tests/run_parallel.py`
   (gate file) in this PR, then the toolkit upgrade to the project repos as its own PR.
+
+## Authorization
+Approved by Zack on 2026-10-07 in chat with Claude: run T001–T005 unattended via
+`ai-pipeline` (the pipeline's Codex plan review gates the start). PR #15 merged first
+(`0818f20`); this branch already contains it. Switching `.ai/validate` and merging stay
+with Zack.
