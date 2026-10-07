@@ -6,7 +6,7 @@ Phase: planning
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 6
+Tasks remaining: 11
 Last validation: none
 Blocked: no
 Next action: Codex plan review; implementation after fix/catchup-review merges
