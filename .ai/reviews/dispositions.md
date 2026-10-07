@@ -1,5 +1,19 @@
 # Review dispositions (Claude)
 
+## Plan review round 5 (HEAD 23ea938)
+
+Claude Fable fallback review, 2026-10-07: BLOCKER 0, MAJOR 2, MINOR 3 — all accepted.
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 spec and plan still describe the abandoned allow/deny policy | accepted | Confirmed: spec R1 still required inherited `Bash(...)` entries and `--disallowedTools`; `current-plan.md` said "positive list + deny list"; T001 said no Bash. R1 rewritten to revision 4 (Read/Glob/Grep only, host-prepared context, `.allowlist` = the three tools); the Reference paragraph's live deny-list check marked superseded; plan line updated. | T001 |
+| P2 host context underspecified per mode; acceptance only checks existence | accepted | Confirmed in `scripts/ai-review`: `claude_attempt` gets only the prompt; recheck has `head` but no base in shell scope (only in the review header that `current_review_rounds` parses, `workflow.py:905-908`); plan mode has no range; the code prompt says "Inspect git diff …" and "CHANGED SINCE … inspect git diff" (`ai-review:251,258`). T001 now specifies files per mode (code incl. `since-last-review.patch`; recheck base via a new `review-range` helper sharing the header regex, plus `findings.txt`; plan `files.txt`/`log.txt`, no diff), a separate `claude_prompt` naming the files, mock changes, and acceptance on content (`T001.txt` in `files.txt` and `diff.patch` for code and recheck) and cleanup after success, `MOCK_CLAUDE_REVIEW='error'` and `limit-once`. | T001 |
+| P3 SIGINT/SIGTERM test would hang | accepted | Matches bash semantics (a trapped signal runs after the foreground command returns) and `timeout` running in its own process group. T002 now prescribes a `hold` mock released by a file after the signal, `Popen(start_new_session=True)`, bounded polls and `communicate(timeout=20)`, cleanup in `finally`; 137 via a `self-kill` mock; the deferred delivery (Ctrl-C) is documented. | T002 |
+| P4 targeted validation misses plan/recheck fallback tests | accepted | `-k` is a substring match; `fall_back` ≠ `fallback`, so `test_plan_review_and_recheck_fall_back_to_claude` and `test_recheck_falls_back_to_claude` were not selected. Added `-k fall_back -k reviewer_setting -k pipeline_without_codex -k review_context -k review_range`. | T001 |
+| P5 SIGKILL/power loss leaves no outcome | accepted | `on_exit` cannot run on SIGKILL, and that is exactly the watchdog/`ai-recover` path where R2's "recovery is not a first-time pass" matters. Fix rather than document: host-side attempt marker in the state root (agents cannot write it), opened/closed with T002's attempt, reconciled as one `crashed` outcome after `ai_lock` at the next `ai-run` start; test with a new `crash` mock modelled on `triage-crash`. Split into its own task to keep T002 small; spec R2 extended. | T003 |
+
+Missing-coverage notes also taken into the tasks: cleanup after a failed review and a limit retry (T001), mock changes keeping the "writes outside its scope" case (T001), the named malformed-queue test with per-subtest row indexing (T002), `error` for a limit wait beyond `AI_LIMIT_MAX_WAIT` (T002 docs). Security note (Read not limited to the checkout): one prompt line in T001's `CLAUDE REVIEWER` suffix.
+
 ## Plan review round 4 (2026-10-07): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
 
 | Finding | Disposition | Evidence / reason | Fix task |
