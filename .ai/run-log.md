@@ -97,3 +97,4 @@
 | 2026-10-07T17:30Z | claude | T003 | DONE: ai-review adds PREVIOUS ROUNDS + CHANGED SINCE THE LAST REVIEW to the implementation review prompt; review.md paragraph; 5 tests | targeted Ran 5 OK; ai-check 248 OK in 107 s | (this commit) | next: T004 |
 | 2026-10-07T17:06:38Z | runner | T003 | completed | PASS | 5bba0c5 | Claude checkpointed; continuing queue |
 | 2026-10-07T17:45Z | claude | T004 | DONE: triage prompt gets round + PREVIOUS ROUNDS; triage-check --fresh requires Convergence: from round 3; triage.md rule; 5 convergence tests | targeted Ran 5 OK; ai-check 253 OK in 112.5 s | (this commit) | next: T005 |
+| 2026-10-07T17:17:31Z | runner | T004 | completed | PASS | 46b7ea2 | Claude checkpointed; continuing queue |
