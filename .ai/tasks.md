@@ -485,7 +485,7 @@ nested dir and symlink, dir mode, replaced by symlink, by file, removed; untouch
 tool limit; it was auto-moved to the background and completed with exit 0.
 
 ## T009 — Dependency outputs must be directories (review N2)
-Status: IN_PROGRESS
+Status: BLOCKED
 Dependencies: T001
 Model: sonnet
 
@@ -513,7 +513,11 @@ Targeted: `python3 -m unittest discover -s tests -k deps_status_output_kind` (ou
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Pending.
+BLOCKED (gate wall time only). Implemented in ae6c54b: `deps_status` uses `lexists` for
+missing and `is_dir()` for kind; test `test_deps_status_output_kind` covers file, broken
+symlink, dir symlink, real dir. Targeted run: `-k deps_status` Ran 8, OK. Full `ai-check` in
+the foreground exceeded the 600 s tool limit and was auto-backgrounded, so it was not
+confirmed in-session; the runner's recovery validation recorded PASS (2026-10-07T02:23:53Z).
 
 ## T010 — Wrapped automated test bullets are not flagged; FINISHED count regression (review N1)
 Status: TODO
