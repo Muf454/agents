@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: feature/flow-batch-2
-Phase: ready_for_acceptance
+Branch: feature/dashboard
+Phase: planning
 Current task: none
-Last completed task: T010
-Tasks complete: 10
-Tasks remaining: 0
-Last validation: PASS at 2026-10-07T08:05:47Z
+Last completed task: none
+Tasks complete: 0
+Tasks remaining: 4
+Last validation: not run
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/15
-Last updated: 2026-10-07T08:11:21Z
+Next action: Codex plan review, then Zack approves and starts ai-pipeline
+Last updated: 2026-10-07T11:20:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

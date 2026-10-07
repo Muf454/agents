@@ -1,86 +1,91 @@
-# Spec: Run flow batch 2: FL-01, FL-07, FL-09
+# Spec: Pipeline dashboard (`ai-dashboard`)
 
 ## Objective
-Run flow batch 2: FL-01, FL-07, FL-09
-Remove the avoidable stops and the misleading human work seen in the overnight runs of
-2026-10-05/06: install dependencies on the host before tasks run (FL-01), make waits and the
-watchdog reliable (FL-07), and make the PR say what really needs Zack (FL-09).
+Pipeline dashboard (`ai-dashboard`)
+One read-only terminal view of every AI pipeline on this machine: the pipeline flow drawn as
+boxes with the active stage highlighted, plus one short ntfy-style status line per run
+(▶ / ✅ / ⏸ / 🔧 / ⚠ / ⛔ / 🏁). Zack runs several pipelines at once (worktrees under
+`~/Projects/wt/`, each in its own tmux session); tmux only keeps them alive and `ai-status`
+covers one checkout and says nothing about where in the flow a run is.
 
-Source: vault [[agents-backlog]] "Run flow improvements (approved by Zack 2026-10-06)",
-items FL-01, FL-07, FL-09 (approved; first batch after OR-01/OR-02, merged as PR #14).
-Trimmed 2026-10-06 to high-impact, low-investment work: FL-03 (review convergence) was
-dropped from this batch and stays in the backlog, not started.
-Planned by Claude as Zack's delegate on 2026-10-06; the pipeline's Codex plan review gates it.
-Hub decisions respected: risk-based models with no usage-saving downgrades (2026-10-06),
-roles vs providers, AD-5 (the watchdog only observes), "auto-recovery never changes the gate"
-(gate files such as `.ai/ci-setup` are run, never edited), "don't break my system".
+Source: Zack, 2026-10-07 ("high prio": a TUI overview of the whole flow, where each run is,
+all running pipelines, statuses like the ntfy app, active boxes highlighted, no overflow of
+information). It implements the approved terminal-first direction (Q1, 2026-10-05): backlog
+OR-19 plus the minimum of OR-12 (an observation snapshot) it needs, ahead of OR-11/14/18.
+Layout chosen by Zack: boxes. Planned by Claude on 2026-10-07; the pipeline's Codex plan
+review gates it.
+Hub decisions respected: AD-4 (runtime observations are small atomic files in `.ai/local/`,
+no SQLite, no daemon), AD-5 (status never authorizes; the watchdog only observes), roles vs
+providers, gate files are never edited by a pipeline session.
 
 ## Requirements
-- **FL-01 Dependencies before tasks (host), kept small** (revised after the plan review).
-  The host, never an agent session, runs the project's `.ai/ci-setup` when dependencies are
-  missing or stale at exactly two points: the start of every `ai-run` invocation that will
-  run a task (so every pipeline start, resume and fix round), and in `ai-recover`'s
-  `commit_and_rerun` before its validation. Staleness is generic, not npm-specific:
-  - inputs: files declared by a comment line in `.ai/ci-setup`
-    (`# ai-deps-inputs: package-lock.json …`), else a documented default list of well-known
-    lockfiles (package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock, bun.lock,
-    bun.lockb, requirements*.txt, poetry.lock, uv.lock, Pipfile.lock, Gemfile.lock, go.sum,
-    Cargo.lock, composer.lock) that exist at the repo root;
-  - outputs: directories declared by `# ai-deps-outputs: node_modules …`, else `node_modules`
-    when `package.json` exists; a missing output is stale;
-  - a stamp `.ai/local/deps.json` records the SHA-256 of `.ai/ci-setup` and of every input;
-    any difference, or no stamp, is stale (also with no inputs at all: a configured
-    installer without lockfiles runs once).
-  Running it: stdin `/dev/null`, a timeout (`AI_DEPS_TIMEOUT` environment variable, default
-  1200 s, bounded by the run's remaining time, tested), output only to the ignored
-  `.ai/local/deps-*.log` and the terminal; nothing tracked is written. Failure or timeout
-  stops ("Dependency setup (.ai/ci-setup) failed …; see <log>"; recovery escalates). After
-  it the gate digest must be unchanged and a project-tree snapshot (HEAD, index, and the
-  path, kind, mode and bytes of every non-ignored file, tracked or untracked, excluding
-  `.ai/local/`; submodules included recursively) must equal the one taken before, also after
-  a failed installer run, else stop ("changed project files"); the stamp is recorded only
-  after these checks. Every dependency-setup stop starts with "Dependency setup" and is a
-  hard escalation in `ai-recover` (never auto-recovered). `.ai/ci-setup` contents are never changed by the
-  toolkit run; the ci-setup template only gains comment lines documenting the declaration
-  lines (one npm example).
-  Not in scope: installing dependencies a task changes mid-run (that task's in-session gate
-  failure follows the existing rules; the next `ai-run` start or recovery validation
-  installs them), installs before every gate, ai-pipeline's own validation step.
-- **FL-07 Reliable waits.** `setup-project --watchdog` (opt-in) installs the timer after a
-  successful install (`ai-watchdog <root> --install-timer --diagnose --recover`); without it
-  setup prints the command as the next step. `ai-watchdog --timer-status` reports whether this
-  checkout's timer is installed (both unit files, enabled and active per `systemctl --user`;
-  otherwise missing, or unknown when systemd can't be asked); `ai-pipeline` warns at start
-  (terminal and the STARTED/RESUMED notification) when it is missing or unknown, never
-  failing the run. README documents PID-based waits
-  (`while kill -0 "$pid"`) and why `pgrep -f` waits are wrong (they match themselves). No
-  script uses `pgrep -f` waits today (verified); a test keeps it that way.
-- **FL-09 What needs Zack.** The handoff's "Manual testing for the human" section has two
-  subsections: `### Needs you` (only checks a human must do: look and feel on a phone, real
-  devices, live accounts, decisions; or "None") and `### Covered by automated tests` (each
-  developer-level step with its test name in backticks). The PR body's "How to test" shows
-  "Needs you" first and the automated list after it; bullets without a backticked test name
-  are flagged. The FINISHED notification counts only "Needs you" steps ("Nothing to test by
-  hand" when None). A legacy handoff without the subsections is treated as before (all steps
-  need the human). Runner, triage, fix-review and review prompts plus the CLAUDE.md/AGENTS.md
-  and handoff templates describe the split.
-- Each task that changes flow behaviour updates the vault `agents-flow.md` (diagram/notes and
-  its `updated:` date) in the same task; a final task audits the docs.
+- **Observation records (scripts only).** `common.sh` gains `ai_observe STAGE [DETAIL]`
+  which atomically writes `.ai/local/observation.json`
+  `{"stage", "detail", "since" (UTC ISO), "pid", "branch"}` (temp file + `mv`; best effort:
+  a failure never changes a run's outcome or exit status). Stage keys:
+  `plan_review setup build checks review triage recheck pr done stopped paused recovering`.
+  Writers: `ai-pipeline` (each `step`, `stop`/pipeline `ai_die` → `stopped` with the reason,
+  `finish` → `done` with the PR URL when there is one), `ai-run` (`setup` around `ai_deps`;
+  `build` per task with detail `<id> · <model> · <n>/<N>`; `triage` for `--triage`),
+  `ai_limit_pause` (`paused`, detail `<agent> until <time>`; afterwards the previous stage is
+  restored), `ai-recover` (`recovering`, detail `<attempt>/<max>`; escalation → `stopped`).
+  Validation inside the pipeline (`ensure_validated`) → `checks`.
+- **Notification mirror.** `ai_notify` also appends one JSON line `{"ts", "message"}` to
+  `${AI_ROOT:-$PWD}/.ai/local/notifications.log` when that `.ai/local` directory exists,
+  whether or not `AI_NOTIFY_CMD` is set; the file keeps the last 200 lines. Never fatal.
+  Messages from the watchdog (it notifies through `ai_notify`) land there too.
+- **Host registry.** `ai-pipeline` start (and resume) runs a new helper
+  `workflow.py pipeline-register` that writes `<state root>/pipelines/<key>.json`
+  `{"checkout", "project", "branch", "started"}` (key: sha256 of the checkout path, first 16
+  hex, like `binding_dir`; state root from `state_root()`/`check_state_root`) and removes
+  entries whose checkout directory no longer exists. Failure prints a warning, never stops.
+- **Snapshot model** (`scripts/lib/dashboard.py`, Python stdlib only). Discovers checkouts
+  from the registry and from a `/proc` scan for live runner processes (`process()`,
+  `is_runner()` from `scripts/lib/watchdog.py`; cwd → checkout root containing `.ai/`), so
+  runs on an older toolkit copy also appear. Per checkout: project, branch, liveness
+  (`.ai/local/pipeline.active` PID alive and a runner), observation, last notifications,
+  `last-error`, task counts (existing `tasks()` parser) → status one of `running`, `paused`,
+  `recovering`, `needs_you` (stopped/escalated), `crashed` (marker left but its process is
+  gone), `finished`, `idle`, with stage `unknown` when no observation exists. Missing or
+  malformed files degrade to `unknown`, never a crash. Strictly read-only: no writes, no
+  locks, no git commands that write.
+- **Sanitising.** Every string read from a checkout (agent-writable) has control characters
+  and escape sequences removed and is length-capped before output.
+- **Output modes.** `ai-dashboard --once` prints a plain-text rendering (no curses; for pipes,
+  Remote Control and tests) and `--json` the snapshot; plain `ai-dashboard` opens the TUI.
+  `--all` includes finished/stopped/idle runs older than 24 h (hidden by default).
+- **TUI** (Python `curses`, `scripts/ai-dashboard` bash wrapper). Header: counts
+  (running / needs you / finished), clock, key help. One card per run, sorted needs you →
+  crashed → running/paused/recovering → finished → idle: title line
+  (`<icon> <project> · <branch>` and `<status> <age>`); at width ≥ 100 a row of seven boxes
+  Plan check → Setup → Build n/N → Checks → Review → Triage (incl. re-check) → PR joined by
+  `──`; the active box has a double border, bold and the role colour of the flow chart
+  (Claude orange: build/triage; Codex blue: plan check/review/re-check; scripts grey:
+  setup/checks/PR); passed boxes dim with ✓ below; a stopped run's box red; paused ⏸,
+  recovering 🔧, crashed ⚠ inside the box; detail (`T003 · sonnet · 12m`) under the active
+  box; last notification line with its time. Width < 100: one compact line
+  `✓Plan ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`. Finished: all ✓ and the 🏁 line.
+  Keys: `q` quit, `↑/↓` select, `Enter` toggles details (last 8 notifications, last error,
+  checkout path), `a` toggle all, `r` refresh; auto refresh every 2 s; resize handled;
+  terminal restored on exit and on exceptions; no colours → bold/reverse only.
+- **Install.** `setup-project` installs `ai-dashboard` and `lib/dashboard.py` into `.ai/bin`
+  like the other scripts; it also runs from `~/Projects/agents/scripts/`.
 
 ## Non-goals
-FL-02, FL-03, FL-04, FL-05, FL-06, FL-08; validation-candidate suggestions for ci-setup; changing `.ai/ci-setup`, `.ai/validate` or other gate files
-of this repo; package-manager-specific logic beyond the default lists; automatically removing
-timers of deleted worktrees; enforcing test-name existence (only the presence of a name).
+No control actions (stop, resume, approve) from the dashboard; no event history (OR-17); no
+`ai-status --json`/`--watch` (OR-11/OR-18 stay in the backlog); no web or phone view; no
+change to `.ai/validate`, `.ai/bin`, `.ai/prompts`, permissions or the CI workflow of this
+repo; no new runtime dependency (curses is stdlib); no change to what ntfy sends.
 
 ## Acceptance
-- FL-01: a fixture project whose ci-setup creates a declared output runs it once at the
-  start of `ai-run` (mock agent sees the output), not again while inputs are unchanged;
-  failure/timeout stops before any agent session with the log path; a ci-setup that
-  overwrites an already modified file, creates a non-ignored file or commits stops without a
-  stamp; a full pipeline with a stale stamp finishes with a clean tree and a PR; recovery
-  installs changed dependencies before its validation and commits valid leftover work; the
-  template ci-setup documents the declaration lines and still installs nothing.
-- FL-07: `setup-project --watchdog` installs the timer (mock systemctl); setup without it
-  prints the command; pipeline start without a timer warns and continues.
-- FL-09: pr-body/finish-summary tests for the split, None, flagged bullets and legacy handoffs.
-- New tests in `tests/test_workflow.py`; all existing tests pass; `.ai/validate` passes.
+- Fixture pipeline runs (mock claude/codex) leave the expected `observation.json` stages and
+  notification lines; a stop records `stopped` with its reason; a pause records `paused`;
+  observation and registry failures never change a run's outcome.
+- `ai-dashboard --once` / `--json` on fixture checkouts show each status correctly, including
+  a legacy checkout with no observation and malformed files; escape sequences are removed;
+  nothing is written anywhere (verified by a before/after tree comparison).
+- `render()` golden outputs at widths 60, 100 and 140 (double-bordered active box, red
+  stopped box, compact line); a curses smoke test under a pty quits on `q` and restores
+  the terminal.
+- README and `docs/workflow.md` describe it; vault notes updated.
+- All existing tests pass; `.ai/validate` passes.
