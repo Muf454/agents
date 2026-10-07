@@ -93,7 +93,7 @@ coordinator fix df0aefd accepts either wording. Re-verified: targeted `-k parall
 (inside the 600 s limit, barely). DONE.
 
 ## T002 — Review history helper
-Status: BLOCKED
+Status: DONE
 Dependencies: T001
 Model: sonnet
 
@@ -152,6 +152,8 @@ BLOCKED: the foreground `.ai/bin/ai-check` hit the 600000 ms Bash tool timeout (
 598.7 s, so the suite is at the limit and the 7 added tests tip it over). No gate result for this
 change; the human or runner must run the gate with a longer limit (or the parallel runner from
 T001) and, if green, set T002 DONE.
+DONE 2026-10-07T17:00Z (coordinator, approved by Zack): the gate now runs the parallel shards
+(`becd1bf`); `.ai/bin/ai-check` 243 tests OK in 102 s on this content.
 
 ## T003 — Codex reviews get the earlier rounds and the delta (B3)
 Status: TODO

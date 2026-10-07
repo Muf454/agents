@@ -93,3 +93,4 @@
 | 2026-10-07T13:00Z | claude | T002 | BLOCKED: `review-history` helper + 7 `review_history` tests implemented | targeted Ran 7 OK; foreground ai-check exceeded the 600 s tool timeout (no result) | (this commit) | rerun the gate with a longer limit; if green set DONE |
 | 2026-10-07T12:42:06Z | runner | T002 | blocked; try next independent task | not complete | ffcca46 | See task result |
 | 2026-10-07T12:42:06Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | c6b8e7b | No merge or deployment performed |
+| 2026-10-07T17:00Z | claude (coordinator) | T002 | DONE: gate switched to tests/run_parallel.py + toolkit copy upgraded (becd1bf, approved by Zack) | ai-check 243 OK in 102 s | (this commit) | resume the pipeline |
