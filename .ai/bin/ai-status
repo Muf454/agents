@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  cat <<'USAGE'
+Usage: ai-status                      workflow state of this checkout
+       ai-status --outcomes [FILE...]  task/review outcomes per model, category and reviewer
+                                       (default: the host outcome log of all projects,
+                                       $AI_STATE_DIR/outcomes.jsonl)
+USAGE
+  exit 0
+fi
+if [[ "${1:-}" == --outcomes ]]; then
+  shift
+  ai_helper outcomes-report "$@"
+  exit 0
+fi
 ai_root
 ai_helper status

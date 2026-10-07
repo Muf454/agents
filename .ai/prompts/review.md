@@ -19,7 +19,8 @@ Start every finding with its stable ID as a heading or bullet (`### B1 — ...`,
 
 Use the structure in `.ai/reviews/current.md`: overall verdict; BLOCKER, MAJOR,
 MINOR findings; missing coverage; security concerns; architecture concerns; manual
-testing recommendations. Each finding needs a stable ID, problem, location,
+testing recommendations (split into "Needs you": what a human must check, and "Covered
+by automated tests": what is or should be an automated test). Each finding needs a stable ID, problem, location,
 impact, evidence/reproduction where practical, and recommended direction. Record
 reviewed revision/base, checks actually observed/run, and limitations. Include
 the requirement behind a requirement-gap finding. Separate pre-existing defects.

@@ -279,9 +279,13 @@ def setup(arguments):
                         help='plan an upgrade of toolkit-owned files (.ai/bin, .ai/prompts); changes nothing')
     parser.add_argument('--apply', action='store_true', help='with --upgrade: apply the plan')
     parser.add_argument('--force', action='store_true', help='with --upgrade --apply: overwrite locally edited files')
+    parser.add_argument('--watchdog', action='store_true',
+                        help='after installing, install the watchdog timer for this checkout')
     args = parser.parse_args(arguments)
     if (args.apply or args.force) and not args.upgrade:
         fail('--apply and --force only make sense with --upgrade.')
+    if args.watchdog and (args.dry_run or args.upgrade):
+        fail('--watchdog cannot be combined with --dry-run or --upgrade.')
     root = args.project.expanduser().resolve()
     if not root.is_dir():
         fail('Target directory must exist. Create it and run git init first.')
@@ -369,6 +373,16 @@ def setup(arguments):
     if created or not (root / STAMP_FILE).exists():  # a no-op repeat must not move the recorded commit
         write_stamp(root, toolkit, stamp)
     print('Installed. Existing files were preserved: reconcile KEEP entries manually before running.')
+    if not args.watchdog:
+        print('Next: install the watchdog timer: .ai/bin/ai-watchdog --install-timer --diagnose --recover')
+        return
+    result = subprocess.run([str(root / '.ai/bin/ai-watchdog'), str(root), '--install-timer',
+                             '--diagnose', '--recover'],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    print(result.stdout, end='')
+    if result.returncode:
+        fail('The watchdog timer was not installed (files were installed; the timer was not): '
+             + (result.stderr.strip() or result.stdout.strip() or f'exit {result.returncode}'))
 
 
 def task_blocks(text):
@@ -640,6 +654,60 @@ def claude_result(path, check_only=False):
         print(f'Note: {len(denials)} denied tool call(s) logged in .ai/local/denials.log', file=sys.stderr)
 
 
+def claude_text(arguments):
+    """Write the final text of a successful `claude -p --output-format json` run to OUT."""
+    source, target = arguments
+    claude_result(source, check_only=True)
+    data = json.loads(Path(source).read_text())
+    denials = data.get('permission_denials') or []
+    if denials:
+        # The reviewer's attempts at its boundary are the audit signal: keep them.
+        with open('.ai/local/review-denials.log', 'a') as log:
+            for denial in denials:
+                log.write(f"{now()} {denial.get('tool_name')} {json.dumps(denial.get('tool_input', {}))[:300]}\n")
+        print(f'Note: {len(denials)} denied reviewer tool call(s) logged in .ai/local/review-denials.log',
+              file=sys.stderr)
+    text = data.get('result')
+    if not isinstance(text, str) or not text.strip():
+        fail('Claude returned no text.')
+    Path(target).write_text(text.strip() + '\n')
+
+
+# Read-only git subcommands a reviewer may run; every other git entry of the project's
+# allowlist (add, commit, rm, mv, ...) is dropped for reviews.
+REVIEW_GIT = ('status', 'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'rev-parse', 'merge-base')
+
+
+# Commands that write, delete, fetch or run anything by themselves: never for a reviewer.
+REVIEW_DROP_FIRST = (r'(?:git|sudo|su|rm|rmdir|mv|cp|ln|chmod|chown|touch|mkdir|tee|dd|install|truncate|'
+                     r'sed|awk|perl|ruby|find|xargs|env|eval|exec|curl|wget|ssh|scp|rsync|tar|unzip|docker)\b')
+# An interpreter or package runner followed only by a wildcard runs arbitrary code
+# (`bash *`, `node *`, `npx *`, `npm run *`); fixed check commands (`npm test`,
+# `npx vitest run *`) stay.
+REVIEW_DROP_OPEN = r'(?:bash|sh|zsh|python3?|node|deno|bun|npx|pnpm|yarn|npm(?: run| exec)?)(?: \*)?'
+
+
+def review_allowlist(arguments):
+    """--allowedTools entries for the Claude reviewer, one per line: the project's approved
+    read and check commands from .ai/permissions.allow minus everything that writes (Edit,
+    Write, git writes, ai-task) or runs the gate (ai-check, .ai/validate), plus read-only git
+    and writes confined to the ignored probe directory."""
+    entries = ['Read', 'Glob', 'Grep', 'Edit(./.ai/local/review-probes/**)']
+    entries += [f'Bash(git {command})' for command in REVIEW_GIT]
+    entries += [f'Bash(git {command} *)' for command in REVIEW_GIT]
+    for line in Path('.ai/permissions.allow').read_text().splitlines():
+        entry = line.strip()
+        match = re.fullmatch(r'Bash\((.+)\)', entry)
+        if not match or entry in entries:
+            continue
+        command = match.group(1)
+        if re.match(REVIEW_DROP_FIRST, command) or re.fullmatch(REVIEW_DROP_OPEN, command) or \
+                re.search(r'ai-task|ai-check|ai-run|ai-pipeline|\.ai/validate|\bpush\b|deploy|supabase|vercel', command):
+            continue
+        entries.append(entry)
+    print('\n'.join(entries))
+
+
 SECRET_PATTERNS = ('.env*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
                    'id_ed25519*', 'id_ecdsa*', '*.kdbx', '*credentials*', '*secret*', '.npmrc', '.netrc')
 
@@ -670,7 +738,7 @@ def publish_review(arguments):
         if field not in content:
             fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
     review_counts(content)
-    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n'
+    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
     bind_review(head, header + content)
 
@@ -680,6 +748,13 @@ COUNTS = re.compile(r'^Finding counts:\s*BLOCKER=(\d+)\s+MAJOR=(\d+)\s+MINOR=(\d
 
 FINDING_ID = re.compile(r'^(?:#{2,6}\s+|[-*]\s+(?:\*\*)?)\s*([A-Z][A-Z0-9]{0,4}-?\d+)\b', re.M)
 NONE_TEXT = re.compile(r'^(?:none|no findings|n/?a)\b', re.I)
+
+
+def reviewer_label():
+    """Visible label for a review written by the Claude fallback (ai-review sets AI_REVIEW_BY
+    and AI_REVIEW_LABEL); empty for Codex reviews, so their files are unchanged."""
+    label = ' '.join(os.environ.get('AI_REVIEW_LABEL', '').split())
+    return f'> **Reviewer: {label}**\n\n' if label else ''
 
 
 def finding_ids(content, level):
@@ -765,14 +840,55 @@ def triage_check(arguments):
     print(f'accepted={accepted} deferred={deferred}')
 
 
+def state_root():
+    """Host state directory: AI_STATE_DIR, else $XDG_STATE_HOME/ai-toolkit, else
+    ~/.local/state/ai-toolkit. A relative setting would depend on the current directory."""
+    for name, suffix in (('AI_STATE_DIR', ''), ('XDG_STATE_HOME', 'ai-toolkit')):
+        value = os.environ.get(name, '')
+        if value:
+            if not os.path.isabs(value):
+                fail(f'{name} must be an absolute path: {value}')
+            return Path(value, suffix) if suffix else Path(value)
+    return Path(os.path.expanduser('~/.local/state/ai-toolkit'))
+
+
+def overlap(a, b):
+    """True when either path equals or lies inside the other, lexically or after resolving
+    symlinks (realpath resolves the existing prefix of a path not created yet)."""
+    for resolve in (os.path.abspath, os.path.realpath):
+        first, second = Path(resolve(a)), Path(resolve(b))
+        if first.is_relative_to(second) or second.is_relative_to(first):
+            return True
+    return False
+
+
+def check_state_root(checkout, knowledge=None):
+    """Refuse a host state directory agent sessions can write: one overlapping the checkout
+    or the knowledge directory. This is a path check, not OS isolation."""
+    root = state_root()
+    for path, label in ((checkout, 'the checkout'), (knowledge, 'the knowledge directory')):
+        if path and overlap(root, path):
+            fail(f'Host state directory {root} overlaps {label} {path} (agent sessions can '
+                 'write there); set AI_STATE_DIR to a directory outside it.')
+    return root
+
+
+def state_root_check(arguments):
+    parser = argparse.ArgumentParser(prog='state-root-check')
+    parser.add_argument('--checkout')
+    parser.add_argument('knowledge', nargs='?')
+    options = parser.parse_args(arguments)
+    checkout = options.checkout or git('rev-parse', '--show-toplevel').decode().strip()
+    check_state_root(os.path.abspath(checkout), options.knowledge)
+
+
 def binding_dir():
     """Host-only store of published review digests, outside the checkout (agent sessions
     get no write access there). Keyed by the repository's root commit and path."""
-    base = os.environ.get('AI_STATE_DIR') or os.path.join(
-        os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state'), 'ai-toolkit')
     root = Path(git('rev-parse', '--show-toplevel').decode().strip())
+    base = check_state_root(root)
     key = hashlib.sha256(str(root).encode()).hexdigest()[:16]
-    return Path(base) / 'reviews' / key
+    return base / 'reviews' / key
 
 
 def run_manifest(arguments):
@@ -985,7 +1101,8 @@ def review_info_values():
 RECHECK = Path('.ai/reviews/recheck.md')
 # Since the reviewed commit a re-check allows only workflow records (pending accepted fix
 # tasks included): the code Codex re-checks must still be the code it reviewed.
-RECHECK_RECORDS = TRIAGE_RECORDS + ('.ai/reviews/current.md', '.ai/reviews/recheck.md', '.ai/reviews/disputes.md')
+RECHECK_RECORDS = TRIAGE_RECORDS + ('.ai/reviews/current.md', '.ai/reviews/recheck.md', '.ai/reviews/disputes.md',
+                                    '.ai/reviews/fallback-log.md')
 RECHECK_HEADER = re.compile(r'\A<!-- Host evidence: re-check of review ([0-9a-f]{64}); rejected rows '
                             r'([0-9a-f]{64}); reviewed HEAD ([0-9a-f]{7,40}); saved [^;>]*\. -->\n')
 RECHECK_VERDICTS = ('withdrawn', 'upheld')
@@ -1098,7 +1215,7 @@ def publish_recheck(arguments):
     cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
     lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
              f'reviewed HEAD {head}; saved {now()}. -->', '',
-             '# Re-check of rejected findings (Codex)', '',
+             f"# Re-check of rejected findings ({os.environ.get('AI_REVIEW_BY') or 'Codex'})", '',
              f'Review digest: {digest}', f'Rejected rows digest: {rows_hash}', f'Reviewed HEAD: {head}', '',
              '| Finding | Level | Answer | Claude\'s evidence | Codex\'s reason |', '| --- | --- | --- | --- | --- |']
     for finding, level, evidence in rows:
@@ -1370,7 +1487,8 @@ def disputes_record(arguments):
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
-                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT')
+                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
+                'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL')
 
 
 def _no_duplicate_keys(pairs):
@@ -1447,14 +1565,172 @@ def committed_matches_worktree(arguments):
                 fail(f'Committed content of {name} differs from the validated file on disk.')
 
 
+DEPS_STAMP = '.ai/local/deps.json'
+DEPS_LOCKFILES = ('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock',
+                  'bun.lock', 'bun.lockb', 'requirements*.txt', 'poetry.lock', 'uv.lock',
+                  'Pipfile.lock', 'Gemfile.lock', 'go.sum', 'Cargo.lock', 'composer.lock')
+DEPS_DECLARATION = re.compile(r'^# ?ai-deps-(inputs|outputs):(.*)$', re.M)
+
+
+def checkout_root():
+    return Path(git('rev-parse', '--show-toplevel').decode().strip()).resolve()
+
+
+def deps_inside(root, token, path):
+    """Declared paths stay inside the checkout, also after resolving symlinks."""
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        fail(f'Dependency path {token!r} in .ai/ci-setup leaves the checkout.')
+
+
+def deps_files(root, tokens):
+    """Existing files matched by relative paths/globs (directories: every file below)."""
+    found = set()
+    for token in tokens:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        matches = sorted(root.glob(token)) if re.search(r'[*?[]', token) else [root / token]
+        for match in matches:
+            if not match.exists():
+                continue
+            deps_inside(root, token, match)
+            below = [match] if not match.is_dir() else \
+                [Path(top) / name for top, _, names in os.walk(match) for name in names]
+            for path in below:
+                deps_inside(root, token, path)
+                if path.is_file():
+                    found.add(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def deps_spec(root):
+    """(setup sha, {input path: sha}, [output dirs]) from .ai/ci-setup's declarations."""
+    setup = root / '.ai/ci-setup'
+    if not setup.is_file():
+        fail('Missing .ai/ci-setup.')
+    data = setup.read_bytes()
+    declared = {'inputs': [], 'outputs': []}
+    for kind, value in DEPS_DECLARATION.findall(data.decode(errors='replace')):
+        declared[kind] += value.split()
+    inputs = deps_files(root, declared['inputs'] or DEPS_LOCKFILES)
+    outputs = declared['outputs'] or (['node_modules'] if (root / 'package.json').is_file() else [])
+    for token in outputs:
+        if os.path.isabs(token) or '..' in Path(token).parts:
+            fail(f'Dependency path {token!r} in .ai/ci-setup must be relative and inside the checkout.')
+        deps_inside(root, token, root / token)
+    return file_sha(data), {path: file_sha((root / path).read_bytes()) for path in inputs}, outputs
+
+
+def deps_status(arguments):
+    """'current' or 'stale <reason>': must the host run .ai/ci-setup? No stamp is always
+    stale, even without inputs, so a configured installer runs at least once."""
+    root = checkout_root()
+    setup, inputs, outputs = deps_spec(root)
+    try:
+        stamp = json.loads((root / DEPS_STAMP).read_text())
+    except FileNotFoundError:
+        stamp = None
+        reason = 'no dependency stamp (.ai/local/deps.json)'
+    except (OSError, ValueError):
+        stamp = None
+        reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+    if stamp is not None:
+        recorded = stamp.get('inputs') if isinstance(stamp, dict) else None
+        if not isinstance(recorded, dict):
+            reason = 'unreadable dependency stamp (.ai/local/deps.json)'
+        elif stamp.get('setup') != setup:
+            reason = '.ai/ci-setup changed'
+        elif recorded != inputs:
+            changes = [f'added {p}' for p in sorted(inputs.keys() - recorded.keys())]
+            changes += [f'removed {p}' for p in sorted(recorded.keys() - inputs.keys())]
+            changes += [f'changed {p}' for p in sorted(inputs.keys() & recorded.keys())
+                        if inputs[p] != recorded[p]]
+            reason = 'inputs changed: ' + ', '.join(changes)
+        else:
+            missing = [t for t in outputs if not os.path.lexists(root / t)]
+            wrong = [t for t in outputs if t not in missing and not (root / t).is_dir()]
+            if missing:
+                reason = 'missing output ' + ', '.join(missing)
+            elif wrong:
+                reason = 'output ' + ', '.join(wrong) + ' is not a directory'
+            else:
+                reason = None
+    print(f'stale {reason}' if reason else 'current')
+
+
+def deps_record(arguments):
+    root = checkout_root()
+    setup, inputs, _ = deps_spec(root)
+    (root / '.ai/local').mkdir(parents=True, exist_ok=True)
+    atomic(root / DEPS_STAMP, json.dumps({'setup': setup, 'inputs': inputs}, indent=2, sort_keys=True) + '\n')
+
+
+def snapshot_put(digest, *parts):
+    for part in parts:
+        part = part if isinstance(part, bytes) else str(part).encode()
+        digest.update(len(part).to_bytes(8, 'big') + part)
+
+
+def snapshot_path(digest, name, path, walk=False):
+    """Kind, mode and bytes or link target of one path, symlinks never followed; with walk,
+    a directory's contents too, read from the filesystem without ignore rules."""
+    if path.is_symlink():
+        snapshot_put(digest, name, b'link', os.fsencode(os.readlink(path)))
+    elif path.is_file():
+        snapshot_put(digest, name, b'file', path.stat().st_mode, file_sha(path.read_bytes()))
+    elif path.is_dir():
+        snapshot_put(digest, name, b'dir', path.stat().st_mode)
+        for child in sorted(os.listdir(path)) if walk else ():
+            snapshot_path(digest, name + b'/' + os.fsencode(child), path / child, walk)
+    else:
+        snapshot_put(digest, name, b'missing')
+
+
+def tree_snapshot(root):
+    """One hash over HEAD, the index and every non-ignored path (kind, mode, bytes) outside
+    .ai/local/; submodules recursively. Equal before/after a command proves it changed no
+    tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
+    Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
+    under an uninitialised submodule, so its directory is walked on the filesystem instead;
+    a symlink at a submodule path is recorded as a link, never followed."""
+    digest = hashlib.sha256()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
+    except subprocess.CalledProcessError:
+        head = b'no HEAD'
+    snapshot_put(digest, b'head', head, b'index', git('diff', '--cached', '--binary', cwd=root))
+    gitlinks = set()
+    for entry in git('ls-files', '--stage', '-z', cwd=root).split(b'\0'):
+        if entry.startswith(b'160000 '):
+            gitlinks.add(entry.split(b'\t', 1)[1])
+    listed = git('ls-files', '--cached', '--others', '--exclude-standard', '-z', cwd=root)
+    for raw in sorted({entry for entry in listed.split(b'\0') if entry}):
+        name = raw.rstrip(b'/')
+        if name == b'.ai/local' or name.startswith(b'.ai/local/'):
+            continue
+        path = Path(root) / os.fsdecode(name)
+        if name in gitlinks or raw.endswith(b'/'):  # submodule or untracked nested repository
+            if path.is_dir() and not path.is_symlink() and (path / '.git').exists():
+                snapshot_put(digest, name, b'repo', tree_snapshot(path))
+                continue
+            snapshot_put(digest, name, b'uninitialised')
+            snapshot_path(digest, name, path, walk=True)
+        else:
+            snapshot_path(digest, name, path)
+    return digest.hexdigest()
+
+
 def finish_summary(arguments):
     """The final notification: what was delivered and the human's todo list."""
     url, reviews, unresolved = arguments[0], arguments[1], arguments[2] == '1'
     blocks = tasks()
     done = sum(task['status'] == 'DONE' for task in blocks)
     handoff = Path('.ai/handoff.md').read_text() if Path('.ai/handoff.md').exists() else ''
-    steps = [line for line in section(handoff, 'Manual testing for the human').splitlines()
-             if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
+    needs_you, automated, legacy = manual_testing(handoff)
+    steps = [line for line in needs_you.splitlines() if BULLET.match(line)]
+    steps = [line for line in steps if legacy or not NONE_TEXT.match(BULLET_PREFIX.sub('', line).strip())]
+    checks = sum(bool(BULLET.match(line)) for line in automated.splitlines())
     extra = [re.sub(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?', '', line).strip()
              for line in section(handoff, 'Human todos').splitlines()
              if re.match(r'^\s*(\d+[.)]|[-*])\s+\S', line)]
@@ -1473,7 +1749,12 @@ def finish_summary(arguments):
         todos.append(f'Resolve {disputes} disputed finding(s) at the PR (Codex upheld what Claude rejected)')
     if unresolved:
         todos.append('Decide the unresolved review findings (draft PR, see dispositions)')
-    todos.append(f'Test: {len(steps)} manual step(s) in the PR' if steps else 'Test the change (no manual steps were written)')
+    if steps:
+        todos.append(f'Test: {len(steps)} manual step(s) in the PR')
+    elif legacy:
+        todos.append('Test the change (no manual steps were written)')
+    else:
+        todos.append(f'Nothing to test by hand ({checks} automated checks in the PR)')
     todos.append('Merge the PR')
     todos += extra[:10]
     if len(extra) > 10:
@@ -1504,7 +1785,7 @@ def publish_plan_review(arguments):
         if field not in content:
             fail(f'Plan review is missing {field}; inspect the local report.')
     review_counts(content)
-    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + content
+    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + reviewer_label() + content
     atomic(PLAN_REVIEW, content)
     # Host-side binding, like implementation reviews: an edited report is not a review.
     directory = binding_dir()
@@ -1523,6 +1804,193 @@ def plan_review_info(arguments):
             binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
         fail('Plan review does not match the report ai-review published; Codex must review again.')
     print('current' if reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
+
+
+RISK_TITLE = re.compile(
+    r'\bRLS\b|row[- ]level|\bauth(?:n|z|entication|enticate|orization|orisation|orize|orise)?\b|'
+    r'permission|\bpolic(?:y|ies)\b|\block(?:s|ing|ed)?\b|lock order|concurren|deadlock|race condition|'
+    r'\bdata race\b|migrat|\bdelet(?:e|es|ed|ing|ion)\b|\bdrop\b|irreversib|payment', re.I)
+
+
+def review_risk(arguments):
+    """'high <reason>' when the reviewed work is risky, else 'normal'. Risky: a task on opus
+    (the planning rules put security/auth/RLS, locking, data-moving migrations and
+    irreversible operations there) or a task title naming such work."""
+    try:
+        blocks = tasks()
+    except (OSError, ValueError):
+        print('normal')
+        return
+    for task in blocks:
+        if task['model'].lower().startswith(('opus', 'claude-opus')):
+            print(f"high {task['id']} runs on opus")
+            return
+    for task in blocks:
+        match = RISK_TITLE.search(task['title'])
+        if match:
+            print(f"high {task['id']} title names {match.group(0).lower()}")
+            return
+    print('normal')
+
+
+FALLBACK_LOG = Path('.ai/reviews/fallback-log.md')
+
+
+def fallback_record(arguments):
+    """Append one Claude-fallback review to .ai/reviews/fallback-log.md: the list of work
+    Codex reviews in one catch-up once it has usage again."""
+    mode, model, effort, head, base, reason = arguments
+    try:
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        branch = 'detached'
+    cell = lambda value: ' '.join(str(value).split()).replace('|', '\\|') or '-'
+    text = FALLBACK_LOG.read_text() if FALLBACK_LOG.exists() else (
+        '# Claude fallback reviews (Codex catch-up pending)\n\n'
+        'Reviews written by the Claude fallback while Codex could not review. Codex reviews all of\n'
+        'this work once in a catch-up review when it has usage again; record the outcome below.\n\n'
+        '| Date (UTC) | Mode | Branch | HEAD | Base | Model | Effort | Reason |\n'
+        '| --- | --- | --- | --- | --- | --- | --- | --- |\n')
+    row = '| ' + ' | '.join(cell(x) for x in (now(), mode, branch, head[:12], base[:12], model, effort, reason)) + ' |\n'
+    atomic(FALLBACK_LOG, text.rstrip('\n') + '\n' + row)
+
+
+def outcomes_path():
+    return state_root() / 'outcomes.jsonl'
+
+
+def project_name():
+    """Main repository name, the same for all its worktrees (wt/raid-x -> raid-planner)."""
+    common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').decode().strip())
+    return (common.parent if common.name == '.git' else common).name
+
+
+CATEGORIES = (('security', r'\bRLS\b|row[- ]level|\bauth(?:n|z|entication|orization|orisation)?\b|permission|'
+                           r'\bpolic(?:y|ies)\b|secur|secret'),
+              ('concurrency', r'\block(?:s|ing|ed)?\b|concurren|deadlock|race condition|\bdata race\b'),
+              ('migration', r'migrat|schema|\bdrop\b'),
+              ('tests', r'\btests?\b|e2e|playwright'),
+              ('docs', r'\bdocs?\b|readme|documentation|rename|copy\b|wording'),
+              ('ui', r'\bui\b|page|view|button|layout|style|css|component|screen|tab\b|board'))
+
+
+def task_category(title):
+    for name, pattern in CATEGORIES:
+        if re.search(pattern, title, re.I):
+            return name
+    return 'feature'
+
+
+def read_outcomes(paths):
+    records = []
+    for path in paths:
+        try:
+            lines = Path(path).read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def outcome(arguments):
+    """Append one outcome line to the host-side log (outside every checkout).
+    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
+    kind, *rest = arguments
+    try:
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        branch = 'detached'
+    path = outcomes_path()
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    if kind == 'task':
+        task_id, result, model, seconds = rest
+        title = next((t['title'] for t in tasks() if t['id'] == task_id), '')
+        earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
+                   and r.get('project') == record['project'] and r.get('branch') == branch]
+        attempt = len(earlier) + 1
+        record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
+                      result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
+                      seconds=int(seconds))
+    elif kind == 'review':
+        mode, reviewer, model, effort, seconds, *report = rest
+        record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
+                      seconds=int(seconds), head=git('rev-parse', 'HEAD').decode().strip())
+        if report and mode != 'recheck':
+            try:
+                counts = review_counts(Path(report[0]).read_text())
+                record.update(blocker=counts[0], major=counts[1], minor=counts[2])
+            except (OSError, ValueError):
+                pass
+    else:
+        fail(f'Unknown outcome kind: {kind}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as log:
+        log.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n')
+
+
+def outcomes_report(arguments):
+    """Summary of the outcome log(s) for tuning the model rules."""
+    records = read_outcomes(arguments or [outcomes_path()])
+    if not records:
+        print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
+        return
+    task_rows = [r for r in records if r.get('kind') == 'task']
+    final, spent = {}, {}
+    for r in task_rows:  # a task's last line is its result; its time is the sum of its attempts
+        key = (r.get('project'), r.get('branch'), r.get('task'))
+        final[key] = r
+        spent[key] = spent.get(key, 0) + (r.get('seconds') or 0)
+
+    def table(title, key):
+        groups = {}
+        for task_key, r in final.items():
+            groups.setdefault(key(r), []).append((r, spent[task_key]))
+        lines = [f'## Tasks by {title}', '',
+                 f'| {title} | tasks | first-time pass | done | not done | avg attempts | avg minutes |',
+                 '| --- | --- | --- | --- | --- | --- | --- |']
+        for name in sorted(groups, key=str):
+            rows = groups[name]
+            count = len(rows)
+            first = sum(bool(r.get('first_pass')) for r, _ in rows)
+            done = sum(r.get('result') == 'done' for r, _ in rows)
+            attempts = sum(r.get('attempt', 1) for r, _ in rows) / count
+            minutes = sum(seconds for _, seconds in rows) / count / 60
+            lines.append(f'| {name} | {count} | {first}/{count} ({100 * first // count}%) | {done} | '
+                         f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
+        return lines + ['']
+
+    lines = ['# Outcomes report', '', f'{len(final)} task(s), {len(task_rows)} attempt(s), '
+             f"{sum(r.get('kind') == 'review' for r in records)} review(s).", '']
+    if final:
+        lines += table('model', lambda r: r.get('model', 'default'))
+        lines += table('category', lambda r: r.get('category', 'feature'))
+        lines += table('model and category', lambda r: f"{r.get('model', 'default')} / {r.get('category', 'feature')}")
+    reviews = [r for r in records if r.get('kind') == 'review']
+    if reviews:
+        groups = {}
+        for r in reviews:
+            groups.setdefault((r.get('reviewer'), r.get('model'), r.get('mode')), []).append(r)
+        lines += ['## Reviews by reviewer', '', '| reviewer | model | mode | reviews | BLOCKER | MAJOR | MINOR | avg minutes |',
+                  '| --- | --- | --- | --- | --- | --- | --- | --- |']
+        for (reviewer, model, mode), rows in sorted(groups.items(), key=str):
+            total = lambda field: sum(r.get(field, 0) or 0 for r in rows)
+            lines.append(f'| {reviewer} | {model} | {mode} | {len(rows)} | {total("blocker")} | {total("major")} | '
+                         f'{total("minor")} | {total("seconds") / len(rows) / 60:.1f} |')
+        lines.append('')
+        fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
+        if fallback:
+            lines += ['## Claude-only reviews (Codex catch-up pending)', '']
+            lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
+                      f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+            lines.append('')
+    print('\n'.join(lines).rstrip('\n'))
 
 
 LIMIT_TEXT = re.compile(
@@ -1594,6 +2062,48 @@ def section(text, heading):
     return body
 
 
+BULLET = re.compile(r'^\s*(\d+[.)]|[-*])\s+\S')
+BULLET_PREFIX = re.compile(r'^\s*(\d+[.)]|[-*])\s+(\[ \]\s*)?')
+
+
+def manual_testing(handoff):
+    """Split "Manual testing for the human" into (needs_you, automated, legacy).
+    Without the `### Needs you` / `### Covered by automated tests` subsections the whole
+    section is "needs you" and legacy is True."""
+    body = section(handoff, 'Manual testing for the human')
+    parts = re.split(r'^###\s+(Needs you|Covered by automated tests)\s*$', body, flags=re.M)
+    if len(parts) == 1:
+        return body, '', True
+    found = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
+    return found.get('Needs you', ''), found.get('Covered by automated tests', ''), False
+
+
+NAMED_TEST = re.compile(r'`[^`\n]+`')
+
+
+def flag_unnamed(automated):
+    """Return (lines, count) for the automated section. A list item is a bullet line plus its
+    continuation lines; one without a paired backtick span gets a warning on its last line."""
+    items, current = [], None
+    for line in automated.splitlines():
+        if BULLET.match(line):
+            current = [line]
+            items.append(current)
+        elif current is not None and line.strip():
+            current.append(line)
+        else:
+            current = None
+            items.append([line])
+    lines, count = [], 0
+    for item in items:
+        if BULLET.match(item[0]):
+            count += 1
+            if not NAMED_TEST.search('\n'.join(item)):
+                item = item[:-1] + [item[-1] + ' ⚠ no test named']
+        lines += item
+    return lines, count
+
+
 def pr_title(arguments):
     """PR title: first line of the spec objective, else the branch name."""
     objective = section(Path('.ai/project-spec.md').read_text(), 'Objective') if Path('.ai/project-spec.md').exists() else ''
@@ -1651,7 +2161,11 @@ def pr_body(arguments):
     else:
         lines.append('No local validation evidence recorded.')
     lines.append('')
-    lines += ['## Independent review (Codex)', '']
+    fallback = re.search(r'^> \*\*Reviewer: (Claude(?: fallback)?) \(([^,;)]+), effort [^;]*; ([^)]*)\)', review, re.M)
+    lines += [f'## Independent review ({fallback.group(1) + ", " + fallback.group(2) if fallback else "Codex"})', '']
+    if fallback:
+        lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
+                  'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
     if review:
         verdict = re.search(r'^Overall verdict:\s*(.*)$', review, re.M)
         counts = COUNTS.search(review)
@@ -1669,8 +2183,19 @@ def pr_body(arguments):
     else:
         lines.append('No review recorded.')
     lines.append('')
-    manual = section(handoff, 'Manual testing for the human')
-    lines += ['## How to test', '', manual or 'See `.ai/handoff.md`.', '']
+    needs_you, automated, legacy = manual_testing(handoff)
+    if legacy:
+        lines += ['## How to test', '', needs_you or 'See `.ai/handoff.md`.', '']
+    else:
+        lines += ['## How to test', '', '### Needs you', '']
+        if not needs_you or NONE_TEXT.match(BULLET_PREFIX.sub('', needs_you)):
+            lines += ['None — everything below is automated.', '']
+        else:
+            lines += [needs_you, '']
+        if automated:
+            flagged, count = flag_unnamed(automated)
+            lines += ['### Covered by automated tests', '',
+                      f'<details><summary>{count} automated checks</summary>', '', *flagged, '', '</details>', '']
     lines += ['---', 'Opened by `ai-pipeline`. Merging and deployment remain with the human.', '',
               '🤖 Generated with [Claude Code](https://claude.com/claude-code)']
     print('\n'.join(lines))
@@ -1722,12 +2247,20 @@ def main():
         stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'state-root-check':
+        state_root_check(arguments)
     elif command == 'checkpoint-guard':
         checkpoint_guard(arguments)
     elif command == 'committed-matches-worktree':
         committed_matches_worktree(arguments)
     elif command == 'recover-decision':
         recover_decision(arguments)
+    elif command == 'deps-status':
+        deps_status(arguments)
+    elif command == 'deps-record':
+        deps_record(arguments)
+    elif command == 'tree-snapshot':
+        print(tree_snapshot(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':
@@ -1738,6 +2271,18 @@ def main():
         plan_review_info(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
+    elif command == 'claude-text':
+        claude_text(arguments)
+    elif command == 'review-allowlist':
+        review_allowlist(arguments)
+    elif command == 'review-risk':
+        review_risk(arguments)
+    elif command == 'fallback-record':
+        fallback_record(arguments)
+    elif command == 'outcome':
+        outcome(arguments)
+    elif command == 'outcomes-report':
+        outcomes_report(arguments)
     elif command == 'pr-title':
         pr_title(arguments)
     elif command == 'pr-body':
