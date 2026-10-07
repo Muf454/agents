@@ -122,6 +122,18 @@ head=$(git rev-parse HEAD)
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='
 prompt+="$head; supplied base=$base_sha; merge-base=$merge_base. Inspect git diff $merge_base..$head and actual source. Validation evidence: .ai/local/validation.json. Return the full Markdown review as the final response. Do not write project files or invoke network/MCP integrations."
+# Earlier rounds are context for Codex, never authority; a helper failure must not block the review.
+if history=$(ai_helper review-history --base "$merge_base" --head "$head" 2>&1); then
+  if [[ -n "$history" ]]; then
+    prompt+=$'\n\nPREVIOUS ROUNDS:\n'"$history"
+    last_head=$(ai_helper review-history --base "$merge_base" --head "$head" --last-head 2>/dev/null || true)
+    if [[ -n "$last_head" ]] && git merge-base --is-ancestor "$last_head" "$head" 2>/dev/null; then
+      prompt+=$'\n\nCHANGED SINCE THE LAST REVIEW: inspect git diff '"$last_head..$head"
+    fi
+  fi
+else
+  printf 'Warning: review-history failed; reviewing without earlier rounds: %s\n' "$history" >&2
+fi
 codex_review "$prompt"
 ai_helper publish-review "$report" "$head" "$merge_base"
 read -r _ blockers majors minors < <(ai_helper review-info)

@@ -201,6 +201,7 @@ assert 'approval_policy="never"' in args
 assert '--ignore-user-config' in args
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
 with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
+with open(state / 'codex-prompts.log', 'a') as log: log.write('=== PROMPT ===\n' + args[-1] + '\n')
 if 'Diagnose this workflow incident' in args[-1]:
     path = pathlib.Path(args[args.index('--output-last-message')+1])
     path.write_text('Codex: the runner was killed.\nEvidence follows.')
@@ -2065,6 +2066,74 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
         self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
         self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    # ---------------------------------------------------------------- review context (B3)
+    def prompts(self):
+        path = self.base / 'codex-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def first_review_round(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('chore(ai): record independent review')
+        first_head = self.run_cmd(['git', 'rev-parse', 'HEAD~1']).stdout.strip()
+        (self.project / '.ai/reviews/dispositions.md').write_text(
+            f'Review HEAD: {first_head}\n\n'
+            '| Finding | Disposition | Evidence / reason | Fix task |\n| --- | --- | --- | --- |\n'
+            '| M1 | rejected | fixture defect is intended by the test | none |\n')
+        self.commit('chore(ai): record review triage')
+        return first_head
+
+    def test_review_context_first_review_has_no_previous_rounds(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main')
+        prompt = self.prompts()[-1]
+        self.assertIn('REVIEW SCOPE', prompt)
+        self.assertNotIn('PREVIOUS ROUNDS:', prompt)
+        self.assertNotIn('CHANGED SINCE THE LAST REVIEW: inspect', prompt)
+
+    def test_review_context_second_review_gets_rounds_and_delta(self):
+        first_head = self.first_review_round()
+        self.tool('ai-review', '--base', 'main')
+        prompt = self.prompts()[-1]
+        self.assertIn('PREVIOUS ROUNDS:', prompt)
+        self.assertIn('### Round 1', prompt)
+        self.assertIn('M1', prompt)
+        self.assertIn('rejected', prompt)
+        self.assertIn(f'CHANGED SINCE THE LAST REVIEW: inspect git diff {first_head}..', prompt)
+
+    def test_review_context_plan_review_and_recheck_prompts_have_neither(self):
+        self.first_review_round()
+        self.tool('ai-review', '--recheck')
+        self.tool('ai-review', '--plan')
+        recheck, plan = self.prompts()[-2:]
+        self.assertIn('PLAN SCOPE', plan)
+        self.assertIn('RECHECK SCOPE', recheck)
+        for prompt in (plan, recheck):
+            self.assertNotIn('PREVIOUS ROUNDS:', prompt)
+            self.assertNotIn('CHANGED SINCE THE LAST REVIEW: inspect', prompt)
+
+    def test_review_context_failing_helper_still_produces_a_review(self):
+        self.first_review_round()
+        helper = self.project / '.ai/bin/lib/workflow.py'
+        text = helper.read_text()
+        marker = 'def review_history(arguments):\n'
+        self.assertIn(marker, text)
+        helper.write_text(text.replace(marker, marker + "    fail('review-history: forced failure')\n", 1))
+        self.commit('fixture: helper that fails')
+        self.tool('ai-check')
+        result = self.tool('ai-review', '--base', 'main')
+        self.assertIn('review-history failed', result.stderr)
+        self.assertNotIn('PREVIOUS ROUNDS:', self.prompts()[-1])
+        self.assertIn('Host evidence', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_review_prompt_template_explains_previous_rounds(self):
+        text = (ROOT / 'templates/.ai/prompts/review.md').read_text()
+        self.assertIn('PREVIOUS ROUNDS', text)
+        self.assertIn('CHANGED SINCE THE LAST REVIEW', text)
+        self.assertIn('full range', text)
 
     def test_task_model_line_overrides_run_model(self):
         self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +

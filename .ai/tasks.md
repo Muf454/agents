@@ -156,7 +156,7 @@ DONE 2026-10-07T17:00Z (coordinator, approved by Zack): the gate now runs the pa
 (`becd1bf`); `.ai/bin/ai-check` 243 tests OK in 102 s on this content.
 
 ## T003 — Codex reviews get the earlier rounds and the delta (B3)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: sonnet
 
@@ -190,6 +190,13 @@ Targeted: `python3 -m unittest discover -s tests -k review_context` (output must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+`scripts/ai-review` (implementation review only) appends `PREVIOUS ROUNDS:` from
+`review-history --base/--head` and `CHANGED SINCE THE LAST REVIEW: inspect git diff <last>..<head>`
+when `--last-head` is an ancestor of HEAD; a helper failure prints a warning and reviews without
+history. `templates/.ai/prompts/review.md` has the paragraph. The mock codex now logs every prompt
+(`codex-prompts.log`). 5 new tests (4 `review_context`, 1 `review_prompt_template`): targeted run
+Ran 5 OK; `.ai/bin/ai-check` Ran 248 tests in 106.6s (8 shards) OK. Vault: flow chart review node
+and hub log updated.
 
 ## T004 — Review convergence rule in triage (FL-03)
 Status: TODO

@@ -13,7 +13,15 @@ FL-03 (review convergence rule). See `.ai/project-spec.md`, `.ai/current-plan.md
   `--collect-only`. One isolation race fixed (a `scripts/` scan skipped `__pycache__`).
   README `## Running the tests`. `.ai/validate` is unchanged (still serial).
 
+- T002 (B3 helper): `review-history` in `scripts/lib/workflow.py` (context only, never authority).
+- T003 (B3): `ai-review --base` appends `PREVIOUS ROUNDS:` and `CHANGED SINCE THE LAST REVIEW:
+  inspect git diff <last>..<head>` to the implementation review prompt (not plan review or
+  re-check); a helper failure warns and reviews without history. `review.md` template explains it.
+
 ## Validation run
+After T003: targeted `-k review_context -k review_prompt_template` Ran 5 OK; `.ai/bin/ai-check`
+Ran 248 tests in 106.6s (8 shards) OK.
+
 After T001 (resumed after the coordinator's flow-chart test fix df0aefd): targeted
 `-k parallel_runner -k flow_this_repo` Ran 8 OK; foreground `.ai/bin/ai-check` Ran 236 tests
 in 598.682s OK. The serial gate sits right at the 600 s session tool limit, so later tasks
@@ -24,8 +32,8 @@ may still time out in-session (gate note in `.ai/tasks.md`).
   stops with "AI_TEST_WORKERS must be a positive integer".
 
 ## Flow chart
-Flow unchanged by T001 (the gate still runs the serial suite until Zack switches
-`.ai/validate`).
+Flow chart updated (T003): the "Codex reviews the code" node notes the earlier rounds and the
+diff since the last review.
 
 ## Manual testing for the human
 
@@ -50,10 +58,17 @@ Flow unchanged by T001 (the gate still runs the serial suite until Zack switches
 - `AI_TEST_WORKERS=0`, `x`, `-2` rejected: `test_parallel_runner_rejects_invalid_workers`.
 - `--collect-only` matches serial discovery:
   `test_parallel_runner_collect_only_matches_serial_discovery`.
+- First review has no PREVIOUS ROUNDS: `test_review_context_first_review_has_no_previous_rounds`.
+- Second review gets earlier rounds and the delta:
+  `test_review_context_second_review_gets_rounds_and_delta`.
+- Plan review and re-check prompts carry neither:
+  `test_review_context_plan_review_and_recheck_prompts_have_neither`.
+- A failing helper still yields a review: `test_review_context_failing_helper_still_produces_a_review`.
+- Template explains the context: `test_review_prompt_template_explains_previous_rounds`.
 - Further scenarios are added by the remaining tasks.
 
 ## Human todos
 - Run the three timed parallel runs and approve the `.ai/validate` switch (see Needs you).
 
 ## Next action
-Runner continues with T002 (review history helper).
+Runner continues with T004 (review convergence rule in triage).

@@ -94,3 +94,4 @@
 | 2026-10-07T12:42:06Z | runner | T002 | blocked; try next independent task | not complete | ffcca46 | See task result |
 | 2026-10-07T12:42:06Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | c6b8e7b | No merge or deployment performed |
 | 2026-10-07T17:00Z | claude (coordinator) | T002 | DONE: gate switched to tests/run_parallel.py + toolkit copy upgraded (becd1bf, approved by Zack) | ai-check 243 OK in 102 s | (this commit) | resume the pipeline |
+| 2026-10-07T17:30Z | claude | T003 | DONE: ai-review adds PREVIOUS ROUNDS + CHANGED SINCE THE LAST REVIEW to the implementation review prompt; review.md paragraph; 5 tests | targeted Ran 5 OK; ai-check 248 OK in 107 s | (this commit) | next: T004 |
