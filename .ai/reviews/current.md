@@ -1,24 +1,28 @@
-<!-- Host evidence: HEAD 993bd33ef53c13a7ff28cf1a2454bc5e89328e96; merge-base 9e11a113f02525b2f1e10db3eb73eb571495507b; saved 2026-10-07T08:10:57Z. -->
+<!-- Host evidence: HEAD 9b01351b48d0be63837370d4e3bba25dd7e442bd; merge-base 55383d7e69c0c7d18afd3665c4220e76d88b994f; saved 2026-10-07T17:33:30Z. -->
 
 # Independent review
 
-Overall verdict: PROCEED WITH MINOR FIXES — the requested behavior is substantially delivered; two localized issues remain.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Overall verdict: PROCEED WITH MINOR FIXES — the efficiency features are substantially delivered, but reporting, oversized-history handling, acceptance records, and fallback probe permissions need correction.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=4
 
-Reviewed HEAD: `993bd33ef53c13a7ff28cf1a2454bc5e89328e96`
-Supplied base / verified merge-base: `9e11a113f02525b2f1e10db3eb73eb571495507b`
+Reviewed HEAD: `9b01351b48d0be63837370d4e3bba25dd7e442bd`  
+Supplied base: `0818f20c4d236072815e24552ba779e058c7e1f0`  
+Reviewed merge-base: `55383d7e69c0c7d18afd3665c4220e76d88b994f`
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, prior reviews/dispositions, relevant documentation, scoped Git history/diff, affected source/tests, validation evidence, and the vault flow chart. The checkout was clean.
+The supplied base and merge-base have identical trees. The checkout was clean. Inspected repository instructions, specification, plan, tasks, state, handoff, prior review evidence, documentation, scoped history/diff, affected source/tests, frozen runtime changes, and the vault flow chart.
 
-Validation observed/run:
+## Validation observed/run
 
-- Stored evidence reports **PASS**, exit 0, at `2026-10-07T08:05:47Z`, recorded with HEAD `6e8668ffc2f86aeed449576edfdc3ce2f8e0acad`. Its log records **229 tests passed** in 596.552 seconds. Validation-stamp verification confirms that its fingerprint matches the current checkout.
-- Task-queue validation, queue-completion verification, and committed-content comparison passed.
-- **Three documentation tests**, **12 Bash syntax checks**, and **three Python compilation checks** passed.
-- Read-only checks exercised the actual dependency-output validation, submodule snapshot, PR rendering, mixed-handoff notification counting, and timer-status functions with mocked I/O where needed.
-- `git diff --check` reported one trailing-whitespace occurrence in the existing review artifact. Excluding that artifact, it passed.
+- Stored validation reports **PASS**, exit 0, at `2026-10-07T17:26:20Z`, recorded against `f729822bd9f7573cdb3225fef2e6e879432e8390`. Its log records **253 tests in 107.8 seconds**, eight shards, **OK**.
+- Independently verified that the validation fingerprint matches HEAD.
+- Task-queue checks, queue completion, and committed-content comparison passed.
+- Discovery collected **253 tests**; **three documentation consistency tests passed**.
+- **18 Bash syntax checks** and **six Python syntax checks** passed.
+- In-memory probes exercised the runner with real unittest failure/error, skipped-test, and expected-failure output, using mocked subprocess I/O. Skips and expected failures were accepted correctly.
+- Exercised history rendering, historical review extraction, and the frozen reviewer allowlist. Toolkit-owned files match their recorded hashes.
+- Scoped `git diff --check` passed; the checkout remained clean.
 
-Limitations: The full `./scripts/ai-check` gate and writable integration fixtures were not rerun because they create repositories, locks, logs, and validation artifacts. Live providers, package installation, systemd, and GitHub were not exercised. No files were written or network/MCP integrations invoked.
+Limitations: Did not rerun `./scripts/ai-check` or writable integration fixtures because they create repositories, locks, logs, and validation artifacts. Live providers, systemd, installations, and publication were not exercised. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -28,79 +32,103 @@ None found in the inspected scope.
 
 None found in the inspected scope.
 
-The previous M1 submodule-preservation defect and N2 output-directory defect are addressed by the implementation and regression tests. N1’s ordinary wrapped-line and unmatched-backtick cases are fixed; the paragraph-break case below remains.
+The implementation uses one uncapped history routine for review context and convergence counting. Implementation-review prompts retain the full review range; convergence checks require same-line text and exclude HTML comments. Added integration tests cover round-three enforcement and interrupted triage.
 
 ## MINOR findings
 
-### N1 — Test names after paragraph breaks still receive false coverage warnings
+### P8 — The runner omits required aggregate failure/error counts
 
-**Location:** `scripts/lib/workflow.py:1842`.
+**Location:** `tests/run_parallel.py:105`; regression assertion: `tests/test_workflow.py:4147`.
 
-**Requirement:** FL-09 flags automated bullets without a backticked test name.
+**Requirement:** `.ai/project-spec.md:29` requires an aggregate `FAILED (failures=…, errors=…)` summary.
 
-**Problem:** `flag_unnamed` ends the current list item at every blank line. Markdown permits a list item to contain additional indented paragraphs, so a test name in such a paragraph is excluded from the check.
+**Problem:** The final summary reports failing shard numbers without aggregating failure/error totals. The new regression explicitly expects this different format.
 
-**Evidence:** Running the actual PR renderer with this automated item:
+**Evidence:** An in-memory probe passed actual unittest output containing one failure and one error through the real parser and aggregation logic. The runner exited 1 and printed both tracebacks, but ended with:
 
-```markdown
-- Scenario.
-
-  Covered by `test_scenario`.
+```text
+Ran 2 tests in 0.0s (1 shards, 2 collected)
+FAILED (failing shards: 1)
 ```
 
-produced:
+**Impact:** Failure still closes the gate, but the specified reporting contract is unmet. This remains unresolved from the plan review.
 
-```markdown
-- Scenario. ⚠ no test named
+**Recommended direction:** Aggregate ordinary failure/error counts, retain crash and count-mismatch diagnostics, and test mixed failures/errors across shards.
 
-  Covered by `test_scenario`.
-```
+### P9 — Oversized newest rounds silently lose findings and dispositions
 
-**Impact:** Correctly named automated checks receive misleading warnings. The automated-check count remains correct.
+**Location:** `scripts/lib/workflow.py:883`.
 
-**Recommended direction:** Preserve blank lines and subsequent indented paragraphs within the list item. Add a regression covering a test name after a paragraph break.
+**Requirement:** `.ai/project-spec.md:45` requires finding IDs, titles, and dispositions, capped by dropping oldest rounds with an omission notice.
 
-### N3 — The workflow guide contradicts setup’s watchdog behavior
+**Problem:** When the newest round alone exceeds the cap, the fallback slices raw Markdown at character 6000. It can remove dispositions and later findings without indicating that the retained round is incomplete.
 
-**Location:** `docs/workflow.md:507`; implementation: `scripts/lib/workflow.py:376`.
+**Evidence:** Calling the actual renderer with one round containing a 6100-character first finding title and a second accepted finding produced exactly 6000 characters. Neither accepted-task disposition nor the second finding survived. The output said `(0 earlier rounds omitted)` and contained no truncation notice.
 
-**Requirement:** FL-07 introduces opt-in timer installation through `setup-project --watchdog`; T007 requires documentation to describe implemented behavior accurately.
+**Impact:** Review and triage receive incomplete context that appears complete. Uncapped round counting remains correct.
 
-**Problem:** The watchdog section still states, “Nothing is installed by `setup-project`.” Setup now installs the timer when `--watchdog` is supplied. This guide also omits the new timer-status and pipeline-warning behavior.
+**Recommended direction:** Provide an explicit oversized-round fallback with an original-report reference, or shorten titles while preserving IDs and dispositions. Add a single oversized newest-round regression.
 
-**Impact:** Readers following the operating guide receive incorrect setup guidance and incomplete information about checkout monitoring.
+### P10 — Final guidance contradicts the gate and lacks qualifying timing evidence
 
-**Evidence:** The source invokes the installed watchdog with `--install-timer --diagnose --recover`. README documents the new behavior, while the workflow guide retains the contradictory statement.
+**Location:** `.ai/handoff.md:14`, `.ai/handoff.md:48`, `README.md:614`; evidence: `.ai/run-log.md:90`.
 
-**Recommended direction:** Qualify the statement for setup without `--watchdog`, and document timer status and STARTED/RESUMED warnings. Extend documentation checks to cover these contracts.
+**Requirement:** T005 requires accurate final documentation. `.ai/project-spec.md:78` requires three consecutive parallel runs with matching serial counts, each under 200 seconds, with counts and times recorded.
 
-Both findings concern behavior or documentation affected by this change. No separate pre-existing defect was demonstrated.
+**Problem:** The handoff says the gate remains serial and asks the human to approve/apply the switch. README likewise calls serial discovery today’s gate. Commit `becd1bf` already switched `.ai/validate`, recording coordinator approval.
+
+The records do not demonstrate the specified three consecutive matching-count runs. They report successful parallel runs over different suite sizes, followed by the final 253-test validation.
+
+**Impact:** The operating instructions are stale, and the performance acceptance evidence is incomplete. The approval record means the switch is not being classified as an unauthorized action.
+
+**Recommended direction:** Reconcile the spec, plan, README, and handoff with the coordinator exception. Record qualifying repeated measurements and the serial comparison, or explicitly record any approved waiver.
+
+### N4 — The fallback reviewer cannot create its promised scratch probes
+
+**Location:** `.ai/bin/lib/workflow.py:695`; caller: `.ai/bin/ai-review:86`.
+
+**Requirement:** The newly imported `.ai/prompts/claude-review.md:17` permits scenario probe files under `.ai/local/review-probes/`.
+
+**Problem:** The generated allowlist grants directory-scoped `Edit`, but no directory-scoped `Write`. The host deletes and recreates an empty probe directory before every review. Creating a new probe therefore lacks an approved tool.
+
+**Evidence:** Executing the actual allowlist helper produced `Edit(./.ai/local/review-probes/**)` and no `Write` entry. The CLI exposes Write but uses `dontAsk` with that allowlist. This is a source-traced permission gap; live enforcement was not exercised.
+
+**Impact:** Fallback reviewers cannot use the promised file-based scenario probes through the intended tools.
+
+**Recommended direction:** Add narrowly scoped Write permission through the coordinating toolkit update. Test probe creation and denial of writes outside the directory.
 
 ## Missing test coverage
 
-- A named automated list item containing a blank line before its indented test-name paragraph.
-- Documentation assertions covering opt-in timer installation, timer status, and pipeline warnings.
-
-Existing added tests cover dependency freshness, installer failure/timeout and preservation, recovery installation, timer states, legacy handoffs, wrapped names, and mixed human/automated notification counting.
+- Required aggregate runner failure/error totals.
+- A newest round that alone exceeds the history cap.
+- Final documentation assertions against the actual gate.
+- Fallback probe creation and permission boundaries. The integration harness installs `scripts/`; its passing results do not establish the newly imported frozen fallback behavior.
+- Recorded three-run timing evidence and comparison with the final serial suite.
 
 ## Security concerns
 
-No additional security defect was demonstrated in the inspected paths. Host execution of package-manager code and the agent-writable dependency stamp remain documented, accepted design choices; the checks provide boundary verification rather than OS isolation.
+No additional exploitable security defect was demonstrated in the inspected paths. History does not replace host-owned fix-round accounting or authorize bypasses. The fallback permission finding concerns missing intended access.
 
 ## Architecture concerns
 
-The implementation reuses existing helpers and adds no external dependencies. The frozen `.ai/bin` remains unchanged intentionally; installed projects need a deliberate upgrade.
+The efficiency implementation adds no external dependency and reuses existing helpers. Frozen runtime adoption remains a separate coordinating operation.
 
-Flow chart updated: the vault note contains the dependency step, recovery rule, testing split, and watchdog warnings, with `updated: 2026-10-06`. Same-task edit timing cannot be established from repository history.
+Flow chart updated: the vault note includes review context and convergence behavior, with `updated: 2026-10-07`. Same-task edit timing cannot be established from repository history.
+
+Known pre-existing issues remain outside the new finding counts: paragraph-break coverage warnings and the workflow guide’s statement that setup installs nothing. Their relevant source/documentation predates this reviewed range.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-Verify an opted-in timer and STARTED/RESUMED phone notifications on real systemd. Inspect the resulting PR’s testing instructions.
+- Smoke-test the corrected fallback permissions with the real Claude CLI.
+- Inspect representative convergence decisions to confirm that repeated concerns produce a design task.
+- Confirm that final acceptance records accurately describe the already approved gate switch.
 
 ### Covered by automated tests
 
-Add the paragraph-break regression and watchdog documentation assertions, then run the full gate in a writable checkout.
+- Add the summary, oversized-history, documentation, and allowlist regressions above.
+- Run `./scripts/ai-check` in a writable checkout after fixes.
+- Record three consecutive default-worker runs under 200 seconds and compare their counts with a serial run of the same revision.
 
 This review does not constitute human acceptance.
