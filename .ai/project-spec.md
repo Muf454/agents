@@ -19,31 +19,52 @@ no SQLite, no daemon), AD-5 (status never authorizes; the watchdog only observes
 providers, gate files are never edited by a pipeline session.
 
 ## Requirements
-- **Observation records (scripts only).** `common.sh` gains `ai_observe STAGE [DETAIL]`
-  which atomically writes `.ai/local/observation.json`
-  `{"stage", "detail", "since" (UTC ISO), "pid", "branch"}` (temp file + `mv`; best effort:
-  a failure never changes a run's outcome or exit status). Stage keys:
-  `plan_review setup build checks review triage recheck pr done stopped paused recovering`.
-  Writers: `ai-pipeline` (each `step`, `stop`/pipeline `ai_die` → `stopped` with the reason,
-  `finish` → `done` with the PR URL when there is one), `ai-run` (`setup` around `ai_deps`;
-  `build` per task with detail `<id> · <model> · <n>/<N>`; `triage` for `--triage`),
-  `ai_limit_pause` (`paused`, detail `<agent> until <time>`; afterwards the previous stage is
-  restored), `ai-recover` (`recovering`, detail `<attempt>/<max>`; escalation → `stopped`).
-  Validation inside the pipeline (`ensure_validated`) → `checks`.
-- **Notification mirror.** `ai_notify` also appends one JSON line `{"ts", "message"}` to
-  `${AI_ROOT:-$PWD}/.ai/local/notifications.log` when that `.ai/local` directory exists,
-  whether or not `AI_NOTIFY_CMD` is set; the file keeps the last 200 lines. Never fatal.
-  Messages from the watchdog (it notifies through `ai_notify`) land there too.
-- **Host registry.** `ai-pipeline` start (and resume) runs a new helper
-  `workflow.py pipeline-register` that writes `<state root>/pipelines/<key>.json`
-  `{"checkout", "project", "branch", "started"}` (key: sha256 of the checkout path, first 16
-  hex, like `binding_dir`; state root from `state_root()`/`check_state_root`) and removes
-  entries whose checkout directory no longer exists. Failure prints a warning, never stops.
+- **Observation records (scripts only; revised after plan review 1, P1/P2/P4/P5/P9).**
+  One record per checkout, `.ai/local/observation.json`:
+  `{"stage", "state", "detail", "since", "note", "pid", "branch", "updated"}`.
+  `stage` is always a flow box key: `plan_review setup build checks review triage recheck pr`
+  (or `none` before the first step); `state` is `active`, `paused`, `recovering`, `stopped`
+  or `done`. Overlays never replace the underlying stage: a pause keeps `stage`, `detail`
+  and `since` and sets `state=paused`, `note=<agent> until <time>`; afterwards `state=active`
+  again. A stop sets `state=stopped`, `note=<reason>`, with the stage normalised from the
+  existing stop labels (`implementation`→build, `validation`→checks, `plan review`→
+  plan_review, `review`→review, `triage`→triage, `re-check`→recheck, `pull request`/`final
+  push`/`pull request preparation`→pr; unknown labels keep the last stage). Recovery sets
+  `state=recovering`, `note=<attempt>/<max>`, keeping the stage that stopped. `done`:
+  `stage=pr`, `note=<PR url or "no PR">`.
+  Writers: `ai-pipeline` (each `step`; `stop`; the pipeline-shell `ai_die`; `finish`),
+  `ai-run` (`setup` around an actual install; `build` per task with detail
+  `<id> · <model> · <n>/<N>`; `checks` around its post-task and final `ai-check` calls,
+  then `build` again when the next task starts; `triage` for `--triage`),
+  `ai_limit_pause` (pause overlay), `ai-recover` (`recovering`; its recovery validation
+  shows `stage=checks, state=recovering`; escalation → `stopped`), `ensure_validated` in the
+  pipeline (`checks`).
+  All writes go through one Python helper (`workflow.py observe`), which refuses a missing,
+  symlinked or non-directory `.ai/local`, writes via a temp file in `.ai/local` + `rename`
+  (never following a symlink at the destination) and never fails the caller (exit 0, warning
+  on stderr).
+- **Notification mirror.** `ai_notify` also records each message through
+  `workflow.py notify-log` into `${AI_ROOT:-$PWD}/.ai/local/notifications.log` (JSON lines
+  `{"ts","message"}`, kept to the last 200), whether or not `AI_NOTIFY_CMD` is set. Writers
+  (pipeline, ai-run, ai-recover, the watchdog) serialise append + trim with `flock` on
+  `.ai/local/notifications.lock`; the destination is opened with `O_NOFOLLOW` and must be a
+  regular file; trimming writes a temp file + `rename` under the lock. Readers take no lock
+  and skip a malformed or partial last line. Never fatal.
+- **Host registry.** `ai-pipeline` start (and resume) runs `workflow.py pipeline-register`:
+  under `flock` on `<state root>/pipelines/.lock` it writes
+  `<state root>/pipelines/<sha256(checkout)[:16]>.json` `{"checkout","project","branch",
+  "started"}` atomically and removes entries whose checkout is no longer an existing
+  directory or whose JSON is invalid (re-read under the lock before each delete). Only this
+  helper writes there. A failure (e.g. `pipelines` is not a directory) prints a warning and
+  never stops the run; the run manifest stays mandatory as today.
 - **Snapshot model** (`scripts/lib/dashboard.py`, Python stdlib only). Discovers checkouts
   from the registry and from a `/proc` scan for live runner processes (`process()`,
   `is_runner()` from `scripts/lib/watchdog.py`; cwd → checkout root containing `.ai/`), so
   runs on an older toolkit copy also appear. Per checkout: project, branch, liveness
-  (`.ai/local/pipeline.active` PID alive and a runner), observation, last notifications,
+  (as the watchdog decides it: `marker_snapshot`/`pipeline_died` semantics in watchdog.py,
+  i.e. PID, process start time not after the marker, `ai-pipeline`/`ai-recover` only, marker
+  re-read; with no marker, live runner processes found in that checkout count, so legacy
+  versions without `pipeline.active` show as running), observation, last notifications,
   `last-error`, task counts (existing `tasks()` parser) → status one of `running`, `paused`,
   `recovering`, `needs_you` (stopped/escalated), `crashed` (marker left but its process is
   gone), `finished`, `idle`, with stage `unknown` when no observation exists. Missing or
@@ -53,7 +74,11 @@ providers, gate files are never edited by a pipeline session.
   and escape sequences removed and is length-capped before output.
 - **Output modes.** `ai-dashboard --once` prints a plain-text rendering (no curses; for pipes,
   Remote Control and tests) and `--json` the snapshot; plain `ai-dashboard` opens the TUI.
-  `--all` includes finished/stopped/idle runs older than 24 h (hidden by default).
+  `--all` includes `finished`, `needs_you` and `idle` runs whose newest record is older than
+  24 h (hidden by default); `crashed`, `running`, `paused` and `recovering` are always shown.
+  No bytecode is written (`sys.dont_write_bytecode` before sibling imports; wrapper uses
+  `python3 -B`); the wrapper resolves its real path (`readlink -f`) so a symlink in
+  `~/.local/bin` works.
 - **TUI** (Python `curses`, `scripts/ai-dashboard` bash wrapper). Header: counts
   (running / needs you / finished), clock, key help. One card per run, sorted needs you →
   crashed → running/paused/recovering → finished → idle: title line

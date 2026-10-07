@@ -14,17 +14,20 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach
-1. T001 (sonnet) observation records: `ai_observe`, notification mirror, registry helper and
-   all writers; tests via the existing fixture pipeline. Flow-chart note (flow unchanged:
-   observation only).
-2. T002 (sonnet) `scripts/lib/dashboard.py` snapshot model: discovery, status derivation,
-   sanitising, `--once` text and `--json`; `scripts/ai-dashboard` wrapper; setup installs.
-3. T003 (sonnet) curses TUI: pure `render(snapshot, width)` shared with `--once`, flow boxes,
-   colours, compact mode, keys, resize, cleanup.
-4. T004 (haiku) docs: README, docs/workflow.md, vault notes.
+## Approach (revised after Codex plan review 1, P1–P10; all accepted)
+1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
+   normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
+   (flock, race-safe prune). Concurrency and path safety → opus (P4, P5, P6).
+2. T002 (sonnet) stage writers: `ai_observe`/`ai_notify` in common.sh call the helpers;
+   ai-pipeline, ai-run (incl. its own `ai-check` calls, P2), ai-recover, pause; writer-level
+   tests; vault flow note.
+3. T003 (sonnet) snapshot model, `--once`/`--json`, wrapper, setup install; liveness reuses
+   the watchdog semantics (P3); age filter keeps crashed runs (P7); no bytecode (P8);
+   symlinked wrapper (P10).
+4. T004 (sonnet) curses TUI and the shared renderer; writer-to-renderer tests (P1).
+5. T005 (haiku) docs and final audit.
 
-Dependencies: T001 → T002 → T003 → T004.
+Dependencies: T001 → T002 → T003 → T004 → T005.
 
 ## API / data changes
 - New files (ignored, host-written): `.ai/local/observation.json`,
@@ -35,6 +38,8 @@ Dependencies: T001 → T002 → T003 → T004.
 - `.ai/local/` is agent-writable: a session can forge an observation or a notification
   line. The dashboard is advisory only (AD-5): it shows, never acts; strings are sanitised
   so a forged line cannot inject terminal escapes. Accepted and documented.
+- Concurrent writers (pipeline and watchdog have separate locks): the notification log and
+  the registry serialise their own writes with dedicated flock files; readers stay lock-free.
 - `/proc` scan sees only this user's processes in practice; fine for a single-user machine.
 - The pipeline running this batch uses the frozen `.ai/bin`; the new records appear in a
   project after its `.ai/bin` is upgraded. Older runs still show via `/proc` (stage unknown).
