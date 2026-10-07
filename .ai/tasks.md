@@ -17,7 +17,7 @@ recorded by the coordinator after the run (see the plan's "Human steps").
 Revised after Codex plan review 1 (`.ai/reviews/plan.md`, P1–P7).
 
 ## T001 — Parallel test runner (FL-11)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: none
 Model: opus
 

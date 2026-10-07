@@ -1,6 +1,7 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -3400,10 +3401,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('## Tasks', body)
 
     def test_pr_body_flow_this_repo_declares_the_flow_chart(self):
+        # AGENTS.md allows either line; a batch that leaves the flow alone says "Flow unchanged".
         handoff = (ROOT / '.ai/handoff.md').read_text()
-        self.assertIn('## Flow chart\nFlow chart updated', handoff)
+        match = re.search(r'^## Flow chart\n(Flow chart updated|Flow unchanged)', handoff, re.M)
+        self.assertIsNotNone(match, 'the handoff needs a "## Flow chart" line')
         self.setup_project()
-        self.assertIn('Flow chart updated', self.pr_body_for(handoff))
+        self.assertIn(match.group(1), self.pr_body_for(handoff))
 
     def test_script_modes_all_shebang_scripts_are_executable(self):
         scripts_dir = ROOT / 'scripts'
