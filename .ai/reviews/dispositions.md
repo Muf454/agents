@@ -1,5 +1,14 @@
 # Review dispositions (Claude)
 
+## Plan review round 4 (2026-10-07): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P5 git option abbreviations bypass the deny list | accepted | `git grep --open-files=` (abbreviation) is accepted by git; deny globs can't enumerate abbreviations for any git subcommand. Convergence: the fallback reviewer gets no Bash at all (Read/Glob/Grep); the host prepares diff/log/files context. | T001 |
+| P4 targeted tests miss the invocation test | accepted | `-k review_falls_back` added. | T001 |
+| P6 README promises runner permissions | accepted | README's fallback reviewer section is in T001. | T001 |
+
+
 ## Plan review round 3 (HEAD e52ed76, 2026-10-07): BLOCKER 0, MAJOR 2, MINOR 2 — all accepted
 
 | Finding | Disposition | Evidence / reason | Fix task |
