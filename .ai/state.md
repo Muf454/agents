@@ -6,7 +6,7 @@ Phase: planning
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 5
+Tasks remaining: 7
 Last validation: not run
 Blocked: no
 Next action: Codex plan review, then Zack approves and starts ai-pipeline

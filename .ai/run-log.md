@@ -88,3 +88,4 @@
 | 2026-10-07T11:06Z | claude | none | planned pipeline dashboard (T001–T004) from Zack's request | not run | (this commit) | Codex plan review next |
 | 2026-10-07T11:14Z | claude | none | plan review 1: 0 BLOCKER, 7 MAJOR, 3 MINOR; all accepted, plan revised (T001 split, opus for writers) | not run | (this commit) | plan review round 2 next |
 | 2026-10-07T11:21Z | claude | none | plan review 2: 0 BLOCKER, 5 MAJOR, 3 MINOR; all accepted (substage precedence, nonblocking/bounded I/O, dir-fd writes, handoff flow line) | handoff flow test OK | (this commit) | plan review round 3 next |
+| 2026-10-07T11:57Z | claude | none | plan review 3: 0 BLOCKER, 2 MAJOR, 2 MINOR; all accepted (explicit recovery stage, safe Git/tasks reads, T002 split into T002-T004, pending flow line) | handoff flow test OK | (this commit) | plan review round 4 next |

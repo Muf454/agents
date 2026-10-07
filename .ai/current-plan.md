@@ -14,22 +14,24 @@
   (ai-run lines near the task loop); the second PR to merge resolves conflicts.
 - Gate: the serial suite takes ~611 s (FL-11 in the efficiency batch speeds it up later).
 
-## Approach (revised after Codex plan reviews 1 (P1–P10) and 2 (P11–P18); all accepted)
+## Approach (revised after Codex plan reviews 1–3, P1–P22; all accepted)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, stop-label
    normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim), `pipeline-register`
    (flock, race-safe prune), plus the shared safe I/O (pinned directory descriptors,
-   nonblocking regular-file opens, bounded reads and locks) the dashboard reuses.
+   nonblocking regular-file opens, bounded reads returning stat, Git metadata incl.
+   worktrees, bounded locks) the dashboard reuses.
    Concurrency and path safety → opus (P4–P6, P12–P14).
-2. T002 (sonnet) stage writers: `ai_observe`/`ai_notify` in common.sh call the helpers;
-   ai-pipeline, ai-run (incl. its own `ai-check` calls, P2), ai-recover, pause; writer-level
-   tests; vault flow note.
-3. T003 (sonnet) snapshot model, `--once`/`--json`, wrapper, setup install; liveness reuses
-   the watchdog semantics (P3); age filter keeps crashed runs (P7); no bytecode (P8);
-   symlinked wrapper (P10).
-4. T004 (sonnet) curses TUI and the shared renderer; writer-to-renderer tests (P1).
-5. T005 (haiku) docs and final audit.
+2. T002 (sonnet) notification mirror + pause overlay (common.sh); vault note.
+3. T003 (sonnet) ai-pipeline stage records, stop/finish, registration; vault note extended.
+4. T004 (sonnet) ai-run/ai-recover stage records (checks inside ai-run, P2; explicit
+   recovery stage, P19; substage precedence end to end, P11).
+5. T005 (sonnet) snapshot model, `--once`/`--json`, wrapper, setup install; liveness with the
+   watchdog semantics on the bounded reader (P3, P14, P20); age filter keeps crashed runs
+   (P7); no bytecode (P8); symlinked wrapper (P10).
+6. T006 (sonnet) curses TUI and the shared renderer; writer-to-renderer tests (P1, P17, P18).
+7. T007 (haiku) docs and final audit.
 
-Dependencies: T001 → T002 → T003 → T004 → T005.
+Dependencies: linear, T001 → T007. Plan reviews 1–3 (P1–P22): all findings accepted.
 
 ## API / data changes
 - New files (ignored, host-written): `.ai/local/observation.json`,
