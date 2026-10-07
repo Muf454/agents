@@ -1,5 +1,16 @@
 # Review dispositions (Claude)
 
+## Plan review (HEAD 00e644d, 2026-10-07): BLOCKER 0, MAJOR 3, MINOR 2 — all accepted, tasks revised
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 retained runners keep write/exec options | accepted | `pytest --junitxml`, `go test -exec`, `tsc --noEmit false` pass the reference policy. T001 now enumerates runners and dangerous forms with a table-driven test; wildcards only where all are denied; live check by mission control. | T001 |
+| P2 outcome logging needs a parseable queue | accepted | `outcome task` reads titles via `tasks()`. T002 makes it tolerant + malformed-queue test. | T002 |
+| P3 no interruption test | accepted | SIGINT/SIGTERM subprocess tests and a separate 137 case added to T002. | T002 |
+| P4 attempt opened before launch | accepted | Attempt now opens right before the invocation; zero-budget case. | T002 |
+| P5 flow chart | accepted | Vault `agents-flow.md` update and "Flow chart updated" in T002. | T002 |
+
+
 Review HEAD: 26463f1d086fe05bbd734ca884066b54a81c592a
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
