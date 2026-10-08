@@ -130,7 +130,7 @@ scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.m
 2026-10-08: `scripts/ai-pipeline`: `base_reached` (base an ancestor of HEAD) and `base_moved` message next to `review_current`; start check right after the top-level `reconcile_disputes` (writes `last-error`, `stop start`); `publish_ready` gets `elif ! base_reached` immediately before `review_current`. `scripts/ai-recover`: a separate `case` before the shared hard-rule patterns prints `Error: <full reason>` to stderr, then escalates ('the review base moved past the branch.' / 'merge the base into the branch, then rerun ai-pipeline.'); `escalate` and the shared patterns unchanged. 7 new tests: `test_base_moved_stops_before_any_agent` (`--base main` and `origin/main`, no Claude/Codex call, ⛔, rerun after merge completes), `_recovery_escalates_without_claude`, `_with_pending_triage_stage`, `_with_counted_open_triage_stage`, `_with_pending_recheck`, `_publish_check_names_the_base`, `_publish_check_without_recovery`. Deviation from the notes: with `advance_origin_main()` the resolved base is `origin/main` (T002), so the start-path tests expect `Review base origin/main (`; the publish fixture has no pushed origin/main and expects `Review base main (`. Without recovery `ai_die` rewrites `last-error` as `Pipeline stopped during start: <message>`, so those tests assert containment. Targeted command: 67 tests OK; `.ai/bin/ai-check`: 306 tests OK. Docs: `docs/workflow.md` (FL-17 paragraph, publish invariants, recovery hard rules), README (Pull request step), vault flow note (start check node, publish node, recovery rules, bullet) and hub Log.
 
 ## T004 — Triage accepts a severity suffix in the finding cell (FL-16)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -160,4 +160,4 @@ scripts/lib/workflow.py, templates/.ai/prompts/triage.md, tests/test_workflow.py
 `python3 -m unittest tests.test_workflow -k triage -k recheck -k disposition`; `.ai/bin/ai-check`
 
 ### Result / notes
-Not started.
+DONE. `DISPOSITION_ROW` takes an optional non-capturing `(BLOCKER|MAJOR|MINOR)` suffix after the ID (group numbers unchanged), so triage-check, review history, recheck-prepare and pr_body all accept it. Template triage prompt says "bare finding ID"; `docs/workflow.md` triage paragraph notes the suffix. Tests: `test_triage_severity_suffix_satisfies_triage_check`, `..._other_decorations_stay_unmatched`, `..._rejected_row_is_rechecked_and_counted`. Targeted 41 OK (before the test fix; 3 new OK after); ai-check 309 OK.

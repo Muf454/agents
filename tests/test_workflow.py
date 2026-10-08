@@ -3762,6 +3762,35 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('model_reasoning_effort="low"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
         self.tool('ai-review', '--recheck', expected=1, AI_RECHECK_EFFORT='huge')
 
+    def test_triage_severity_suffix_satisfies_triage_check(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (MAJOR)', 'M1 (major)', 'M1(MAJOR)'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+        # Accepted rows still need an existing fix task.
+        dispositions.write_text(rows.replace('| M1 |', '| M1 (MAJOR) |').replace('T001', 'T099'))
+        self.helper('triage-check', '--fresh', expected=1)
+
+    def test_triage_severity_suffix_other_decorations_stay_unmatched(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (CRITICAL)', '**M1**', 'M1 (MAJOR) x'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            result = self.helper('triage-check', '--fresh', expected=1)
+            self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
+        self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 (MAJOR) | accepted | real defect | T002 |\n'], fix_task=True)
+        self.helper('triage-check', '--fresh')
+        self.tool('ai-review', '--recheck')
+        self.assertIn('M1\tMAJOR\tT001.txt is a fixture; the finding misreads it',
+                      (self.base / 'codex-recheck-calls').read_text())
+        self.helper('recheck-verify')
+        wf = self.recheck_module()
+        rows = [m.group(2).lower() for m in wf.DISPOSITION_ROW.finditer(
+            (self.project / '.ai/reviews/dispositions.md').read_text())]
+        self.assertEqual(rows, ['rejected', 'accepted'])
+
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
         ids = ['M1', 'M2']

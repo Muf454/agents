@@ -228,7 +228,8 @@ exactly `chore(ai): record review triage`.
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
-deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
+deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
+decorations do not match. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
