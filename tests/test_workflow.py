@@ -2679,7 +2679,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     (local / name).unlink(missing_ok=True)
                 runner = subprocess.Popen([str(self.project / '.ai/bin/ai-run'), '--approved'], cwd=self.project,
                                           env=dict(self.env, MOCK_CLAUDE='hold'), stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                          stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                          # a background-launched pipeline inherits SIGINT ignored, which bash cannot trap
+                                          preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
                 try:
                     for _ in range(200):
                         if (local / 'mock-session.pid').exists() and (local / 'mock-session.pid').read_text():
@@ -2688,8 +2690,6 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     else:
                         self.fail('the session never started')
                     runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
-                    # let the runner take the signal before the session ends, however loaded the host is
-                    time.sleep(0.5)
                     (local / 'mock-release').touch()
                     runner.communicate(timeout=20)
                 finally:
