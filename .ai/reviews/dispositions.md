@@ -1,5 +1,13 @@
 # Review dispositions (Claude)
 
+## Plan review round 7 (HEAD a7956da, 2026-10-08): BLOCKER 0, MAJOR 2, MINOR 1
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 incomplete append swallows the recovery row | deferred | Real, but only in the crash-durable marker design (old T003/T004), which this fix no longer includes: Convergence: rounds 5–7 kept finding durability edge cases in an advisory telemetry log; the marker work moves to backlog CU-5 and R2 documents the SIGKILL limit. | — |
+| P2 existing outcome not proven durable | deferred | Same area and reason as P1 (CU-5). | — |
+| P3 README outcome contract outdated | accepted | T002 updates README's outcome section together with `docs/workflow.md`. | T002 |
+
 ## Plan review round 6 (HEAD ae9bd39)
 
 Codex plan review, 2026-10-07: BLOCKER 0, MAJOR 3, MINOR 1 — all accepted (revision 6).

@@ -31,15 +31,11 @@ CU-1..3. Zack: development goes through the toolkit pipeline.
   session that stops before its result: `timeout` (session exit 124/137), `interrupted`
   (runner exit 130/143), else `error`. A later recovery counts as a further attempt and is
   not a first-time pass. Existing outcomes (`done`, `blocked`, `validation_failed`,
-  `no_checkpoint`) stay single. An attempt whose runner dies without its EXIT handler
-  (SIGKILL, OOM kill, power loss) is logged `crashed` by the next `ai-run` start on the same
-  checkout and branch, from a host-side attempt marker, so that recovery is not a first-time
-  pass either. Each attempt has a unique ID, stored in its marker and its outcome row; an
-  outcome whose ID is already logged is never appended again, so finishing or reconciling an
-  attempt twice (a crash between the outcome append and the marker removal) keeps exactly one
-  row with its original result. Writes are durable in order: the marker is fsynced before the
-  session starts, the outcome row before the marker is removed (revision 6, plan review
-  round 6 P1).
+  `no_checkpoint`) stay single. A runner killed without its EXIT handler (SIGKILL, OOM kill, power loss)
+  logs nothing for that attempt; this is an accepted limit of this fix (the outcome log is
+  advisory model-tuning data). Crash-durable attempt markers were planned in revisions 5–6 and
+  moved to the vault backlog (CU-5) by mission control after plan review round 7, to keep this
+  fix small.
 
 ## Reference
 `.ai/local/reference/catchup-m1-m2.patch` is a prototype of both fixes with tests, written by

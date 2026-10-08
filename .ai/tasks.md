@@ -70,7 +70,7 @@ Malformed queue: the existing test `test_runner_no_progress_denial_and_error_sto
 Update the "Outcome log" section of `docs/workflow.md` and the vault flow chart `agents-flow.md` (stopped-attempt lifecycle; T001 already did the reviewer policy); the PR description must say "Flow chart updated". New tests named `test_outcome_*`. Reference: `.ai/local/reference/catchup-m1-m2.patch` (opens the attempt too early).
 
 ### Likely affected modules
-scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
+README.md (outcome section), scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
 
 ### Acceptance criteria
 - Timeout, then error, then a successful run log attempts 1, 2, 3 with results timeout, error, done and `first_pass` false for all (test fails without the fix).
@@ -81,75 +81,6 @@ scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.m
 - A run with zero time budget left logs no task outcome.
 - Successful and failed `--triage` runs create no task outcome; a usage-limit pause and retry inside one implementation session yields exactly one outcome with the original start time.
 - Docs describe the deferred signal delivery and the limit-wait `error` case; vault flow chart updated.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k outcome -k runner_no_progress`; `.ai/bin/ai-check`
-
-### Result / notes
-
-## T003 — Crash-safe attempt marker helper (R2, SIGKILL/power loss)
-Status: TODO
-Dependencies: T002
-Model: opus
-
-### Goal
-R2: a host-side helper that records an open attempt durably under a unique attempt ID and finishes or reconciles it idempotently, so a crash at any point leaves at most one outcome row per attempt, with its original result.
-
-### Implementation notes
-Plan review round 5, P5: the EXIT handler cannot run on SIGKILL, OOM kill or power loss (the watchdog/`ai-recover` path). Plan review round 6, P1: `outcome task` (`workflow.py` `outcome`) always appends and derives the attempt number from earlier rows, with no attempt identity, so a crash between "append outcome" and "remove marker" would later add a second row (a spurious `crashed` after `done` turns a finished task into an unfinished one in `outcomes-report`, whose last row per task is the result). Round 6, P2: crash recovery and the lock contract are concurrency work, so opus; the `ai-run` wiring is T004.
-
-Marker: `<state root>/attempts/<sha16 of checkout root>-<sha16 of branch>.json` (keyed like `binding_dir`/`fix_rounds_store`, under `check_state_root`; agent sessions cannot write there) holding `id` (`secrets.token_hex(8)`), task, model, start time and the title/category captured at launch (T002's launch metadata).
-
-`outcome task` gets an optional trailing `--attempt-id ID`: the row stores `attempt_id`; if a task row with the same `attempt_id`, project and branch is already in the log, it appends nothing and exits 0 (same attempt). Rows without an ID behave as today. The append is one `write` of the line to the file opened for append, then `flush` + `os.fsync` before returning.
-
-New helper `attempt open TASK MODEL TITLE CATEGORY | finish RESULT SECONDS | reconcile` (one place owns the order of writes):
-- `open`: runs `reconcile` first (a stale marker is never overwritten unlogged), then writes the marker durably (temp file in the same directory, `fsync`, `os.replace`, `fsync` of the directory; today's `atomic` has no fsync, so add a durable variant) and prints the ID. The caller starts the session only after `open` returned.
-- `finish`: reads the marker; appends the outcome with its ID, task, model and title/category (dedup above, fsynced), then unlinks the marker and fsyncs the directory. No marker: nothing to do, exit 0 (so a second `finish`, e.g. the EXIT handler after `task_outcome`, is harmless). If the append fails, still remove the marker and print a note on stderr (a missing row is today's nonfatal behaviour; a later `crashed` for a finished attempt would be wrong).
-- `reconcile`: no marker: exit 0. Marker whose ID is already logged: unlink it (+ directory fsync) without appending. Otherwise append one `crashed` row with the marker's ID and seconds 0 (end time unknown; crashed attempts add no time), fsynced, then unlink + directory fsync. Rerunning it after a crash at any boundary yields the same single row.
-Marker and outcome write failures stay nonfatal for the runner (note on stderr, exit 0) except where noted. The helper never takes the checkout lock itself; its callers (T004) hold it. No crash-injection hooks in production code.
-
-Tests (`tests/test_workflow.py`, helper level, new tests named `test_outcome_attempt_*`): build the on-disk state each crash boundary leaves, using the helper's own subcommands, then recover:
-- after the normal append: `attempt open`, `outcome task T001 done … --attempt-id <id>` (what `finish` does first), marker left; `attempt reconcile` twice → exactly one row with that ID, result `done`, `first_pass` true, no marker; `outcomes-report` counts T001 as done;
-- after the reconciliation append: `attempt open`, `outcome task T001 crashed … 0 --attempt-id <id>`, marker left; `reconcile` twice → exactly one `crashed` row, no marker;
-- `finish` twice → one row; `open` over a stale unlogged marker → one `crashed` row for the old ID and a new marker with a new ID;
-- an ID already logged on another branch does not suppress the row (dedup is per project and branch).
-
-### Likely affected modules
-scripts/lib/workflow.py, tests/test_workflow.py
-
-### Acceptance criteria
-- Marker and outcome row carry the same unique attempt ID; `outcome task` never logs an ID twice for the same project and branch.
-- Each boundary state above, recovered once or twice, leaves exactly one row for the attempt with its original result (`done` stays `done`, `crashed` stays single) and no marker.
-- `open`, `finish` and `reconcile` fsync the marker, the outcome line and the directory in the order above (code inspection; the tests cover the resulting states).
-- Rows without an attempt ID (existing callers) are unchanged.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k outcome`; `.ai/bin/ai-check`
-
-### Result / notes
-
-## T004 — Crashed attempts are logged at the next `ai-run` start (R2 wiring)
-Status: TODO
-Dependencies: T003
-Model: opus
-
-### Goal
-R2: `ai-run` opens, finishes and reconciles attempts through T003's helper, so a SIGKILLed attempt is logged once as `crashed` and the recovered run is attempt 2, not a first-time pass.
-
-### Implementation notes
-`scripts/ai-run`: where T002 opens the attempt (implementation sessions only, right before the `claude` invocation), call `ai_helper attempt open …` and start the session only after it returned; where T002 closes it (`task_outcome` and the EXIT handler), call `ai_helper attempt finish RESULT SECONDS` instead of `outcome task` (failures stay a stderr note). `ai_helper attempt reconcile` runs right after `ai_lock`, before task selection (so a live runner's marker is never reconciled; inside `ai-pipeline` the pipeline holds the lock and `ai-run` runs under it). `--triage` never opens an attempt. Docs: "Outcome log" section of `docs/workflow.md` (marker, attempt ID, `crashed`, seconds 0, recovery after a crash at any point keeps one row) and the vault flow chart `agents-flow.md` (one node on the start path; bump `updated:`).
-
-Test: a new mock mode `MOCK_CLAUDE='crash'` SIGKILLs the runner like `triage-crash` does (runner = parent of the mock's parent `timeout`, read from `/proc/<ppid>/stat`), without killing a pipeline. Run `ai-run --approved` with it (expect the kill), then a normal `ai-run --approved`: rows attempt 1 `crashed`, attempt 2 `done`, `first_pass` false, distinct attempt IDs, and no marker left. A normal successful run leaves no marker; a second runner refused by the lock (the test holds the checkout lock itself while a marker exists) does not reconcile that marker. New tests named `test_outcome_crashed_*`.
-
-### Likely affected modules
-scripts/ai-run, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
-
-### Acceptance criteria
-- After a SIGKILLed implementation session and a successful rerun, the outcome log has exactly attempt 1 `crashed` and attempt 2 `done` with `first_pass=false`; no attempt marker remains.
-- Normal, timeout, error and interrupted attempts (T002 tests) leave no marker and log no extra `crashed` row.
-- A runner that fails at `ai_lock` while another holds the lock leaves the other's marker untouched.
-- `--triage` never writes a marker.
-- Docs and flow chart describe the marker, the attempt ID and `crashed`.
 
 ### Validation
 `python3 -m unittest tests.test_workflow -k outcome -k runner_no_progress`; `.ai/bin/ai-check`

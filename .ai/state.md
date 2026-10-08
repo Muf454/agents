@@ -6,7 +6,7 @@ Phase: implementing
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 4
+Tasks remaining: 2
 Last validation: none
 Blocked: no
 Next action: ai-pipeline (plan review, T001)
