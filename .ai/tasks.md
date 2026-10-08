@@ -347,3 +347,79 @@ README.md, docs/workflow.md, templates/CLAUDE.md, templates/AGENTS.md, tests/tes
 - Vault: hub Log line added; the live trial added to `agents-human-todo.md` as an unchecked item (human todo).
 - Evidence: `python3 -m unittest tests.test_workflow -k docs_consistency` OK (3); `-k pr_body_flow` OK (2); `.ai/bin/ai-check` OK (359 tests, 226.9 s).
 - Limitation: the live supervised trial with real Claude/Codex was not run here (needs a human; see handoff "Needs you").
+
+## T011 — Check stored needs-human decisions outside the optional plan-review loop (review M1)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+R5: a recorded needs-human plan revision for the current plan report stops the pipeline before any re-review, revision or implementation session, regardless of `--skip-plan-review` or the task queue's state (review M1).
+
+### Implementation notes
+- `scripts/ai-pipeline`: move the `plan_decision_check` definition above its first use and call it unconditionally after the startup open-stage dispatch / `reconcile_disputes` (also after a completed startup plan-revision stage when the plan loop is skipped), keep the call inside the plan-review loop, and call it again before entering the implementation loop. `--skip-plan-review` only skips the optional review; it never clears a recorded decision. Exit 2 (unreadable records) still stops as a `Plan revision stage` failure.
+- No change to `workflow.py plan-revisions decision` semantics (it already keys on the verified report, not task state); no change to `ai-recover` (already checks first).
+- Docs: `docs/workflow.md` / README sentence that `--skip-plan-review` does not bypass a recorded needs-human decision; `ai-pipeline --help` if it describes the skip. Flow change: vault `agents-flow.md` (decision check also on the skip/partly-done path) + `updated:`, handoff `## Flow chart`.
+
+### Likely affected modules
+scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, README.md, vault agents-flow.md
+
+### Acceptance criteria
+- Regression: a stored needs-human decision for the current plan report + `--skip-plan-review` → stop `plan review needs your decision` with the stored questions; no plan-review, revision or implementation mock invocation; also with `AI_AUTO_RECOVER=1`, no recovery session.
+- Regression: a stored needs-human decision with one task DONE and another TODO (plan loop skipped by `tasks untouched`) → same stop, no implementation invocation.
+- Regression: an unreadable revision store on the skip path → fails closed (Plan revision stage stop), no agent.
+- No decision recorded + `--skip-plan-review` → behaviour unchanged (implementation runs); existing `supervised_plan` and plan-stop tests pass unchanged.
+
+### Validation
+`python3 -m unittest tests.test_workflow -k needs_human_decision_gate`; `python3 -m unittest tests.test_workflow -k supervised_plan`; `.ai/bin/ai-check`
+
+### Result / notes
+
+## T012 — Keep one checkout baseline across a review format retry (review M2)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+R4/T009: both reviewer calls of a format retry review the same checkout; a HEAD change or a dirty tree between the calls stops before the retry and nothing is published (review M2).
+
+### Implementation notes
+- `scripts/ai-review`: capture the expected HEAD once per review operation (the outer `$head` for code reviews, the plan scope HEAD for plan reviews) and have `run_review` compare against it instead of a fresh per-call `start_head` (e.g. an optional expected-HEAD argument or a variable set by `review_with_format_retry`). Before the retry call (after the format check and the notification) verify HEAD equals that value and the tree is clean, else `ai_die` with a checkout-changed message (prior review preserved; the EXIT trap logs the retry as stopped). Recheck the same before publishing.
+- Re-check path unchanged; integrity failures stay non-retried.
+- Docs: `docs/workflow.md` Format retry paragraph mentions that the checkout must stay unchanged across both calls.
+
+### Likely affected modules
+scripts/ai-review, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression (code review and plan review): first report malformed, a clean committed checkout change is made between the calls (e.g. by the mock's notification hook or between mock calls) → stop with a checkout-changed message, no second publish, prior `.ai/reviews/current.md` / `plan.md` preserved, run-log line says stopped.
+- Same with an uncommitted change between the calls → stop.
+- Existing `format_retry` tests pass unchanged (malformed then valid on an unchanged checkout still publishes).
+
+### Validation
+`python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`
+
+### Result / notes
+
+## T013 — Convergence guidance includes the supervised extra round (review N1)
+Status: TODO
+Dependencies: T010
+Model: haiku
+
+### Goal
+R6: docs and the flow chart say round-three triage (Convergence line) is reached either with `--max-fix-rounds` ≥ 3 or through the supervised extra round at the default limit (review N1).
+
+### Implementation notes
+- `docs/workflow.md:373`: replace "only reachable with `--max-fix-rounds` ≥ 3" with wording covering the supervised extra fix round. Vault `agents-flow.md` "Convergence rule" note: same fix + `updated:`.
+- Add the old phrase to the `docs_consistency` wrong-sentences list (or a required phrase for the new wording).
+
+### Likely affected modules
+docs/workflow.md, tests/test_workflow.py, vault agents-flow.md
+
+### Acceptance criteria
+- `docs/workflow.md` no longer says round three is only reachable with `--max-fix-rounds` ≥ 3; a `docs_consistency` assertion fails on the old wording.
+
+### Validation
+`python3 -m unittest tests.test_workflow -k docs_consistency`; `.ai/bin/ai-check`
+
+### Result / notes

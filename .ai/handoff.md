@@ -170,6 +170,8 @@ None beyond "Needs you" above.
 Flow chart updated
 
 ## Next action
-All ten tasks (T001–T010) are DONE with the gate passing (see `.ai/run-log.md`). Next: an independent
-Codex review of the branch, then the live supervised trial in "Needs you" above. No run budget in
-this batch (OR-09).
+Codex review of HEAD 5b8d86b (MAJOR 2, MINOR 1) triaged: all accepted (`.ai/reviews/dispositions.md`).
+Next: T011 (needs-human decision checked also with `--skip-plan-review` / a partly done queue),
+T012 (one checkout baseline across a review format retry), T013 (convergence docs), then a new
+independent review and the live supervised trial in "Needs you" above. No run budget in this
+batch (OR-09).
