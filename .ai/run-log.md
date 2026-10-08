@@ -116,3 +116,4 @@
 | 2026-10-07T19:17:35Z | claude (opus planning) | plan rev 5 | plan review round 5 (Fable fallback, 0/2/3) all accepted: spec R1 = no-Bash reviewer; context per mode; bounded signal tests; crash attempt marker | — | (this commit) | |
 | 2026-10-08T05:04:51Z | claude (opus planning) | plan rev 6 | plan review round 6 (Codex 0/3/1) accepted | — | (this commit) | |
 | 2026-10-08T05:08:54Z | claude (mission control) | plan rev 7 | plan review round 7 (0/2/1): P1/P2 deferred with the crash-durable marker tasks (backlog CU-5), P3 accepted; 2 tasks remain | — | (this commit) | convergence: simplify |
+| 2026-10-08T05:20Z | claude (opus) | T001 | DONE: Claude reviewer Read/Glob/Grep only, host-prepared `.ai/local/review-context/` per mode, `review-range`, docs/prompt/flow chart | targeted 25 OK; ai-check 279 OK | (this commit) | handoff gained `## Flow chart`; live CLI check pending (mission control) |

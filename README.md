@@ -356,21 +356,26 @@ old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried a
 every later review, so it takes over as soon as it has usage.
 
 The Claude reviewer is a separate `claude -p` session with no access to the
-implementing session: tools Read/Glob/Grep/Bash/Edit/Write. Its allowlist is built from
-`.ai/permissions.allow`: Read/Glob/Grep, read-only git, and the project's fixed check
-commands (e.g. `npm test`, `npx vitest run *`). Dropped: Edit/Write, git writes, `ai-task`,
-`ai-check`, `.ai/validate`, pushes, deploys, `supabase`, `vercel`, writers and runners
-(`rm`, `tee`, `sed`, `find`, `curl`, ...), and open interpreters (`bash *`, `node *`,
-`npx *`, `npm run *`, `python3 *`). Writes are allowed only for scratch probes under the
-ignored `.ai/local/review-probes/` (deleted afterwards). The list it got is saved next
-to the review log (`.ai/local/review-*.allowlist`), denied attempts go to
-`.ai/local/review-denials.log`. The approved test commands still run project code, and
-Read is not limited to the checkout. No MCP; project settings only. It gets
-the mode's usual prompt plus `.ai/prompts/claude-review.md` (sceptical stance, scenario
-probes, a checklist of failure types seen in these projects) and returns the same
-format, so the host saves it to the same file with the same bindings; dispositions,
-re-checks and disputes work unchanged. The allowlist is not an OS sandbox: the
-checkout-unchanged check after the review and the gate check still apply.
+implementing session and no shell: tools Read/Glob/Grep only, whatever
+`.ai/permissions.allow` contains (every Bash allow/deny list tried left a route to
+running code or writing files through command arguments). It runs no commands, tests
+or probes. Instead the host writes the review's git context to the ignored
+`.ai/local/review-context/` right before the session and deletes it right after: for
+a code review the diff (`diff.patch`), commits (`log.txt`), changed paths (`files.txt`)
+and, on a later round, `since-last-review.patch`; for a re-check the same for the
+reviewed range plus the rejected findings (`findings.txt`); for a plan review the plan
+files and recent commits. If any of that fails, the review stops before Claude starts
+and the prior review stays. The reviewer works from traced code paths and the
+recorded validation evidence (`.ai/local/validation.json`, gate logs). The tool list is
+saved next to the review log (`.ai/local/review-*.allowlist`), denied attempts go to
+`.ai/local/review-denials.log`. Read is not limited to the checkout (the prompt tells it
+to stay inside, since the review is published). No MCP; project settings only. It gets
+the mode's usual prompt (naming the context files instead of git commands) plus
+`.ai/prompts/claude-review.md` (sceptical stance, evidence rules, a checklist of failure
+types seen in these projects) and returns the same format, so the host saves it to the
+same file with the same bindings; dispositions, re-checks and disputes work unchanged.
+The tool list is not an OS sandbox: the checkout-unchanged check after the review and
+the gate check still apply.
 
 Model by risk: `claude-fable-5-1` for plan and code reviews when any task runs on opus
 or a task title names RLS/row-level, auth/authentication/authorization, permissions,

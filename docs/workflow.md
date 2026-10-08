@@ -532,18 +532,37 @@ an incident as a successful probe. Nothing is installed by `setup-project`.
 pauses and retries under `codex`; under `auto` it switches to `claude_attempt` for this
 review (any other Codex failure stops as before; a missing Codex CLI goes straight to
 Claude). `claude_attempt`: `claude -p --permission-mode dontAsk --output-format json
---tools Read,Glob,Grep,Bash,Edit,Write --allowedTools $(workflow.py review-allowlist)
+--tools Read,Glob,Grep --allowedTools $(workflow.py review-allowlist)
 --setting-sources project --strict-mcp-config --model M --effort E`, stdin `/dev/null`,
-the mode prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` keeps Read/Glob/
-Grep, read-only git subcommands and the project's `Bash(...)` entries except writers,
-runners and open interpreters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`), and
-adds `Edit(./.ai/local/review-probes/**)` (verified live: in dontAsk mode this rule lets
-the Write tool create files there and nowhere else). The probe directory is recreated
-before and removed after the session. A Claude usage limit pauses (`ai_limit_pause
-Claude`) and the loop starts again with Codex. The final text (`claude-text`) becomes
-the report (denials go to `.ai/local/review-denials.log`; the allowlist it got to
-`.ai/local/review-*.allowlist`); the usual "checkout unchanged" check and publish
-helpers follow.
+the mode's Claude prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` prints
+just `Read`, `Glob`, `Grep` and does not read `.ai/permissions.allow`.
+
+No shell, by design: plan review rounds 1–4 each found a new command-argument route
+through Bash allow/deny lists (runner options, exact entries, git option abbreviations
+such as `git grep --open-files=`), so the reviewer gets no Bash, Edit or Write tool. The
+host prepares the git context instead: `review_context`, called by `claude_attempt` right
+before each session (a retry after a Claude usage-limit pause rebuilds it), recreates the
+ignored `.ai/local/review-context/` and writes, with `git … --no-ext-diff --no-textconv`
+and no truncation:
+- code: `diff.patch` (`git diff MERGE_BASE..HEAD`), `log.txt` (`git log --stat`),
+  `files.txt` (`--name-only`), and `since-last-review.patch` when the last reviewed HEAD
+  is an ancestor of HEAD;
+- recheck: the same three for the current review's range from `workflow.py review-range`
+  (`HEAD MERGE_BASE` of the verified review, parsed with the header regex
+  `current_review_rounds` uses; it must match `recheck-prepare`'s HEAD), plus
+  `findings.txt` (the rejected rows);
+- plan: `files.txt` (spec, plan, tasks) and `log.txt` (`git log --stat -n 20`).
+
+`run_review` calls `claude_attempt` in a conditional context, where bash disables
+`errexit`, so every context step is checked explicitly; the first failure removes the
+directory and dies (`Could not prepare the review context; prior review preserved.`)
+before `claude` runs. The directory is removed right after the session, before any
+result check. Each mode builds `claude_prompt` next to the Codex prompt: same template,
+history and output contract, with scope lines naming the context files instead of git
+commands. A Claude usage limit pauses (`ai_limit_pause Claude`) and the loop starts
+again with Codex. The final text (`claude-text`) becomes the report (denials go to
+`.ai/local/review-denials.log`; the tool list to `.ai/local/review-*.allowlist`); the
+usual "checkout unchanged" check and publish helpers follow.
 
 Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching (whole
 words) RLS, row-level, auth/authn/authz/authentication/authorization, permission, policy,

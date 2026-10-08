@@ -4,7 +4,7 @@ Branch `fix/catchup-review`: fixes for the Codex catch-up review M1/M2 (see `.ai
 Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts` or other gate files.
 
 ## T001 — Read-only Claude reviewer policy (M1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -49,6 +49,8 @@ scripts/ai-review, scripts/lib/workflow.py, templates/.ai/prompts/claude-review.
 `python3 -m unittest tests.test_workflow -k review_allowlist -k claude_review -k review_falls_back -k fallback -k fall_back -k reviewer_setting -k pipeline_without_codex -k review_context -k review_range`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done 2026-10-08. `scripts/ai-review`: `claude_attempt` runs `--tools Read,Glob,Grep --allowedTools Read Glob Grep` (from `review-allowlist`), no probe directory; new `review_context`/`context_fail` write `.ai/local/review-context/` per mode (`--no-ext-diff --no-textconv`, every step checked, dies before `claude` on failure) and the directory is removed right after the session; each mode builds `claude_prompt` naming the context files, Codex prompts are byte-identical to before. `scripts/lib/workflow.py`: `review_allowlist` prints Read/Glob/Grep only (`REVIEW_GIT`/`REVIEW_DROP_*` removed); `review_header` shared by `current_review_rounds` and new `review-range`. Prompt template "Evidence" section, README, `docs/workflow.md`, vault `agents-flow.md` updated. Tests: mock asserts no probe dir and no `inspect git diff`, logs the context per call; new `test_claude_review_context_*` (code, delta, recheck, plan, limit retry, failure before Claude), `test_review_range_prints_head_and_merge_base`, `test_review_allowlist_is_read_glob_grep_whatever_the_project_allows`. Targeted command: 25 tests OK; `.ai/bin/ai-check`: 279 tests OK (first run failed only `test_pr_body_flow_this_repo_declares_the_flow_chart` because the handoff lacked `## Flow chart`; added "Flow chart updated").
+Pending (mission control): live Claude CLI check that the reviewer can run no Bash command, write no file, and reads `.ai/local/review-context/`.
 
 ## T002 — Outcome logged for stopped task attempts (M2)
 Status: TODO
