@@ -120,3 +120,4 @@
 | 2026-10-08T05:23:17Z | runner | T001 | completed | PASS | 86a99f8 | Claude checkpointed; continuing queue |
 | 2026-10-08T05:36:19Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38dcdaa | No merge or deployment performed |
 | 2026-10-08T07:10Z | claude (sonnet) | T002 | DONE: signal test now gives the runner 0.5 s to take the signal before the session is released (flaky SIGINT exit 1) | targeted OK; ai-check 287 OK twice | (this commit) | flake not reproduced locally; cause inferred from timing |
+| 2026-10-08T07:04:54Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 091c80e | No merge or deployment performed |
