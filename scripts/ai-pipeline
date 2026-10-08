@@ -12,8 +12,9 @@ Hands-off delivery of an approved plan on a feature branch:
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
   Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
---base is the review base (default main); --pr-base is the PR target branch
-(default: --base when it is a local or origin/ branch).
+--base is the review base (default main); a local branch B is replaced by origin/B when
+origin/B is strictly ahead of it (never fetched), and the resolved base is printed.
+--pr-base is the PR target branch (default: --base when it is a local or origin/ branch).
 The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
 an interrupted review triage is verified and recorded once, and pending re-checks of
 rejected findings run, before anything else.
@@ -83,7 +84,21 @@ finish() {
 }
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
-base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
+# A local base branch that is behind origin/<base> would make the review cover already
+# merged work: review against origin/<base> when it is strictly ahead. Never fetches.
+base_ref=$base base_note=''
+if git show-ref --verify --quiet "refs/heads/$base" && \
+   git show-ref --verify --quiet "refs/remotes/origin/$base" && \
+   [[ "$(git rev-parse "refs/heads/$base")" != "$(git rev-parse "refs/remotes/origin/$base")" ]]; then
+  if git merge-base --is-ancestor "refs/heads/$base" "refs/remotes/origin/$base"; then
+    base_ref=origin/$base base_note=" (local $base is behind)"
+  elif ! git merge-base --is-ancestor "refs/remotes/origin/$base" "refs/heads/$base"; then
+    printf 'Local %s and origin/%s have diverged; reviewing against local %s.\n' "$base" "$base" "$base"
+  fi
+fi
+base_sha=$(git rev-parse --verify --quiet "${base_ref}^{commit}") || ai_die "Invalid base: $base"
+base_label="$base_ref ($(git rev-parse --short "$base_sha"))"
+printf 'Review base: %s at %s%s\n' "$base_ref" "$(git rev-parse --short "$base_sha")" "$base_note"
 # A dispute file unchanged since the merge-base was merged by the human: historical, not active.
 export AI_DISPUTES_BASE=$base_sha
 if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
@@ -334,7 +349,7 @@ while true; do
       stop review
     fi
     step 'Independent review (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
+    "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
     ai_guard_verify
     mapfile -t records < <(review_record .ai/reviews/current.md)
     host_commit 'chore(ai): record independent review' "${records[@]}"

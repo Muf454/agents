@@ -272,7 +272,10 @@ tmux new -s my-app-ai
    disputes are history: a later branch inherits the unchanged file without a draft,
    and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
-   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   required. The review itself compares against `origin/<base>` when that is strictly
+   ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
+   PRs into the review); the run prints `Review base: <ref> at <sha>`, warns when the two
+   have diverged (then local wins), and never fetches. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every review it requires that the committed bytes equal the validated files.
    Before and after every push attempt (failed or not) it re-checks that the review is
    current for HEAD, validation is current, the tree is clean, the committed bytes

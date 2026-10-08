@@ -2997,6 +2997,96 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(create[create.index('--base') + 1], 'develop')
         self.assertTrue(origin.exists())
 
+    # ---------------------------------------------------------------- review base (FL-15)
+    def git_out(self, *args):
+        return self.run_cmd(['git', *args]).stdout.strip()
+
+    def origin_with_main(self):
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return origin
+
+    def commit_on(self, parent, message):
+        return self.git_out('commit-tree', f'{parent}^{{tree}}', '-p', parent, '-m', message)
+
+    def advance_origin_main(self):
+        """Moves origin's main one commit ahead without touching the local main branch."""
+        sha = self.commit_on('origin/main', 'merged elsewhere')
+        self.run_cmd(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return sha
+
+    def advance_local_main(self):
+        sha = self.commit_on('main', 'local only')
+        self.run_cmd(['git', 'branch', '-f', 'main', sha])
+        return sha
+
+    def assert_reviewed_against(self, result, ref, sha, behind=False):
+        short = self.git_out('rev-parse', '--short', sha)
+        line = f'Review base: {ref} at {short}' + (' (local main is behind)' if behind else '')
+        self.assertIn(line + '\n', result.stdout)
+        header = re.search(r'merge-base ([0-9a-f]{40})', (self.project / '.ai/reviews/current.md').read_text())
+        self.assertEqual(header.group(1), sha)
+        prompts = (self.base / 'codex-prompts.log').read_text()
+        self.assertIn(f'supplied base={sha}; merge-base={sha}.', prompts)
+
+    def test_review_base_origin_ahead_of_local(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        local = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        self.assertNotIn(f'merge-base={local}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_origin_ahead_pr_still_targets_main(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0]
+        self.assertEqual(create[create.index('--base') + 1], 'main')
+
+    def test_review_base_equal_to_origin(self):
+        self.origin_with_main()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+        self.assertNotIn('diverged', result.stdout)
+
+    def test_review_base_without_origin_ref(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+
+    def test_review_base_local_ahead_of_origin(self):
+        self.origin_with_main()
+        remote = self.git_out('rev-parse', 'origin/main')
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', sha)
+        self.assertNotIn('is behind', result.stdout)
+        self.assertNotIn(f'merge-base={remote}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_diverged_uses_local(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Local main and origin/main have diverged; reviewing against local main.', result.stdout)
+        self.assert_reviewed_against(result, 'main', sha)
+
+    def test_review_base_explicit_sha(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', sha, '--no-pr')
+        self.assert_reviewed_against(result, sha, sha)
+
     def test_failed_final_push_is_reported_not_hidden(self):
         self.ready()
         self.add_origin()

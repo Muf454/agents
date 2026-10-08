@@ -338,6 +338,16 @@ recorded again on the new branch. Without `AI_DISPUTES_BASE` (a helper run by ha
 nothing is inherited. Limitation: reusing a branch name whose host records were already
 merged fails verification (its old records sit both in the inherited copy and the store).
 
+Review base (FL-15): `ai-pipeline --base B` resolves the base once per run, without
+fetching. When both the local branch `B` and `origin/B` exist and differ, `origin/B` is
+used if the local branch is its ancestor (local is stale); if neither contains the other
+the run prints `Local B and origin/B have diverged; reviewing against local B.` and keeps
+the local branch. Any other base (an `origin/` ref, a SHA) is used as given. The run
+prints `Review base: <ref> at <short sha>` (with ` (local B is behind)` when it switched)
+and passes the resolved SHA to `ai-review`, the fix-round counter and the dispute base.
+The PR target is still inferred from the name `B`. A rerun resolves again, so the base
+can advance between runs after a fetch.
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push attempt (failed or successful, before the retry
 wait), the review must verify and be current for HEAD (only workflow records changed

@@ -43,7 +43,7 @@ scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, README.md
 2026-10-08: `publish_review` requires only `Finding counts:` plus a verdict from the new `review_verdict` (next to `reviewer_label`); failure message unchanged ("Review is missing Overall verdict:; prior review preserved. …"). `publish_plan_review` requires only `Finding counts:`. `pr_body` uses `review_verdict`, falling back to `unknown`. `review_counts` unchanged. Small widening beyond the plan: the verdict line may be bolded (`**Overall verdict:** x`), so reports that passed the old substring check in that form are not newly rejected. New mock Codex mode `verdict-heading`; 5 new `test_review_format_*` tests cover every acceptance criterion (missing 0-count sections in code/plan reviews with `review-info`/`plan-review-info`, all six mismatch cases for both report kinds with `current.md`/`plan.md` byte-identical, heading verdict with and without colon and PR body `Verdict: Approve with two minor notes.`, empty/missing verdict rejected, `ai-review --base main` with the heading mode). Targeted command: 14 tests OK; `.ai/bin/ai-check`: 292 tests OK. Docs: `docs/workflow.md` publish rules, README review step. Flow unchanged.
 
 ## T002 — Review base prefers a newer origin branch (FL-15)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -82,7 +82,7 @@ scripts/ai-pipeline, tests/test_workflow.py, README.md, docs/workflow.md, vault 
 `python3 -m unittest tests.test_workflow -k review_base -k pr_base -k pipeline_clean_review`; `.ai/bin/ai-check`
 
 ### Result / notes
-Not started.
+2026-10-08: `scripts/ai-pipeline` resolves `base_ref` in one block before `base_sha`: when `refs/heads/B` and `refs/remotes/origin/B` both exist and differ, local an ancestor → `origin/B` (suffix ` (local B is behind)`); neither an ancestor → `Local B and origin/B have diverged; reviewing against local B.`, local kept. Prints `Review base: <ref> at <short sha>`, sets `base_label` for T003, passes `--base "$base_sha"` to `ai-review`; `pr_base` inference still uses the name. Never fetches. Usage text, README (Pull request step), `docs/workflow.md` (new "Review base (FL-15)" paragraph before the publish invariants), vault flow note bullet and hub Log updated. 7 new tests (`origin_ahead_of_local`, `origin_ahead_pr_still_targets_main`, `equal_to_origin`, `without_origin_ref`, `local_ahead_of_origin`, `diverged_uses_local`, `explicit_sha`), each asserting the printed line, the published review's header `merge-base` and `supplied base=<sha>; merge-base=<sha>.` in the Codex prompt log; helpers `origin_with_main()`, `advance_origin_main()`, `advance_local_main()`. Targeted command: 9 tests OK; `.ai/bin/ai-check`: 299 tests OK.
 
 ## T003 — Stop early when the base moved past the branch (FL-17)
 Status: TODO
