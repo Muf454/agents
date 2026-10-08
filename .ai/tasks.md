@@ -283,7 +283,7 @@ test with imitated subjects; another branch inits legacy records from subjects �
 history).
 
 ## T009 — Retry a malformed plan or code review once
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -313,6 +313,12 @@ scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_work
 `python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`
 
 ### Result / notes
+- `workflow.py`: `review_format_error(mode, content)` (empty report, required fields, `review_counts`) used by `publish_review`, `publish_plan_review` and the new `review-format-check plan|code REPORT` (no writes; exit 2 + error on stdout, other failures exit 1); `claude-text --allow-empty` writes an empty report for a blank result (non-string result still fails).
+- `ai-review`: `review_with_format_retry` for plan and code (not re-check): format check after `run_review`; with `AI_SUPERVISE=1` one more `run_review` with `FORMAT ERROR: <msg>. Return the full report again in the required structure.`, notification `🔁 Review format retry (<mode>): <error>`, first report kept in `.ai/local/`. Run-log line written after the second call only: `published` (before the hand-run plan record commit, which now adds `.ai/run-log.md`) or, via an EXIT trap, `stopped again, prior review preserved` on any later stop. Empty text from a successful call goes to the format check only when the retry is on; unreadable report, Codex errors, limit handling and `unchanged` stay fatal (the `unchanged` check runs on each call). `run_review` resets `AI_REVIEW_BY`/`AI_REVIEW_LABEL`/review_by/model/effort/reason per call and clears them on Codex success. `ai-pipeline review_record` adds a dirty `.ai/run-log.md`.
+- Tests (8): `test_format_retry_code_review_once_then_publish_or_stop`, `test_format_retry_off_without_supervision`, `test_format_retry_claude_fallback_reviewer`, `test_format_retry_after_claude_fallback_attributes_the_codex_review`, `test_format_retry_plan_review_by_hand`, `test_format_retry_pipeline_commits_the_run_log_line_with_each_review`, `test_format_retry_never_for_a_malformed_recheck`, `test_review_format_check_helper_matches_publish`; mocks gained per-call sequences (`MOCK_CODEX='malformed,success'`, `MOCK_CODEX_PLAN_FORMAT`, `MOCK_CLAUDE_REVIEW='empty,success'`).
+- Docs: README (fix-round paragraph), `docs/workflow.md` (Format retry), `ai-review --help`; vault `agents-flow.md` reviewer chart + note + notification row (`updated:` already 2026-10-08); handoff covered-tests list.
+- Validation: `python3 -m unittest tests.test_workflow -k format_retry -k review_format_check` Ran 8 OK; `.ai/bin/ai-check` Ran 359 OK (227.6 s, 8 shards).
+- Limitation: a format retry that then stops leaves its run-log line uncommitted (like other stop bookkeeping; `ai-recover` commits it, a hand rerun needs it committed or discarded first).
 
 ## T010 — Docs reconciliation, flow-chart check, handoff
 Status: TODO

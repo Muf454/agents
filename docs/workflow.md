@@ -578,6 +578,23 @@ The host saves only the final review artifact after checking the required sectio
 A failed/timed-out/malformed report preserves the previous current review. Raw results
 are local; commit current reports/dispositions so Git retains earlier audits.
 
+Format retry (FL-04 R4): `review-format-check plan|code REPORT` runs exactly the content
+checks of `publish-plan-review` / `publish-review` (shared `review_format_error`, no writes;
+exit 2 with the error on stdout). With `AI_SUPERVISE=1`, `ai-review --plan` and the code
+review run it after the reviewer call; on a format error (including empty text from an
+otherwise successful Codex or Claude call) they notify `🔁 Review format retry (<mode>):
+<error>`, keep the first report in `.ai/local/`, and call the reviewer once more through the
+same chain with `FORMAT ERROR: <message>. Return the full report again in the required
+structure.` appended. Reviewer metadata (label, model, fallback reason) is reset per call,
+so a retry Codex answers after a Claude fallback is saved and logged as a Codex review. The
+run-log line (`review format retry (<mode>): published` or `stopped again, prior review
+preserved`, with the first report's path) is written only after the second call, so both
+calls see a clean checkout; after a publish it is committed with the review record (by
+`ai-pipeline`'s `review_record`, or by the hand-run plan path). A second format error stops
+as before. Never retried: reviewer exit errors, limit handling, a checkout changed during
+either call, unreadable reports, binding writes, re-checks (JSON; a malformed answer stays
+upheld, an empty one stops) and everything with `AI_SUPERVISE=0`.
+
 Codex tests can be restricted by read-only execution. The report must distinguish
 source inspection, validation evidence, tests actually run, and tests not run. Human
 can request isolated test execution if needed; do not expand write permissions over

@@ -271,7 +271,12 @@ tmux new -s my-app-ai
    the current review (`🔁 Extra fix round: findings falling (x → y → z)`); otherwise the
    PR is a draft as before. Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
-   whose counts disagree with its listed finding IDs is rejected.
+   whose counts disagree with its listed finding IDs is rejected. Supervised
+   (`AI_SUPERVISE=1`), a plan or code review that fails only these format checks (missing
+   field or section, counts not matching the listed IDs, empty answer) is requested once
+   more with the error appended (`🔁 Review format retry (plan|code): <error>`, one run-log
+   line naming the first report, committed with the review); a second format error stops
+   as before. Reviewer errors, a changed checkout and re-checks are never retried.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings

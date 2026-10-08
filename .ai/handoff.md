@@ -25,7 +25,11 @@ reads "(in the previous run)").
 T008 done (extra fix round: `fix-rounds record` stores the triaged review's head, digest and
 BLOCKER/MAJOR counts, legacy bare hashes still read; `fix-rounds trend BASE`; `run-manifest
 extra-round-reserve|extra-round`; `ai-pipeline` gives one extra round per supervised run at the
-limit when x > y > z, notifies `🔁 Extra fix round: findings falling (x → y → z)`). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+limit when x > y > z, notifies `🔁 Extra fix round: findings falling (x → y → z)`).
+T009 done (review format retry: `review-format-check plan|code REPORT` shares the publish
+checks; supervised `ai-review --plan`/code reviews ask the reviewer once more on a format error
+or empty answer, `🔁 Review format retry (<mode>): <error>`, run-log line committed with the
+review; integrity failures and re-checks never retried; per-call reviewer metadata reset). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -127,6 +131,21 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   another branch `test_extra_fix_round_trend_history_boundaries`; reservation once per run, reset
   by a restart `test_extra_fix_round_reservation_once_per_run`; crash right after the
   reservation resumes into that round once `test_extra_fix_round_crash_after_reservation_resumes_it_once`.
+- T009 format retry: Codex code review malformed/empty/counts-lie then valid → published with 2
+  calls, notification, `FORMAT ERROR:` prompt, first report kept and named in the run log;
+  malformed or empty twice → stop, prior review kept; valid → 1 call; `mutates` and Codex error →
+  no retry; malformed then a mutating or failing retry → stop, logged
+  `test_format_retry_code_review_once_then_publish_or_stop`; the same for a hand-run plan review
+  (clean checkout for both calls, run-log line in the record commit)
+  `test_format_retry_plan_review_by_hand`; Claude fallback malformed/empty then valid, empty or
+  malformed twice, plan on the fallback `test_format_retry_claude_fallback_reviewer`; malformed
+  Claude fallback then Codex retry saved, logged and attributed as Codex
+  `test_format_retry_after_claude_fallback_attributes_the_codex_review`; pipeline commits each
+  retry's run-log line with the plan and code review records, checkout clean
+  `test_format_retry_pipeline_commits_the_run_log_line_with_each_review`; malformed re-check →
+  one call, upheld `test_format_retry_never_for_a_malformed_recheck`; `AI_SUPERVISE=0` → no retry
+  `test_format_retry_off_without_supervision`; helper = publish checks
+  `test_review_format_check_helper_matches_publish`.
 
 ## Human todos
 None beyond "Needs you" above.

@@ -75,7 +75,13 @@ if 'CLAUDE REVIEWER' in prompt:
     with open(state / 'claude-review-prompts.log', 'a') as f: f.write(prompt + '\n=====\n')
     assert pathlib.Path('.ai/local/review-probes').is_dir(), 'no probe directory'
     pathlib.Path('.ai/local/review-probes/probe.txt').write_text('scenario probe')
-    review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success')
+    review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success').split(',')
+    # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
+    review_mode = review_mode[min(len((state / 'claude-review-args.log').read_text().splitlines()), len(review_mode)) - 1]
+    if review_mode in ('malformed', 'empty'):
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],
+                          'result': 'looks fine' if review_mode == 'malformed' else '  \n'}))
+        sys.exit(0)
     if review_mode == 'limit-once' and not (state / 'claude-review-limit').exists():
         (state / 'claude-review-limit').touch()
         print(json.dumps({'type':'result','subtype':'error','is_error':True,
@@ -322,6 +328,21 @@ if 'PLAN SCOPE' in args[-1]:
     status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=all'],
                             capture_output=True, text=True, check=True).stdout.strip()
     with open(state / 'codex-plan-status', 'a') as f: f.write((status or 'clean').replace('\n', ' ') + '\n')
+    # MOCK_CODEX_PLAN_FORMAT='malformed,ok': report format of plan call 1, 2, ...; the last one repeats.
+    formats = os.environ.get('MOCK_CODEX_PLAN_FORMAT', 'ok').split(',')
+    plan_format = formats[min(plan_calls, len(formats)) - 1]
+    out = pathlib.Path(args[args.index('--output-last-message')+1])
+    if plan_format == 'error': sys.exit(17)
+    if plan_format == 'empty': sys.exit(0)
+    if plan_format == 'malformed':
+        out.write_text('looks fine')
+        sys.exit(0)
+    if plan_format == 'counts-lie':
+        out.write_text('# Plan review\nOverall verdict: gap\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+                       '## BLOCKER findings\nNone.\n## MAJOR findings\n- P1: T001 has no test.\n## MINOR findings\nNone.\n')
+        sys.exit(0)
+    if plan_format == 'mutates':
+        pathlib.Path('unexpected.txt').write_text('unexpected concurrent edit')
     major = os.environ.get('MOCK_CODEX_PLAN') == 'major' or \
         (os.environ.get('MOCK_CODEX_PLAN') == 'major-once' and plan_calls == 1)
     items = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_FINDINGS', '').split(';') if item]
@@ -338,6 +359,9 @@ mode = os.environ.get('MOCK_CODEX', 'success')
 calls = state / 'codex-calls'
 calls.write_text(calls.read_text() + 'call\n' if calls.exists() else 'call\n')
 count = calls.read_text().count('call')
+if ',' in mode:
+    # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
+    mode = mode.split(',')[min(count, len(mode.split(','))) - 1]
 if mode == 'error': sys.exit(17)
 if mode == 'limit-once' and count == 1:
     print('ERROR: usage_limit_reached. You have hit your usage limit. Try again in 3 minutes.')
@@ -3830,6 +3854,218 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='counts-lie')
         self.assertIn('counts MAJOR=0', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+
+    # ------------------------------------------------------------- review format retry (T009)
+    def reset_review_fixture(self):
+        """Undo one review attempt: reviewer call counters, uncommitted records, stray files."""
+        for name in ('codex-calls', 'codex-plan-calls', 'codex-prompts.log', 'claude-review-args.log',
+                     'claude-review-prompts.log', 'notifications.log'):
+            (self.base / name).unlink(missing_ok=True)
+        (self.project / 'unexpected.txt').unlink(missing_ok=True)
+        self.run_cmd(['git', 'checkout', '--', '.ai'])
+        self.run_cmd(['git', 'clean', '-fdq', '--', '.ai/reviews'])
+
+    def format_retry_lines(self):
+        return [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if 'review format retry' in line]
+
+    def codex_calls(self, name='codex-calls'):
+        path = self.base / name
+        return path.read_text().count('call') if path.exists() else 0
+
+    def test_format_retry_code_review_once_then_publish_or_stop(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        cases = [  # MOCK_CODEX, exit code, Codex calls, run-log outcome (None: no retry)
+            ('malformed,success', 0, 2, 'published'),
+            ('empty,success', 0, 2, 'published'),
+            ('counts-lie,success', 0, 2, 'published'),
+            ('success', 0, 1, None),
+            ('malformed', 1, 2, 'stopped again, prior review preserved'),
+            ('empty', 1, 2, 'stopped again, prior review preserved'),
+            ('mutates', 1, 1, None),
+            ('error', 1, 1, None),
+            ('malformed,mutates', 1, 2, 'stopped again, prior review preserved'),
+            ('malformed,error', 1, 2, 'stopped again, prior review preserved'),
+        ]
+        for mode, code, calls, outcome in cases:
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                result = self.tool('ai-review', '--base', 'main', expected=code, MOCK_CODEX=mode, AI_SUPERVISE='1')
+                self.assertEqual(self.codex_calls(), calls)
+                lines = self.format_retry_lines()
+                if outcome is None:
+                    self.assertEqual(lines, [])
+                    self.assertNotIn('Review format retry', self.notifications())
+                else:
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn(f'review format retry (code): {outcome}', lines[0])
+                    first = re.search(r'first report (\.ai/local/review-\w+\.md)', lines[0]).group(1)
+                    self.assertTrue((self.project / first).exists())  # the first report is kept
+                    self.assertIn('🔁 Review format retry (code): ', self.notifications())
+                    prompts = (self.base / 'codex-prompts.log').read_text().split('=== PROMPT ===')
+                    self.assertNotIn('FORMAT ERROR', prompts[1])
+                    self.assertIn('FORMAT ERROR: ', prompts[2])
+                    self.assertIn('Return the full report again in the required structure.', prompts[2])
+                if code:
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                else:
+                    self.helper('review-info')
+        # The second call mutating the checkout is still an integrity stop.
+        self.reset_review_fixture()
+        result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='malformed,mutates', AI_SUPERVISE='1')
+        self.assertIn('Checkout changed during review', result.stderr)
+        self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+        self.assertIn('Review is missing Overall verdict:', self.format_retry_lines()[0])
+        # The counts-lie is a format error: its message reaches the reviewer.
+        self.reset_review_fixture()
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='counts-lie,success', AI_SUPERVISE='1')
+        self.assertIn('FORMAT ERROR: Review lists MAJOR findings but counts MAJOR=0',
+                      (self.base / 'codex-prompts.log').read_text())
+
+    def test_format_retry_off_without_supervision(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        for mode, message in (('malformed,success', 'Review is missing Overall verdict:'),
+                              ('empty,success', 'The reviewer produced no review')):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX=mode, AI_SUPERVISE='0')
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.codex_calls(), 1)
+                self.assertEqual(self.format_retry_lines(), [])
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+        self.reset_review_fixture()
+        self.tool('ai-review', '--plan', expected=1, MOCK_CODEX_PLAN_FORMAT='malformed,ok', AI_SUPERVISE='0')
+        self.assertEqual(self.codex_calls('codex-plan-calls'), 1)
+        self.reset_review_fixture()
+        self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='empty,success',
+                  AI_SUPERVISE='0')
+        self.assertEqual(len(self.claude_review_args()), 1)
+
+    def test_format_retry_claude_fallback_reviewer(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        for mode, code in (('malformed,success', 0), ('empty,success', 0), ('empty', 1), ('malformed', 1)):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                self.tool('ai-review', '--base', 'main', expected=code, MOCK_CODEX_LIMIT='1',
+                          MOCK_CLAUDE_REVIEW=mode, AI_SUPERVISE='1')
+                self.assertEqual(len(self.claude_review_args()), 2)
+                prompts = (self.base / 'claude-review-prompts.log').read_text().split('\n=====\n')
+                self.assertIn('FORMAT ERROR: ', prompts[1])
+                self.assertEqual(len(self.format_retry_lines()), 1)
+                if code:
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                else:
+                    review = (self.project / '.ai/reviews/current.md').read_text()
+                    self.assertIn('> **Reviewer: Claude fallback (claude-opus-5-5', review)
+                    self.helper('review-info')
+        # A plan review on the Claude fallback, too.
+        self.reset_review_fixture()
+        self.tool('ai-review', '--plan', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='empty,success', AI_SUPERVISE='1')
+        self.assertEqual(len(self.claude_review_args()), 2)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_format_retry_after_claude_fallback_attributes_the_codex_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back.
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', MOCK_CLAUDE_REVIEW='malformed', AI_SUPERVISE='1')
+        self.assertEqual(len(self.claude_review_args()), 1)
+        self.assertEqual(self.codex_calls(), 2)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertNotIn('Reviewer:', review)
+        self.assertFalse((self.project / '.ai/reviews/fallback-log.md').exists())
+        outcome = json.loads((self.base / 'host-state/outcomes.jsonl').read_text().splitlines()[-1])
+        self.assertEqual((outcome['reviewer'], outcome['mode']), ('codex', 'code'))
+        self.helper('review-info')
+
+    def test_format_retry_plan_review_by_hand(self):
+        self.ready()
+        plan = self.project / '.ai/reviews/plan.md'
+        cases = [  # MOCK_CODEX_PLAN_FORMAT, exit code, Codex plan calls, run-log outcome
+            ('malformed,ok', 0, 2, 'published'),
+            ('empty,ok', 0, 2, 'published'),
+            ('counts-lie,ok', 0, 2, 'published'),
+            ('ok', 0, 1, None),
+            ('malformed', 1, 2, 'stopped again, prior review preserved'),
+            ('mutates', 1, 1, None),
+            ('error', 1, 1, None),
+            ('malformed,mutates', 1, 2, 'stopped again, prior review preserved'),
+        ]
+        for number, (mode, code, calls, outcome) in enumerate(cases):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                (self.project / 'src.txt').write_text(f'source {number}\n')  # a new plan digest each time
+                self.commit(f'source {number}')
+                before = plan.read_bytes() if plan.exists() else None
+                logged = len(self.format_retry_lines())  # earlier lines are committed
+                self.tool('ai-review', '--plan', expected=code, MOCK_CODEX_PLAN_FORMAT=mode, AI_SUPERVISE='1')
+                self.assertEqual(self.codex_calls('codex-plan-calls'), calls)
+                # The checkout was clean for both reviewer calls (no run-log line in between).
+                self.assertEqual(set((self.base / 'codex-plan-status').read_text().split('\n')[-calls - 1:-1]),
+                                 {'clean'})
+                lines = self.format_retry_lines()[logged:]
+                if outcome:
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn(f'review format retry (plan): {outcome}', lines[0])
+                    self.assertIn('🔁 Review format retry (plan): ', self.notifications())
+                else:
+                    self.assertEqual(lines, [])
+                if code:
+                    self.assertEqual(plan.read_bytes() if plan.exists() else None, before)
+                    (self.base / 'codex-plan-status').unlink()
+                    continue
+                # Published and recorded by hand: the run-log line is in the record commit.
+                self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+                self.assertEqual(self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout.strip(),
+                                 'chore(ai): record plan review')
+                if outcome:
+                    self.assertIn('.ai/run-log.md', self.run_cmd(['git', 'show', '--name-only', '--format=']).stdout)
+                self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+                (self.base / 'codex-plan-status').unlink()
+
+    def test_format_retry_pipeline_commits_the_run_log_line_with_each_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_SUPERVISE='1',
+                  MOCK_CODEX_PLAN_FORMAT='malformed,ok', MOCK_CODEX='empty,success')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertEqual((self.codex_calls('codex-plan-calls'), self.codex_calls()), (2, 2))
+        for subject, mode in (('chore(ai): record plan review', 'plan'),
+                              ('chore(ai): record independent review', 'code')):
+            sha = self.run_cmd(['git', 'log', '-1', '--format=%H', '--fixed-strings', f'--grep={subject}']).stdout.strip()
+            shown = self.run_cmd(['git', 'show', sha, '--', '.ai/run-log.md']).stdout
+            self.assertIn(f'review format retry ({mode}): published', shown)
+            self.assertIn(f'🔁 Review format retry ({mode}): ', self.notifications())
+
+    def test_format_retry_never_for_a_malformed_recheck(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | out of scope | none |\n'])
+        self.tool('ai-review', '--recheck', MOCK_RECHECK='M1 withdrawn', AI_SUPERVISE='1')
+        self.assertEqual((self.base / 'codex-recheck-calls').read_text().count('reviewed HEAD='), 1)
+        answers = self.helper('recheck-verify').stdout
+        self.assertEqual(answers.count('\tupheld\t'), 2)
+        self.assertEqual(self.format_retry_lines(), [])
+
+    def test_review_format_check_helper_matches_publish(self):
+        report = self.base / 'report.md'
+        good = ('Overall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+                '## BLOCKER findings\nNone.\n## MAJOR findings\nNone.\n## MINOR findings\nNone.\n')
+        report.write_text(good)
+        self.helper('review-format-check', 'code', str(report))
+        self.helper('review-format-check', 'plan', str(report))
+        report.write_text(good.replace('Overall verdict: ok\n', ''))
+        self.helper('review-format-check', 'plan', str(report))
+        result = self.helper('review-format-check', 'code', str(report), expected=2)
+        self.assertEqual(result.stdout.strip(), 'Review is missing Overall verdict:')
+        report.write_text('\n')
+        self.assertIn('empty report', self.helper('review-format-check', 'plan', str(report), expected=2).stdout)
+        self.helper('review-format-check', 'code', str(self.base / 'missing.md'), expected=1)
+        self.helper('review-format-check', 'recheck', str(report), expected=1)
 
     def test_no_claude_session_may_rewrite_the_codex_review(self):
         self.ready()

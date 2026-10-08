@@ -149,11 +149,13 @@ host_commit() {
   git commit -m "$1" >/dev/null
   ai_guard_verify
 }
-# A Claude fallback review appends to the fallback log: commit it with the review record.
+# A Claude fallback review appends to the fallback log, a format retry to the run log:
+# commit them with the review record.
 review_record() {
   local paths=("$@")
   [[ -z "$(git status --porcelain --untracked-files=all -- .ai/reviews/fallback-log.md)" ]] || \
     paths+=(.ai/reviews/fallback-log.md)
+  [[ -z "$(git status --porcelain -- .ai/run-log.md)" ]] || paths+=(.ai/run-log.md)
   printf '%s\n' "${paths[@]}"
 }
 # Review is current if nothing but workflow records changed since the reviewed commit.

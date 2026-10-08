@@ -655,8 +655,10 @@ def claude_result(path, check_only=False):
 
 
 def claude_text(arguments):
-    """Write the final text of a successful `claude -p --output-format json` run to OUT."""
-    source, target = arguments
+    """Write the final text of a successful `claude -p --output-format json` run to OUT
+    (--allow-empty: blank text writes an empty OUT, for the review format check to judge)."""
+    allow_empty = '--allow-empty' in arguments
+    source, target = [argument for argument in arguments if argument != '--allow-empty']
     claude_result(source, check_only=True)
     data = json.loads(Path(source).read_text())
     denials = data.get('permission_denials') or []
@@ -668,9 +670,9 @@ def claude_text(arguments):
         print(f'Note: {len(denials)} denied reviewer tool call(s) logged in .ai/local/review-denials.log',
               file=sys.stderr)
     text = data.get('result')
-    if not isinstance(text, str) or not text.strip():
+    if not isinstance(text, str) or not (text.strip() or allow_empty):
         fail('Claude returned no text.')
-    Path(target).write_text(text.strip() + '\n')
+    Path(target).write_text(text.strip() + '\n' if text.strip() else '')
 
 
 # Read-only git subcommands a reviewer may run; every other git entry of the project's
@@ -730,14 +732,9 @@ def checkpoint_guard(arguments):
 def publish_review(arguments):
     source, head, base = arguments
     content = Path(source).read_text()
-    # Only what the pipeline relies on is mandatory; the other sections are requested by the
-    # prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
-    required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
-                '## MINOR findings')
-    for field in required:
-        if field not in content:
-            fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
-    review_counts(content)
+    error = review_format_error('code', content)
+    if error:
+        fail(f'{error.rstrip(".")}; prior review preserved. Inspect local report.')
     header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
     bind_review(head, header + content)
@@ -779,6 +776,39 @@ def review_counts(content):
             fail(f'Review counts {level}={count} but lists {len(finding_ids(content, level))} '
                  f'{level} finding IDs; each finding needs a stable ID such as M1.')
     return counts
+
+
+# Only what the pipeline relies on is mandatory; the other sections are requested by the
+# prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
+REVIEW_FIELDS = {'code': ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
+                          '## MINOR findings'),
+                 'plan': ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings')}
+
+
+def review_format_error(mode, content):
+    """The content checks of publish-review (code) and publish-plan-review (plan): the format
+    error, or None. An empty report is a format error too (ai-review retries it once)."""
+    if not content.strip():
+        return 'The reviewer returned an empty report.'
+    for field in REVIEW_FIELDS[mode]:
+        if field not in content:
+            return f"{'Plan review' if mode == 'plan' else 'Review'} is missing {field}"
+    try:
+        review_counts(content)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def review_format_check(arguments):
+    """`review-format-check plan|code REPORT`, no writes: exit 0 when publishable, exit 2 with
+    the format error on stdout; any other failure (unreadable report) exits 1."""
+    if len(arguments) != 2 or arguments[0] not in REVIEW_FIELDS:
+        fail('Usage: review-format-check plan|code REPORT')
+    error = review_format_error(arguments[0], Path(arguments[1]).read_text())
+    if error:
+        print(' '.join(error.split()))
+        sys.exit(2)
 
 
 DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
@@ -2026,10 +2056,9 @@ def plan_digest():
 def publish_plan_review(arguments):
     """Save Codex's plan review, bound to the exact spec/plan/tasks it reviewed."""
     content = Path(arguments[0]).read_text()
-    for field in ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings'):
-        if field not in content:
-            fail(f'Plan review is missing {field}; inspect the local report.')
-    review_counts(content)
+    error = review_format_error('plan', content)
+    if error:
+        fail(f'{error.rstrip(".")}; inspect the local report.')
     # HEAD in the header: a review after a revision commit is always a new report (own round),
     # even when the plan digest and the reviewer's text repeat within the same second.
     head = git('rev-parse', 'HEAD').decode().strip()
@@ -3032,6 +3061,8 @@ def main():
         print(plan_digest())
     elif command == 'publish-plan-review':
         publish_plan_review(arguments)
+    elif command == 'review-format-check':
+        review_format_check(arguments)
     elif command == 'plan-review-info':
         plan_review_info(arguments)
     elif command == 'plan-rounds':
