@@ -122,3 +122,4 @@
 | 2026-10-08T07:10Z | claude (sonnet) | T002 | DONE: signal test now gives the runner 0.5 s to take the signal before the session is released (flaky SIGINT exit 1) | targeted OK; ai-check 287 OK twice | (this commit) | flake not reproduced locally; cause inferred from timing |
 | 2026-10-08T07:04:54Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 091c80e | No merge or deployment performed |
 | 2026-10-08T07:30Z | claude (sonnet) | T002 | DONE: signal test resets SIGINT to default for the runner (background pipelines inherit it ignored); sleep removed; docs note | targeted 10 OK; ai-check 287 OK | (this commit) | SIGINT-ignored shell run not verified (denied); host gate decides |
+| 2026-10-08T07:10:55Z | runner | T002 | completed | PASS | 2a290d8 | Claude checkpointed; continuing queue |
