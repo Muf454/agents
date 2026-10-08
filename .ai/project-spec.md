@@ -53,7 +53,8 @@ the line.
   review as pending only when no Codex line of the same project covers it (matched on mode
   and reviewed HEAD), and shows the coverage. `fallback_record` inserts new rows into the
   table instead of after a later section. Covered work is never hidden by a guess: rows that
-  cannot be resolved stay pending.
+  cannot be resolved stay pending. Each log row is judged on its own: a row that is not
+  covered or cannot be resolved never drops the coverage of the other rows.
 
 ## Constraints
 - Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts`, `.ai/validate`,

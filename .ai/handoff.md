@@ -19,9 +19,9 @@ Flow chart updated (T004: outcome log and catch-up text in `agents-flow.md`)
 
 ### Covered by automated tests
 - Parallel runner with `FORCE_COLOR=3` / `PYTHON_COLORS=1`, ANSI-safe summary parsing: `test_parallel_runner_*` (T001)
-- Per-attempt model statistics with a mixed-model retry: `test_outcome_report_*` (T002)
+- Per-attempt model statistics with a mixed-model retry and old attempt-less lines: `test_outcome_report_*` (T002)
 - Re-check upheld/withdrawn totals and `reviewed_head`, line still written when the report cannot be verified: `test_outcome_recheck_*` (T003)
-- Catch-up coverage (covered, later base, other branch, plan row, unknown row, cross-project), fallback row placement: `test_outcome_catchup_*`, `test_fallback_record_*` (T004)
+- Catch-up coverage: the rule as a unit test on one mixed log (covered, merged-branch row with an older base, later base, other branch, plan row, unknown HEAD/base, escaped `\|`, a `plan` ref), one end-to-end Claude-then-Codex run, missing log / missing header, cross-project report; fallback row placement: `test_outcome_catchup_*`, `test_fallback_record_*` (T004)
 
 ## Human todos
 None.
