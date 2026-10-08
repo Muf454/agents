@@ -1,28 +1,27 @@
-<!-- Host evidence: HEAD 6deb935b69437226ad05501e4c60868feba4fc78; merge-base ba330ef04b94ee86ea8ecf3a4e8dc3ace0e6c200; saved 2026-10-08T08:38:44Z. -->
+<!-- Host evidence: HEAD 373c89c6ce828e548276a88001631ca2722383a4; merge-base c7d4deea62c4743e4212270c88ea2fa5b39bead5; saved 2026-10-08T21:27:29Z. -->
 
-> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit until 2026-10-08 12:05). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+# Independent review
 
-The larger targeted run has now finished, so the review's validation section can be completed. Everything else in the review stands unchanged.
-
-# Independent review (Claude, read-only)
-
-Overall verdict: PROCEED — the no-shell reviewer, the host-prepared context and the stopped-attempt outcome logging are implemented as specified and covered by relevant tests; one previously reported MINOR gap in the malformed-queue fallback is still open and undispositioned.
+Overall verdict: PROCEED WITH MINOR CORRECTION — the four scoped changes are implemented, with one remaining base-resolution edge case.
 Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
 
-Reviewed HEAD: `6deb935b69437226ad05501e4c60868feba4fc78`
-Supplied base and merge-base: `ba330ef04b94ee86ea8ecf3a4e8dc3ace0e6c200`
+Reviewed HEAD: `373c89c6ce828e548276a88001631ca2722383a4`  
+Supplied base and merge-base: `c7d4deea62c4743e4212270c88ea2fa5b39bead5`
 
-Inspected: `AGENTS.md`, `.ai/tasks.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/reviews/current.md` (prior Codex review at `be83ab5`), `.ai/reviews/dispositions.md`, the full diff `ba330ef..6deb935` for `scripts/ai-review`, `scripts/ai-run`, `scripts/lib/workflow.py`, `templates/.ai/prompts/claude-review.md`, `tests/test_workflow.py`, `README.md`, `docs/workflow.md`; the full current source of `scripts/ai-review` and `scripts/ai-run`; `.claude/settings.json`; `.gitignore`; `scripts/lib/common.sh` (`ai_die`, `ai_guard_verify`, `ai_limit_pause`).
+Inspected the full range, Git history, repository guidance, specification, plan, tasks, state, handoff, prior review/dispositions, relevant documentation, changed source/tests, and validation evidence. Checkout was clean.
 
 ## Validation observed/run
 
-- `.ai/local/validation.json`: **PASS**, exit 0, `2026-10-08T08:30:25Z`, head `42aef4c` (the reviewed HEAD differs from it only by the "record review handoff" bookkeeping commit). Its log `.ai/local/check-E41uuHRR.log` ends with `Ran 287 tests in 125.8s (8 shards, 287 collected) OK`.
-- Run here: `python3 -m unittest tests.test_workflow -k review_allowlist -k claude_review -k review_falls_back -k fall_back -k review_context -k review_range -k outcome -k runner_no_progress -k fix_round_count -k convergence -k triage_completion` → **49 tests OK in 224.8 s** (the T001 and T002 targeted selections plus T003's five multi-round pipeline tests).
-- Run here: `python3 -m unittest tests.test_workflow -k review_context -k review_range -k review_allowlist -k outcome` → **21 tests OK in 55.0 s** (includes the SIGTERM/SIGINT and self-kill cases).
-- Probe (under `.ai/local/review-probes/`, run through `unittest discover`): `outcome_title('T001')` against a queue that is malformed Markdown with one invalid UTF-8 byte → `UnicodeDecodeError` propagates; the valid-UTF-8 malformed control returns `'broken'`. See N7.
-- `git status --porcelain --untracked-files=all` after the review: clean.
+- Recorded validation: **PASS**, exit 0, at `2026-10-08T21:23:55Z`, HEAD `e498fe4`. Its log reports **309 tests passed**.
+- Independently verified that the validation fingerprint matches current content. Changes after that validated revision affect only state and run-log bookkeeping.
+- Ran shell syntax checks: **12 files passed**; Python AST parsing: **4 files passed**.
+- Read-only test discovery collected **309 tests**.
+- Ran `DocsConsistencyTest`: **3 tests passed**.
+- In-memory probes passed for five verdict forms, eight count-validation cases, and nine disposition-row cases.
+- `git diff --check` passed.
+- Confirmed the vault flow note contains the base-selection, startup-stop, publish-check and recovery changes, with `updated: 2026-10-08`; corresponding hub log entries exist.
 
-Limitations: no live Claude CLI run (the mock asserts invocation arguments only; the provider's enforcement of `--tools Read,Glob,Grep` is still the pending mission-control check). The vault flow chart lives outside the checkout and was not read. Ad-hoc shell probes (`python3 script.py`, `rm`) were denied in this session; the probe ran through the unittest entry point. I could not delete `.ai/local/review-probes/` myself (rm denied); the host removes it. The full `.ai/bin/ai-check` was not rerun; the recorded gate result above is the full-suite evidence.
+**Limitations:** `./scripts/ai-check` and integration tests were not rerun because they require filesystem writes. Their fixtures and assertions were inspected; execution evidence comes from the recorded gate. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -34,60 +33,54 @@ None found in the inspected scope.
 
 ## MINOR findings
 
-### N7 — An undecodable task queue still loses the stopped attempt (re-reported, undispositioned) — **demonstrated**
+### N1 — Automatically selected remote base can resolve to a different ref
 
-**Requirement:** T002 implementation notes: `outcome task` "must log even when `.ai/tasks.md` no longer parses (… or a tolerant fallback); genuine write failures stay nonfatal."
+**Requirement:** R2 requires using `refs/remotes/origin/B` when it is strictly ahead of local branch `B`. R3 requires stopping when that resolved commit is absent from HEAD.
 
-**Location:** `scripts/lib/workflow.py:2025-2039` (`outcome_title`): the first lookup catches `(ValueError, OSError)`, which includes `UnicodeDecodeError`; the heading-scan fallback at line 2033 calls `Path('.ai/tasks.md').read_text()` again and catches only `OSError`, so the same decoding error escapes on the second read.
+**Location:** `scripts/ai-pipeline:90–99`, particularly the shorthand assignment at line 94 and resolution at line 99.
 
-**Impact:** A session that leaves non-UTF-8 bytes in the queue stops the runner via `tasks check`; `on_exit` calls `task_outcome error`, the helper raises before appending, the runner prints "could not append" and closes the attempt. After repair the retry is logged as attempt 1 with `first_pass=true`, which is exactly the signal R2 wants to keep honest. Telemetry only, no data at risk.
+**Problem:** The ancestry checks use fully qualified refs, but selection sets `base_ref=origin/$base` and subsequently resolves that shorthand. Git gives a matching tag or local branch precedence over a remote-tracking ref.
 
-**Evidence:** Probe output: `control title: 'broken'`; `undecodable RAISED: UnicodeDecodeError 'utf-8' codec can't decode byte 0x96 in position 32: invalid start byte`. This is the same finding Codex reported as N7 in the review of `be83ab5` (`.ai/reviews/current.md`); `.ai/reviews/dispositions.md` has no row for that review, and T003 (added afterwards) did not touch it.
+**Impact:** A local branch or tag named `origin/main` can make `--base main` resolve an older commit while claiming to use the newer remote base. This restores the stale review range and can miss the required “moved past the branch” stop.
 
-**Recommended direction:** Read the queue as bytes in the fallback (`read_bytes().decode('utf-8', 'replace')`) or catch `ValueError` there too, returning `''` on failure. Add a regression: corrupt the queue's encoding, assert the `error` row, repair, assert attempt 2 `done` with `first_pass=false`. Record a disposition row for the `be83ab5` review so the pipeline's record is complete.
+**Evidence/reproduction:** In the new `origin_with_main()` fixture, advance remote main with `advance_origin_main()`, leave the feature branch unmerged, and create local branch `origin/main` pointing at local `main`. The ancestry check selects the remote path, but `git rev-parse 'origin/main^{commit}'` resolves the local collision. Git’s locally installed `gitrevisions` manual confirms this precedence. This collision fixture was not executed here because creating refs requires writes.
+
+**Recommended direction:** Keep `origin/main` as the display label, but resolve the automatically selected commit through `refs/remotes/origin/main`. Add a regression asserting the remote SHA and early stop despite a colliding local branch or tag.
+
+The ambiguity for explicitly supplied shorthand refs predates this batch; this finding concerns the newly introduced automatic selection.
 
 ## Missing coverage
 
-Checked against the checklist: 4 (stale results: the context is rebuilt per Claude attempt after a usage-limit pause and the `unchanged` check guards HEAD; covered by `test_claude_review_context_is_rebuilt_after_a_limit_and_removed`), 10 (irreversible operations: the only `rm -rf` targets the fixed relative path `.ai/local/review-context` after `ai_root`, and the prior review is never touched before publish; covered by the failure-before-Claude test). Items 1–3 and 5–9 do not apply to this change.
+- Ref-name collision described in N1.
+- Plan-review P10’s suggested rerun regression remains absent: advance origin to a commit already contained in the reviewed HEAD and verify reuse of the broader saved review. The unchanged `review_current` predicate permits that reuse, consistent with the explicit non-goal.
+- Suffixed disposition rows lack direct review-history and PR-body output assertions. Inspection confirms both consume the shared regex with unchanged capture groups.
+- Bold verdict-line support is implemented but lacks a dedicated regression.
 
-Not covered by tests:
-- Undecodable queue (N7).
-- An implementation-session usage-limit wait beyond `AI_LIMIT_MAX_WAIT` producing exactly one `error` row. `test_outcome_triage_runs_log_no_task_outcome` exercises limit exhaustion only for triage, where nothing must be logged; the documented `error` case for an implementation attempt is asserted nowhere (traced: `ai_limit_pause` → `ai_die` → `on_exit` with `attempt_open=yes`, `session_code` not 124/137 → `error`).
-- `since-last-review.patch` content: `test_claude_review_context_second_review_has_the_delta` asserts the file name and the prompt line, not that the patch covers `last_head..HEAD` rather than the full range.
-- The re-check context's own failure branches (`review-range` disagreeing with `recheck-prepare`, missing merge-base in the header). Traced: both read the HEAD from `review_info_values()` on the same file (`workflow.py:896`, `:1238`), so a mismatch is unreachable today.
-- Live provider enforcement of the tool list (pending, listed in the handoff).
+Earlier accepted plan concerns about interrupted stages, detailed recovery diagnostics, publish-hook detection, and the base-resolution matrix have relevant tests. P9’s incorrect expected ref is corrected. FL-12 remains deferred, and its recovery parser is unchanged.
 
 ## Security concerns
 
-- Reviewer tool surface: `claude -p … --tools Read,Glob,Grep --allowedTools Read Glob Grep --strict-mcp-config --mcp-config '{"mcpServers":{}}' --setting-sources project` (`scripts/ai-review:125-130`). No Bash, Edit, Write, Agent, WebFetch or MCP tool is offered, and `review_allowlist` ignores `.ai/permissions.allow` entirely (`workflow.py:676-682`; `test_review_allowlist_is_read_glob_grep_whatever_the_project_allows` seeds `Bash(bash *)`, `Bash(python3 *)`, `Edit`, `Write` and still gets the three tools). This closes the command-argument routes the plan rounds found.
-- Residual, pre-existing and acknowledged: Read, Glob and Grep accept absolute paths, so a reviewer could read files outside the checkout and quote them into a review that is published in the PR. The only control is the prompt line in `claude_attempt`; `.claude/settings.json` has no `Read(...)` deny rules. Not counted as a finding of this change (the previous policy had the same exposure plus Bash), but a deny list for obvious secret paths is worth a follow-up.
-- Host git context uses `--no-ext-diff --no-textconv` (`scripts/ai-review:85`, `:97`), so a project's diff/textconv drivers cannot run during preparation. Every step is checked and `context_fail` runs before `claude` (`:76-79`); `test_claude_review_context_failure_stops_before_claude` proves no invocation and a byte-identical, still-bound prior review.
-- `on_exit` only calls the project helper after re-verifying the gate digest (`scripts/ai-run:90`), so a run that stopped because the gate changed never executes a possibly modified `workflow.py`.
+No new security defect found in the inspected changes. Count validation still precedes report replacement; review bindings, triage scope checks and re-check protections remain intact. The advanced-base recovery arm escalates before any recovery Claude session.
 
 ## Architecture concerns
 
-- The Codex prompts are unchanged in content (the `ending`/`rows` split reassembles the same strings); the Claude prompt is a parallel string naming context files. This duplicates the scope sentence per mode in three places; acceptable now, a fourth mode would justify a small builder.
-- Attempt tracking is a three-variable state machine in bash (`track_attempt`, `attempt_open`, `session_code`). Traced every exit between `track_attempt=yes` (`ai-run:316`) and the outcome calls: `claude_session` deaths (timeout, error, limit beyond budget) → `on_exit`; post-session `ai_branch`/`tasks check`/`ai_guard_verify` deaths → `on_exit` (`error`, or nothing after a gate change); DONE/BLOCKED/other → explicit outcome before any later `ai_die`. No path logs twice, none exits 0 with the attempt open. Stops after a completed session but before its outcome (run-time limit before post-task validation, secret-looking files, unchecked BLOCKED work) are classified `error`; that matches the spec's "any stop in between" wording but slightly overstates session failures in the tuning data.
-- `review-range` reuses `review_info_values` (binding check) and the shared `review_header` regex, as the plan required; `current_review_rounds` goes through the same function.
-- T003 touches only the test harness: `COMMAND_TIMEOUT` 25 s, `PIPELINE_TIMEOUT` 120 s via `tool('ai-pipeline', …)`, both scaled by `AI_TEST_TIMEOUT_SCALE`. Direct `subprocess` calls elsewhere in the tests keep their own bounds (15 s, 20 s, 60 s, 120 s), none of which are pipeline runs. The five previously timing-out pipeline tests passed here in the 49-test run. The claim that the range `git log --stat` is bounded by the PR's own commits holds for code and re-check mode; plan mode uses `-n 20`.
-- Process gap: the Codex review of `be83ab5` has no disposition rows at all, although the template asks for one per BLOCKER/MAJOR and MINOR "where relevant". The MINOR was relevant enough to re-surface here.
+Changes remain small and localized, add no dependencies, and preserve installed gate files. Verdict extraction is shared between publication and PR rendering. Flow chart updated.
 
-Pre-existing defects excluded from the counts: Read access outside the checkout (above); `.ai/local/` ignore-status is assumed by the `unchanged` check (as it was for the old probe directory and the review temp files).
+Pre-existing defect excluded from counts: the prior review’s N7 queue-decoding issue remains in `outcome_title`; its fallback still catches only `OSError`. This batch does not change that code.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Run the pending live fallback review (`AI_REVIEWER=claude .ai/bin/ai-review --base master` in a scratch project) and confirm in the session JSON that only Read/Glob/Grep tool uses appear and that `.ai/local/review-context/` is gone afterwards. With Bash absent from `--tools`, a shell attempt cannot show up in `.ai/local/review-denials.log` as the handoff suggests; the evidence is the absence of such tool calls in `review-*.claude.json`, not a denial line.
-- After merge, approve `setup-project --upgrade --apply` for the installed copies; this repository's own `.ai/prompts/claude-review.md` (the frozen copy that produced this very prompt) still carries the probe instructions until then.
-- Confirm the vault flow chart (`agents-flow.md`) was updated for both the reviewer policy and the stopped-attempt lifecycle; not verifiable from the checkout.
+- Confirm the stop message and notification in a real checkout whose remote base advanced. Merge the base only after interrupted triage/re-check processing finishes and the pipeline stops.
+- After merge, approve installed-copy upgrades separately.
 
 ### Covered by automated tests
 
-- Reviewer arguments, fixed allowlist, saved `.allowlist`: `test_review_falls_back_to_claude_at_the_codex_limit`, `test_review_allowlist_is_read_glob_grep_whatever_the_project_allows`, `test_claude_review_denials_and_allowlist_are_recorded` (passed here).
-- Context per mode, delta, rebuild after limit, removal, failure before Claude, `review-range`: the six `test_claude_review_context_*` tests and `test_review_range_prints_head_and_merge_base` (passed here).
-- Stopped attempts numbered, validation once, 137, SIGTERM/SIGINT, malformed queue retry, zero budget, triage, limit pause: the nine `test_outcome_*` tests (passed here).
-- CI headroom: `test_fix_round_count_ignores_agent_subject_*`, `test_convergence_*`, `test_triage_completion_respects_the_fix_round_limit` (passed here under the 120 s bound).
-- Should be added: undecodable queue (N7) and an implementation-session limit-exhaustion `error` row.
+- Review format acceptance/rejection and prior-report preservation.
+- Base-selection matrix and unchanged PR target.
+- Startup and publish-path stops, recovery diagnostics, interrupted-stage completion, and merge/rerun behavior.
+- Suffixed triage rows and re-check binding.
+- Add the ref-collision regression from N1 and saved-review reuse coverage from P10.
 
 This review does not constitute human acceptance.
