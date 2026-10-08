@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest d545e7c240c63337edd97eefbdf5511efc40a410716a49b80f2c051e1ca3cecb; saved 2026-10-07T22:43:47Z. -->
+<!-- Plan review of plan digest e319a0ea6e4cc1378ea7620adf2af4d3eb9b8c57d43d8ad03c077f8d68acba50; saved 2026-10-08T05:08:00Z. -->
 
 # Plan review
 
-Overall verdict: CHANGES REQUIRED — make crash logging idempotent, require successful context preparation, and correct T003’s model.
-Finding counts: BLOCKER=0 MAJOR=3 MINOR=1
+Overall verdict: CHANGES REQUIRED — crash recovery needs to handle incomplete and not-yet-durable outcome writes.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
 
-Reviewed HEAD: `ae9bd39065ef9b5ea22a85cea55c5d1d32b665b4`.
+Reviewed HEAD: `a7956da09f0237964ad174ac2a9b7c61de2bbbea`.
 
-Inspected repository guidance, spec, plan, tasks, state, handoff, previous review dispositions, relevant scripts and helpers, test fixtures, validation entry points, reviewer prompts, workflow documentation, reference patches, and the vault flow chart. This is a review of the proposed implementation; the changes have not been implemented.
+Inspected repository guidance, spec, plan, tasks, state, handoff, relevant scripts/helpers, tests, validation entry points, reviewer prompts, documentation, previous review and reference material. Implementation remains pending.
 
 ## BLOCKER findings
 
@@ -15,80 +15,72 @@ None.
 
 ## MAJOR findings
 
-- P1: **Appending an outcome and removing its marker is not crash-safe or idempotent.**
+- P1: **An incomplete outcome append can swallow the recovery row.**
 
-  **Location:** `.ai/tasks.md:96`; `.ai/project-spec.md:28`; `scripts/lib/workflow.py:2049` and `:2069`.
+  **Location:** `.ai/tasks.md:103`, `.ai/tasks.md:108`; `scripts/lib/workflow.py:2020`.
 
-  T003 prescribes two separate operations: append an outcome, then remove the marker. A SIGKILL between them leaves both the outcome and its marker. The next reconciliation appends another `crashed` outcome for the same attempt. Reconciliation itself has the same append-before-remove window.
+  T003 covers crashes after complete appends but does not specify recovery from a partially persisted final JSONL record. A single append followed by `fsync` does not protect against power loss before that `fsync` completes.
 
-  The existing outcome helper always appends and calculates the attempt number from previous rows; it has no attempt identity or duplicate check. Consequently, a previously recorded `done` can be followed by a spurious `crashed`, inflating attempts and making the report treat the completed task as unfinished. This violates R2’s single-outcome requirement. Atomic marker replacement alone also does not establish durability across the explicitly supported power-loss case.
+  If the partial record lacks its terminating newline, reconciliation appends `crashed` directly onto it. The existing reader skips the resulting malformed line, losing the recovery outcome too. Reconciliation then removes the marker, so the subsequent successful attempt can again appear as a first-time pass. A partial UTF-8 character can also prevent the reader from decoding the entire log.
 
-  **Concrete plan change:** Give each attempt a unique ID stored in both its marker and outcome. Make finalization and reconciliation recognize an already recorded ID and remove the stale marker without appending again. Specify durable ordering for successful marker/outcome writes before starting the session or removing the marker. Add fault-injection tests at the boundary after a normal outcome append and after a reconciliation append; repeated recovery must preserve exactly one outcome and its original result.
+  **Evidence:** an in-memory probe using the actual `read_outcomes` function retained a recovery row after a complete preceding line, but discarded it after an incomplete preceding line.
 
-- P2: **T003 uses Sonnet for locking-sensitive crash recovery.**
+  **Concrete plan change:** specify safe handling of incomplete final records before appending recovery outcomes, including partial UTF-8. Preserve complete historical rows and coordinate repair with other writers because the log is shared across checkouts. Add boundary-state tests with a truncated record and a truncated multibyte character; repeated recovery must retain exactly one readable outcome for the attempt.
 
-  **Location:** `.ai/tasks.md:90` and `:96`; `.ai/current-plan.md:6`; `CLAUDE.md`, task-model selection rules.
+  The reader weakness is pre-existing; the gap concerns R2’s newly promised power-loss recovery.
 
-  T003 establishes whether another runner is live, places reconciliation behind the checkout lock, and coordinates atomic persistent state with outcome logging. This is concurrency and locking work. The explicit `Model: sonnet` conflicts with the required Opus assignment for that risk category.
+- P2: **Finding an existing outcome does not prove it is durable.**
 
-  **Concrete plan change:** Set T003 to `Model: opus` and update the corresponding model in `.ai/current-plan.md`. Keep its locking and crash-boundary tests in the task.
+  **Location:** `.ai/tasks.md:103`, `.ai/tasks.md:108`; `.ai/project-spec.md:40`.
 
-- P3: **Context preparation needs explicit failure handling before the reviewer starts.**
+  The duplicate-ID path returns success without appending, and reconciliation removes an already-logged marker. Neither path explicitly requires syncing the existing outcome log first.
 
-  **Location:** `.ai/tasks.md:19`; `scripts/ai-review:152`.
+  A helper can be killed after flushing a complete row into the kernel cache but before `fsync`. Its successor can read that row, recognize the ID, and durably remove the marker. A subsequent power loss can then lose the unsynced outcome while retaining the marker deletion. This violates the required outcome-before-marker-removal durability order.
 
-  T001 specifies the context commands and cleanup but does not require checking each preparation failure. The existing caller invokes `claude_attempt "$prompt" || code=$?`. Bash suppresses `errexit` inside functions called in that conditional context, including nested functions. A straightforward `review_context` containing consecutive commands therefore can continue after a failed Git command or file write and launch Claude with incomplete context.
+  The proposed tests construct existing rows through the helper’s completed, fsynced append, so they cannot catch this boundary.
 
-  A read-only shell reproduction using that call structure confirmed that a failing context command continued to the simulated session and returned status zero. With Bash removed from the reviewer, the reviewer cannot regenerate the missing diff independently.
-
-  **Concrete plan change:** Require explicit failure checks for every mandatory context command and write. On failure, remove partial context, stop before invoking Claude, and preserve the prior review. Add a test that fails a context-generation Git command after preflight and asserts no Claude invocation, no publication, and cleanup.
+  **Concrete plan change:** require the duplicate-ID success path to establish durability of the existing outcome before allowing marker removal. Add a test observing the synchronization order when the row already exists: outcome-log synchronization must precede unlinking and syncing the marker directory. Use test-side mocks rather than production crash hooks.
 
 ## MINOR findings
 
-- P4: **The malformed-queue retry criterion assumes the wrong attempt number for its named fixture.**
+- P3: **The README’s outcome contract would remain outdated.**
 
-  **Location:** `.ai/tasks.md:65` and `:77`; `tests/test_workflow.py:1084`.
+  **Location:** `.ai/tasks.md:70`, `.ai/tasks.md:140`; `README.md:397`.
 
-  The existing test runs five modes against the same checkout, branch, and T001, repairing and committing between modes. With the planned logging, `bad-format` follows four recorded attempts. Its subsequent successful retry cannot be attempt 2 in that fixture; it would be attempt 6.
+  T002/T004 update the workflow documentation and flow chart, but the README still enumerates only `done`, `blocked`, `validation_failed`, and `no_checkpoint`. It would omit the new stopped/crashed results and attempt identity.
 
-  **Concrete plan change:** Put the malformed-queue-and-retry case in a fresh fixture if asserting attempts 1 and 2, or assert that recovery increments the preceding attempt number by one. Retain `first_pass=false`.
+  **Concrete plan change:** include the README’s “Outcome log” section in the documentation updates, covering the new results, attempt IDs, and crash reconciliation.
 
-## Missing test coverage
+## Missing coverage
 
-Add the crash-boundary and context-preparation failure tests identified above. The proposed tests otherwise cover the main reviewer modes, timeout codes, interruptions, malformed results, validation failures, usage-limit retries, and triage exclusion.
+Add the incomplete-record and existing-but-unsynced-record tests above. The planned tests otherwise cover the principal review modes, context preparation failures, timeout/interruption outcomes, malformed queues, retry numbering, triage exclusion, and checkout-lock rejection.
 
-The handoff’s “Covered by automated tests” list currently describes planned coverage; it is not implementation evidence.
+## Security and architecture
 
-## Security concerns
+The shell-free reviewer design addresses the accepted command-execution finding. Explicit models fit the planned risks.
 
-Removing Bash, Edit, Write, and inherited runner permissions addresses the accepted reviewer command-execution finding. The plan appropriately retains publication bindings and checkout checks.
+Read access remains broader than the checkout; the prompt restriction does not provide filesystem isolation. The planned live Claude CLI check remains pending.
 
-Read access remains broader than the checkout; the proposed prompt restriction is an instruction, not filesystem isolation. The pending live Claude CLI check remains necessary to verify actual tool enforcement.
-
-## Architecture concerns
-
-The changes reuse existing host-state and review-publication mechanisms without adding dependencies. The new attempt marker needs an idempotent finalization contract, as described in P1.
-
-The deferred outcome-report findings remain outside this review’s implementation scope.
+The host-state design reuses existing mechanisms without new dependencies. Its crash guarantees need the additional boundaries identified above.
 
 ## Validation observed
 
 - Python syntax parsing passed for four source/test files.
 - Bash syntax checks passed for 13 scripts and validation entry points.
 - Test discovery collected 272 cases; test bodies were not executed.
-- A reduced shell reproduction confirmed conditional function invocation suppresses `errexit`.
-- HEAD and tracked/untracked Git status remained unchanged.
+- The read-only, in-memory outcome-reader probe reproduced P1.
+- HEAD and Git status remained unchanged.
 
-Not run: `./scripts/ai-check`, `.ai/bin/ai-check`, integration tests, or live Claude CLI checks. Those checks require filesystem writes unavailable in this read-only review. No files were modified and no network or MCP integrations were invoked.
+Not run: `./scripts/ai-check`, `.ai/bin/ai-check`, integration tests, or live CLI checks. They require filesystem writes unavailable in this review. No files were modified and no network/MCP integrations were invoked.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-Perform the planned live Claude reviewer tool-enforcement check in a disposable fixture. Installed-copy upgrades remain subject to human approval.
+Complete the planned live Claude reviewer tool-enforcement check in a disposable fixture. Installed-copy upgrades remain under human control.
 
 ### Covered by automated tests
 
-Implement the proposed regression coverage plus P1’s interrupted-finalization tests and P3’s failed-context test.
+Implement the planned regressions and the two additional crash-boundary cases above.
 
 This review is not human acceptance.
