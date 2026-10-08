@@ -339,6 +339,20 @@ another branch starts at zero. A branch without a host record (legacy) is initia
 at pipeline start (`fix-rounds init`, before any session) from commits whose subject is
 exactly `chore(ai): record review triage`.
 
+Extra fix round (FL-04 R3): `fix-rounds record` also stores the verified review the round
+triaged (`{commit, review_head, review_digest, blockers, majors}`; legacy bare hashes stay
+valid, without counts). `fix-rounds trend BASE` prints BLOCKER+MAJOR of the last two
+recorded rounds reachable in `BASE..HEAD` and of the current verified review (`x y z`); it
+fails with `insufficient history` when either round has no counts (legacy) or the current
+review is the one the last round triaged. When the limit is reached exactly, with
+`AI_SUPERVISE=1`, no reservation in this run and x > y > z, the pipeline reserves the extra
+round for the current review digest in the run manifest (`run-manifest extra-round-reserve`,
+once per run: a resume keeps it, a human restart resets it), notifies
+`🔁 Extra fix round: findings falling (x → y → z)`, opens the triage stage and appends a
+run-log line that the triage commit carries; a resume that finds the reservation for the
+current review runs that round. Anything else (`AI_SUPERVISE=0`, flat or rising counts,
+fewer than two counted rounds, the reservation used) ends with the draft PR as before.
+
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,

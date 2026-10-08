@@ -197,6 +197,11 @@ if 'TRIAGE CONTRACT' in prompt:
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
                              if mode == 'triage-mixed-reject' else '')
+                          # MOCK_CODEX=counts: the further MAJOR findings share the fix task.
+                          + ''.join(f'| {finding} | accepted | fixture defect confirmed | {new_id} |\n'
+                                    for finding in re.findall(r'^- (M\d+):',
+                                                              pathlib.Path('.ai/reviews/current.md').read_text(), re.M)
+                                    if finding != 'M1' and os.environ.get('MOCK_CODEX') == 'counts')
                           + (convergence + '\n' if convergence else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
@@ -353,13 +358,21 @@ if mode == 'counts-lie':
     sys.exit(0)
 major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
 two = mode == 'two-major-once' and count == 1
+majors = 2 if two else 1 if major else 0
+if mode == 'counts':
+    # MOCK_CODEX_MAJORS='3,2,1': MAJOR findings of review call 1, 2, 3; the last one repeats.
+    series = [int(n) for n in os.environ['MOCK_CODEX_MAJORS'].split(',')]
+    majors = series[min(count, len(series)) - 1]
+    major = majors > 0
 path.write_text("""# Independent review
 Overall verdict: """ + ('one major finding' if major else 'no demonstrated findings in inspected fixture') + """
-Finding counts: BLOCKER=0 MAJOR=""" + ('2' if two else '1' if major else '0') + """ MINOR=0
+Finding counts: BLOCKER=0 MAJOR=""" + str(majors) + """ MINOR=0
 ## BLOCKER findings
 None found.
 ## MAJOR findings
-""" + ('- M1: fixture defect at T001.txt:1.' + ('\n- M2: second defect, out of scope.' if two else '') if major else 'None found.') + """
+""" + ('- M1: fixture defect at T001.txt:1.' + ('\n- M2: second defect, out of scope.' if two else '')
+       + ''.join(f'\n- M{n}: fixture defect {n}.' for n in range(2, majors + 1) if mode == 'counts')
+       if major else 'None found.') + """
 ## MINOR findings
 None found.
 ## Missing test coverage
@@ -4345,6 +4358,150 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.fix_rounds(), 1)
         self.run_cmd(['git', 'checkout', '-q', 'feature/test'])
         self.assertEqual(self.fix_rounds(), 1)
+
+    # ---------------------------------------------------------------- extra fix round (T008)
+    # Round 3+ triage needs a Convergence line; the extra round is round 3 here.
+    CONVERGENCE = 'Convergence: findings fall each round; the fix tasks address them'
+
+    def falling_run(self, majors, *args, expected=0, **env):
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '2', *args,
+                         expected=expected, **dict({'AI_SUPERVISE': '1', 'MOCK_CODEX': 'counts',
+                                                    'MOCK_CODEX_MAJORS': majors, 'MOCK_CONVERGENCE': self.CONVERGENCE},
+                                                   **env))
+
+    def pr_draft(self):
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertEqual(len(create), 1)
+        return '--draft' in create[0]
+
+    def fix_round_store(self):
+        return next((self.base / 'host-state').rglob('fix-rounds-*.json'))
+
+    def triage_commits(self):
+        return self.run_cmd(['git', 'log', '--reverse', '--format=%H', '--grep',
+                             '^chore(ai): record review triage$']).stdout.split()
+
+    def test_extra_fix_round_falling_counts_get_one_round_then_draft(self):
+        self.ready()
+        self.add_origin()
+        result = self.falling_run('4,3,2,1')
+        self.assertIn('Review triage, round 3 (Claude)', result.stdout)
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertEqual(self.fix_rounds(), 3)
+        notes = self.notifications()
+        self.assertEqual(notes.count('🔁 Extra fix round'), 1)
+        self.assertIn('🔁 Extra fix round: findings falling (4 → 3 → 2)', notes)
+        # Still falling (3 → 2 → 1) at the next limit, but the run's extra round is used: draft.
+        self.assertIn('Fix round limit (2) reached', result.stdout)
+        self.assertTrue(self.pr_draft())
+        # The third triage commit carries the run-log line; the records hold verified counts.
+        third = self.triage_commits()[2]
+        self.assertIn('extra fix round 3: findings falling (4 → 3 → 2)',
+                      self.run_cmd(['git', 'show', third, '--', '.ai/run-log.md']).stdout)
+        records = json.loads(self.fix_round_store().read_text())
+        self.assertEqual([r['majors'] for r in records], [4, 3, 2])
+        self.assertEqual([r['commit'] for r in records], self.triage_commits())
+
+    def test_extra_fix_round_clean_review_after_it_opens_a_ready_pr(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('3,2,1,0')
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertIn('🔁 Extra fix round: findings falling (3 → 2 → 1)', self.notifications())
+        self.assertFalse(self.pr_draft())
+
+    def assert_no_extra_round(self, majors, **env):
+        self.ready()
+        self.add_origin()
+        result = self.falling_run(majors, **env)
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.fix_rounds(), 2)
+        self.assertIn('Fix round limit (2) reached', result.stdout)
+        self.assertNotIn('Extra fix round', self.notifications())
+        self.assertTrue(self.pr_draft())
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+
+    def test_extra_fix_round_flat_counts_and_imitated_subjects_draft(self):
+        self.assert_no_extra_round('2,2,2', MOCK_TRIAGE_SUBJECT='chore(ai): record review triage')
+
+    def test_extra_fix_round_rising_counts_draft(self):
+        self.assert_no_extra_round('1,2,3')
+
+    def test_extra_fix_round_unsupervised_draft(self):
+        self.assert_no_extra_round('3,2,1', AI_SUPERVISE='0')
+
+    def test_extra_fix_round_trend_history_boundaries(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                  MOCK_CODEX='counts', MOCK_CODEX_MAJORS='4,3,2,1', MOCK_CONVERGENCE=self.CONVERGENCE)
+        self.assertEqual(self.helper('fix-rounds', 'trend', 'main').stdout.split(), ['3', '2', '1'])
+        store = self.fix_round_store()
+        counted = json.loads(store.read_text())
+        legacy = [r['commit'] for r in counted]
+
+        def trend(records, rounds=3):
+            store.write_text(json.dumps(records))
+            self.assertEqual(self.fix_rounds(), rounds)  # both shapes still count
+            result = self.helper('fix-rounds', 'trend', 'main', expected=None)
+            return result.stdout.split() if result.returncode == 0 else result.stderr.strip()
+        insufficient = 'Error: insufficient history'
+        # Round 1 triaged by the old toolkit, rounds 2-3 with counts: only 2-3 and the current review.
+        self.assertEqual(trend([legacy[0], counted[1], counted[2]]), ['3', '2', '1'])
+        # Only round 3 counted.
+        self.assertEqual(trend([legacy[0], legacy[1], counted[2]]), insufficient)
+        # A legacy record between counted ones, or as the most recent one.
+        self.assertEqual(trend([counted[0], legacy[1], counted[2]]), insufficient)
+        self.assertEqual(trend([counted[0], counted[1], legacy[2]]), insufficient)
+        # The current review must not be the one the last round already triaged.
+        head = self.helper('review-info').stdout.split()[0]
+        self.assertEqual(trend([counted[0], counted[1], dict(counted[2], review_head=head)]), insufficient)
+        # A record no longer reachable from HEAD is skipped: the last two reachable rounds count.
+        self.assertEqual(trend([counted[0], counted[1], dict(counted[2], commit='f' * 40)], rounds=2),
+                         ['4', '3', '1'])
+        self.assertEqual(trend([legacy[0], counted[1], dict(counted[2], commit='f' * 40)], rounds=2), insufficient)
+        store.write_text(json.dumps(counted))
+        # Another branch at the same commits has no host records: commit subjects alone (also
+        # agent-chosen ones) give legacy rounds without counts, never an extra round.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.assertEqual(self.fix_rounds(), 3)
+        self.assertEqual(self.helper('fix-rounds', 'trend', 'main', expected=1).stderr.strip(), insufficient)
+
+    def test_extra_fix_round_reservation_once_per_run(self):
+        self.ready()
+        self.start_run('feature/test')
+        first, second = 'a' * 64, 'b' * 64
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+        self.helper('run-manifest', 'extra-round-reserve', first)
+        self.helper('run-manifest', 'extra-round-reserve', first)  # a resume: same review, no error
+        self.assertIn('already used', self.helper('run-manifest', 'extra-round-reserve', second, expected=1).stderr)
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), first)
+        self.helper('run-manifest', 'extra-round-reserve', 'not-a-digest', expected=1)
+        self.start_run('feature/test')  # a human (re)start resets it
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+
+    def test_extra_fix_round_crash_after_reservation_resumes_it_once(self):
+        self.ready()
+        notify = self.base / 'notify-crash'
+        notify.write_text(f'printf "%s\\n" "$1" >> "{self.notify_log}"\n'
+                          f'case "$1" in *"Extra fix round"*)\n'
+                          f'  [ -e "{self.base}/notify-crashed" ] || {{ touch "{self.base}/notify-crashed"; '
+                          'kill -9 "$(cat .ai/local/pipeline.active)"; }\n'
+                          'esac\n')
+        crash = dict(AI_AUTO_RECOVER='1', AI_NOTIFY_CMD=f'bash "{notify}" "$1"')
+        crashed = self.falling_run('3,2,1', '--no-pr', expected=None, **crash)
+        self.assertEqual(crashed.returncode, -9)
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.open_stage(), '')  # reserved, the stage not opened yet
+        self.assertNotEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_CLAUDE='',
+                  MOCK_CODEX='counts', MOCK_CODEX_MAJORS='3,2,1', MOCK_CONVERGENCE=self.CONVERGENCE, **crash)
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertEqual(self.fix_rounds(), 3)
+        self.assertEqual(self.notifications().count('🔁 Extra fix round'), 1)
+        self.assertIn('reserved before a restart',
+                      self.run_cmd(['git', 'show', self.triage_commits()[2], '--', '.ai/run-log.md']).stdout)
+        self.assertIn('🏁 FINISHED', self.notifications())
 
     def test_triage_completion_source_leftovers_escalate_and_commit_nothing(self):
         self.ready()

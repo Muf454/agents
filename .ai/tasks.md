@@ -240,7 +240,7 @@ Mission control 2026-10-08 12:45: the first T007 session died at 12:32 without a
 2026-10-08 (third session): reconciled both WIP checkpoints (1ce016d, 959276f) against the criteria and finished them. 27 `supervised_plan_resume` tests cover crash points 1–3 (session edits; before/after the preamble commit; before/after the revision commit; after the record; after stage-clear; reservation without stage at limit 1; stage without reservation; plan review without its round record), each by human rerun and by `ai-recover` (watchdog path): one record, one session, two plan reviews (last clean), stage closed, tasks complete. Point 4: count 3, models opus, opus, escalation ×2, Convergence line. Point 5: decision survives after the record and after stage-clear, both paths, no plan/revision/implementation/recovery call; answer + hand `ai-review --plan` → implementation. Restart after the limit reviews first; approved settings survive a config change. Defects fixed: `ai-run` accepts exactly the uncommitted host section (`start-plan-dispositions --pending`, test `test_plan_dispositions_pending_accepts_only_the_host_header`); `ai-recover` closes a committed plan-revision stage when escalating a stored decision (T005 test updated); notification "(in the previous run)" instead of "round 0/N". Mission control's BLOCKED defect (above) is fixed: `crash_kill` now kills only processes whose cwd is the fixture project (and whose name is `ai-run`, or `ai-pipeline`/`ai-recover` for the pipeline pid), and its walk stops at the first ancestor outside the fixture, so it can never reach the host runner. Test `test_supervised_plan_resume_crash_kill_stays_inside_the_fixture`: a fake `ai-run`/`ai-pipeline` outside the fixture survives, inside it is killed (the old name-only walk would kill the outside `ai-run`). Evidence: targeted 29 tests OK (245 s); `.ai/bin/ai-check` OK (343 tests). docs/workflow.md, handoff, vault flow chart and log updated.
 
 ## T008 — Extra fix round from host-verified falling counts
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -268,6 +268,19 @@ scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-run, tests/test_workflo
 `python3 -m unittest tests.test_workflow -k extra_fix_round`; `python3 -m unittest tests.test_workflow -k fix_round_count`; `.ai/bin/ai-check`
 
 ### Result / notes
+2026-10-08: `workflow.py`: fix-round records are dicts `{commit, review_head, review_digest,
+blockers, majors}` (legacy bare hashes accepted; `fix_round_commits()` for `stage-verify`/count);
+`fix-rounds trend BASE`; `run-manifest extra-round-reserve DIGEST` / `extra-round` (manifest key
+`extra_fix_round`, reset by `start`). `ai-pipeline`: at `fixes == max_fix_rounds` with
+`AI_SUPERVISE=1`, a reservation for the current review digest resumes the round; else no
+reservation and x > y > z → reserve, notify, then stage-set and an `ai_log` line (committed by the
+triage commit). Reservation and notification come before stage-set so a crash there leaves a
+clean checkout. Tests: 8 `extra_fix_round` tests (new mock `MOCK_CODEX=counts`) — OK; `-k
+fix_round_count -k stage` OK (35 incl. extra); `.ai/bin/ai-check` OK (351 tests). Docs: README,
+`docs/workflow.md`, vault `agents-flow.md` (diagram edge, bullet, notification row).
+Note: "agent commits imitating subjects" is covered as: they never add counted records (flat
+test with imitated subjects; another branch inits legacy records from subjects → insufficient
+history).
 
 ## T009 — Retry a malformed plan or code review once
 Status: TODO

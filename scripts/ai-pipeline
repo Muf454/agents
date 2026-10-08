@@ -473,14 +473,36 @@ while true; do
     break
   fi
   fixes=$(ai_helper fix-rounds count "$base_sha") || stop review
+  extra=''
   if (( fixes >= max_fix_rounds )); then
-    unresolved=1
-    printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
-    break
+    # Supervised, one extra round per run when the host-verified BLOCKER+MAJOR counts fall
+    # strictly over the last two rounds and this review; reserved before its triage starts.
+    extra_reserved=$(ai_helper run-manifest extra-round) || stop review
+    digest=$(sha256sum .ai/reviews/current.md | cut -d' ' -f1)
+    if [[ "$AI_SUPERVISE" == 1 && "$fixes" == "$max_fix_rounds" && "$extra_reserved" == "$digest" ]]; then
+      extra='resumed'
+    elif [[ "$AI_SUPERVISE" == 1 && "$fixes" == "$max_fix_rounds" && -z "$extra_reserved" ]] && \
+         trend=$(ai_helper fix-rounds trend "$base_sha" 2>/dev/null); then
+      read -r trend_x trend_y trend_z <<< "$trend"
+      if (( trend_x > trend_y && trend_y > trend_z )); then
+        ai_helper run-manifest extra-round-reserve "$digest" || stop review
+        extra="$trend_x → $trend_y → $trend_z"
+        # Before the stage opens: a crash here leaves a clean checkout and the reservation.
+        ai_notify "🔁 Extra fix round: findings falling ($extra)"
+      fi
+    fi
+    if [[ -z "$extra" ]]; then
+      unresolved=1
+      printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
+      break
+    fi
   fi
   step "Review triage, round $(( fixes + 1 )) (Claude)"
   # Recorded before triage starts, so a stop or crash anywhere in it resumes this stage.
   ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
+  # The triage commit carries this line (the run log is a triage record).
+  [[ -z "$extra" ]] || ai_log none "extra fix round $(( fixes + 1 )): findings falling (${extra/#resumed/reserved before a restart})" 'n/a' \
+    "beyond --max-fix-rounds $max_fix_rounds; once per run"
   complete_stage
   verdict=$(ai_helper triage-check --fresh) || stop triage
   reconcile_disputes

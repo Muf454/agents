@@ -21,7 +21,11 @@ T007 done (crash/resume scenarios for every plan-revision crash point, by human 
 watchdog recovery; fixes: `ai-run` resumes a host section left uncommitted by a crash
 (`start-plan-dispositions --pending`), `ai-recover` closes a committed plan-revision stage when it
 escalates a stored decision, the notification after a restart closed the previous run's revision
-reads "(in the previous run)"). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+reads "(in the previous run)").
+T008 done (extra fix round: `fix-rounds record` stores the triaged review's head, digest and
+BLOCKER/MAJOR counts, legacy bare hashes still read; `fix-rounds trend BASE`; `run-manifest
+extra-round-reserve|extra-round`; `ai-pipeline` gives one extra round per supervised run at the
+limit when x > y > z, notifies `🔁 Extra fix round: findings falling (x → y → z)`). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -112,6 +116,17 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   host header pending check `test_plan_dispositions_pending_accepts_only_the_host_header`;
   simulated crashes never kill a process outside the test fixture (the host runner)
   `test_supervised_plan_resume_crash_kill_stays_inside_the_fixture`.
+- T008 extra fix round: falling 4 → 3 → 2 with `--max-fix-rounds 2` gets one extra round,
+  notification, run-log line in the triage commit, then draft at the next limit although still
+  falling `test_extra_fix_round_falling_counts_get_one_round_then_draft`; clean review after it →
+  ready PR `test_extra_fix_round_clean_review_after_it_opens_a_ready_pr`; flat counts with agent
+  commits imitating the triage subject `test_extra_fix_round_flat_counts_and_imitated_subjects_draft`;
+  rising `test_extra_fix_round_rising_counts_draft`; `AI_SUPERVISE=0`
+  `test_extra_fix_round_unsupervised_draft`; legacy round 1 + counted 2–3 boundary, only round 3
+  counted, legacy record between/last, same review as the last round, unreachable record,
+  another branch `test_extra_fix_round_trend_history_boundaries`; reservation once per run, reset
+  by a restart `test_extra_fix_round_reservation_once_per_run`; crash right after the
+  reservation resumes into that round once `test_extra_fix_round_crash_after_reservation_resumes_it_once`.
 
 ## Human todos
 None beyond "Needs you" above.

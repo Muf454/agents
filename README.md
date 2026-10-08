@@ -266,7 +266,10 @@ tmux new -s my-app-ai
    touch workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
-   from commit messages). Codex's report is never edited by Claude:
+   from commit messages). Supervised (`AI_SUPERVISE=1`), a run gets one extra fix round
+   when the host-verified BLOCKER+MAJOR counts fell strictly over the last two rounds and
+   the current review (`🔁 Extra fix round: findings falling (x → y → z)`); otherwise the
+   PR is a draft as before. Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
    whose counts disagree with its listed finding IDs is rejected.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and

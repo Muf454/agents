@@ -1124,6 +1124,19 @@ def run_manifest(arguments):
         print(len(reserved))
     elif action == 'revision-count':
         print(len(manifest_revisions(data)))
+    elif action == 'extra-round-reserve':
+        # The one extra fix round of this run, reserved for one implementation review BEFORE its
+        # triage starts: a resume keeps it (for that review only), a human (re)start resets it.
+        if len(arguments) != 2 or not re.fullmatch(r'[0-9a-f]{64}', arguments[1]):
+            fail('Usage: run-manifest extra-round-reserve DIGEST')
+        reserved = manifest_extra_round(data)
+        if reserved and reserved != arguments[1]:
+            fail('fix rounds: the extra fix round of this run is already used')
+        if not reserved:
+            data['extra_fix_round'] = arguments[1]
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'extra-round':
+        print(manifest_extra_round(data))
     elif action == 'stage-clear':
         branch = current_branch()
         if branch:
@@ -1189,7 +1202,15 @@ def manifest_revisions(data):
     return list(reserved)
 
 
-# Stage name -> the digest it is bound to: the implementation review a triage answers, the
+def manifest_extra_round(data):
+    """The review digest the extra fix round of this run is reserved for, or ''."""
+    reserved = data.get('extra_fix_round', '')
+    if not isinstance(reserved, str) or not re.fullmatch(r'(?:[0-9a-f]{64})?', reserved):
+        fail('The run manifest extra fix round reservation is unreadable; rerun ai-pipeline --approved by hand.')
+    return reserved
+
+
+# Stage name ->the digest it is bound to: the implementation review a triage answers, the
 # plan review a plan revision answers.
 STAGE_DIGESTS = {'triage': 'review_digest', 'plan-revision': 'report_digest'}
 STAGE_LABELS = {'triage': 'Triage stage', 'plan-revision': 'Plan revision stage'}
@@ -1253,7 +1274,7 @@ def stage_verify(arguments):
         fail(f'Triage stage: {error}')
     # Only a host-recorded triage commit closes the stage; a commit subject alone never does.
     commits = git('log', '--format=%H', f'{start}..HEAD').decode().split()
-    if not set(commits) & set(fix_round_records() or []):
+    if not set(commits) & set(fix_round_commits()):
         print('pending')
         return
     if git('status', '--porcelain', '--untracked-files=all').strip():
@@ -1498,6 +1519,23 @@ def fix_rounds_store():
     return binding_dir() / f'fix-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
 
 
+def fix_round_record_valid(record):
+    """A legacy bare commit hash, or {commit, review_head, review_digest, blockers, majors}."""
+    if isinstance(record, str):
+        return re.fullmatch(r'[0-9a-f]{40,64}', record) is not None
+    return (isinstance(record, dict)
+            and isinstance(record.get('commit'), str) and re.fullmatch(r'[0-9a-f]{40,64}', record['commit']) is not None
+            and isinstance(record.get('review_head'), str)
+            and re.fullmatch(r'[0-9a-f]{7,40}', record['review_head']) is not None
+            and isinstance(record.get('review_digest'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', record['review_digest']) is not None
+            and all(type(record.get(key)) is int and record[key] >= 0 for key in ('blockers', 'majors')))
+
+
+def fix_round_commit(record):
+    return record if isinstance(record, str) else record['commit']
+
+
 def fix_round_records():
     path = fix_rounds_store()
     if not path.exists():
@@ -1506,10 +1544,13 @@ def fix_round_records():
         records = json.loads(path.read_text())
     except ValueError:
         records = None
-    if not isinstance(records, list) or not all(
-            isinstance(r, str) and re.fullmatch(r'[0-9a-f]{40,64}', r) for r in records):
+    if not isinstance(records, list) or not all(fix_round_record_valid(r) for r in records):
         fail('The host fix round records are unreadable; inspect them before continuing.')
     return records
+
+
+def fix_round_commits():
+    return [fix_round_commit(record) for record in fix_round_records() or []]
 
 
 def write_fix_rounds(records):
@@ -1519,20 +1560,25 @@ def write_fix_rounds(records):
 
 
 def fix_rounds(arguments):
-    """record COMMIT: the host triage commit of one round. init BASE: a branch without a host
-    record (legacy) starts from its commits whose subject is exactly the host subject; later
-    commits, whatever their subject, never count. count BASE: recorded rounds in BASE..HEAD."""
+    """record COMMIT: the host triage commit of one round, with the verified review it triaged
+    (head, digest, BLOCKER/MAJOR counts). init BASE: a branch without a host record (legacy)
+    starts from its commits whose subject is exactly the host subject (bare hashes, no counts);
+    later commits, whatever their subject, never count. count BASE: recorded rounds in
+    BASE..HEAD. trend BASE: BLOCKER+MAJOR of the last two reachable rounds and of the current
+    review ('x y z'), or fails 'insufficient history'."""
     action = arguments[0]
     if action == 'record':
         commit = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
         if git('log', '-1', '--format=%s', commit).decode().strip() != TRIAGE_COMMIT:
             fail(f'{commit} is not a host triage commit.')
         records = fix_round_records() or []
-        if commit not in records:
-            write_fix_rounds(records + [commit])
+        if commit not in [fix_round_commit(record) for record in records]:
+            head, blockers, majors, _ = review_info_values()
+            write_fix_rounds(records + [{'commit': commit, 'review_head': head, 'review_digest': review_digest(),
+                                         'blockers': blockers, 'majors': majors}])
         return
-    if action not in ('init', 'count'):
-        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE')
+    if action not in ('init', 'count', 'trend'):
+        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE | trend BASE')
     base = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
     history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
     records = fix_round_records()
@@ -1540,9 +1586,19 @@ def fix_rounds(arguments):
         records = [line.split(' ', 1)[0] for line in reversed(history)
                    if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
         write_fix_rounds(records)
+    reachable = {line.split(' ', 1)[0] for line in history}
+    rounds = [record for record in records if fix_round_commit(record) in reachable]
     if action == 'count':
-        reachable = {line.split(' ', 1)[0] for line in history}
-        print(sum(1 for record in records if record in reachable))
+        print(len(rounds))
+    elif action == 'trend':
+        # Only the last two rounds of this branch, both host-recorded with verified counts (a
+        # legacy round or one from an older toolkit never stands in), then the current review.
+        last = rounds[-2:]
+        head, blockers, majors, _ = review_info_values()
+        if len(last) < 2 or not all(isinstance(record, dict) for record in last) \
+                or last[-1]['review_head'] == head or last[-1]['review_digest'] == review_digest():
+            fail('insufficient history')
+        print(*(record['blockers'] + record['majors'] for record in last), blockers + majors)
 
 
 def dispute_records():
