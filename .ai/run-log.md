@@ -119,3 +119,4 @@
 | 2026-10-08T05:20Z | claude (opus) | T001 | DONE: Claude reviewer Read/Glob/Grep only, host-prepared `.ai/local/review-context/` per mode, `review-range`, docs/prompt/flow chart | targeted 25 OK; ai-check 279 OK | (this commit) | handoff gained `## Flow chart`; live CLI check pending (mission control) |
 | 2026-10-08T05:23:17Z | runner | T001 | completed | PASS | 86a99f8 | Claude checkpointed; continuing queue |
 | 2026-10-08T05:36:19Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38dcdaa | No merge or deployment performed |
+| 2026-10-08T07:10Z | claude (sonnet) | T002 | DONE: signal test now gives the runner 0.5 s to take the signal before the session is released (flaky SIGINT exit 1) | targeted OK; ai-check 287 OK twice | (this commit) | flake not reproduced locally; cause inferred from timing |

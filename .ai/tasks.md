@@ -53,7 +53,7 @@ Done 2026-10-08. `scripts/ai-review`: `claude_attempt` runs `--tools Read,Glob,G
 Pending (mission control): live Claude CLI check that the reviewer can run no Bash command, write no file, and reads `.ai/local/review-context/`.
 
 ## T002 — Outcome logged for stopped task attempts (M2)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T001
 Model: sonnet
 

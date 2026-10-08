@@ -2688,6 +2688,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     else:
                         self.fail('the session never started')
                     runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
+                    # let the runner take the signal before the session ends, however loaded the host is
+                    time.sleep(0.5)
                     (local / 'mock-release').touch()
                     runner.communicate(timeout=20)
                 finally:
