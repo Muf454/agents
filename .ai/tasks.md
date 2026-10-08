@@ -104,7 +104,7 @@ scripts/lib/workflow.py, tests/test_workflow.py
 Done. `workflow.py`: `PLAN_REVISION_RECORDS`, host preamble, `start-plan-dispositions BASE`, `plan-dispositions-check`, `plan-revision-scope START` (shares `records_scope` with `triage-scope`), `plan_round_current` (also backs `plan-rounds current`), `bounded_questions` (for T004's record). Deviation for T004: the check is `plan-dispositions-check --since START --base BASE [--fresh] [--questions]`; `--base` is required because the round number (header, Convergence from round 3) must come from host records in `BASE..HEAD`, never from the agent-editable header. `--fresh` adds the TODO/task-status rules (as `triage-check`); `--questions` prints only the bounded questions (`P1: <question>`, `<br>` collapsed), no counts line. Every present row is validated and counted (MINOR rows too). The section also needs its host `Plan review HEAD:` line (an ancestor of HEAD); trailing blank lines above the header are ignored in the byte comparison (the writer separates sections with a blank line). Mock codex gained `MOCK_CODEX_PLAN_MINOR`. 7 new `test_plan_dispositions_*` tests pass; `.ai/bin/ai-check` OK, 290 tests (first run hit one tempdir-cleanup race, `.git/objects` not empty at teardown, not an assertion; rerun clean).
 
 ## T004 — ai-run --revise-plan: prompt, read/plan-only allowlist, host commit with log entry, outcome record
-Status: TODO
+Status: DONE
 Dependencies: T001, T003
 Model: opus
 
@@ -135,6 +135,7 @@ scripts/ai-run, scripts/lib/workflow.py, templates/.ai/prompts/plan-revision.md,
 `python3 -m unittest tests.test_workflow -k revise_plan`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done. `ai-run --revise-plan [--since] [--base]` (exclusive with `--triage`; `--base` only with it); `claude_session PROMPT MODEL TOOLS ALLOWED...`. `workflow.py`: `plan-revision-allowlist` (Read/Glob/Grep + `Edit(./…)` of spec, plan, tasks, plan-dispositions, handoff: the host owns state.md/run-log.md, so they are in scope but not editable), `plan-revisions record BASE COMMIT --accepted --rejected --needs-human` (stdin questions re-bounded; subject, ancestry and committed plan.md = current report checked; idempotent per report), `plan-revisions revised|decision` (0/1/2), outcome kind `plan_revision`. New prompt `templates/.ai/prompts/plan-revision.md` (this repo's frozen `.ai/prompts` needs a human `setup-project --upgrade`). Choices: model is `--model` if given, else `opus` (AI_MODEL is ignored here); the state line is `blocked` when needs-human > 0, else `planning`; the "already revised" check uses `plan-revisions revised` (exit 2 → fail closed). Decision with an unverifiable report fails closed only when the LAST reachable revision record had needs-human rows. 9 `revise_plan` tests pass; `.ai/bin/ai-check` OK, 299 tests. Not done here: live check with real Claude (mission control, per the task notes).
 
 ## T005 — Plan-revision stage, per-run reservation and terminal recovery rules
 Status: TODO

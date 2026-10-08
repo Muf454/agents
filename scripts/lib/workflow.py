@@ -2298,6 +2298,121 @@ def plan_revision_scope(arguments):
     records_scope(arguments[0], PLAN_REVISION_RECORDS, 'Plan revision')
 
 
+# The records a revision session may edit (Edit only, no Write or Bash): the host owns state.md
+# and run-log.md and writes the section header itself.
+PLAN_REVISION_EDITABLE = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', PLAN_DISPOSITIONS,
+                          '.ai/handoff.md')
+PLAN_REVISION_SUBJECT = 'chore(ai): record plan revision'
+
+
+def plan_revision_allowlist(arguments):
+    """--allowedTools entries for the plan revision session, one per line: read tools and Edit
+    of the editable plan records. Nothing from .ai/permissions.allow, no Bash, no Write."""
+    print('\n'.join(['Read', 'Glob', 'Grep'] + [f'Edit(./{path})' for path in PLAN_REVISION_EDITABLE]))
+
+
+def plan_revisions_store():
+    """Host-side plan revision records of the current branch (agents can't write here)."""
+    branch = current_branch()
+    if not branch:
+        fail('Plan revisions need a branch (detached HEAD).')
+    return binding_dir() / f'plan-revisions-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def plan_revision_records():
+    """The stored revision records ([] when there is no store yet); unreadable data fails."""
+    path = plan_revisions_store()
+    if not path.exists():
+        return []
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    keys = {'commit', 'report_digest', 'round', 'accepted', 'rejected', 'needs_human', 'questions'}
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and set(r) == keys and isinstance(r['commit'], str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['commit'])
+            and isinstance(r['report_digest'], str) and re.fullmatch(r'[0-9a-f]{64}', r['report_digest'])
+            and all(isinstance(r[k], int) and not isinstance(r[k], bool) and r[k] >= 0
+                    for k in ('round', 'accepted', 'rejected', 'needs_human'))
+            and isinstance(r['questions'], str) for r in records):
+        fail('The host plan revision records are unreadable; inspect them before continuing.')
+    return records
+
+
+def is_ancestor(commit):
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def plan_revisions_record(arguments):
+    """record BASE COMMIT --accepted A --rejected R --needs-human H (questions on stdin): the
+    outcome of the host revision commit for the current plan review, in one write."""
+    usage = 'Usage: plan-revisions record BASE COMMIT --accepted A --rejected R --needs-human H'
+    if len(arguments) != 8 or arguments[2::2] != ['--accepted', '--rejected', '--needs-human'] or \
+            not all(re.fullmatch(r'\d{1,4}', value) for value in arguments[3::2]):
+        fail(usage)
+    base, commit = arguments[:2]
+    accepted, rejected, needs_human = (int(value) for value in arguments[3::2])
+    commit = git('rev-parse', '--verify', f'{commit}^{{commit}}').decode().strip()
+    if git('log', '-1', '--format=%s', commit).decode().strip() != PLAN_REVISION_SUBJECT or not is_ancestor(commit):
+        fail(f'{commit} is not a host plan revision commit.')
+    number, digest = plan_round_current(base)
+    if report_digest(committed_file(commit, str(PLAN_REVIEW))) != digest:
+        fail(f'{commit} does not hold the current plan review.')
+    # Re-bounded here too: only this short text ever reaches stop messages and notifications.
+    lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+    questions = '\n'.join(' '.join(line.split())[:QUESTION_CAP] for line in lines[:QUESTION_LIMIT + 1])
+    records = plan_revision_records()
+    if any(r['report_digest'] == digest and is_ancestor(r['commit']) for r in records):
+        return
+    plan_revisions_store().parent.mkdir(parents=True, exist_ok=True)
+    atomic(plan_revisions_store(), json.dumps(records + [{
+        'commit': commit, 'report_digest': digest, 'round': number, 'accepted': accepted,
+        'rejected': rejected, 'needs_human': needs_human, 'questions': questions}], indent=2) + '\n')
+
+
+def plan_revision_lookup():
+    """(record for the verified current plan.md or None, report verified?, last reachable
+    record or None). Raises on an unreadable store."""
+    reachable = [r for r in plan_revision_records() if is_ancestor(r['commit'])]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else None
+    if content is None or not verified_plan_review(content):
+        return None, False, reachable[-1] if reachable else None
+    digest = report_digest(content)
+    return next((r for r in reversed(reachable) if r['report_digest'] == digest), None), True, \
+        reachable[-1] if reachable else None
+
+
+def plan_revisions(arguments):
+    """record ... | revised | decision. revised: exit 0 when the verified current plan review
+    already has a revision record, 1 when not. decision: exit 0 and print the stored questions
+    when that record holds needs-human rows (the human answers, commits and runs ai-review
+    --plan, which makes a new report and clears it), 1 when not. Both exit 2 on an unreadable
+    store, and when the report does not verify while the last revision asked the human."""
+    action = arguments[0] if arguments else ''
+    if action == 'record':
+        plan_revisions_record(arguments[1:])
+        return
+    if action not in ('revised', 'decision') or len(arguments) != 1:
+        fail('Usage: plan-revisions record BASE COMMIT ... | revised | decision')
+    try:
+        record, verified, last = plan_revision_lookup()
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f'Error: {error}', file=sys.stderr)
+        sys.exit(2)
+    if not verified:
+        if last and last['needs_human'] > 0:
+            print('Error: the plan review does not match the report ai-review published, and the last '
+                  'plan revision is waiting for your decision; inspect .ai/reviews/plan.md.', file=sys.stderr)
+            sys.exit(2)
+        sys.exit(1)
+    if record is None or (action == 'decision' and record['needs_human'] == 0):
+        sys.exit(1)
+    if action == 'decision':
+        print(record['questions'])
+
+
 RISK_TITLE = re.compile(
     r'\bRLS\b|row[- ]level|\bauth(?:n|z|entication|enticate|orization|orisation|orize|orise)?\b|'
     r'permission|\bpolic(?:y|ies)\b|\block(?:s|ing|ed)?\b|lock order|concurren|deadlock|race condition|'
@@ -2392,7 +2507,8 @@ def read_outcomes(paths):
 
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
-    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
+    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
+    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)"""
     kind, *rest = arguments
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
@@ -2420,6 +2536,9 @@ def outcome(arguments):
                 record.update(blocker=counts[0], major=counts[1], minor=counts[2])
             except (OSError, ValueError):
                 pass
+    elif kind == 'plan_revision':
+        round_number, result, model, seconds = rest
+        record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
     else:
         fail(f'Unknown outcome kind: {kind}')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2773,6 +2892,10 @@ def main():
         plan_dispositions_check(arguments)
     elif command == 'plan-revision-scope':
         plan_revision_scope(arguments)
+    elif command == 'plan-revision-allowlist':
+        plan_revision_allowlist(arguments)
+    elif command == 'plan-revisions':
+        plan_revisions(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':

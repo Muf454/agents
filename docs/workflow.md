@@ -219,7 +219,7 @@ count|current BASE` read the number; `plan-history BASE [--count]` renders the e
 BLOCKER/MAJOR findings paired with their sections of `.ai/reviews/plan-dispositions.md`. History
 is context only and never approves, counts or skips anything.
 
-Plan-review round sections (helpers only; no caller yet). `workflow.py start-plan-dispositions
+Plan-review round sections (used by `ai-run --revise-plan`, below). `workflow.py start-plan-dispositions
 BASE` appends `## Plan review round <n> (report <digest>)`, a `Plan review HEAD:` line and an
 empty table to `.ai/reviews/plan-dispositions.md` (creating it with a host preamble), unless the
 last section already is that header. `plan-dispositions-check --since START --base BASE [--fresh]
@@ -234,6 +234,38 @@ needs_human=h`; `--questions` prints at most 3 needs-human questions, one line o
 characters each, plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
 START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
+
+Plan revision (`ai-run --approved --revise-plan [--since COMMIT] [--base REF] [--model M]`; no
+pipeline caller yet). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE,
+syncs and reads the round (`plan-rounds current BASE`, BASE = merge-base with `--base`, default
+`main`) and refuses a report that already has a revision record (`this plan review was already
+revised; review again (ai-review --plan)`). When the section already validates (an interrupted
+revision), it records it without a session; otherwise it appends the section, commits it as
+`chore(ai): open plan dispositions`, and runs one Claude session (default model `opus`) with
+`--tools Read,Glob,Grep,Edit` and `--allowedTools` from `workflow.py plan-revision-allowlist`
+(Read, Glob, Grep, and `Edit(./…)` of spec, plan, tasks, plan-dispositions and handoff; nothing
+from `.ai/permissions.allow`, no Bash or Write). The prompt is `.ai/prompts/plan-revision.md`
+plus the host `REVISION CONTRACT` (round, section header, editable files, the Convergence rule
+from round 3, "do not commit") and `PREVIOUS PLAN ROUNDS`; git context the session cannot fetch
+itself (plan history, recent diffs of the plan records) is written to the ignored
+`.ai/local/revision-context/` and removed afterwards. Afterwards the host checks that
+`plan.md` and the gate are byte-identical, the scope, `tasks check` and `plan-dispositions-check
+--fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
+needs-human h`) and the state line, `git add` of the plan revision records, `git commit
+--allow-empty -m 'chore(ai): record plan revision'`, the gate check, and ONE host record
+`plan-revisions record BASE HEAD --accepted a --rejected r --needs-human h` (bounded questions on
+stdin) in `plan-revisions-<branch hash>.json`: `{commit, report_digest, round, accepted,
+rejected, needs_human, questions}`. Nothing writes to the checkout after the commit, so a
+following `ai-review --plan` starts on a clean checkout. The outcome log gets a `plan_revision`
+line (not part of `ai-status --outcomes`).
+
+`plan-revisions revised` exits 0 when the verified current plan review has a reachable revision
+record, 1 when not; `plan-revisions decision` exits 0 and prints the stored questions when that
+record has needs-human rows, 1 when not. Both exit 2 when the store is unreadable, or when the
+plan review does not verify while the last revision is waiting for a human decision (fail
+closed); with no store, or no outstanding decision, an invalid report takes the normal review
+path. A needs-human decision clears only with a new report: answer the question in the plan
+records, commit, and run `ai-review --plan` by hand.
 
 ## Pipeline contract (`ai-pipeline`)
 

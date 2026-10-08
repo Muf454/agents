@@ -75,6 +75,41 @@ if 'CLAUDE REVIEWER' in prompt:
                 '## MINOR findings\nNone.\n')
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],'result':text}))
     sys.exit(0)
+if 'REVISION CONTRACT' in prompt:
+    # A plan revision session: Read/Glob/Grep/Edit only, never commits (it has no shell).
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'revision-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
+    with open(state / 'revision-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    assert pathlib.Path('.ai/local/revision-context/plan-history.md').exists(), 'no revision context'
+    mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
+    review = pathlib.Path('.ai/reviews/plan.md').read_text()
+    majors = review.split('## MAJOR findings')[1].split('## MINOR findings')[0]
+    ids = re.findall(r'^- (P\d+):', majors, re.M)
+    section = pathlib.Path('.ai/reviews/plan-dispositions.md')
+    tasks_file = pathlib.Path('.ai/tasks.md')
+    rows = ''
+    for number, finding in enumerate(ids):
+        if mode == 'revise-needs-human' and number == 0:
+            rows += f'| {finding} | needs-human | ' + os.environ.get('MOCK_QUESTION', 'Should the rollback keep option A or switch to B?') + ' | |\n'
+        elif mode in ('revise-reject', 'revise-needs-human', 'revise-touch-source', 'revise-edit-plan-review'):
+            rows += f'| {finding} | rejected | the plan covers it in current-plan.md:12 | |\n'
+        else:
+            text = tasks_file.read_text()
+            new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
+            tasks_file.write_text(text.rstrip('\n') + '\n\n' + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id))
+            rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
+    if os.environ.get('MOCK_CONVERGENCE'):
+        rows += os.environ['MOCK_CONVERGENCE'] + '\n'
+    section.write_text(section.read_text() + rows)
+    if mode == 'revise-touch-source':
+        with open(os.environ.get('MOCK_SOURCE_PATH', 'src.txt'), 'a') as f: f.write('# not allowed in a plan revision\n')
+    if mode == 'revise-edit-plan-review':
+        pathlib.Path('.ai/reviews/plan.md').write_text(review.replace('MAJOR=', 'MAJOR=0 was '))
+    if mode == 'revise-error':
+        print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+        sys.exit(0)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+    sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
 assert '--strict-mcp-config' in args
@@ -1888,6 +1923,195 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                               self.helper('plan-revision-scope', start, expected=1).stderr)
                 file.write_text(original)
         self.helper('plan-revision-scope', start)
+
+    def revise_ready(self, findings='P1|Gap in tests'):
+        """A MAJOR plan review recorded by hand; returns HEAD (the revision's START)."""
+        self.ready()
+        self.plan_round(findings, 1)
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def revise(self, *args, expected=0, **env):
+        return self.tool('ai-run', '--approved', '--revise-plan', *args, expected=expected, **env)
+
+    def revision_commits(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines().count('chore(ai): record plan revision')
+
+    def revisions(self, action, expected):
+        return self.helper('plan-revisions', action, expected=expected)
+
+    def revision_args(self):
+        return [json.loads(line) for line in (self.base / 'revision-args.log').read_text().splitlines()]
+
+    def test_revise_plan_accept_commits_once_and_leaves_a_clean_checkout(self):
+        start = self.revise_ready()
+        self.revisions('revised', 1)
+        self.revisions('decision', 1)  # fresh install: no store, nothing outstanding
+        self.revise()
+        section = (self.project / '.ai/reviews/plan-dispositions.md').read_text()
+        self.assertTrue(section.startswith('# Plan review dispositions (Claude)'))  # host preamble, file absent at START
+        self.assertIn('| P1 | accepted | the plan lacks this test | T002 |', section)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.run_cmd(['git', 'log', '--format=%s', f'{start}..HEAD']).stdout.splitlines(),
+                         ['chore(ai): record plan revision', 'chore(ai): open plan dispositions'])
+        committed = self.run_cmd(['git', 'show', 'HEAD', '--', '.ai/run-log.md']).stdout
+        self.assertIn('plan revised (round 1): accepted 1, rejected 0, needs-human 0', committed)
+        records = json.loads(next((self.base / 'host-state').rglob('plan-revisions-*.json')).read_text())
+        self.assertEqual(len(records), 1)
+        self.assertEqual({k: records[0][k] for k in ('round', 'accepted', 'rejected', 'needs_human', 'questions')},
+                         {'round': 1, 'accepted': 1, 'rejected': 0, 'needs_human': 0, 'questions': ''})
+        self.assertEqual(records[0]['commit'], self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.revisions('revised', 0)
+        self.revisions('decision', 1)
+        self.assertFalse((self.project / '.ai/local/revision-context').exists())
+        outcomes = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        self.assertEqual([(o['kind'], o['round'], o['result'], o['model']) for o in outcomes
+                          if o['kind'] == 'plan_revision'], [('plan_revision', 1, 'revised', 'opus')])
+        # Session boundary: read tools and Edit of the plan records only, no shell, no project allowlist.
+        (call,) = self.revision_args()
+        self.assertEqual(call[call.index('--tools') + 1], 'Read,Glob,Grep,Edit')
+        self.assertEqual(call[call.index('--model') + 1], 'opus')
+        allowed = call[call.index('--allowedTools') + 1:call.index('--setting-sources')]
+        editable = {'.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md',
+                    '.ai/reviews/plan-dispositions.md', '.ai/handoff.md'}
+        for entry in allowed:
+            self.assertNotIn('Bash', entry)
+            self.assertNotIn('Write', entry)
+            self.assertNotIn('ai-check', entry)
+            self.assertNotIn('validate', entry)
+            if entry.startswith('Edit'):
+                self.assertRegex(entry, r'^Edit\(\./[^*]+\)$')
+                self.assertIn(entry[7:-1], editable)
+            else:
+                self.assertIn(entry, ('Read', 'Glob', 'Grep'))
+        prompt = (self.base / 'revision-prompts.log').read_text()
+        self.assertIn('REVISION CONTRACT: This is plan review round 1', prompt)
+        self.assertIn('Do not commit; the host validates the section and commits it.', prompt)
+        self.assertNotIn('Convergence:', prompt.split('REVISION CONTRACT')[1])
+        # The same report again: refused, no second commit or record.
+        result = self.revise(expected=1)
+        self.assertIn('this plan review was already revised; review again (ai-review --plan)', result.stderr)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the refused run's stop line
+        self.tool('ai-review', '--plan')  # starts: no "Commit the plan before reviewing it"
+        self.revisions('revised', 1)
+
+    def test_revise_plan_reject_only_changes_only_the_dispositions(self):
+        start = self.revise_ready('P1|Gap in tests;P2|Unclear rollback')
+        self.revise(MOCK_CLAUDE='revise-reject')
+        changed = self.run_cmd(['git', 'diff', '--name-only', start, 'HEAD']).stdout.split()
+        self.assertEqual(sorted(changed), ['.ai/reviews/plan-dispositions.md', '.ai/run-log.md', '.ai/state.md'])
+        self.assertIn('plan revised (round 1): accepted 0, rejected 2, needs-human 0',
+                      (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual(self.helper('tasks', 'count').stdout.strip(), '1')
+
+    def test_revise_plan_needs_human_record_and_decision(self):
+        self.revise_ready('P1|Rollback choice;P2|Gap in tests')
+        question = ('Should the rollback keep  option A <br> or switch to B? ' * 20)[:1000]
+        result = self.revise(MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION=question)
+        self.assertIn('Your decision is needed:', result.stdout)
+        self.assertIn('accepted 0, rejected 1, needs-human 1', (self.project / '.ai/run-log.md').read_text())
+        self.assertIn('Phase: blocked', (self.project / '.ai/state.md').read_text())
+        lines = self.revisions('decision', 0).stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('P1: Should the rollback keep option A or switch to B?'), lines[0])
+        self.assertLessEqual(len(lines[0]), 300)
+        store = next((self.base / 'host-state').rglob('plan-revisions-*.json'))
+        self.assertEqual(json.loads(store.read_text())[0]['questions'], lines[0])
+        # Outstanding decision with forged or missing evidence fails closed.
+        review = self.project / '.ai/reviews/plan.md'
+        original = review.read_text()
+        review.write_text(original.replace('Rollback choice', 'Nothing to decide'))
+        self.assertIn('waiting for your decision', self.revisions('decision', 2).stderr)
+        review.unlink()
+        self.revisions('decision', 2)
+        review.write_text(original)
+        good = store.read_text()
+        store.write_text('{not json')
+        self.revisions('decision', 2)
+        self.revisions('revised', 2)
+        store.write_text(json.dumps([dict(json.loads(good)[0], needs_human='1')]))
+        self.revisions('decision', 2)
+        store.write_text(good)
+        self.revisions('decision', 0)
+        # The human answers, commits, and reviews again by hand: the new report clears it.
+        (self.project / '.ai/current-plan.md').write_text('Rollback: option B (human decision).\n')
+        self.commit('answer the plan question')
+        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS='P1|Another gap')
+        self.revisions('decision', 1)
+
+    def test_revise_plan_forged_report_without_a_decision_takes_the_normal_path(self):
+        self.revise_ready()
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('forged report')
+        self.revisions('decision', 1)  # no store: the normal invalid-report path handles it
+        self.revisions('revised', 1)
+        self.assertIn('does not match the report ai-review published', self.revise(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the stopped run's log line
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')  # AI_SUPERVISE=0: reviews again
+        self.revisions('decision', 1)
+
+    def revise_out_of_bounds(self, message, **env):
+        self.revise_ready()
+        self.assertIn(message, self.revise(expected=1, **env).stderr)
+        self.assertEqual(self.revision_commits(), 0)
+        self.revisions('revised', 1)
+
+    def test_revise_plan_touching_source_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('Plan revision changed files outside workflow records: src.txt',
+                                  MOCK_CLAUDE='revise-touch-source')
+
+    def test_revise_plan_editing_the_plan_review_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('A Claude session modified .ai/reviews/plan.md', MOCK_CLAUDE='revise-edit-plan-review')
+
+    def test_revise_plan_touching_a_gate_file_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('Approved workflow gate changed during this run',
+                                  MOCK_CLAUDE='revise-touch-source', MOCK_SOURCE_PATH='.ai/validate')
+
+    def test_revise_plan_resumes_an_uncommitted_complete_section_without_a_session(self):
+        start = self.revise_ready()
+        # The session wrote its rows (it never commits), then the run died before the host commit.
+        self.assertIn('Claude session failed', self.revise(expected=1, MOCK_CLAUDE='revise-error').stderr)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        result = self.revise()  # no --since: START = HEAD, which already holds the section header
+        self.assertIn('already complete; recording the revision', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        self.revisions('revised', 0)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.helper('plan-revision-scope', start)
+
+    def test_revise_plan_preconditions_and_round_three_contract(self):
+        self.revise_ready()
+        self.assertIn('exclusive', self.tool('ai-run', '--approved', '--triage', '--revise-plan', expected=1).stderr)
+        self.assertIn('--base only applies', self.tool('ai-run', '--approved', '--base', 'main', expected=1).stderr)
+        prompt = self.project / '.ai/prompts/plan-revision.md'
+        saved = prompt.read_text()
+        prompt.unlink()
+        self.commit('drop the prompt')
+        self.assertIn('setup-project --upgrade', self.revise(expected=1).stderr)
+        prompt.write_text(saved)
+        self.commit('restore the prompt')
+        # Rounds 1 and 2 answered, round 3 needs a Convergence line in its own section.
+        self.revise(MOCK_CLAUDE='revise-reject')
+        self.plan_round('P1|Gap in tests', 2)
+        self.revise(MOCK_CLAUDE='revise-reject')
+        self.plan_round('P1|Gap in tests', 3)
+        self.assertIn('Plan review round 3 needs a Convergence: line',
+                      self.revise(expected=1, MOCK_CLAUDE='revise-reject').stderr)
+        self.assertIn('redesign the area as a whole', (self.base / 'revision-prompts.log').read_text().split('=== PROMPT ===')[-1])
+        self.assertEqual(self.revision_commits(), 2)
+        # Resume with the missing line: an uncommitted complete section is recorded without a session.
+        section = self.project / '.ai/reviews/plan-dispositions.md'
+        section.write_text(section.read_text() + 'Convergence: none — one gap, redesigned in T001\n')
+        self.revise()
+        self.assertEqual(self.revision_commits(), 3)
+        self.assertEqual(len(self.revision_args()), 3)
+        self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
 
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')

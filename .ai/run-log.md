@@ -123,3 +123,4 @@
 | 2026-10-08T08:55:45Z | runner | T002 | completed | PASS | e751cfe | Claude checkpointed; continuing queue |
 | 2026-10-08T09:06:21Z | claude (opus) | T003 | start-plan-dispositions, plan-dispositions-check (--base required), plan-revision-scope in workflow.py; docs/workflow.md; 7 tests | ai-check OK (290 tests; one earlier tempdir-cleanup race) | (this commit) | |
 | 2026-10-08T09:09:17Z | runner | T003 | completed | PASS | fcd1112 | Claude checkpointed; continuing queue |
+| 2026-10-08T09:40:00Z | claude (opus) | T004 | ai-run --revise-plan (Read/Glob/Grep/Edit session, host commit with run-log line, plan-revisions record/revised/decision), plan-revision.md prompt, plan_revision outcome; docs/workflow.md; 9 tests | ai-check OK (299 tests) | (this commit) | this repo's .ai/prompts needs setup-project --upgrade (human) |
