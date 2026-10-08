@@ -138,7 +138,7 @@ scripts/ai-run, scripts/lib/workflow.py, templates/.ai/prompts/plan-revision.md,
 Done. `ai-run --revise-plan [--since] [--base]` (exclusive with `--triage`; `--base` only with it); `claude_session PROMPT MODEL TOOLS ALLOWED...`. `workflow.py`: `plan-revision-allowlist` (Read/Glob/Grep + `Edit(./…)` of spec, plan, tasks, plan-dispositions, handoff: the host owns state.md/run-log.md, so they are in scope but not editable), `plan-revisions record BASE COMMIT --accepted --rejected --needs-human` (stdin questions re-bounded; subject, ancestry and committed plan.md = current report checked; idempotent per report), `plan-revisions revised|decision` (0/1/2), outcome kind `plan_revision`. New prompt `templates/.ai/prompts/plan-revision.md` (this repo's frozen `.ai/prompts` needs a human `setup-project --upgrade`). Choices: model is `--model` if given, else `opus` (AI_MODEL is ignored here); the state line is `blocked` when needs-human > 0, else `planning`; the "already revised" check uses `plan-revisions revised` (exit 2 → fail closed). Decision with an unverifiable report fails closed only when the LAST reachable revision record had needs-human rows. 9 `revise_plan` tests pass; `.ai/bin/ai-check` OK, 299 tests. Not done here: live check with real Claude (mission control, per the task notes).
 
 ## T005 — Plan-revision stage, per-run reservation and terminal recovery rules
-Status: TODO
+Status: DONE
 Dependencies: T001, T004
 Model: opus
 
@@ -169,6 +169,7 @@ scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_wor
 `python3 -m unittest tests.test_workflow -k plan_revision_stage`; `python3 -m unittest tests.test_workflow -k triage_completion`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done (resumed from an interrupted session's uncommitted diff, reviewed and kept). `workflow.py`: `STAGE_DIGESTS` (`triage` → `review_digest`, `plan-revision` → `report_digest`), `stage-set plan-revision` binds the verified plan report, `stage_fields` validates either, `plan_stage_verify` (digest + `records_scope` with `PLAN_REVISION_RECORDS`; committed only from a host record in START..HEAD), `run-manifest revision-reserve DIGEST LIMIT` / `revision-count` (`plan_revisions` list in `run.json`; `start` rebuilds the manifest, so it resets). `ai-pipeline`: `plan_revision_model`, `plan_stage_fail`, `complete_plan_stage`, open-stage dispatch by name, "open stage" wording (`test_stage_per_branch_unreadable_record_fails_closed` assertion updated to it). `ai-recover`: decision check right after the manifest/gate/branch checks, before hard rules, attempt limit and stage resume; new hard-rule patterns; stage-specific scope helper; usage text. Docs: `docs/workflow.md` (stage paragraph, recovery contract), README auto-recovery, vault `agents-flow.md` recovery diagram + note, hub log. Note: with `AI_AUTO_RECOVER=0` in the approved run, `ai-recover` escalates "auto-recovery is off" before the decision check (no session either way). 8 `plan_revision_stage` tests pass; `triage_completion`/`stage_per_branch`/recovery tests (36) pass; `.ai/bin/ai-check` OK, 307 tests.
 
 ## T006 — Supervised plan-review loop in ai-pipeline
 Status: TODO

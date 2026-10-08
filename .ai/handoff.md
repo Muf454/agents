@@ -8,7 +8,11 @@ T003 done (`start-plan-dispositions BASE`, `plan-dispositions-check --since STAR
 [--fresh] [--questions]`, `plan-revision-scope START`; T004 passes `--base`).
 T004 done (`ai-run --revise-plan [--since] [--base]`: Read/Glob/Grep/Edit-only session on the new
 `plan-revision.md` prompt, host commit `chore(ai): record plan revision` with its run-log line,
-host record `plan-revisions record`, `plan-revisions revised|decision`; no pipeline caller yet). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+host record `plan-revisions record`, `plan-revisions revised|decision`; no pipeline caller yet).
+T005 done (host `plan-revision` stage bound to the plan report, `run-manifest revision-reserve|revision-count`,
+`complete_plan_stage` in `ai-pipeline` with the round's model, recovery: stored needs-human decision
+escalates before the attempt limit and any resume, new always-escalate reasons, plan-revision
+leftovers checked with `plan-revision-scope`; T006 adds the loop that opens the stage). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -57,9 +61,20 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   `test_revise_plan_touching_a_gate_file_stops_with_nothing_counted`; resume without a session
   `test_revise_plan_resumes_an_uncommitted_complete_section_without_a_session`; exclusivity,
   missing prompt, round 3 Convergence `test_revise_plan_preconditions_and_round_three_contract`.
+- T005 plan-revision stage: pending/committed/dirty/foreign report/out of scope/agent commit
+  `test_plan_revision_stage_set_and_verify`; reservation idempotent, limit, reset by start, kept
+  on resume `test_plan_revision_stage_reservation_per_run`; committed stage only cleared
+  `test_plan_revision_stage_committed_record_only_clears_the_stage`; model by round (opus, then
+  the escalation model; not the run's `--model`) `test_plan_revision_stage_pending_runs_the_round_model`;
+  limit stop without a session `test_plan_revision_stage_limit_stops_before_the_session`; new
+  reasons escalate without Claude `test_plan_revision_stage_recovery_reasons_always_escalate`;
+  source leftovers escalate, nothing committed
+  `test_plan_revision_stage_source_leftovers_escalate_without_a_commit`; stored needs-human
+  decision after a crash escalates with its questions, also with the allowance used up
+  `test_plan_revision_stage_stored_decision_escalates_before_any_resume`.
 
 ## Flow chart
-Flow unchanged
+Flow chart updated
 
 ## Next action
 Plan review round 4 of revision 4 (after `fix/catchup-review` merges and this branch is rebuilt

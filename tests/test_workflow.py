@@ -2113,6 +2113,183 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(self.revision_args()), 3)
         self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
 
+    # ---------------------------------------------------------------- plan revision stage (T005)
+    def plan_stage_ready(self, findings='P1|Gap in tests', recoverable=False):
+        """A MAJOR plan review, an approved run and an open plan-revision stage; returns START."""
+        start = self.revise_ready(findings)
+        self.start_recoverable_run() if recoverable else self.start_run('feature/test')
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+        return start
+
+    def stage_verify(self, expected=0):
+        return self.helper('stage-verify', expected=expected)
+
+    def commit_leftovers(self, message):
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit(message)
+
+    def start_recoverable_run(self):
+        """An approved run whose captured settings allow auto-recovery (the fixture default is off)."""
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
+                      '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1'))
+
+    def test_plan_revision_stage_set_and_verify(self):
+        start = self.plan_stage_ready()
+        digest = self.plan_current()[1]
+        self.assertEqual(self.open_stage(), f'plan-revision {start} {digest}')
+        self.assertEqual(self.stage_verify().stdout.strip(), 'pending')
+        # An agent commit with the revision subject is not a host record.
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record plan revision'])
+        self.assertEqual(self.stage_verify().stdout.strip(), 'pending')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        # Out-of-scope leftovers and a forged report fail closed.
+        (self.project / 'src.txt').write_text('agent edit\n')
+        self.assertIn('Plan revision stage: Plan revision changed files outside workflow records: src.txt',
+                      self.stage_verify(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', 'src.txt'])
+        review = self.project / '.ai/reviews/plan.md'
+        original = review.read_text()
+        review.write_text(original.replace('Gap in tests', 'Nothing to see'))
+        self.assertIn('Plan revision stage: the plan review does not match', self.stage_verify(expected=1).stderr)
+        self.assertIn('Plan revision stage: the plan review does not match',
+                      self.helper('run-manifest', 'stage-set', 'plan-revision', start, expected=1).stderr)
+        review.write_text(original)
+        # The host revision record closes it; a dirty tree after the record commit fails.
+        self.revise('--since', start)
+        self.assertEqual(self.stage_verify().stdout.strip(), 'committed')
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(handoff.read_text() + 'late edit\n')
+        self.assertIn('Plan revision stage: uncommitted changes after the counted revision commit.',
+                      self.stage_verify(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', '.ai/handoff.md'])
+        # A foreign report: the stage stays bound to the one it started on.
+        self.plan_round('P1|Another gap', 2)
+        self.assertIn('Plan revision stage: the current plan review is not the one this revision started on.',
+                      self.stage_verify(expected=1).stderr)
+        # A stage record without its report digest is invalid.
+        stage_file = next((self.base / 'host-state').rglob('stage-*.json'))
+        stage_file.write_text(json.dumps({'branch': 'feature/test',
+                                          'stage': {'name': 'plan-revision', 'start_head': start}}))
+        self.assertIn('Plan revision stage: the stage record is invalid.',
+                      self.helper('run-manifest', 'stage', expected=1).stderr)
+
+    def test_plan_revision_stage_reservation_per_run(self):
+        self.ready()
+        self.start_run('feature/test')
+        first, second = 'a' * 64, 'b' * 64
+        reserve = lambda digest, limit, expected=0: self.helper('run-manifest', 'revision-reserve', digest, limit,
+                                                                expected=expected)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')
+        self.assertEqual(reserve(first, '1').stdout.strip(), '1')
+        self.assertEqual(reserve(first, '1').stdout.strip(), '1')  # idempotent, also at the limit
+        self.assertIn('plan review: supervision limit reached (1 revisions this run)',
+                      reserve(second, '1', expected=1).stderr)
+        self.assertEqual(reserve(second, '2').stdout.strip(), '2')
+        self.assertIn('Usage: run-manifest revision-reserve', reserve('xyz', '2', expected=1).stderr)
+        self.assertIn('Usage: run-manifest revision-reserve', reserve(first, '10', expected=1).stderr)
+        # A recovery (attempt reserved, no start) keeps the list; a human (re)start resets it.
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '2')
+        self.start_run('feature/test')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        manifest.write_text(json.dumps(dict(json.loads(manifest.read_text()), plan_revisions=['short'])))
+        self.assertIn('reservations are unreadable', self.helper('run-manifest', 'revision-count', expected=1).stderr)
+
+    def test_plan_revision_stage_committed_record_only_clears_the_stage(self):
+        start = self.plan_stage_ready()
+        self.revise('--since', start)  # the pipeline's revision child recorded it, then the pipeline died
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                           MOCK_CODEX_PLAN='major')
+        self.assertIn('Completing the interrupted plan revision', result.stdout)
+        self.assertNotIn('already revised', result.stderr)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')  # nothing reserved
+
+    def test_plan_revision_stage_pending_runs_the_round_model(self):
+        self.plan_stage_ready()
+        # --model is the implementation model; the revision gets opus below the escalation round.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--model', 'sonnet', expected=1,
+                  MOCK_CODEX_PLAN='major', AI_SUPERVISE_ESCALATE_ROUND='2', AI_SUPERVISE_ESCALATE_MODEL='claude-test-x')
+        (call,) = self.revision_args()
+        self.assertEqual(call[call.index('--model') + 1], 'opus')
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertIn('plan review found', (self.project / '.ai/local/last-error').read_text())  # re-reviewed
+        # Round 2 (the re-review) reaches the escalation round.
+        self.commit_leftovers('record the stop')
+        self.assertEqual(self.plan_current()[0], '2')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'plan-revision', head)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CLAUDE='revise-reject',
+                  MOCK_CODEX_PLAN='major', AI_SUPERVISE_ESCALATE_ROUND='2', AI_SUPERVISE_ESCALATE_MODEL='claude-test-x')
+        call = self.revision_args()[-1]
+        self.assertEqual(call[call.index('--model') + 1], 'claude-test-x')
+        self.assertEqual(self.revision_commits(), 2)
+
+    def test_plan_revision_stage_limit_stops_before_the_session(self):
+        self.plan_stage_ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  AI_SUPERVISE_PLAN_ROUNDS='0')
+        self.assertIn('plan review: supervision limit reached (0 revisions this run)',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertFalse((self.base / 'revision-args.log').exists())
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+        self.assertTrue(self.open_stage().startswith('plan-revision '))
+
+    def test_plan_revision_stage_recovery_reasons_always_escalate(self):
+        self.ready()
+        self.start_recoverable_run()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        for reason in ('Plan revision stage cannot be completed safely: the plan revision was not recorded.',
+                       'plan review: supervision limit reached (3 revisions this run); BLOCKER 0, MAJOR 1 remain',
+                       'plan review needs your decision (round 2): P1: keep A or B?'):
+            with self.subTest(reason):
+                (self.project / '.ai/local/last-error').write_text(reason + '\n')
+                self.tool('ai-recover', '--stage', 'plan review', expected=1, AI_AUTO_RECOVER='1')
+                self.assertIn(f'stopped during plan review: {reason}', self.notifications())
+                self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+
+    def test_plan_revision_stage_source_leftovers_escalate_without_a_commit(self):
+        self.plan_stage_ready(recoverable=True)
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        (self.project / 'src.txt').write_text('agent edit\n')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        notes = self.notifications()
+        self.assertIn('the interrupted plan revision left changes outside its scope', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+        self.assertIn(' M src.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_plan_revision_stage_stored_decision_escalates_before_any_resume(self):
+        start = self.plan_stage_ready('P1|Rollback choice;P2|Gap in tests', recoverable=True)
+        self.revise('--since', start, MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or B?')
+        # A crash after the record, before stage-clear; the recovery allowance is already used up.
+        for _ in range(3):
+            self.helper('run-manifest', 'reserve-attempt')
+        (self.project / '.ai/local/last-error').unlink(missing_ok=True)
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        notes = self.notifications()
+        self.assertIn('plan review needs your decision: P1: Keep option A or B?', notes)
+        self.assertIn('a plan revision recorded questions only you can answer', notes)
+        self.assertNotIn('already tried', notes)
+        self.assertNotIn('Resuming the pipeline', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+        self.assertIn('needs your decision', (self.project / '.ai/local/last-error').read_text())
+        self.assertTrue(self.open_stage().startswith('plan-revision '))
+        # An unreadable store escalates too, still without a session.
+        next((self.base / 'host-state').rglob('plan-revisions-*.json')).write_text('{not json')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('the plan revision records are unreadable', self.notifications())
+        self.assertEqual(self.recovery_calls(), [])
+
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')
         self.ready(title_task + '\n' + task('T002'))
@@ -3550,7 +3727,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('is unreadable', self.helper('run-manifest', 'stage', expected=1).stderr)
         self.helper('stage-verify', expected=1)
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
-        self.assertIn("Cannot read this branch's triage stage", result.stderr)
+        self.assertIn("Cannot read this branch's open stage", result.stderr)
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
 
     def test_stage_per_branch_interrupted_triage_completes_after_another_branch_run(self):

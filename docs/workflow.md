@@ -267,6 +267,28 @@ closed); with no store, or no outstanding decision, an invalid report takes the 
 path. A needs-human decision clears only with a new report: answer the question in the plan
 records, commit, and run `ai-review --plan` by hand.
 
+Plan revision stage (`ai-pipeline`; the supervised loop that opens it comes with T006). Before
+the stage opens, `run-manifest revision-reserve DIGEST LIMIT` reserves the revision for that
+plan-review report in `run.json`: a digest already reserved prints the count unchanged (no limit
+check, so a resume never trips the limit), a new one is appended while the count is below LIMIT
+(`AI_SUPERVISE_PLAN_ROUNDS`), else it fails `plan review: supervision limit reached (N revisions
+this run)`. A human (re)start (`run-manifest start`) resets the list; a recovery resume keeps it
+(`revision-count` prints it). `run-manifest stage-set plan-revision START` then records
+`{name: plan-revision, start_head, report_digest}` (the verified plan report; a triage stage keeps
+`review_digest`). `stage-verify` for this stage requires the verified plan review with that
+digest and only plan revision records changed since START; a host `plan-revisions` record for
+the digest whose commit is in START..HEAD means `committed` (the record holds the outcome), a
+dirty tree after it fails `Plan revision stage: uncommitted changes after the counted revision
+commit.`, else `pending` (an agent commit with the revision subject never closes it).
+`complete_plan_stage` (every start and resume dispatches the open stage by name, before the
+clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-reserve` again
+(idempotent), `ai-run --revise-plan --since START --base <base sha> --model M` with the run's
+`--session-timeout`/`--knowledge-dir` (never its `--model`), `stage-verify` = `committed`,
+`stage-clear`. M is `opus`, or `AI_SUPERVISE_ESCALATE_MODEL` from round
+`AI_SUPERVISE_ESCALATE_ROUND` on (round from `plan-rounds current`; settings restored from the
+manifest on resume). It writes nothing to the checkout. A failed check is a `Plan revision stage
+…` stop; a failed reservation is the limit stop; both always need the human.
+
 ## Pipeline contract (`ai-pipeline`)
 
 Stages, each resumable by rerunning: plan review (only while no task is DONE;
@@ -442,13 +464,18 @@ the manifest, the host state directory must pass `state-root-check` for the chec
 original stop reason, without a Claude session, commit or attempt; current gate
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
-on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
+on finish) before any fallible work; a recorded needs-human plan revision for the current
+plan report (`plan-revisions decision` exit 0) escalates with the stored questions
+(`plan review needs your decision: …`), whatever the recorded reason (also a crash with no
+last-error) and before the attempt limit and any stage resume; an unreadable revision store
+(exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
-`Triage stage`);
-an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage for the
-branch (also after a watchdog crash recovery) it never commits anything: changes since
-the stage start outside triage records escalate, otherwise it resumes without a Claude
-session and the pipeline completes the stage; bookkeeping-only leftovers
+`Triage stage`, `Plan revision stage`, `supervision limit reached`, `needs your decision`);
+an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage or plan-revision
+stage for the branch (also after a watchdog crash recovery) it never commits anything: changes
+since the stage start outside that stage's records (`triage-scope` / `plan-revision-scope`)
+escalate, otherwise it resumes without a Claude session and the pipeline completes the stage;
+bookkeeping-only leftovers
 (state, run log, handoff) are committed as `chore(ai): record stop during S`; one
 read-only Claude session returns `{"action", "reason", "human_action"}`;
 the decision counts only with a zero exit, a success envelope and exactly one valid

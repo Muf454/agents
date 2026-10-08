@@ -324,7 +324,15 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    **review triage** is never committed as leftover work: if only workflow records changed
    since the triage started, `ai-recover` reruns and the pipeline first finishes that
    triage (checks the review it belongs to, the scope and the dispositions, then records
-   the round exactly once); anything else escalates. Otherwise a
+   the round exactly once); anything else escalates. A **plan revision** stage works the
+   same way: only plan records changed → rerun, and the pipeline closes the stage when the
+   host revision record exists or runs the revision once (reserved per plan report, so a
+   resume never counts it twice; model `opus`, or `AI_SUPERVISE_ESCALATE_MODEL` from round
+   `AI_SUPERVISE_ESCALATE_ROUND`); anything else escalates. A revision that recorded
+   questions for you (needs-human) always escalates with those questions, even after a
+   crash and before the attempt limit, and so do a failed plan-revision stage and the
+   supervision limit (`AI_SUPERVISE_PLAN_ROUNDS` revisions per human-started run).
+   Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or

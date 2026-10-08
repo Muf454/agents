@@ -1089,16 +1089,41 @@ def run_manifest(arguments):
         data['attempts'] = 0
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
-        # Recorded before the stage starts, bound to the verified review it works on.
+        # Recorded before the stage starts, bound to the verified review it works on: the
+        # current implementation review (triage) or the current plan review (plan-revision).
         name, start = arguments[1], arguments[2]
-        if name != 'triage' or not re.fullmatch(r'[0-9a-f]{40}', start):
+        if name not in STAGE_DIGESTS or not re.fullmatch(r'[0-9a-f]{40}', start):
             fail('Invalid stage.')
-        review_info_values()
+        if name == 'triage':
+            review_info_values()
+            digest = review_digest()
+        else:
+            content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+            if not verified_plan_review(content):
+                fail('Plan revision stage: the plan review does not match the report ai-review published.')
+            digest = report_digest(content)
         branch = current_branch()
         if not branch:
             fail('Invalid stage: detached HEAD.')
-        stage = {'name': name, 'start_head': start, 'review_digest': review_digest()}
+        stage = {'name': name, 'start_head': start, STAGE_DIGESTS[name]: digest}
         atomic(stage_path(branch), json.dumps({'branch': branch, 'stage': stage}) + '\n')
+    elif action == 'revision-reserve':
+        # Plan revisions this run, reserved per plan-review report BEFORE the stage opens (and
+        # again, idempotently, when it is completed): a report counts once, a resume keeps the
+        # list, a human (re)start resets it.
+        if len(arguments) != 3 or not re.fullmatch(r'[0-9a-f]{64}', arguments[1]) \
+                or not re.fullmatch(r'\d', arguments[2]):
+            fail('Usage: run-manifest revision-reserve DIGEST LIMIT')
+        reserved = manifest_revisions(data)
+        if arguments[1] not in reserved:
+            if len(reserved) >= int(arguments[2]):
+                fail(f'plan review: supervision limit reached ({len(reserved)} revisions this run)')
+            reserved.append(arguments[1])
+            data['plan_revisions'] = reserved
+            atomic(path, json.dumps(data) + '\n')
+        print(len(reserved))
+    elif action == 'revision-count':
+        print(len(manifest_revisions(data)))
     elif action == 'stage-clear':
         branch = current_branch()
         if branch:
@@ -1155,12 +1180,30 @@ def review_digest():
     return hashlib.sha256(Path('.ai/reviews/current.md').read_bytes()).hexdigest()
 
 
+def manifest_revisions(data):
+    """The plan-review report digests reserved for revision in this run (run manifest)."""
+    reserved = data.get('plan_revisions', [])
+    if not isinstance(reserved, list) or not all(
+            isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) for digest in reserved):
+        fail('The run manifest plan revision reservations are unreadable; rerun ai-pipeline --approved by hand.')
+    return list(reserved)
+
+
+# Stage name -> the digest it is bound to: the implementation review a triage answers, the
+# plan review a plan revision answers.
+STAGE_DIGESTS = {'triage': 'review_digest', 'plan-revision': 'report_digest'}
+STAGE_LABELS = {'triage': 'Triage stage', 'plan-revision': 'Plan revision stage'}
+
+
 def stage_fields(stage):
-    fields = [stage.get(key) if isinstance(stage, dict) else None
-              for key in ('name', 'start_head', 'review_digest')]
-    if fields[0] != 'triage' or not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
-            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
+    """'name start_head digest' of a stage record; anything else fails closed."""
+    name = stage.get('name') if isinstance(stage, dict) else None
+    if name not in STAGE_DIGESTS:
         fail('Triage stage: the stage record is invalid.')
+    fields = [name, stage.get('start_head'), stage.get(STAGE_DIGESTS[name])]
+    if not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
+            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
+        fail(f'{STAGE_LABELS[name]}: the stage record is invalid.')
     return fields
 
 
@@ -1188,13 +1231,16 @@ def triage_scope(arguments):
 
 
 def stage_verify(arguments):
-    """Verify an open triage stage before it is completed. Prints 'committed' when its counted
+    """Verify an open stage before it is completed. Prints 'committed' when its counted
     commit already exists after start_head (close it without a second count), else 'pending'.
     Any mismatch fails: the caller escalates without implementation or counting."""
     stage = load_stage(current_branch())
     if stage is None:
         fail('Triage stage: no open stage for this branch.')
-    _, start, digest = stage_fields(stage)
+    name, start, digest = stage_fields(stage)
+    if name == 'plan-revision':
+        plan_stage_verify(start, digest)
+        return
     try:
         review_info_values()
     except ValueError as error:
@@ -2411,6 +2457,29 @@ def plan_revisions(arguments):
         sys.exit(1)
     if action == 'decision':
         print(record['questions'])
+
+
+def plan_stage_verify(start, digest):
+    """stage-verify for an open plan-revision stage: 'committed' once a host revision record
+    for this plan review names a commit in START..HEAD (the record carries the outcome, so
+    the outcome is stored), else 'pending'. Never 'committed' from a commit subject alone."""
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not verified_plan_review(content):
+        fail('Plan revision stage: the plan review does not match the report ai-review published.')
+    if report_digest(content) != digest:
+        fail('Plan revision stage: the current plan review is not the one this revision started on.')
+    try:
+        records_scope(start, PLAN_REVISION_RECORDS, 'Plan revision')
+        records = plan_revision_records()
+    except ValueError as error:
+        fail(f'Plan revision stage: {error}')
+    commits = set(git('log', '--format=%H', f'{start}..HEAD').decode().split())
+    if not any(r['commit'] in commits and r['report_digest'] == digest for r in records):
+        print('pending')
+        return
+    if git('status', '--porcelain', '--untracked-files=all').strip():
+        fail('Plan revision stage: uncommitted changes after the counted revision commit.')
+    print('committed')
 
 
 RISK_TITLE = re.compile(

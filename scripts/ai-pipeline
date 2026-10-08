@@ -98,7 +98,7 @@ fi
 # neither drop nor inherit it) is completed below, before anything else; its leftovers are
 # checked there. An uncommitted re-check report (a stop before its host commit) is verified
 # and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
-open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
+open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's open stage: ${open_stage#Error: }"
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
@@ -235,6 +235,50 @@ complete_stage() {
   state=$(ai_helper triage-check --fresh 2>&1) || stage_fail "$state"
   ai_helper run-manifest stage-clear || stage_fail 'cannot clear the stage in the run manifest.'
 }
+# The revision gets its model from the round, never from --model: opus, or the escalation
+# model from AI_SUPERVISE_ESCALATE_ROUND on (settings restored from the manifest on resume).
+plan_revision_args=()
+for (( i=0; i<${#triage_args[@]}; i+=2 )); do
+  [[ "${triage_args[i]}" == --model ]] || plan_revision_args+=("${triage_args[i]}" "${triage_args[i+1]}")
+done
+plan_revision_model() {
+  local current round
+  current=$(ai_helper plan-rounds current "$base_sha") || return 1
+  read -r round _ <<< "$current"
+  if (( round >= AI_SUPERVISE_ESCALATE_ROUND )); then
+    printf '%s\n' "$AI_SUPERVISE_ESCALATE_MODEL"
+  else
+    printf '%s\n' opus
+  fi
+}
+# A failed plan revision stage check always needs the human (ai-recover escalates it).
+plan_stage_fail() {
+  printf 'Plan revision stage cannot be completed safely: %s\n' "${1#Error: }" > .ai/local/last-error
+  stop 'plan revision'
+}
+# Completes the open plan revision stage exactly once (fresh start and resume alike): close
+# it when its host revision record exists, else reserve the revision (idempotent per report)
+# and record it through ai-run --revise-plan. Writes nothing to the checkout itself.
+complete_plan_stage() {
+  local info state start digest model
+  info=$(ai_helper run-manifest stage 2>&1) || plan_stage_fail "$info"
+  [[ -n "$info" ]] || return 0
+  state=$(ai_helper stage-verify 2>&1) || plan_stage_fail "$state"
+  if [[ "$state" != committed ]]; then
+    read -r _ start digest <<< "$info"
+    if ! state=$(ai_helper run-manifest revision-reserve "$digest" "$AI_SUPERVISE_PLAN_ROUNDS" 2>&1); then
+      printf '%s\n' "${state#Error: }" > .ai/local/last-error
+      stop 'plan revision'
+    fi
+    model=$(plan_revision_model 2>&1) || plan_stage_fail "$model"
+    "$AI_BIN/ai-run" --approved --revise-plan --since "$start" --base "$base_sha" --model "$model" \
+      "${plan_revision_args[@]}" || stop 'plan revision'
+    ai_guard_verify
+    state=$(ai_helper stage-verify 2>&1) || plan_stage_fail "$state"
+    [[ "$state" == committed ]] || plan_stage_fail 'the plan revision was not recorded.'
+  fi
+  ai_helper run-manifest stage-clear || plan_stage_fail 'cannot clear the stage in the run manifest.'
+}
 recheck_fail() {
   printf 'Re-check of rejected findings: %s\n' "${1#Error: }" > .ai/local/last-error
   stop 're-check'
@@ -289,7 +333,12 @@ if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
 else
   ai_notify "▶ STARTED on $branch.$timer_note"
 fi
-if [[ -n "$open_stage" ]]; then
+if [[ "$open_stage" == 'plan-revision '* ]]; then
+  step 'Completing the interrupted plan revision'
+  complete_plan_stage
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    plan_stage_fail 'the checkout is not clean after completing the plan revision.'
+elif [[ -n "$open_stage" ]]; then
   step 'Completing the interrupted review triage'
   complete_stage
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
