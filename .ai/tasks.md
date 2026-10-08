@@ -409,7 +409,7 @@ Resumed 2026-10-08: ported as on master: `TIMEOUT_SCALE`/`COMMAND_TIMEOUT`/`PIPE
 - Evidence: `python3 -m unittest tests.test_workflow -k format_retry` 8 tests OK; `.ai/bin/ai-check` PASS (364 tests, 8 shards). A first gate run hit one 25 s subprocess timeout in an unrelated `ai-pipeline --max-fix-rounds 2` test under load; the rerun was clean.
 
 ## T013 — Convergence guidance includes the supervised extra round (review N1)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: haiku
 
@@ -430,3 +430,4 @@ docs/workflow.md, tests/test_workflow.py, vault agents-flow.md
 `python3 -m unittest tests.test_workflow -k docs_consistency`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done. `docs/workflow.md` Convergence paragraph now says round three is reached "with `--max-fix-rounds` ≥ 3, or by the supervised extra fix round at the default limit, see Extra fix round below" (was "only reachable with `--max-fix-rounds` ≥ 3"). `tests/test_workflow.py` `DocsConsistencyTest.FORBIDDEN` gained "only reachable with `--max-fix-rounds`", so `test_docs_consistency_no_wrong_sentences` fails on the old wording. The new wording is not a REQUIRED phrase, because that list applies to README.md too, which does not carry it. Vault `agents-flow.md` Convergence rule updated (same wording, `updated:` already 2026-10-08). Evidence: `python3 -m unittest tests.test_workflow -k docs_consistency` 3 OK; `.ai/bin/ai-check` OK (364 tests, 8 shards).

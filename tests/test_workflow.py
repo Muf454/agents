@@ -6236,6 +6236,7 @@ class DocsConsistencyTest(unittest.TestCase):
         'stops on reported permission denials',
         'denied permissions, timeouts',
         'permission denial, or crash',
+        'only reachable with `--max-fix-rounds`',
     )
 
     REQUIRED = (

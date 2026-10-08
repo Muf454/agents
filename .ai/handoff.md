@@ -184,10 +184,11 @@ None beyond "Needs you" above.
 
 ## Flow chart
 Flow chart updated (T011: plan-decision check before the pipeline plan review, also on the
-`--skip-plan-review` / task-DONE path; T012: format retry note says both calls review one checkout)
+`--skip-plan-review` / task-DONE path; T012: format retry note says both calls review one checkout;
+T013: round-three Convergence reached also by the supervised extra fix round at the default limit)
 
 ## Next action
 Codex review of HEAD 5b8d86b (MAJOR 2, MINOR 1) triaged: all accepted (`.ai/reviews/dispositions.md`).
-T011 and T012 done. Next: T013 (convergence docs), then a new
+T011, T012 and T013 done. Next: a new
 independent review and the live supervised trial in "Needs you" above. No run budget in this
 batch (OR-09).

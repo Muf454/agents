@@ -374,7 +374,8 @@ Convergence (FL-03): the triage prompt gets `This review is round <n>.` and, fro
 `merge-base..HEAD` of the current review's host header, with finding IDs, titles and
 dispositions; context only). When one area has had BLOCKER/MAJOR findings in three
 consecutive rounds, triage adds a design task instead of another symptom fix. From round 3
-on (only reachable with `--max-fix-rounds` ≥ 3), `triage-check --fresh` requires a line
+on (reached with `--max-fix-rounds` ≥ 3, or by the supervised extra fix round at the default
+limit, see Extra fix round below), `triage-check --fresh` requires a line
 `Convergence: <text>` (text on the same line, outside HTML comments) in
 `dispositions.md`; without it the triage stops with "Round <n> triage needs a Convergence:
 line". It computes the round from the same routine as the prompt (uncapped count + 1), so
