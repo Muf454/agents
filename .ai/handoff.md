@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet. Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+T001 done (supervision settings: config, validation, manifest, recovery restore; no behaviour yet). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -18,7 +18,10 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
    it and clearing it with a hand-run `ai-review --plan` (filled in by T010).
 
 ### Covered by automated tests
-Listed per task when done.
+- T001 settings: invalid values stop before any agent `test_supervise_settings_invalid_values_stop_before_any_agent`,
+  `test_supervise_settings_invalid_supervise_stops_hand_run_tools`; manifest capture and resume
+  `test_supervise_settings_are_captured_and_survive_a_config_change`; key lists
+  `test_supervise_settings_key_lists_are_identical`.
 
 ## Flow chart
 Flow unchanged

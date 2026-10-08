@@ -52,6 +52,7 @@ while (( $# )); do
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
 [[ -z "$since" || "$triage" == yes ]] || ai_die '--since only applies to --triage.'
+ai_supervise_settings
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
 # Host authority state must live where agent sessions cannot write (also for --triage).

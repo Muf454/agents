@@ -64,6 +64,7 @@ case "${AI_REVIEWER:-auto}" in
   auto) command -v codex >/dev/null || printf '%s\n' 'Codex CLI not found: reviews run on the Claude fallback reviewer.' ;;
   *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
 esac
+ai_supervise_settings
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.
 state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \

@@ -11,7 +11,7 @@ updates vault `agents-flow.md` and its `updated:` date and sets `.ai/handoff.md`
 to "Flow chart updated" in the same task (see the plan for the no-vault-access case).
 
 ## T001 — Supervision settings: config, validation, manifest, recovery restore
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 

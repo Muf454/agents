@@ -418,6 +418,18 @@ default **high**). Reviews are where a stronger model pays off most: findings ca
 there save Claude fix rounds. The narrower re-check of rejected findings
 (`ai-review --recheck`) uses `AI_RECHECK_EFFORT` (default **medium**).
 
+### Supervisor settings
+
+Used by the supervisor; validated before any agent runs and captured with the approved
+run (a recovery resume keeps the approved values):
+
+| Setting | Default | Valid |
+|---|---|---|
+| `AI_SUPERVISE` | `1` | `0` or `1` |
+| `AI_SUPERVISE_PLAN_ROUNDS` | `3` | `0`-`9` |
+| `AI_SUPERVISE_ESCALATE_ROUND` | `3` | `1`-`9` |
+| `AI_SUPERVISE_ESCALATE_MODEL` | `claude-fable-5-1` | `[A-Za-z0-9._:-]{1,64}` |
+
 ### Notifications
 
 Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$1`
@@ -426,7 +438,8 @@ subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
-`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`; environment variables win):
+`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
+`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>

@@ -35,6 +35,7 @@ done
 if [[ "$plan" == no && "$recheck" == no ]]; then
   [[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
 fi
+ai_supervise_settings
 reviewer=${AI_REVIEWER:-auto}
 case "$reviewer" in
   codex) command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first (or set AI_REVIEWER=auto).' ;;

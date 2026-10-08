@@ -387,6 +387,7 @@ class ToolkitTest(unittest.TestCase):
         template.write_text(task('TXXX'))
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
+        self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
@@ -1865,6 +1866,69 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Control: a human start does read it.
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertNotIn('AI_MODEL', manifest['env'])
+
+    def test_supervise_settings_invalid_values_stop_before_any_agent(self):
+        self.ready()
+        for key, value in (('AI_SUPERVISE', '2'), ('AI_SUPERVISE_PLAN_ROUNDS', '10'),
+                           ('AI_SUPERVISE_ESCALATE_ROUND', '0'), ('AI_SUPERVISE_ESCALATE_MODEL', 'bad model!')):
+            with self.subTest(key=key):
+                result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                                   expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+                for name in ('codex-calls', 'codex-plan-calls'):
+                    self.assertFalse((self.base / name).exists())
+
+    def test_supervise_settings_invalid_supervise_stops_hand_run_tools(self):
+        self.ready()
+        result = self.tool('ai-review', '--plan', expected=1, AI_SUPERVISE='yes')
+        self.assertIn('Invalid AI_SUPERVISE: yes', result.stderr)
+        result = self.tool('ai-run', '--approved', expected=1, AI_SUPERVISE='yes')
+        self.assertIn('Invalid AI_SUPERVISE: yes', result.stderr)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        for name in ('codex-calls', 'codex-plan-calls'):
+            self.assertFalse((self.base / name).exists())
+
+    def test_supervise_settings_are_captured_and_survive_a_config_change(self):
+        self.ready()
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        (self.config / 'ai-toolkit/config').write_text(
+            'AI_SUPERVISE_PLAN_ROUNDS=5\nAI_SUPERVISE_ESCALATE_MODEL=model-one\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest_file = next((self.base / 'host-state').rglob('run.json'))
+        env = json.loads(manifest_file.read_text())['env']
+        self.assertEqual(env['AI_SUPERVISE_PLAN_ROUNDS'], '5')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_MODEL'], 'model-one')
+        self.assertEqual(env['AI_SUPERVISE'], '0')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_ROUND'], '3')
+        (self.config / 'ai-toolkit/config').write_text(
+            'AI_SUPERVISE_PLAN_ROUNDS=7\nAI_SUPERVISE_ESCALATE_MODEL=model-two\n')
+        self.tool('ai-recover', '--stage', 'implementation', MOCK_RECOVER='rerun',
+                  AI_SUPERVISE_PLAN_ROUNDS='9')
+        env = json.loads(manifest_file.read_text())['env']
+        self.assertEqual(env['AI_SUPERVISE_PLAN_ROUNDS'], '5')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_MODEL'], 'model-one')
+
+    def test_supervise_settings_key_lists_are_identical(self):
+        root = Path(__file__).resolve().parent.parent / 'scripts'
+        key = r'AI_[A-Z_]+'
+        common = (root / 'lib/common.sh').read_text()
+        config = re.search(r'case "\$key" in ((?:%s\|)*%s)\) ;;' % (key, key), common)
+        recover = (root / 'ai-recover').read_text()
+        unset = re.search(r'^unset ((?:%s ?)+)$' % key, recover, re.M)
+        case = re.search(r'^\s+((?:%s\|)*%s)\)$' % (key, key), recover, re.M)
+        py = re.search(r'RUN_SETTINGS = \(([^)]*)\)', (root / 'lib/workflow.py').read_text())
+        self.assertTrue(config and unset and case and py)
+        lists = {
+            'ai_config': set(config.group(1).split('|')),
+            'unset': set(unset.group(1).split()),
+            'case': set(case.group(1).split('|')),
+            'RUN_SETTINGS': set(re.findall(r"'(AI_[A-Z_]+)'", py.group(1))),
+        }
+        for name, keys in lists.items():
+            self.assertEqual(keys, lists['RUN_SETTINGS'], name)
+        self.assertIn('AI_SUPERVISE_ESCALATE_MODEL', lists['RUN_SETTINGS'])
 
     def test_committed_content_must_match_validated_files(self):
         self.ready()

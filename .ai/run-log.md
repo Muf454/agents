@@ -117,3 +117,4 @@
 | 2026-10-08T05:23:30Z | claude (mission control) | plan rev 5 | plan review round 4 (0/1/2) accepted: revision session without Bash; retry logging; README in T005/T009 | — | (this commit) | |
 | 2026-10-08T05:29:15Z | claude (mission control) | plan rev 6 | plan review round 5 (0/1/2) accepted | — | (this commit) | |
 | 2026-10-08T08:41:07Z | claude (mission control) | plan rev 7 | round 6 (0/2/1) accepted; Zack: implement without another plan review | — | (this commit) | |
+| 2026-10-08T09:00:00Z | claude (sonnet) | T001 | AI_SUPERVISE* settings: config keys, ai_supervise_settings validation (pipeline/review/run), RUN_SETTINGS, ai-recover restore, 4 tests, README | ai-check OK (276 tests) | (this commit) | |
