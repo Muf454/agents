@@ -1,11 +1,13 @@
-<!-- Plan review of plan digest aef218245ec9a5755c814fe403f34621ee648a83e268566a16d989c24d9f7ed1; saved 2026-10-08T20:20:22Z. -->
+<!-- Plan review of plan digest ea4fbf0555f18e4ae0456d9a58b89bca6c8b7d2446bfa8719b20149ddd89c299; saved 2026-10-08T20:29:15Z. -->
 
 # Plan review
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION.
-Finding counts: BLOCKER=0 MAJOR=3 MINOR=1
+Finding counts: BLOCKER=0 MAJOR=3 MINOR=2
 
-Reviewed HEAD: `4cc7d2e12e7cef3b294213ca9cb67f98e86563a5`.
+Reviewed HEAD: `3f722ccdca85ce7d43bd2cda8a633811c89853ec` — plan revision 2.
+
+Finding IDs continue from the previous review; P1 remains unresolved for additional inputs.
 
 ## BLOCKER findings
 
@@ -13,82 +15,87 @@ None.
 
 ## MAJOR findings
 
-- P1: Recovery suffix scanning can accept malformed or ambiguous decisions.
+- P1: Recovery parsing still accepts ambiguous decisions and malformed containers.
 
-  **Location:** `.ai/tasks.md:170–171`; `.ai/project-spec.md:48–53`.
+  **Location:** `.ai/tasks.md:173–174`; `.ai/project-spec.md:52–60`.
 
-  T005 treats duplicate-key parsing failures as “no object here,” including during the prefix ambiguity check. Consequently, this answer accepts `commit_and_rerun`:
+  An in-memory reproduction of the revised algorithm accepts `commit_and_rerun` for both answers below:
 
   ```text
-  Diagnosis.
-  {"action":"escalate","action":"rerun","reason":"first"}
+  {"\u0061ction":"escalate","reason":"unsafe"}
   {"action":"commit_and_rerun","reason":"second"}
   ```
 
-  The proposed scanner also accepts an object inside an unterminated array:
-
   ```text
-  Diagnosis. [{"action":"commit_and_rerun","reason":"x"}
+  Diagnosis.
+  [
+  {"action":"commit_and_rerun","reason":"x"}
   ```
 
-  An in-memory reproduction of the specified algorithm confirmed both outcomes. These violate R5’s duplicate-key, ambiguity and non-object rejection requirements. The returned action drives automatic recovery, including checkpointing leftovers.
+  In the first answer, JSON decodes the earlier key to `action`, but the prefix regex misses it. In the second, taking the final line extracts a decision from an unfinished array. Both violate R5’s rejection requirements. These inputs currently escalate because the whole response cannot parse; the proposed fallback introduces their acceptance. The resulting action can validate and checkpoint leftovers through `scripts/ai-recover:159`.
 
-  **Concrete plan change:** distinguish malformed decision objects from ordinary non-JSON prose; retain duplicate-key information during prefix inspection and reject earlier action-bearing objects even when their keys repeat. Require the final decision to be a standalone object rather than a suffix extracted from a malformed container. Add these exact rejection cases.
+  **Concrete plan change:** require the final object to be outside any preceding unfinished JSON container. Conservatively reject prefix escapes that could conceal an earlier action key; detecting ambiguity must never authorize recovery. Add both exact inputs as required escalation regressions while retaining the accepted `{foo}` prose case.
 
-- P2: The early base stop’s merge-and-rerun advice can strand interrupted triage.
+- P5: T005 requires an inline-prefixed object to pass an algorithm that explicitly rejects it.
 
-  **Location:** `.ai/tasks.md:97,103,114`; `scripts/lib/workflow.py:1162–1171,1174–1189`.
+  **Location:** `.ai/tasks.md:173,178–179`; `tests/test_workflow.py:1769`.
 
-  T003 places the base stop before completing an open triage stage. If origin advances during an interrupted triage, the pipeline therefore tells the human to merge first while leaving that stage open. A merge that changes source then causes `stage_verify` → `triage_scope` to reject changes outside `TRIAGE_RECORDS`. The promised rerun does not complete; it stops again with a triage scope error.
+  T005 requires changing `Decision: {"action":"rerun","reason":"crash"}` to return `rerun`. Form A cannot parse that text. Form B also rejects it: the last line starts with `Decision:`, rather than `{`, and there is no preceding non-empty line. The in-memory reproduction returns `escalate`.
 
-  This follows from the existing source checks. The planned fresh-run fixture does not exercise it. The scope protection is pre-existing; the new ordering and recovery advice create the interaction.
+  Implementing the specified algorithm therefore fails the prescribed tests. Making those tests pass by extracting an inline object would contradict R5’s explicit prohibition.
 
-  **Concrete plan change:** define a stage-aware recovery procedure before prescribing a merge. Explain how the human safely settles the interrupted stage against its prior approved base before merging, and provide corresponding stop wording and handoff instructions. Preserve the triage scope protection. Add regressions for both pending and already-counted-but-open triage stages when origin advances.
+  **Concrete plan change:** retain the existing inline case’s `escalate` expectation and remove it from the accepted cases. Add `Decision:\n{"action":"rerun","reason":"crash"}` as the accepted alternative. Update the claim that one existing assertion must change.
 
-- P3: T005’s model assignment does not fit its recovery integrity risk.
+- P6: T003’s recovery arm loses the detailed stderr message required by its acceptance tests.
 
-  **Location:** `.ai/tasks.md:160`; `scripts/ai-recover:153–184`.
+  **Location:** `.ai/tasks.md:99,106,114`; `scripts/ai-pipeline:128–132`; `scripts/ai-recover:35–43`.
 
-  T005 specifies `Model: sonnet` while broadening acceptance of untrusted output that selects automatic recovery actions. `commit_and_rerun` validates and commits non-ignored leftovers, then resumes the pipeline. Preserving malformed-response rejection is an integrity control, as P1 demonstrates, rather than ordinary presentation parsing.
+  With automatic recovery enabled, `stop` replaces the pipeline process with `ai-recover`. The proposed arm calls `escalate` with the generic first argument `the review base moved past the branch.`. Existing `escalate` prints that argument to stderr, while preserving the original reason only in `last-error` and the notification.
 
-  **Concrete plan change:** assign T005 `Model: opus`, consistent with the required model policy for security-sensitive work. Update the model summaries in the plan and handoff.
+  Consequently, stderr omits the base ref/SHA, merge instructions and `Publish check failed at pull request preparation:` prefix. The mandatory publish fixture explicitly enables recovery and asserts that detailed prefix in stderr, so the planned implementation will fail it.
+
+  **Concrete plan change:** have the new arm print the complete recorded reason to stderr before escalating, or pass the complete reason as the first escalation argument. Keep the mandatory assertions and verify detailed diagnostics with recovery both enabled and disabled.
 
 ## MINOR findings
 
-- P4: Publish-path regression coverage is optional despite an available fixture.
+- P7: The pending re-check exception lacks a regression with an advanced base.
 
-  **Location:** `.ai/tasks.md:104,115`; `tests/test_workflow.py:2934–2952`.
+  **Location:** `.ai/tasks.md:101–106,113–119`; `tests/test_workflow.py:3696`.
 
-  T003 permits documenting why the publish wording was not tested instead of verifying it. Existing hook fixtures support deterministic history manipulation without product test hooks. Start-check coverage would still pass if the new `publish_ready` branch were omitted.
+  T003 specifies advanced-base tests for interrupted triage, but none for a pending re-check. Existing interrupted-recheck coverage keeps the base unchanged and therefore cannot establish the new ordering relative to the base stop.
 
-  **Concrete plan change:** make the publish-path test mandatory. Use a guarded post-commit hook to create HEAD with the same tree but ancestry excluding the base. Assert the specific base error, no push or PR creation, and no recovery Claude session.
+  **Concrete plan change:** adapt the interrupted-recheck fixture to advance origin before resuming. Assert that the original findings are re-checked and recorded once, the base stop occurs before implementation or a replacement code review, and merge-and-rerun succeeds without a scope error or duplicate dispute.
 
-## Requirements and task assessment
+- P8: T002’s regression matrix omits two required outcomes.
 
-T001’s assumption about missing zero-count sections matches `review_counts`. T002 correctly preserves the PR target name while passing the resolved SHA to code review. T004’s proposed non-capturing suffix preserves existing disposition groups and shared consumers.
+  **Location:** `.ai/tasks.md:71–75`; `.ai/project-spec.md:32–37`; `tests/test_workflow.py:2908`.
 
-T003’s dependency on T002 is appropriate. All tasks specify models; no task’s own failed attempt is recorded. No new dependencies or schema migrations are proposed. The planned frozen-gate boundaries and flow-note updates match repository guidance.
+  R2 preserves local-base behavior when origin is behind, but T002 does not prescribe that test. Its referenced SHA test stops because `--pr-base` is missing; it does not demonstrate successful review against an explicit SHA.
+
+  **Concrete plan change:** add a remote-behind case and a successful explicit-SHA run with `--no-pr` or an explicit PR target. Assert the resolved base and published review range.
+
+## Scope and task assessment
+
+T001’s reliance on existing `review_counts` matches the inspected source: absent sections produce empty bodies, and positive counts remain rejected. T004’s non-capturing suffix preserves the disposition groups used by triage, history, re-check preparation and PR summaries.
+
+T003’s revised check placement addresses the prior interrupted-triage finding. T005 now specifies `opus`, and the publish regression is mandatory. Every task specifies a model; no task’s own failed implementation attempt is recorded. The model assignments and T003’s dependency on T002 are appropriate.
+
+No new dependency, schema migration or external publishing action is proposed. Planned flow-note updates and frozen-gate boundaries match repository guidance.
 
 ## Validation observed
 
-- Confirmed the requested HEAD and clean checkout.
-- Read repository instructions, spec, plan, tasks, state, handoff, relevant source, tests, prompts, documentation, validation entry points and local vault references.
-- Python syntax checks passed for four source/test files.
-- Bash syntax checks passed for 13 script/validation files.
+- Confirmed the requested HEAD and a clean checkout.
+- Read repository guidance, spec, plan, tasks, state, handoff, prior review/dispositions, relevant documentation, source, tests, prompts and validation entry points.
+- Shell syntax passed for 13 script/validation files.
+- Python AST parsing passed for `workflow.py`, `test_workflow.py` and `run_parallel.py`.
 - Read-only discovery collected 287 existing tests.
 - `git diff --check c7d4dee..HEAD` passed.
-- Reproduced P1 using the proposed algorithm in memory.
+- Reproduced P1 and P5 using the proposed algorithm in memory.
 
-Test bodies, `./scripts/ai-check` and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current `.ai/local/validation.json` exists. Implementation has not started, so new regression results remain unobserved.
+Test bodies, `./scripts/ai-check` and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current `.ai/local/validation.json` exists. New regression results remain unobserved. The external vault flow note was not inspected.
 
-No files were modified and no network/MCP integrations were invoked.
-
-## Security and architecture concerns
-
-Recovery parsing must preserve rejection before an action reaches host automation. Base recovery must preserve interrupted-stage integrity and human ownership of merges. No additional demonstrated issue was identified in the inspected T001, T002 or T004 paths.
+No files were modified, and no network/MCP integrations were invoked.
 
 ## Manual testing recommendations
 
-After the revised regressions and full gate pass, verify resolved-base output, stop notifications and merge-and-rerun instructions in a disposable checkout. Inspect the flow-note changes alongside T002/T003. Installed-copy upgrades remain a separate human action.
-
-This review is not human acceptance.
+After the revised tests and full gate pass, verify base diagnostics and notifications with automatic recovery enabled and disabled in a disposable checkout. Inspect the flow-note changes alongside T002/T003. Installed-copy upgrades and human acceptance remain separate actions.
