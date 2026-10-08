@@ -357,12 +357,16 @@ elif [[ -n "$open_stage" ]]; then
 fi
 reconcile_disputes
 # A recorded needs-human revision of the current plan review stops for the human (host record,
-# also after a crash); it clears only when a new plan review replaces the report.
+# also after a crash); it clears only when a new plan review replaces the report. Checked on
+# every start whatever --skip-plan-review or the task queue say, in the plan review loop and
+# again before implementation: skipping the optional review never skips the decision.
 plan_decision_check() {
   local questions rc=0 current
   questions=$(ai_helper plan-revisions decision 2>&1) || rc=$?
   case "$rc" in
-    0) current=$(ai_helper plan-rounds current "$base_sha" 2>/dev/null) || current='?'
+    0) # The round number only labels the stop, so a failed sync just leaves it unknown.
+       ai_helper plan-rounds sync "$base_sha" >/dev/null 2>&1 || true
+       current=$(ai_helper plan-rounds current "$base_sha" 2>/dev/null) || current='?'
        printf 'plan review needs your decision (round %s): %s\n' "${current%% *}" "${questions//$'\n'/; }" \
          > .ai/local/last-error
        stop 'plan review' ;;
@@ -370,6 +374,7 @@ plan_decision_check() {
     *) plan_stage_fail "the plan revision records are unreadable (${questions#Error: })." ;;
   esac
 }
+plan_decision_check
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent. Supervised
 # (AI_SUPERVISE=1), a BLOCKER/MAJOR verdict gets a bounded plan revision (at most
 # AI_SUPERVISE_PLAN_ROUNDS per run) and every revision a fresh review on a clean checkout.
@@ -437,6 +442,7 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
     plan_revised=yes
   done
 fi
+plan_decision_check
 while true; do
   # Derived from the current review each round, so an earlier deferral doesn't stick.
   unresolved=0

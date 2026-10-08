@@ -270,7 +270,10 @@ record has needs-human rows, 1 when not. Both exit 2 when the store is unreadabl
 plan review does not verify while the last revision is waiting for a human decision (fail
 closed); with no store, or no outstanding decision, an invalid report takes the normal review
 path. A needs-human decision clears only with a new report: answer the question in the plan
-records, commit, and run `ai-review --plan` by hand.
+records, commit, and run `ai-review --plan` by hand. `ai-pipeline` runs this decision check
+on every start (after the startup stage dispatch and `reconcile_disputes`, whether or not the
+plan-review loop below runs), in each loop pass, and again before the implementation loop:
+`--skip-plan-review` or a DONE task skips only the optional review, never a recorded decision.
 
 Plan revision stage (`ai-pipeline`, opened by the supervised plan-review loop below). Before
 the stage opens, `run-manifest revision-reserve DIGEST LIMIT` reserves the revision for that
@@ -324,7 +327,8 @@ Stages, each resumable by rerunning: plan review (only while no task is DONE;
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
 host review store; committed as `chore(ai): record plan review`; reused while that digest is
 unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 gets a supervised plan
-revision and a new review (above), or stops with `AI_SUPERVISE=0`; `--skip-plan-review` skips it) → implement (`ai-run`) → validate if the stamp is
+revision and a new review (above), or stops with `AI_SUPERVISE=0`; `--skip-plan-review` skips it,
+but never the stored needs-human decision check) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
 `--max-fix-rounds` fix rounds are recorded: triage (`ai-run --triage`,

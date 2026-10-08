@@ -349,7 +349,7 @@ README.md, docs/workflow.md, templates/CLAUDE.md, templates/AGENTS.md, tests/tes
 - Limitation: the live supervised trial with real Claude/Codex was not run here (needs a human; see handoff "Needs you").
 
 ## T011 — Check stored needs-human decisions outside the optional plan-review loop (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -374,6 +374,7 @@ scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, README.md, vault 
 `python3 -m unittest tests.test_workflow -k needs_human_decision_gate`; `python3 -m unittest tests.test_workflow -k supervised_plan`; `.ai/bin/ai-check`
 
 ### Result / notes
+2026-10-08: `plan_decision_check` defined before its first use and called after the startup stage dispatch + `reconcile_disputes` (unconditional), in each plan-loop pass (kept) and before the implementation loop; on a decision it syncs plan rounds best-effort only to label the round. New tests `test_needs_human_decision_gate_*` (4): skip path stops with the stored question (exact pipeline message with `AI_AUTO_RECOVER=0`; with recovery, no recovery session), partly done queue stops, unreadable store → `Plan revision stage cannot be completed safely: the plan revision records are unreadable`, no decision + skip implements; no plan review, revision or implementation invocation in the stop cases. `-k needs_human_decision_gate` 4 OK; `-k supervised_plan` 35 OK (unchanged); `.ai/bin/ai-check` 363 tests OK. Docs: README, `docs/workflow.md`; vault `agents-flow.md` decision node. Not done: re-running the new tests against the pre-fix script (the revert command was denied); the review's probe already showed the bypass. `ai-pipeline --help` does not describe the skip, unchanged.
 
 ## T012 — Keep one checkout baseline across a review format retry (review M2)
 Status: TODO

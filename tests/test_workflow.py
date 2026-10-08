@@ -2472,6 +2472,67 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.implementation_calls(), 0)
         self.assertEqual(self.recovery_calls(), [])
 
+    # ---------------------------------------------------------------- needs-human decision gate (T011)
+    def decision_recorded(self, queue=None):
+        """A supervised run whose plan revision asked the human, stopped and committed."""
+        self.ready(queue)
+        self.supervised('--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                        MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        self.commit_leftovers('record the stop')
+        (self.project / '.ai/local/last-error').unlink()
+        return self.plan_calls(), len(self.revision_args())
+
+    def assert_decision_stop(self, plan_calls, sessions, recovery):
+        error = (self.project / '.ai/local/last-error').read_text()
+        if recovery:  # ai-recover escalates the pipeline's stop with its own wording
+            self.assertIn('plan review needs your decision: P1: Keep option A or switch to B?', error)
+        else:
+            self.assertEqual(error, 'Pipeline stopped during plan review: plan review needs your decision '
+                                    '(round 1): P1: Keep option A or switch to B?\n')
+        self.assertEqual(self.plan_calls(), plan_calls)
+        self.assertEqual(len(self.revision_args()), sessions)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_needs_human_decision_gate_holds_with_skip_plan_review(self):
+        calls = self.decision_recorded()
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='0', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=False)
+        (self.project / '.ai/local/last-error').unlink()
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=True)
+
+    def test_needs_human_decision_gate_holds_with_tasks_partly_done(self):
+        calls = self.decision_recorded(task('T001') + task('T002'))
+        tasks = self.project / '.ai/tasks.md'
+        tasks.write_text(tasks.read_text().replace('Status: TODO', 'Status: DONE', 1))
+        self.commit('T001 done by hand')
+        self.helper('tasks', 'untouched', expected=1)
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='0', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=False)
+        (self.project / '.ai/local/last-error').unlink()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=True)
+
+    def test_needs_human_decision_gate_unreadable_store_fails_closed_with_skip(self):
+        calls = self.decision_recorded()
+        next((self.base / 'host-state').rglob('plan-revisions-*.json')).write_text('{not json')
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage cannot be completed safely: the plan revision records are unreadable', error)
+        self.assertEqual(self.plan_calls(), calls[0])
+        self.assertEqual(len(self.revision_args()), calls[1])
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_needs_human_decision_gate_absent_skip_plan_review_implements(self):
+        self.ready()
+        self.supervised('--no-pr', '--skip-plan-review', MOCK_CODEX_PLAN='major')
+        self.assertEqual(self.plan_calls(), 0)
+        self.assertGreater(self.implementation_calls(), 0)
+        self.helper('tasks', 'complete')
+
     def test_supervised_plan_limit_stops_without_recovery(self):
         self.ready()
         self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', AI_SUPERVISE_PLAN_ROUNDS='1',

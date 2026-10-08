@@ -240,7 +240,9 @@ tmux new -s my-app-ai
    when a revision leaves its scope; from review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass
-   `--skip-plan-review` (on every rerun) to proceed anyway. The verdict is reused while
+   `--skip-plan-review` (on every rerun) to proceed anyway. A question a revision recorded
+   for the current report stops every run, also with `--skip-plan-review` or a task already
+   DONE, until you answer it and run `ai-review --plan`. The verdict is reused while
    the committed tree is unchanged apart from workflow records; any plan, source or
    validation change is reviewed again. Like implementation reviews, the report is
    bound to a digest stored outside the checkout, so an edited report doesn't count.

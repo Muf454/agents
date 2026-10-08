@@ -139,3 +139,4 @@
 | 2026-10-08T12:49:40Z | runner | T010 | completed | PASS | 52a193b | Claude checkpointed; continuing queue |
 | 2026-10-08T12:53:27Z | runner | none | queue complete; ready for independent review | PASS | 7c7d1ec | Human acceptance remains |
 | 2026-10-08T13:02:33Z | runner | triage | review triaged into dispositions/tasks | n/a | fa1dcc7 | Fix tasks run next |
+| 2026-10-08T13:15:14Z | claude (opus) | T011 | DONE: stored needs-human plan decision checked on every start, in each plan-review pass and before implementation (review M1); 4 regression tests; README, docs/workflow.md, vault flow chart + hub log | needs_human_decision_gate 4 OK; supervised_plan 35 OK; ai-check OK (363 tests) | (this commit) | pre-fix re-run of new tests not done (revert command denied) |

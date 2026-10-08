@@ -30,6 +30,9 @@ T009 done (review format retry: `review-format-check plan|code REPORT` shares th
 checks; supervised `ai-review --plan`/code reviews ask the reviewer once more on a format error
 or empty answer, `🔁 Review format retry (<mode>): <error>`, run-log line committed with the
 review; integrity failures and re-checks never retried; per-call reviewer metadata reset).
+T011 done (review M1: `ai-pipeline` checks a stored needs-human plan decision on every start,
+after the startup stage dispatch and `reconcile_disputes`, in each plan-review pass and before the
+implementation loop; `--skip-plan-review` or a DONE task no longer bypasses it).
 
 Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
@@ -159,6 +162,12 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   one call, upheld `test_format_retry_never_for_a_malformed_recheck`; `AI_SUPERVISE=0` → no retry
   `test_format_retry_off_without_supervision`; helper = publish checks
   `test_review_format_check_helper_matches_publish`.
+- T011 decision gate: stored needs-human decision + `--skip-plan-review` stops (also with
+  auto-recovery: no plan review, revision, implementation or recovery session)
+  `test_needs_human_decision_gate_holds_with_skip_plan_review`; with one task DONE and one TODO
+  `test_needs_human_decision_gate_holds_with_tasks_partly_done`; unreadable store on the skip
+  path fails closed `test_needs_human_decision_gate_unreadable_store_fails_closed_with_skip`; no
+  decision + `--skip-plan-review` implements `test_needs_human_decision_gate_absent_skip_plan_review_implements`.
 - T010 docs: README and `docs/workflow.md` wording guarded by `test_docs_consistency_no_wrong_sentences`,
   `test_docs_consistency_required_sentences`, `test_docs_consistency_modes_table`; this handoff's flow
   line and PR body by `test_pr_body_flow_this_repo_declares_the_flow_chart`.
@@ -167,11 +176,11 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
 None beyond "Needs you" above.
 
 ## Flow chart
-Flow chart updated
+Flow chart updated (T011: plan-decision check before the pipeline plan review, also on the
+`--skip-plan-review` / task-DONE path)
 
 ## Next action
 Codex review of HEAD 5b8d86b (MAJOR 2, MINOR 1) triaged: all accepted (`.ai/reviews/dispositions.md`).
-Next: T011 (needs-human decision checked also with `--skip-plan-review` / a partly done queue),
-T012 (one checkout baseline across a review format retry), T013 (convergence docs), then a new
+T011 done. Next: T012 (one checkout baseline across a review format retry), T013 (convergence docs), then a new
 independent review and the live supervised trial in "Needs you" above. No run budget in this
 batch (OR-09).
