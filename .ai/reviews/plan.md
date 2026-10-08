@@ -1,68 +1,34 @@
-<!-- Plan review of plan digest 1c1857fb8a0c6b2e486c01a427d03429e9115b220676c7e79322da88b4c35594; saved 2026-10-08T05:11:23Z. -->
+<!-- Plan review of plan digest a62a92a1f21a6b7157047d2a261e4c3fdf03a89a42c81c9bd66484036c208787; saved 2026-10-08T21:40:45Z. -->
 
-# Plan review
+> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
 
-Overall verdict: READY FOR IMPLEMENTATION. No new findings in the inspected scope. Revision 7 addresses the earlier plan gaps and explicitly defers crash-durable telemetry.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Wrapping up: I've traced the four tasks against `workflow.py`, `ai-review`, `run_parallel.py` and the existing tests. Writing the review now.
 
-Reviewed HEAD: `7b407f824c1561ceda1e23eea2deebe2bd2dc941`
+# Plan review — outcome follow-ups (CU-1..CU-4), HEAD 3ec6936
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, prior reviews/dispositions, relevant scripts and prompts, test harness, validation entry points, Git history, and relevant vault flow-chart/backlog entries. Changes since `ba330ef` contain planning and workflow records; implementation has not started.
+Overall verdict: The plan is sound and matches the code. The coverage rule in T004 is mathematically correct (B ≤ R and X ≤ H implies R..X ⊆ B..H) and the call sites it relies on (`review_records` before the hand-run commits, `recheck_values()` verifying the published report, fallback rows written with the reviewed HEAD) exist as described. One MAJOR gap: the plan's "any exception drops `base`/`covers`" rule, combined with the toolkit's `git()` helper raising on `merge-base --is-ancestor` exit 1, would make `covers` silently empty whenever the fallback log contains any row from a merged branch, which is already the case in this repository. The rest are MINOR hardening points for tests and parsing.
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=5
 
 ## BLOCKER findings
-
 None.
 
 ## MAJOR findings
-
-None.
+- P1 (demonstrated): T004 "Recording", `.ai/tasks.md:101-105`. The plan says "any exception in this step drops `base`/`covers`, never the line", and the rule needs an ancestry test per row. The toolkit's `git()` helper (`scripts/lib/workflow.py:27-28`) is `check_output`, so `git merge-base --is-ancestor X H` raises `CalledProcessError` on exit 1 ("not an ancestor"), and the same for a row whose base does not resolve. With a blanket `try` around the step, the first non-covered row aborts the whole computation and `covers` is dropped for every row, including covered ones. This is not a hypothetical: this repository's own `.ai/reviews/fallback-log.md:8,16-17` holds three rows from merged branches (`feature/reviewer-fallback`, `fix/catchup-review`). For any Codex code review on a later branch, X is an ancestor of H (merged) but B = merge-base(master, H) is a descendant of their base R, so `is-ancestor B R` exits 1. Every Codex review in this repo would therefore record no coverage, and the pending list would never shrink, while the planned tests (each scenario in a fresh fixture with a single row) would still pass. The failure direction is "safe" per the spec, but the feature does not work on real logs. Plan change: (a) state that the ancestry checks use `subprocess.run([...]).returncode` with 0 = yes, 1 = no, anything else = skip the row, as `recheck_preflight` does at `workflow.py:1269-1271`; (b) handle resolution/ancestry failures per row (skip that row) and reserve the outer `try` for failures of the step as a whole (reading the log, resolving the Codex base); (c) add a mixed test: one covered Claude code row plus one row from a merged branch whose base is older than the Codex base plus one unresolvable row, all in the same `fallback-log.md`, asserting `covers` contains exactly the covered entry.
 
 ## MINOR findings
-
-None.
-
-## Requirements and task assessment
-
-T001 replaces the unsafe reviewer Bash policy with Read/Glob/Grep only. Its context preparation accounts for code, plan and re-check modes, preserves Codex prompts, checks mandatory preparation failures explicitly, and specifies meaningful content and cleanup assertions. The proposed `review-range` helper obtains the re-check base from a verified review.
-
-T002 accounts for stopped implementation attempts without opening attempts for triage or exhausted preflight budgets. It addresses malformed queues, duplicate terminal outcomes, usage-limit retries, and bounded signal tests. The SIGKILL/OOM/power-loss limitation is explicit and recorded separately as CU-5.
-
-Both tasks specify models appropriate to their remaining scope. Their order is valid. Documentation and flow-chart updates accompany each workflow change; installed-copy upgrades remain under human control.
+- P2 (suspected): T004 row parsing, `.ai/tasks.md:101-103`. Two parsing details are unstated. First, the plan says "rows whose base is not a commit (`plan`, `recheck`)": if the implementer decides this by `git rev-parse --verify plan^{commit}`, a branch or tag named `plan` or `recheck` would resolve and give a wrong R. Specify: treat the literal cells `plan` and `recheck` as "no base" before any git call; only a 7-40 hex cell is resolved. Second, the Reason cell may contain escaped `\|` (`fallback_record` writes `cell()` with that escape, `workflow.py:1971`), so a naive `split('|')` yields a variable number of cells; specify that mode, branch, HEAD and base are taken from the left (cells 2-5) and the rest ignored.
+- P3 (suspected): T004 tests, `.ai/tasks.md:111-117`. "then a further commit and a Codex code review of the same branch": `ai-review` runs `stamp verify` (`scripts/ai-review:284`, `workflow.py:579-585`), which fails when the fingerprint changed since the last `ai-check`. The existing test gets away with it because `self.commit('record review')` only commits `.ai/` records. Say explicitly that the further commit touches only records, or that the test reruns `ai-check` first. The "other branch" scenario needs a branch with a complete task queue and a fresh validation stamp, which `ready()` does not provide for `main`. Recommend factoring the rule into a pure helper (for example `catchup_covers(rows, base, head)` returning the list) so the base-descendant, other-branch and unresolvable cases can be unit-tested directly in a scratch git repo through the `recheck_module()` loader, with one end-to-end test for the happy path.
+- P4 (suspected): T001 tests, `.ai/tasks.md:17`. `ParallelRunnerTest.setUp` copies the developer's environment (`tests/test_workflow.py:4669`). If the host sets `NO_COLOR=1` or CI sets `PYTHON_COLORS=0`, the `FORCE_COLOR=3` and `PYTHON_COLORS=1` cases pass without exercising the fix (and the "both" case is the only real one). Specify that each subtest first removes `NO_COLOR`, `FORCE_COLOR` and `PYTHON_COLORS` from the env, then sets only the case's variables. Also record the mutation check's expected outcome conditionally (`sys.version_info >= (3, 14)` colours unittest output; older Pythons pass regardless), as the task already hints.
+- P5 (suspected): T002 first-time-pass denominator, `.ai/tasks.md:43`. "Rows without an `attempt` field count as attempt 1": a task with several old attempt-less rows would be counted several times in y. Say: for each task key, the attempt-1 row is the row with `attempt == 1` or, absent that field, the first row for that key in file order. Low impact (old lines only), but it makes the acceptance criterion "old lines still report" precise.
+- P6 (suspected): T003 report table, `.ai/tasks.md:72`. The new "Re-checks by reviewer" table has no `mode` column and the plan does not say what key groups rows (reviewer, model). State the grouping key and the sort order so that the hand-written JSONL report test asserts a deterministic row, and say that `reviewed_head` is not printed (or is, as a 12-char prefix) so T004's test can target the right string.
 
 ## Missing coverage
+Checked against the checklist: item 10 (irreversible operations) applies to `fallback_record` rewriting `fallback-log.md`; the plan correctly forbids reordering rows and keeps `atomic()`. Item 4 (stale results) does not apply: all computations are read-only at logging time and nonfatal. Items 1-3 and 5-9 (locks, deletion, attribution, realtime, tenancy, roles, hidden rows, main/alt) do not apply to telemetry in this toolkit; the closest analogue, "rows hidden from a view" (item 8), is exactly T004's risk and is addressed by the opus assignment and the conservative rule, with the gap in P1.
 
-The planned regression tests are not yet implemented. No additional significant coverage gap was identified in the inspected paths.
-
-The mocked CLI tests establish invocation arguments and host behavior; the planned live Claude check remains necessary to verify actual tool enforcement.
+Tests still missing from the plan: the mixed-row `covers` case (P1); explicit env isolation for the colour tests (P4); a direct unit test of the coverage rule independent of the pipeline fixture (P3).
 
 ## Security concerns
+None new. `outcome` and `outcomes_report` write only to the host state root (`check_state_root`, `workflow.py:2051`) and the plan adds no writes to the checkout besides the existing `fallback_record`. `git rev-parse --verify` on 12-character cells taken from a committed Markdown table is safe (hex-only, `^{commit}` suffix); P2 asks to restrict the resolved cells to hex so a crafted literal cannot name a ref.
 
-Removing Bash, Edit and Write closes the demonstrated reviewer command-writing routes. The invocation retains disabled MCP configuration and the checkout-unchanged check.
-
-Read access is not confined by an OS sandbox. The plan acknowledges this and adds checkout-only instructions; live testing must not describe those instructions as filesystem isolation.
-
-## Architecture concerns
-
-The plan reuses existing review publication, binding and outcome machinery without adding dependencies. It preserves frozen installed gate files and keeps the deferred durability work outside this implementation.
-
-## Validation observed
-
-- Python syntax parsing passed for four source/test files.
-- Bash syntax checks passed individually for 13 script/template/validation files.
-- Test discovery collected 272 existing cases.
-- `git diff --check ba330ef..HEAD` passed.
-- HEAD and the clean checkout remained unchanged.
-
-Test bodies, `./scripts/ai-check`, and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current implementation-validation evidence was present. No files were modified and no network/MCP integrations were invoked.
-
-## Manual testing recommendations
-
-### Needs you
-
-Perform the planned live Claude tool-enforcement check in a disposable fixture. Approve installed-copy upgrades separately.
-
-### Covered by automated tests
-
-Implement the specified context, preparation-failure, outcome, retry and signal regressions, then run targeted checks and the full gate.
-
-This review is not human acceptance.
+## Model assignment check
+All four tasks carry an explicit `Model:` line. T004 on `opus` is appropriate (a wrong rule hides work). T001-T003 on `sonnet` fit ordinary code and tests. No task is mechanical enough to need `haiku`.
