@@ -138,3 +138,4 @@
 | 2026-10-08T13:10:00Z | claude (haiku) | T010 | DONE: docs checked against T001–T009 code (no template change); flow chart already complete; handoff Needs you = live trial steps, automated tests named T005–T009; Next action updated; vault hub log + human todo line | ai-check OK (359 tests, 226.9 s); docs_consistency 3 OK; pr_body_flow 2 OK | (this commit) | live supervised trial is a human todo; queue complete |
 | 2026-10-08T12:49:40Z | runner | T010 | completed | PASS | 52a193b | Claude checkpointed; continuing queue |
 | 2026-10-08T12:53:27Z | runner | none | queue complete; ready for independent review | PASS | 7c7d1ec | Human acceptance remains |
+| 2026-10-08T13:02:33Z | runner | triage | review triaged into dispositions/tasks | n/a | fa1dcc7 | Fix tasks run next |
