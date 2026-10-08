@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest e319a0ea6e4cc1378ea7620adf2af4d3eb9b8c57d43d8ad03c077f8d68acba50; saved 2026-10-08T05:08:00Z. -->
+<!-- Plan review of plan digest 1c1857fb8a0c6b2e486c01a427d03429e9115b220676c7e79322da88b4c35594; saved 2026-10-08T05:11:23Z. -->
 
 # Plan review
 
-Overall verdict: CHANGES REQUIRED — crash recovery needs to handle incomplete and not-yet-durable outcome writes.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
+Overall verdict: READY FOR IMPLEMENTATION. No new findings in the inspected scope. Revision 7 addresses the earlier plan gaps and explicitly defers crash-durable telemetry.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
-Reviewed HEAD: `a7956da09f0237964ad174ac2a9b7c61de2bbbea`.
+Reviewed HEAD: `7b407f824c1561ceda1e23eea2deebe2bd2dc941`
 
-Inspected repository guidance, spec, plan, tasks, state, handoff, relevant scripts/helpers, tests, validation entry points, reviewer prompts, documentation, previous review and reference material. Implementation remains pending.
+Inspected repository instructions, spec, plan, tasks, state, handoff, prior reviews/dispositions, relevant scripts and prompts, test harness, validation entry points, Git history, and relevant vault flow-chart/backlog entries. Changes since `ba330ef` contain planning and workflow records; implementation has not started.
 
 ## BLOCKER findings
 
@@ -15,72 +15,54 @@ None.
 
 ## MAJOR findings
 
-- P1: **An incomplete outcome append can swallow the recovery row.**
-
-  **Location:** `.ai/tasks.md:103`, `.ai/tasks.md:108`; `scripts/lib/workflow.py:2020`.
-
-  T003 covers crashes after complete appends but does not specify recovery from a partially persisted final JSONL record. A single append followed by `fsync` does not protect against power loss before that `fsync` completes.
-
-  If the partial record lacks its terminating newline, reconciliation appends `crashed` directly onto it. The existing reader skips the resulting malformed line, losing the recovery outcome too. Reconciliation then removes the marker, so the subsequent successful attempt can again appear as a first-time pass. A partial UTF-8 character can also prevent the reader from decoding the entire log.
-
-  **Evidence:** an in-memory probe using the actual `read_outcomes` function retained a recovery row after a complete preceding line, but discarded it after an incomplete preceding line.
-
-  **Concrete plan change:** specify safe handling of incomplete final records before appending recovery outcomes, including partial UTF-8. Preserve complete historical rows and coordinate repair with other writers because the log is shared across checkouts. Add boundary-state tests with a truncated record and a truncated multibyte character; repeated recovery must retain exactly one readable outcome for the attempt.
-
-  The reader weakness is pre-existing; the gap concerns R2’s newly promised power-loss recovery.
-
-- P2: **Finding an existing outcome does not prove it is durable.**
-
-  **Location:** `.ai/tasks.md:103`, `.ai/tasks.md:108`; `.ai/project-spec.md:40`.
-
-  The duplicate-ID path returns success without appending, and reconciliation removes an already-logged marker. Neither path explicitly requires syncing the existing outcome log first.
-
-  A helper can be killed after flushing a complete row into the kernel cache but before `fsync`. Its successor can read that row, recognize the ID, and durably remove the marker. A subsequent power loss can then lose the unsynced outcome while retaining the marker deletion. This violates the required outcome-before-marker-removal durability order.
-
-  The proposed tests construct existing rows through the helper’s completed, fsynced append, so they cannot catch this boundary.
-
-  **Concrete plan change:** require the duplicate-ID success path to establish durability of the existing outcome before allowing marker removal. Add a test observing the synchronization order when the row already exists: outcome-log synchronization must precede unlinking and syncing the marker directory. Use test-side mocks rather than production crash hooks.
+None.
 
 ## MINOR findings
 
-- P3: **The README’s outcome contract would remain outdated.**
+None.
 
-  **Location:** `.ai/tasks.md:70`, `.ai/tasks.md:140`; `README.md:397`.
+## Requirements and task assessment
 
-  T002/T004 update the workflow documentation and flow chart, but the README still enumerates only `done`, `blocked`, `validation_failed`, and `no_checkpoint`. It would omit the new stopped/crashed results and attempt identity.
+T001 replaces the unsafe reviewer Bash policy with Read/Glob/Grep only. Its context preparation accounts for code, plan and re-check modes, preserves Codex prompts, checks mandatory preparation failures explicitly, and specifies meaningful content and cleanup assertions. The proposed `review-range` helper obtains the re-check base from a verified review.
 
-  **Concrete plan change:** include the README’s “Outcome log” section in the documentation updates, covering the new results, attempt IDs, and crash reconciliation.
+T002 accounts for stopped implementation attempts without opening attempts for triage or exhausted preflight budgets. It addresses malformed queues, duplicate terminal outcomes, usage-limit retries, and bounded signal tests. The SIGKILL/OOM/power-loss limitation is explicit and recorded separately as CU-5.
+
+Both tasks specify models appropriate to their remaining scope. Their order is valid. Documentation and flow-chart updates accompany each workflow change; installed-copy upgrades remain under human control.
 
 ## Missing coverage
 
-Add the incomplete-record and existing-but-unsynced-record tests above. The planned tests otherwise cover the principal review modes, context preparation failures, timeout/interruption outcomes, malformed queues, retry numbering, triage exclusion, and checkout-lock rejection.
+The planned regression tests are not yet implemented. No additional significant coverage gap was identified in the inspected paths.
 
-## Security and architecture
+The mocked CLI tests establish invocation arguments and host behavior; the planned live Claude check remains necessary to verify actual tool enforcement.
 
-The shell-free reviewer design addresses the accepted command-execution finding. Explicit models fit the planned risks.
+## Security concerns
 
-Read access remains broader than the checkout; the prompt restriction does not provide filesystem isolation. The planned live Claude CLI check remains pending.
+Removing Bash, Edit and Write closes the demonstrated reviewer command-writing routes. The invocation retains disabled MCP configuration and the checkout-unchanged check.
 
-The host-state design reuses existing mechanisms without new dependencies. Its crash guarantees need the additional boundaries identified above.
+Read access is not confined by an OS sandbox. The plan acknowledges this and adds checkout-only instructions; live testing must not describe those instructions as filesystem isolation.
+
+## Architecture concerns
+
+The plan reuses existing review publication, binding and outcome machinery without adding dependencies. It preserves frozen installed gate files and keeps the deferred durability work outside this implementation.
 
 ## Validation observed
 
 - Python syntax parsing passed for four source/test files.
-- Bash syntax checks passed for 13 scripts and validation entry points.
-- Test discovery collected 272 cases; test bodies were not executed.
-- The read-only, in-memory outcome-reader probe reproduced P1.
-- HEAD and Git status remained unchanged.
+- Bash syntax checks passed individually for 13 script/template/validation files.
+- Test discovery collected 272 existing cases.
+- `git diff --check ba330ef..HEAD` passed.
+- HEAD and the clean checkout remained unchanged.
 
-Not run: `./scripts/ai-check`, `.ai/bin/ai-check`, integration tests, or live CLI checks. They require filesystem writes unavailable in this review. No files were modified and no network/MCP integrations were invoked.
+Test bodies, `./scripts/ai-check`, and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current implementation-validation evidence was present. No files were modified and no network/MCP integrations were invoked.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-Complete the planned live Claude reviewer tool-enforcement check in a disposable fixture. Installed-copy upgrades remain under human control.
+Perform the planned live Claude tool-enforcement check in a disposable fixture. Approve installed-copy upgrades separately.
 
 ### Covered by automated tests
 
-Implement the planned regressions and the two additional crash-boundary cases above.
+Implement the specified context, preparation-failure, outcome, retry and signal regressions, then run targeted checks and the full gate.
 
 This review is not human acceptance.
