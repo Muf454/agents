@@ -135,3 +135,4 @@
 | 2026-10-08T20:53Z | claude (opus) | T002 | DONE: FL-15 review base: origin/B when local B is behind (no fetch), diverged warning keeps local, `Review base:` line, resolved SHA to `ai-review`, PR target unchanged | targeted 9 OK; ai-check 299 OK | (this commit) | `base_label` + `advance_origin_main()` ready for T003 |
 | 2026-10-08T20:55:39Z | runner | T002 | completed | PASS | 86a26b1 | Claude checkpointed; continuing queue |
 | 2026-10-08T21:30Z | claude (opus) | T003 | DONE: FL-17 start check after triage/re-check settlement (`stop start`), `publish_ready` names "moved past the branch", `ai-recover` arm escalates with full reason on stderr; 7 `test_base_moved_*` tests | targeted 67 OK; ai-check 306 OK | (this commit) | start-path message names origin/main (T002 resolution) |
+| 2026-10-08T21:10:55Z | runner | T003 | completed | PASS | 754d2c1 | Claude checkpointed; continuing queue |
