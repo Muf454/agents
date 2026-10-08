@@ -6,10 +6,10 @@ Phase: implementing
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 5
+Tasks remaining: 4
 Last validation: not run on this branch
 Blocked: no
-Next action: Plan revision 2 (plan review round 1 dispositions recorded); implement T001 (FL-14 review report tolerance), then T002–T005 in queue order
+Next action: Plan revision 3 (plan review round 2 dispositions recorded; FL-12/T005 deferred to a later batch); implement T001 (FL-14 review report tolerance), then T002–T004 in queue order
 Last updated: 2026-10-08
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

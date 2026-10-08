@@ -1,10 +1,11 @@
-# Spec: robustness batch from the stop analysis of 2026-10-07 (FL-12, FL-14..FL-17)
+# Spec: robustness batch from the stop analysis of 2026-10-07 (FL-14..FL-17; FL-12 deferred)
 
 ## Objective
-Remove five pipeline stops seen in real runs whose cause was a format or wording problem, not
+Remove four pipeline stops seen in real runs whose cause was a format or wording problem, not
 a real defect. Source: vault backlog `agents-backlog.md`, section "Stop analysis 2026-10-07
 (mission control)". Planned 2026-10-08 on branch `fix/robustness-batch` from origin/master
-c7d4dee. Each item was checked against this branch; all five are still open (nothing dropped):
+c7d4dee. Each item was checked against this branch; all five were still open. FL-12 was dropped
+from this batch in plan revision 3 (see Non-goals):
 - FL-14: `publish_review` (`scripts/lib/workflow.py`) requires the literal strings
   `Overall verdict:` and all three `## <LEVEL> findings` headings. `publish_plan_review` requires
   the three headings.
@@ -14,8 +15,9 @@ c7d4dee. Each item was checked against this branch; all five are still open (not
   reviewed commit, and `publish_ready` reports every false as "reviewed content changed".
   Nothing checks the base before the code review.
 - FL-16: `DISPOSITION_ROW` only matches a bare ID cell (`| M1 |`).
-- FL-12: `recover_decision` only accepts a text that is one JSON object (optionally fenced).
-  `test_recovery_decision_parsing_is_strict` pins `Decision: {...}` to `escalate`.
+- FL-12 (deferred): `recover_decision` only accepts a text that is one JSON object (optionally
+  fenced). `test_recovery_decision_parsing_is_strict` pins `Decision: {...}` to `escalate`.
+  Both stay as they are in this batch.
 
 ## Requirements
 - **R1 (FL-14, P1): review report tolerance.** A code or plan review report may leave out a
@@ -43,23 +45,21 @@ c7d4dee. Each item was checked against this branch; all five are still open (not
   use the base. The stop therefore never leaves a stage open that the human's merge would
   strand. The triage and re-check scope protections are unchanged. The publish check reports
   the same case with that wording, not as "reviewed content changed". Auto-recovery escalates
-  this stop without a Claude session, because merging the base is a human decision.
+  this stop without a Claude session, because merging the base is a human decision, and keeps
+  the complete stop message (base ref and SHA, merge advice, publish-check prefix) on stderr,
+  as the stop does with recovery disabled.
 - **R4 (FL-16, P2): severity suffix in triage IDs.** A disposition row whose finding cell is
   `M1 (MAJOR)` counts as the row for `M1`. This applies to `triage-check`, the review history,
   re-check preparation and the PR body, which all use `DISPOSITION_ROW`. The suffix may be
   BLOCKER, MAJOR or MINOR in any letter case. The finding ID stays the key and the suffix is not
   checked against the finding's level. Other decorations (bold, links) stay unmatched.
-- **R5 (FL-12, P2): recovery decision after prose.** The decision is valid when the session's
-  text is exactly one decision object, as today, or prose followed by one JSON object written
-  on the last non-empty line. That line may sit alone inside a code fence that closes the
-  text. The parser is line-based and never extracts an object from inside a line or a
-  container. It escalates when anything follows the object, when the last line is not exactly
-  one object (extra data, an array, a multi-line object), when the text before it contains an
-  `"action":` key in any form (including malformed or duplicate-key objects), or in every case
-  that escalates today (exit code, envelope, duplicate keys, unknown action, missing reason,
-  non-object). The decision selects automatic recovery actions, so any doubt escalates.
 
 ## Non-goals
+- FL-12 (recovery decision after prose) is deferred to a later batch. Relaxing the
+  `recover-decision` parser drew MAJOR plan-review findings in two rounds, and the decision
+  selects automatic recovery actions, so this batch leaves `recover_decision` and its tests
+  exactly as on master. The later batch should get the decision as structured output through
+  the CLI's `--json-schema` instead of a lenient parser.
 - No retry of malformed reviews. FL-04 R4 on `feature/supervisor` adds a review format retry,
   and this batch only widens what is accepted.
 - No `git fetch` and no `--json-schema` structured output. Both need the network or a newer
