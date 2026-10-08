@@ -36,21 +36,28 @@ c7d4dee. Each item was checked against this branch; all five are still open (not
   count, dispute base and publish check all use the same commit. Inferring the PR target is
   unchanged (`--base main` still targets `main`).
 - **R3 (FL-17, P2): base moved past the branch.** When the resolved base commit is not an
-  ancestor of HEAD, the pipeline stops before the code review with "Review base `<ref>`
-  (`<sha>`) moved past the branch; merge it into `<branch>` and rerun". The publish check
-  reports the same case with that wording, not as "reviewed content changed". Auto-recovery
-  escalates this stop without a Claude session, because merging the base is a human decision.
+  ancestor of HEAD, the pipeline stops before the plan review, implementation and code review
+  with "Review base `<ref>` (`<sha>`) moved past the branch; merge it into `<branch>` and
+  rerun". An interrupted triage stage and a pending re-check are completed first, because both
+  are bound to the published review, reject any source change since they started, and do not
+  use the base. The stop therefore never leaves a stage open that the human's merge would
+  strand. The triage and re-check scope protections are unchanged. The publish check reports
+  the same case with that wording, not as "reviewed content changed". Auto-recovery escalates
+  this stop without a Claude session, because merging the base is a human decision.
 - **R4 (FL-16, P2): severity suffix in triage IDs.** A disposition row whose finding cell is
   `M1 (MAJOR)` counts as the row for `M1`. This applies to `triage-check`, the review history,
   re-check preparation and the PR body, which all use `DISPOSITION_ROW`. The suffix may be
   BLOCKER, MAJOR or MINOR in any letter case. The finding ID stays the key and the suffix is not
   checked against the finding's level. Other decorations (bold, links) stay unmatched.
 - **R5 (FL-12, P2): recovery decision after prose.** The decision is valid when the session's
-  text is exactly one decision object, as today, or prose followed by exactly one JSON object
-  that ends the text (optionally inside a closing code fence). It escalates when anything
-  follows the object, when the prose holds another JSON object with an `action` key, or in
-  every case that escalates today (exit code, envelope, duplicate keys, unknown action, missing
-  reason, non-object).
+  text is exactly one decision object, as today, or prose followed by one JSON object written
+  on the last non-empty line. That line may sit alone inside a code fence that closes the
+  text. The parser is line-based and never extracts an object from inside a line or a
+  container. It escalates when anything follows the object, when the last line is not exactly
+  one object (extra data, an array, a multi-line object), when the text before it contains an
+  `"action":` key in any form (including malformed or duplicate-key objects), or in every case
+  that escalates today (exit code, envelope, duplicate keys, unknown action, missing reason,
+  non-object). The decision selects automatic recovery actions, so any doubt escalates.
 
 ## Non-goals
 - No retry of malformed reviews. FL-04 R4 on `feature/supervisor` adds a review format retry,

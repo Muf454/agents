@@ -9,7 +9,7 @@ Tasks complete: 0
 Tasks remaining: 5
 Last validation: not run on this branch
 Blocked: no
-Next action: Implement T001 (FL-14 review report tolerance), then T002–T005 in queue order
+Next action: Plan revision 2 (plan review round 1 dispositions recorded); implement T001 (FL-14 review report tolerance), then T002–T005 in queue order
 Last updated: 2026-10-08
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

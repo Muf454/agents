@@ -87,36 +87,39 @@ Dependencies: T002
 Model: opus
 
 ### Goal
-R3: when the resolved base is not an ancestor of HEAD, the pipeline stops before any agent or review with a message that names the case and the fix. The publish check reports it the same way instead of "reviewed content changed". Auto-recovery escalates it without a Claude session.
+R3: when the resolved base is not an ancestor of HEAD, the pipeline stops before the plan review, implementation and code review with a message that names the case and the fix. An interrupted triage stage and a pending re-check are settled first, so the human's merge never lands in an open stage. The publish check reports the case the same way instead of "reviewed content changed". Auto-recovery escalates it without a Claude session.
 
 ### Implementation notes
 Case seen: on 2026-10-08, FL-04 stopped at the PR publish check with "the review is not current for HEAD (reviewed content changed)" after a clean Codex review, and `ai-recover` escalated twice on that wording. The real cause: `review_current` requires the base (origin/master) to be an ancestor of the reviewed commit, and master had gained #19/#20.
 
 `scripts/ai-pipeline`:
 - New function next to `review_current`: `base_reached() { git merge-base --is-ancestor "$base_sha" HEAD 2>/dev/null; }` and a message variable or function. Use the wording `Review base <base_label> moved past the branch; merge it into <branch> and rerun ai-pipeline`, with `base_label` from T002.
-- Start check: after the helper functions are defined (so `stop` and the recovery handover work) and before the STARTED notification, the interrupted-stage completion, `reconcile_disputes`, the plan review and implementation. If `! base_reached`, write the message to `.ai/local/last-error` and `stop start`. Reason (see plan, Decisions): the base SHA is fixed for a run and HEAD only gains commits, so this is the earliest point and it covers the code review. A resume re-resolves the base and checks again.
+- Start check: directly after the top-level `reconcile_disputes` call (~line 297), before the plan review and the implementation loop. If `! base_reached`, write the message to `.ai/local/last-error` and `stop start`. Do NOT place it before the interrupted-stage completion or `reconcile_disputes`. Both settle records bound to the existing review: `stage_verify` → `triage_scope` rejects any non-record change since the stage started, and a pending re-check allows only `RECHECK_RECORDS` since the reviewed commit. A merge made while either is open would make the rerun stop with a triage or re-check scope error, so the run settles both first and only then asks for the merge. Neither step uses the base range. They are triage (Claude) and re-check (Codex) of the review already published. Preserve the triage scope protection unchanged. Reason for the placement (see plan, Decisions): the base SHA is fixed for a run and HEAD only gains commits, so this is the earliest point that leaves no stage open, and it comes before the code review. A resume re-resolves the base and checks again.
 - `publish_ready`: add `elif ! base_reached; then why="…moved past the branch…"` immediately before `elif ! review_current`. Leave the existing branches and their order unchanged.
 `scripts/ai-recover`: add a separate `case` arm for `*'moved past the branch'*` that escalates with `the review base moved past the branch.` / `merge the base into the branch, then rerun ai-pipeline.`, placed before the generic hard-rule arm. Do not edit the shared pattern lines, because FL-04 adds patterns there.
 
 Tests (new methods named `test_base_moved_*`; reuse `advance_origin_main()` from T002, with the feature branch NOT containing the new commit):
 - Start: `ai-pipeline --approved --base main --no-pr` (and `--base origin/main`) exits 1 before any agent. There is no `.ai/local/mock-invocations` and no Codex call log, stderr and `last-error` contain `moved past the branch; merge it`, and a ⛔ notification is sent. With `AI_AUTO_RECOVER='1'`, `ai-recover` escalates with no recovery Claude call (`recovery_calls()` empty) and its notification names the base.
 - After merging origin/main into the branch, the same run proceeds normally (review, no-pr finish).
-- Publish wording (defence in depth): reach `publish_ready` with the base no longer an ancestor of HEAD. For example, use a `post-commit` hook on `chore(ai): record independent review`, as the publish-invariant tests do, that re-parents HEAD below the base with the same tree (`git reset --soft <commit before base>` and re-commit; the fixture needs base = a branch with at least two commits). Assert `Publish check failed at …: Review base … moved past the branch` and no `reviewed content changed`. If no deterministic fixture exists without a test hook in `scripts/`, record that in the result and cover the start check only. Do not add test hooks to product code.
+- Pending triage stage (`test_base_moved_with_pending_triage_stage`): build the stage as `test_triage_completion_crash_after_counted_commit_does_not_count_twice` does (`ai-run`, `ai-review --base main` with `major-once`, `run-manifest start`, `stage-set triage <head>`) but without running the triage child. Set up the origin as T002's fixture does (`add_origin()`, push `main`). Then call `advance_origin_main()` (branch not containing it) and run `ai-pipeline --approved --base main --no-pr`, expected 1. Assert stdout `Completing the interrupted review triage`, `triage_rounds() == 1`, `open_stage() == ''`, the base message in stderr, and no new Codex review (the Codex call count is unchanged across the run). Then `git merge --no-edit origin/main` and rerun: it exits 0 with no `Triage stage` error and T002 DONE.
+- Counted-but-open triage stage (`test_base_moved_with_counted_open_triage_stage`): the same, but run `ai-run --approved --triage --since <head>` before advancing origin (as the existing test does). The stopped run closes the stage without a second count (`triage_rounds() == 1`, `triage_calls() == 1`, `open_stage() == ''`), then stops with the base message. After the merge, the rerun completes.
+- Publish wording (`test_base_moved_publish_check_names_the_base`, mandatory): `ready()`, `add_origin()`, then `git branch -f main HEAD`, so that `main` has two commits and the base is the plan commit. Add a `post-commit` hook via `self.hook(...)` guarded on the subject `chore(ai): record independent review` (as in `test_publish_ready_commit_hook_changing_source_while_recording_review_stops_before_push`). The hook replaces HEAD with a commit of the same tree whose parent is `main^`: `git reset -q --soft "$(git commit-tree "HEAD^{tree}" -p main^ -m 'hook: rewritten history')"`. The tree is unchanged and the checkout stays clean. A merge-base with `main` still exists, so `disputes-verify` (`inherited_disputes`) passes, but `main` is no longer an ancestor. Do not use a parentless commit: without a merge-base, `disputes-verify` fails first with "No merge-base". Run `ai-pipeline --approved --base main` (PR mode) with `AI_AUTO_RECOVER='1'`, expected 1. Assert `Publish check failed at pull request preparation: Review base main (` and `moved past the branch` in stderr and `last-error`, no `reviewed content changed`, `remote_head(origin) == ''`, no `pr create` call, `recovery_calls() == []`, ⛔ in the notifications and no FINISHED. This test fails if the `publish_ready` branch is left out. No test hooks in product code.
 
-Docs: `docs/workflow.md` (publish checks ~line 340 and the recovery hard-rule list ~line 383), the README publish paragraph (~line 275), vault `agents-flow.md`. In the flow note, add a start check node or edge ("base an ancestor of HEAD? no → ⛔ merge the base"), name the case in the `publish` node or its bullet, and add "base moved past the branch?" to the recovery `rules` node. Bump `updated:` and use `Edit` only. Append a dated line to the hub Log. The handoff `## Flow chart` says "Flow chart updated".
+Docs: `docs/workflow.md` (publish checks ~line 340 and the recovery hard-rule list ~line 383), the README publish paragraph (~line 275), vault `agents-flow.md`. The docs say that an interrupted triage or pending re-check is completed before the stop, and that the human merges only after that stop. In the flow note, add a start check node or edge after the interrupted-triage and dispute reconciliation steps ("base an ancestor of HEAD? no → ⛔ merge the base"), name the case in the `publish` node or its bullet, and add "base moved past the branch?" to the recovery `rules` node. Bump `updated:` and use `Edit` only. Append a dated line to the hub Log. The handoff `## Flow chart` says "Flow chart updated".
 
 ### Likely affected modules
 scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, README.md, vault agents-flow.md, vault agents.md (Log)
 
 ### Acceptance criteria
-- A base not contained in the branch stops the pipeline before any Claude or Codex call, with the "moved past the branch; merge it into <branch>" message in stderr, `last-error` and the ⛔ notification.
+- A base not contained in the branch stops the pipeline before the plan review, implementation and code review, with the "moved past the branch; merge it into <branch>" message in stderr, `last-error` and the ⛔ notification. Without an open triage stage or a pending re-check, no Claude or Codex call happens at all.
+- An open triage stage (pending or already counted) is completed exactly once before that stop and is cleared.
 - Auto-recovery escalates that stop without a Claude session.
-- After the human merges the base, the rerun completes.
-- The publish check reports the case as "moved past the branch" (or the result records why only the start check is tested). "reviewed content changed" is still reported for a real content change (the existing publish-invariant tests pass).
+- After the human merges the base, the rerun completes, including after an interrupted triage, with no triage scope error.
+- The publish check reports the case as "moved past the branch" (tested by `test_base_moved_publish_check_names_the_base`, with no push, no PR and no recovery Claude call). "reviewed content changed" is still reported for a real content change (the existing publish-invariant tests pass).
 - All existing pipeline and recovery tests pass unchanged. Docs and flow note updated.
 
 ### Validation
-`python3 -m unittest tests.test_workflow -k base_moved -k review_base -k publish -k recovery -k pr_base`; `.ai/bin/ai-check`
+`python3 -m unittest tests.test_workflow -k base_moved -k review_base -k publish -k recovery -k pr_base -k triage_completion -k stage_per_branch -k disputed`; `.ai/bin/ai-check`
 
 ### Result / notes
 Not started.
@@ -157,32 +160,33 @@ Not started.
 ## T005 — Recovery decision after prose (FL-12)
 Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
-R5: `recover-decision` accepts a decision object that follows the session's diagnosis prose, while keeping "exactly one decision". An ambiguous answer still escalates as "gave no valid decision".
+R5: `recover-decision` accepts a decision object on its own last line after the session's diagnosis prose, while keeping "exactly one decision". Anything malformed or ambiguous still escalates as "gave no valid decision". The decision drives automatic recovery (`commit_and_rerun` commits leftovers), so this is an integrity control: when in doubt, escalate.
 
 ### Implementation notes
 Case seen: twice on 2026-10-07 the recovery session wrote its diagnosis first. The stop said "gave no valid decision" and lost the real reason (it was escalate both times).
 
-`scripts/lib/workflow.py` `recover_decision` (~line 1625), changed in place:
-- Keep the envelope checks unchanged. First try the whole text, as today (fence-stripped `json.loads` with `_no_duplicate_keys`).
-- Only if that fails to parse: strip one trailing closing fence (```` ``` ````) and trailing whitespace, then find the object that ends the text. For each `{` position, `json.JSONDecoder(object_pairs_hook=_no_duplicate_keys).raw_decode(text, i)`. The decision is the dict whose end equals `len(text)`; at most one position can reach the end. Duplicate-key `ValueError`s at a position count as "no object here". Escalate if there is none.
-- Ambiguity: escalate if the prefix before that object contains any `{` position that decodes to a dict with an `action` key (including fenced examples).
-- The field validation after it is unchanged. Update the docstring (it describes a "first '{' to last '}'" span that the code does not implement).
+`scripts/lib/workflow.py` `recover_decision` (~line 1625), changed in place. No scanning for `{` positions and no `raw_decode`: the accepted forms are line-based.
+- Keep the envelope checks unchanged. Form A, as today: the whole fence-stripped text is one object (`json.loads` with `_no_duplicate_keys`). If it parses, its result is the decision, whatever its type, and the field validation decides. Form B is tried only when form A raises `ValueError`.
+- Form B: split `result.strip()` into lines and drop blank lines at the end. The decision line is the last line. If the last line, stripped, is exactly ```` ``` ```` and the line two above it, stripped, is ```` ``` ```` or ```` ```json ````, the decision line is the one between them, and those three lines form the tail. Otherwise the tail is the last line alone. The decision line, stripped, must start with `{` and pass `json.loads(line, object_pairs_hook=_no_duplicate_keys)` as a dict. Any `ValueError` (including duplicate keys and extra data after the object) or a non-dict escalates. There must be at least one non-blank line before the tail (otherwise form A would have applied).
+- Ambiguity: the prefix (all text before the tail) must not contain `re.search(r'["\']action["\']\s*:', prefix, re.I)`. This is a plain text test, so earlier objects with duplicate or repeated keys, malformed or truncated objects and fenced examples all escalate, and nothing is parsed out of the prose. Prose braces such as `{foo}` are fine.
+- The field validation after it is unchanged. Update the docstring (it describes a "first '{' to last '}'" span that the code does not implement) and the comment above the parse to describe both forms.
 Do not touch `scripts/ai-recover` (FL-04 edits it). Leave the prompt template `templates/.ai/prompts/recover.md` as it is (it still asks for JSON only; the parser is tolerant).
 
-Tests: in `test_recovery_decision_parsing_is_strict`, change the `Decision: {"action": "rerun", "reason": "crash"}` case from `escalate` to `rerun`. This is the only existing assertion that changes; say so in the result. Add cases or a new method `test_recovery_decision_after_prose`:
-- Accepted: multi-line prose then a bare object; prose then a ```` ```json ```` fenced object; prose with non-JSON braces (`{foo}`) then an object.
-- Escalate: the object followed by more prose; two objects after prose; an `action` example in the prose plus a final object; prose then an object with duplicate keys; prose only; prose then `[{…}]`.
+Tests: in `test_recovery_decision_parsing_is_strict`, change the `Decision: {"action": "rerun", "reason": "crash"}` case from `escalate` to `rerun`. It stays on one line, so it is form B. This is the only existing assertion that changes; say so in the result. Add a new method `test_recovery_decision_after_prose`:
+- Accepted: multi-line prose then a one-line object on the last line (trailing blank lines are allowed); prose then a ```` ```json ```` fence holding a one-line object; prose with non-JSON braces (`{foo}`) then a one-line object; `Decision: {…}` on one line.
+- Escalate: the object followed by more prose; two objects on the last line; two object lines after prose; an `action` example in the prose plus a final object; `{"action":"escalate","action":"rerun","reason":"first"}` on one line followed by `{"action":"commit_and_rerun","reason":"second"}` on the last line (the reviewer's P1 case); prose then a final object with duplicate keys; `Diagnosis. [{"action":"commit_and_rerun","reason":"x"}` (P1 case); prose then `[{…}]`; prose then a pretty-printed multi-line object (fenced or not); prose only.
+Each escalate case asserts the full "gave no valid decision" line, so a `commit_and_rerun` never slips through.
 
-Docs: `docs/workflow.md` ~line 416 ("must be exactly one JSON object (optionally fenced)"), described as one decision object at the end of the answer, after optional prose, with no other `action` object. Flow unchanged.
+Docs: `docs/workflow.md` ~line 416 ("must be exactly one JSON object (optionally fenced)"). Describe the two forms: the whole answer is one object (optionally fenced), or the object is on the last line after prose (optionally in a fence of its own), with no other `"action":` anywhere before it. Flow unchanged.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
 
 ### Acceptance criteria
-- The accepted cases above yield the object's action, reason and human_action. Every escalate case prints the "gave no valid decision" line.
+- The accepted cases above yield the object's action, reason and human_action. Every escalate case prints the "gave no valid decision" line, including both P1 reproductions from plan review round 1.
 - All other cases in `test_recovery_decision_parsing_is_strict` keep their expected result.
 - Recovery flow tests (`-k recover`) pass unchanged.
 

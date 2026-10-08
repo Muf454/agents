@@ -1,5 +1,7 @@
 # Plan: robustness batch FL-12, FL-14..FL-17
 
+Plan revision: 2 (2026-10-08, after Codex plan review round 1; see `.ai/reviews/dispositions.md`).
+
 Branch `fix/robustness-batch` from origin/master c7d4dee, worktree `~/Projects/wt/agents-robustness`.
 I verified all five items against the code on this branch, and none is already fixed.
 
@@ -8,24 +10,33 @@ I verified all five items against the code on this branch, and none is already f
    `publish_plan_review`, the verdict line in `pr_body`, and one new helper `review_verdict`.
 2. T002 FL-15 (opus, changes the reviewed range): `ai-pipeline --base B` prefers `origin/B` when
    it is strictly ahead, prints the resolved base, and passes the SHA to `ai-review`.
-3. T003 FL-17 (opus, publish invariants): the pipeline stops before the code review when the base
-   is not an ancestor of HEAD, the publish check names that case, and `ai-recover` escalates it
-   by hard rule. Depends on T002 (same lines, and it reuses its origin-ahead test fixture).
+3. T003 FL-17 (opus, publish invariants): the pipeline stops before the plan review,
+   implementation and code review when the base is not an ancestor of HEAD, after settling an
+   interrupted triage stage or pending re-check. The publish check names that case (mandatory
+   hook-fixture test), and `ai-recover` escalates it by hard rule. Depends on T002 (same lines,
+   and it reuses its origin-ahead test fixture).
 4. T004 FL-16 (sonnet, parsing): `DISPOSITION_ROW` accepts `| M1 (MAJOR) |`.
-5. T005 FL-12 (sonnet, parsing): `recover_decision` accepts one decision object after prose.
+5. T005 FL-12 (opus, recovery integrity): `recover_decision` also accepts one decision object on
+   the last line after prose (line-based, no `{` scanning), and any earlier `"action":`
+   escalates.
 
 The P1 items come first, and T001, T002, T004 and T005 are independent. T002 and T003 change the
 flow (start of run, publish check, recovery hard rules), so they update the vault flow note. The
 other three only change parsing, so the flow is unchanged.
 
 ## Decisions
-- FL-17: the base check runs once, right after the base is resolved and before any agent or
-  review (it is placed after the helper functions so `stop` and auto-recovery work). The base
-  SHA is fixed for a run and HEAD only gains commits, so a base that is not an ancestor at the
-  start never becomes one. Today such a run always ends at the publish check, after the whole
-  implementation and review. A resume re-resolves the base, so the check also catches a base
-  that moved between runs. `publish_ready` still names the case as defence in depth (history
-  rewritten by a hook or session).
+- FL-17: the base check runs once per start, right after the interrupted-triage completion and
+  `reconcile_disputes`, and before the plan review, implementation and code review. It does not
+  run earlier, because an open triage stage (`triage_scope`) and a pending re-check
+  (`RECHECK_RECORDS`) reject any source change since they started. A merge made while either is
+  open would strand the rerun on a scope error (plan review round 1, P2). Both steps act on the
+  already published review and never use the base range, so they are settled first and the
+  stop's "merge and rerun" advice is always safe. The base SHA is fixed for a run and HEAD only
+  gains commits, so a base that is not an ancestor at the start never becomes one. Today such a
+  run always ends at the publish check, after the whole implementation and review. A resume
+  re-resolves the base, so the check also catches a base that moved between runs.
+  `publish_ready` still names the case as defence in depth (history rewritten by a hook or
+  session), and a hook-fixture test covers it.
 - Interaction of FL-15 and FL-17: preferring an `origin/B` that is ahead makes the pipeline stop
   and ask for a merge when origin's base has moved past the branch. Today such a run passes
   against the stale local base, and its PR is out of date on GitHub. This is the intended,
@@ -35,8 +46,12 @@ other three only change parsing, so the flow is unchanged.
   count is above 0. The verdict is the only other required field. The counts line stays the
   authority, so a misnamed section with count 0 passes, as an empty one does today.
 - FL-12: no `--json-schema`, because it depends on the CLI version and cannot be tested
-  offline. "Exactly one decision" is kept: the object must end the text, and no other
-  `action` object may appear before it.
+  offline. "Exactly one decision" is kept with the narrowest form that covers the observed
+  case: one object on the last non-empty line (optionally alone in a closing fence), and no
+  `"action":` text anywhere before it. No `{` scanning, because a general suffix scan accepted
+  objects from malformed containers and skipped duplicate-key objects in plan review round 1
+  (P1). A pretty-printed object after prose escalates. That is acceptable because the prompt
+  asks for JSON only, and the JSON-only form still accepts any layout.
 
 ## Expected overlap with `feature/supervisor` (FL-04, PR #21)
 - `scripts/lib/workflow.py`: `publish_review` and `publish_plan_review` (T001), the review format
