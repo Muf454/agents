@@ -149,6 +149,7 @@ A host-bound `plan-revision` stage that a crash at any point completes once, and
 - `scripts/ai-pipeline`: `plan_revision_model` (round n from `plan-rounds current "$base_sha"`, manifest-restored `AI_SUPERVISE_ESCALATE_*`) and `complete_plan_stage` exactly as in the plan's loop section: `stage-verify`; `committed` → `stage-clear`; `pending` → `revision-reserve DIGEST "$AI_SUPERVISE_PLAN_ROUNDS"` again (idempotent), `ai-run --approved --revise-plan --since START --base "$base_sha" --model "$(plan_revision_model)"` plus `--session-timeout`/`--knowledge-dir` as in `triage_args`, `stage-verify` = committed, `stage-clear`. `complete_plan_stage` writes nothing to the checkout. At start, dispatch the open stage by name (`complete_stage` for triage, `complete_plan_stage` for plan-revision). Fix the "triage stage" wording at the `open_stage` read.
 - `scripts/ai-recover`: open-stage leftovers checked with the stage's own scope helper; add always-escalate patterns `*'Plan revision stage'*`, `*'supervision limit reached'*`, `*'needs your decision'*`. After the open-stage block and before the stop-recording commit and any Claude session: `plan-revisions decision` exit 0 → escalate `plan review needs your decision: <stored questions>` (also when the recorded reason is a crash or unknown); exit 2 → escalate (unreadable record).
 - Flow change (recovery rules): vault `agents-flow.md` recovery part + `updated:`, `docs/workflow.md` recovery section, handoff `## Flow chart`.
+- Round 6 P3: recovery checks stored needs-human decisions after validating host authority and BEFORE the attempt limit and open-stage resume paths. Test: open-stage crash with a stored needs-human decision escalates directly with the stored questions and no resume, also with the recovery allowance exhausted.
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md
@@ -244,6 +245,7 @@ R3: one extra fix round per run, only for a strictly falling host-verified trend
 - `run-manifest extra-round-reserve DIGEST` / `extra-round`: once per run (reset by `start`, kept by resumes).
 - `ai-pipeline` at `fixes >= max_fix_rounds`: with `AI_SUPERVISE=1`, no reservation yet and x > y > z → reserve with the current review digest, `ai_log`, notify `🔁 Extra fix round: findings falling (x → y → z)`, then triage as round max+1 (the triage commit carries the log line, as today's triage); a reservation for the current review digest found on resume allows that one round; otherwise today's draft path.
 - Flow change: vault `agents-flow.md` fix-round part + `updated:`, README/`docs/workflow.md`, handoff `## Flow chart`.
+- Round 6 P1: the trend uses the last two reachable round records; both must carry verified counts, else `insufficient history` (no extra round). Tests: a legacy (uncounted) record as the most recent one and between counted ones; keep the legacy-round-1-then-counted-2–3 boundary test.
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
@@ -272,6 +274,7 @@ R4: format errors of Markdown reviews get one retry; integrity failures and re-c
 - `scripts/ai-review` plan and code paths only: after `run_review`, format check; on failure with `AI_SUPERVISE` ≠ 0 and no retry used yet → notify `🔁 Review format retry (<mode>): <error>`, keep the first report path in the log line, rerun `run_review` with `FORMAT ERROR: <message>. Return the full report again in the required structure.` appended (same reviewer chain incl. Claude fallback), then publish (a second format failure dies as today, prior review preserved). After a retried publish append one run-log line (`ai_log`); `ai-pipeline review_record` adds `.ai/run-log.md` when dirty; the hand-run plan path commits it with the record.
 - Re-check path unchanged. Codex non-zero exit, limit handling, `unchanged` checkout check and binding writes stay `ai_die` with no retry.
 - Flow change: vault `agents-flow.md` review part + `updated:`, `docs/workflow.md`, handoff `## Flow chart`.
+- Round 6 P2: empty text from an otherwise successful reviewer call goes through the Markdown format validation (so it gets the one retry); unsuccessful calls, invalid envelopes, unreadable report storage and checkout mutation still fail at once; verify checkout integrity before the retry. Tests: empty-then-valid and empty-twice for Codex plan/code and the Claude fallback, and with `AI_SUPERVISE=0`.
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md

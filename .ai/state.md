@@ -2,14 +2,14 @@
 
 Project: agents
 Branch: feature/supervisor
-Phase: planning
+Phase: implementing
 Current task: none
 Last completed task: none
 Tasks complete: 0
 Tasks remaining: 10
 Last validation: none
 Blocked: no
-Next action: Codex plan review; implementation after fix/catchup-review merges
+Next action: ai-pipeline --skip-plan-review (Zack 2026-10-08)
 Last updated: 2026-10-07T23:05:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

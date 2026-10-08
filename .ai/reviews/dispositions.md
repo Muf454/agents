@@ -1,5 +1,16 @@
 # Review dispositions (Claude)
 
+## Plan review round 6 (HEAD 15fa38f, 2026-10-08): BLOCKER 0, MAJOR 2, MINOR 1 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 trend skips an uncounted recent round | accepted | Last two reachable records must both be counted. | T008 |
+| P2 empty reviewer text skips the retry | accepted | Empty successful text goes through format validation. | T009 |
+| P3 recovery decision-check placement | accepted | Needs-human check before attempt limit/resume. | T005 |
+
+Zack 2026-10-08: build after these fixes without another plan review (`--skip-plan-review`); Codex still reviews the code.
+
+
 ## Plan review round 5 (HEAD 03d8fba, 2026-10-08): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
 
 | Finding | Disposition | Evidence / reason | Fix task |
