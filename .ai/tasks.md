@@ -92,3 +92,26 @@ Fixed 2026-10-08 (sonnet): the test starts the runner with `preexec_fn` resettin
 Mission control 2026-10-08 (second failure, root cause): not timing. The host gate runs under a pipeline started in the background (`setsid nohup … &` from a non-interactive shell), so SIGINT is SIG_IGN on entry for every child; bash cannot trap a signal that was ignored on entry, so the runner never sees SIGINT and exits 1. The session's own foreground gate passed for the same reason. Fix in the test: start the runner with SIGINT restored, e.g. `subprocess.Popen(..., preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))` (or `restore_signals` plus an explicit reset), and keep the ready-marker wait; verify by running the test from a shell started with SIGINT ignored (`python3 -c 'import signal,subprocess;signal.signal(signal.SIGINT,signal.SIG_IGN);subprocess.run([...])'`). Remove the 0.5 s sleep if it is no longer needed. Note in docs/workflow.md that background-launched pipelines ignore SIGINT (use SIGTERM to stop them).
 Mission control 2026-10-08: the full gate after the checkpoint (38dcdaa) failed in `test_outcome_signal_to_runner_logs_interrupted_once` (SIGINT run exited 1 instead of 130, then a dirty checkout), although the earlier gate on the same code passed 287/287: the signal test is timing-dependent under the parallel runner. Make it deterministic (wait for the runner's own ready marker before signalling; the runner must reach its trap before the signal), then re-run the gate twice.
 Done 2026-10-08. `scripts/ai-run`: `track_attempt` (set only around the implementation `claude_session`) makes `claude_session` open the attempt (`attempt_open`, `task_started`) right before the `claude` call; `task_outcome` closes it; `on_exit` logs `interrupted` (exit 130/143), `timeout` (session exit 124/137) or `error` for a still-open attempt, but only while the approved gate digest is intact (no project helper runs after a gate change; found by `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`). `scripts/lib/workflow.py`: `outcome_title` falls back to a heading scan, then an empty title, when `.ai/tasks.md` no longer parses. Docs: `docs/workflow.md` Outcome log (lifecycle, limit-wait `error`, deferred signal delivery, gate-change exception), README result list, vault `agents-flow.md` + hub log. Tests: mock modes `hold`/`self-kill`; new `test_outcome_*` (stopped attempts numbered, validation once, 137, SIGTERM/SIGINT, malformed queue retry, no time left, triage, limit pause); `test_runner_no_progress_denial_and_error_stop_without_retry` asserts one row per mode. Mutation check: with tracking disabled the stopped-attempt, 137, signal and malformed-queue tests fail. Targeted: 11 tests OK; `.ai/bin/ai-check`: 287 tests OK.
+
+## T003 — CI headroom for multi-round pipeline tests
+Status: TODO
+Dependencies: T002
+Model: sonnet
+
+### Goal
+PR #19's CI self-check fails twice in a row (also on a rerun) with `subprocess.TimeoutExpired` for 5 multi-round `ai-pipeline` tests (`test_fix_round_count_ignores_agent_subject_*`, `test_convergence_pipeline_requires_the_line_from_round_three`, `test_convergence_interrupted_round_three_resumes_*`, `test_triage_completion_respects_the_fix_round_limit`): "timed out after 25 seconds". Locally each takes ~12 s on branch and master; the GitHub runner (4 shards, ~500 s per shard) is several times slower, and this branch adds host-side context preparation per Claude review, pushing those tests past 25 s. Master's CI passed.
+
+### Implementation notes
+Find where the test harness sets the 25 s per-command timeout (`tests/test_workflow.py`, `tool`/`run_cmd`). Give whole-pipeline invocations a larger bound (e.g. a module constant `PIPELINE_TIMEOUT = 120`, overridable with `AI_TEST_TIMEOUT_SCALE` for slow machines) instead of 25 s; keep short commands short so a real hang still fails fast. Do not change product code. Check whether the context preparation does avoidable work per review (e.g. full `git log --stat` over long ranges) and bound it if so (limit lines/commits, as the plan-mode `-n 20` does).
+
+### Likely affected modules
+tests/test_workflow.py, scripts/ai-review (only if the context preparation is unbounded)
+
+### Acceptance criteria
+- The five tests pass locally with the new bound; a deliberately hung pipeline still fails within the bound.
+- The PR's CI self-check passes after the pipeline pushes.
+
+### Validation
+`python3 -m unittest tests.test_workflow -k fix_round_count -k convergence -k triage_completion`; `.ai/bin/ai-check`
+
+### Result / notes
