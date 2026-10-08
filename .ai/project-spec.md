@@ -22,7 +22,9 @@ CU-1..3. Zack: development goes through the toolkit pipeline.
   - plan review: no diff; the plan file paths and recent history.
   The Claude-path prompt names these files instead of git commands (the Codex prompt keeps its
   commands); the reviewer also reads the validation evidence (`.ai/local/validation.json`, gate
-  logs) and the source. The saved `.allowlist` file lists `Read`, `Glob`, `Grep`. The
+  logs) and the source. If any mandatory context command or write fails, the host removes the
+  partial context and stops before Claude starts; the prior review stays (plan review round 6
+  P3). The saved `.allowlist` file lists `Read`, `Glob`, `Grep`. The
   checkout-unchanged check stays. README, `docs/workflow.md`,
   `templates/.ai/prompts/claude-review.md` and the vault flow chart describe the same policy.
 - **R2 (M2) Outcome per stopped attempt.** `ai-run` logs exactly one task outcome for a
@@ -32,7 +34,12 @@ CU-1..3. Zack: development goes through the toolkit pipeline.
   `no_checkpoint`) stay single. An attempt whose runner dies without its EXIT handler
   (SIGKILL, OOM kill, power loss) is logged `crashed` by the next `ai-run` start on the same
   checkout and branch, from a host-side attempt marker, so that recovery is not a first-time
-  pass either.
+  pass either. Each attempt has a unique ID, stored in its marker and its outcome row; an
+  outcome whose ID is already logged is never appended again, so finishing or reconciling an
+  attempt twice (a crash between the outcome append and the marker removal) keeps exactly one
+  row with its original result. Writes are durable in order: the marker is fsynced before the
+  session starts, the outcome row before the marker is removed (revision 6, plan review
+  round 6 P1).
 
 ## Reference
 `.ai/local/reference/catchup-m1-m2.patch` is a prototype of both fixes with tests, written by

@@ -114,3 +114,4 @@
 | 2026-10-07T18:53:42Z | claude (mission control) | plan rev 3 | plan review round 3 (0/2/2) accepted; Convergence: reviewer inherits no runners; triage outside the attempt lifecycle | — | (this commit) | |
 | 2026-10-07T19:00:43Z | claude (mission control) | plan rev 4 | plan review round 4 (0/1/2) accepted; Convergence: fallback reviewer has no Bash, host-prepared git context | — | (this commit) | |
 | 2026-10-07T19:17:35Z | claude (opus planning) | plan rev 5 | plan review round 5 (Fable fallback, 0/2/3) all accepted: spec R1 = no-Bash reviewer; context per mode; bounded signal tests; crash attempt marker | — | (this commit) | |
+| 2026-10-08T05:04:51Z | claude (opus planning) | plan rev 6 | plan review round 6 (Codex 0/3/1) accepted | — | (this commit) | |

@@ -21,11 +21,13 @@ Context. New function `review_context` in `scripts/ai-review`, called by `claude
 - recheck: the base is not in shell scope today. Add helper `review-range` to `workflow.py` printing `HEAD MERGE_BASE` of the current review: verify it with `review_info_values` (binding), then parse with the header regex `current_review_rounds` uses (factor it into one function both call). `ai-review` dies before the session if that HEAD differs from `recheck-prepare`'s `head` or the header has no merge-base. Files: `diff.patch`, `log.txt`, `files.txt` for `base..head` as in code mode, plus `findings.txt` = the rejected-row lines `recheck-prepare` printed. `current.md` and `dispositions.md` stay where they are (the prompt names them).
 - plan: no `diff.patch`; `files.txt` = `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`; `log.txt` = `git log --stat -n 20 HEAD`.
 
+Preparation failures (plan review round 6, P3). `run_review` calls `claude_attempt "$prompt" || code=$?`, and bash suppresses `errexit` inside a function called in that context and in everything it calls, so a failed git command or write in `review_context` would otherwise fall through to the session. Check every mandatory context command and write explicitly (`… > file || fail`); on the first failure `rm -rf .ai/local/review-context` and `ai_die 'Could not prepare the review context; prior review preserved.'` before `claude` is invoked (`ai_die` exits even from the conditional context; nothing is published, `current.md`/`plan.md` stay). The `since-last-review.patch` ancestor test is a condition, not a failure; the `review-range` check (recheck) dies the same way.
+
 Prompts. The shared mode prompts keep their git commands for Codex. Each mode also builds `claude_prompt` (same template, history and output contract) whose scope lines name the context files instead of commands: code `REVIEW SCOPE: HEAD=…; merge-base=…. You have no shell: the diff is .ai/local/review-context/diff.patch, the commits log.txt, the changed paths files.txt …` and `CHANGED SINCE THE LAST REVIEW: .ai/local/review-context/since-last-review.patch`; recheck adds `findings.txt`; plan names `files.txt`/`log.txt`. `run_review "$prompt" "$claude_prompt"` passes it to `claude_attempt`. The `CLAUDE REVIEWER` suffix drops the probe sentence and says: tools Read/Glob/Grep only, read only the checkout (including `.ai/local`), never files outside it (review security note: Read is not limited to the checkout and the review text is published).
 
 Docs. Rewrite `templates/.ai/prompts/claude-review.md` "Prove findings with probes" into "Evidence": no commands or probes; trace exact code paths, read the prepared context, tests and the validation evidence (`.ai/local/validation.json`, gate logs); **demonstrated** = traced path or validation output, **suspected** = reasoned; no vitest/PGlite probe instructions. README "Claude fallback reviewer" section (it promises inherited `npm test`/vitest and probes), `docs/workflow.md` reviewer section (lines ~530–546: no Bash, `.ai/local/review-context/` per mode, `review-range`, why), vault flow chart `agents-flow.md` (reviewer policy; bump `updated:`).
 
-Tests (`tests/test_workflow.py`). The harness mock `claude` (`CLAUDE REVIEWER` branch, lines ~55–60) stops asserting/writing the probe directory: it asserts `.ai/local/review-probes` does not exist and the prompt has no `inspect git diff`, and appends per call to `MOCK_STATE_DIR/claude-review-context.log` the mode, the sorted file names in `.ai/local/review-context/`, `files.txt` and the `diff --git` lines of `diff.patch` (when present). Keep a marker line in the mock that `test_claude_review_failure_or_write_keeps_the_prior_review` rewrites to write `stray.txt` (the "reviewer changes the checkout" case). Update the probe-directory assertions at lines ~2286, ~2293, ~2438, ~2460, ~2486. New tests named `test_claude_review_context_*`.
+Tests (`tests/test_workflow.py`). The harness mock `claude` (`CLAUDE REVIEWER` branch, lines ~55–60) stops asserting/writing the probe directory: it asserts `.ai/local/review-probes` does not exist and the prompt has no `inspect git diff`, and appends per call to `MOCK_STATE_DIR/claude-review-context.log` the mode, the sorted file names in `.ai/local/review-context/`, `files.txt` and the `diff --git` lines of `diff.patch` (when present). Keep a marker line in the mock that `test_claude_review_failure_or_write_keeps_the_prior_review` rewrites to write `stray.txt` (the "reviewer changes the checkout" case). Update the probe-directory assertions at lines ~2286, ~2293, ~2438, ~2460, ~2486. New tests named `test_claude_review_context_*`. Failure test: a test-local `git` wrapper in the mock bin delegates to the real git (path resolved before the mock bin is prepended) and exits 1 only for a `diff` invocation carrying `--no-ext-diff` (used only by the context commands, so preflight such as `merge-base`/`rev-parse` passes); no test hook in `scripts/`.
 
 Mission control runs a live check with the Claude CLI afterwards (the reviewer cannot run any Bash command or write a file); list it in the task result as pending.
 
@@ -39,6 +41,7 @@ scripts/ai-review, scripts/lib/workflow.py, templates/.ai/prompts/claude-review.
 - Re-check mode (`test_recheck_falls_back_to_claude` path): `files.txt` lists `T001.txt`, `diff.patch` contains its `diff --git` line (base from the review header) and `findings.txt` contains `M1`.
 - Plan mode: `files.txt` lists `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`; no `diff.patch`.
 - `.ai/local/review-context` does not exist after a successful review, after a failed one (`MOCK_CLAUDE_REVIEW='error'`) and after a `limit-once` retry (where the mock saw it on both calls); a review still publishes and binds as before.
+- A context `git diff` that fails after preflight (wrapper above, `AI_REVIEWER=claude`, code mode, with a prior bound review): `ai-review` exits nonzero, the mock `claude` was never invoked (no call in its log), the prior `current.md` is byte-identical and still bound, and `.ai/local/review-context` does not exist.
 - `review-range` prints the current review's HEAD and merge-base and fails on an unbound review.
 - README, docs, prompt and flow chart describe the same policy.
 
@@ -62,7 +65,7 @@ Signal behaviour (plan review round 5, P3, probed): bash runs a trapped INT/TERM
 
 Signal test design (bounded, no 30 s sleeps): a new mock mode `MOCK_CLAUDE='hold'` writes its PID to `.ai/local/mock-session.pid`, then waits (poll 0.05 s, at most 10 s) for `.ai/local/mock-release`, then prints an error result and exits 1. The test starts the runner with `subprocess.Popen(..., start_new_session=True)`, polls (at most 10 s) for the PID file, sends the signal to the runner PID only, creates `mock-release`, then `communicate(timeout=20)`; a `finally` kills the mock PID and the runner's process group if still alive. Assert exit 143 (SIGTERM) or 130 (SIGINT) and exactly one new `interrupted` row; the next run's row has the next attempt number. Exit 137: mock mode `self-kill` does `os.kill(os.getpid(), signal.SIGKILL)` (`timeout` returns 137 at once); do not ignore TERM and wait for `--kill-after`.
 
-Malformed queue: the existing test is `test_runner_no_progress_denial_and_error_stop_without_retry` (`bad-format` mode, line ~1084); it runs five modes in one project, so outcome assertions index rows per subtest (filter by task and mode order), not by total count.
+Malformed queue: the existing test `test_runner_no_progress_denial_and_error_stop_without_retry` (line ~1084) runs five modes against the same project, branch and T001 and never reruns after its repair, so `bad-format` is T001's fifth logged attempt there. In that test assert per subtest that the mode added exactly one T001 row whose attempt is the previous T001 row's attempt + 1 (for `bad-format`: result `error`). The retry case gets its own fresh fixture, `test_outcome_malformed_queue_then_retry`: `bad-format` run, repair and commit the queue, rerun successfully.
 
 Update the "Outcome log" section of `docs/workflow.md` and the vault flow chart `agents-flow.md` (stopped-attempt lifecycle; T001 already did the reviewer policy); the PR description must say "Flow chart updated". New tests named `test_outcome_*`. Reference: `.ai/local/reference/catchup-m1-m2.patch` (opens the attempt too early).
 
@@ -74,7 +77,7 @@ scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.m
 - A validation failure logs exactly one `validation_failed` line.
 - Exit 137 (`self-kill` mock) is logged as `timeout` (separate case from 124).
 - SIGTERM and SIGINT to the runner PID during a `hold` session, per the design above, exit 143/130 within the bounded waits with exactly one `interrupted` line each; the retry is the next attempt; no mock or runner process is left.
-- In `test_runner_no_progress_denial_and_error_stop_without_retry`, the `bad-format` session logs exactly one `error`; after repair the retry is attempt 2, `first_pass=false`.
+- In `test_runner_no_progress_denial_and_error_stop_without_retry`, each mode adds exactly one T001 row with the previous T001 attempt + 1, and `bad-format`'s row is `error`. In the fresh fixture `test_outcome_malformed_queue_then_retry`, rows are attempt 1 `error`, attempt 2 `done`, `first_pass=false`.
 - A run with zero time budget left logs no task outcome.
 - Successful and failed `--triage` runs create no task outcome; a usage-limit pause and retry inside one implementation session yields exactly one outcome with the original start time.
 - Docs describe the deferred signal delivery and the limit-wait `error` case; vault flow chart updated.
@@ -84,28 +87,69 @@ scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.m
 
 ### Result / notes
 
-## T003 — Crashed attempts are logged at the next start (R2, SIGKILL/power loss)
+## T003 — Crash-safe attempt marker helper (R2, SIGKILL/power loss)
 Status: TODO
 Dependencies: T002
-Model: sonnet
+Model: opus
 
 ### Goal
-R2: an attempt whose runner dies without its EXIT handler is logged once as `crashed`, so the recovered run is attempt 2 and not a first-time pass.
+R2: a host-side helper that records an open attempt durably under a unique attempt ID and finishes or reconciles it idempotently, so a crash at any point leaves at most one outcome row per attempt, with its original result.
 
 ### Implementation notes
-Plan review round 5, P5: the EXIT handler cannot run on SIGKILL, OOM kill or power loss (the watchdog/`ai-recover` path). Host-side attempt marker in the state root (agent sessions cannot write there; `check_state_root`): `<state root>/attempts/<sha16 of checkout root>-<sha16 of branch>.json` (same keying idea as `binding_dir`/`fix_rounds_store`) with task, model, start time and the title/category captured at launch (T002's launch metadata). New `workflow.py` helper `attempt open|close|reconcile`: `open` writes it atomically when T002 opens the attempt; `close` removes it wherever T002 closes the attempt (`task_outcome` and the EXIT handler); `reconcile` runs in `ai-run` right after `ai_lock` (so a live runner's marker is never reconciled; inside `ai-pipeline` the pipeline holds the lock) and, for an orphan marker of this checkout and branch, appends one `crashed` outcome (seconds 0: the end time is unknown; the docs say crashed attempts add no time) and removes the marker. Marker or outcome write failures stay nonfatal (a note on stderr). Docs: "Outcome log" section of `docs/workflow.md` (marker, `crashed`, seconds 0) and the vault flow chart (one node on the start path).
+Plan review round 5, P5: the EXIT handler cannot run on SIGKILL, OOM kill or power loss (the watchdog/`ai-recover` path). Plan review round 6, P1: `outcome task` (`workflow.py` `outcome`) always appends and derives the attempt number from earlier rows, with no attempt identity, so a crash between "append outcome" and "remove marker" would later add a second row (a spurious `crashed` after `done` turns a finished task into an unfinished one in `outcomes-report`, whose last row per task is the result). Round 6, P2: crash recovery and the lock contract are concurrency work, so opus; the `ai-run` wiring is T004.
 
-Test: a new mock mode `MOCK_CLAUDE='crash'` SIGKILLs the runner like `triage-crash` does (runner = parent of the mock's parent `timeout`, read from `/proc/<ppid>/stat`), without killing a pipeline. Run `ai-run --approved` with it (expect the kill), then a normal `ai-run --approved`: rows attempt 1 `crashed`, attempt 2 `done`, `first_pass` false, and no marker left. A normal successful run leaves no marker; a second runner refused by the lock (the test holds the checkout lock itself) does not reconcile the first runner's marker. New tests named `test_outcome_crashed_*`.
+Marker: `<state root>/attempts/<sha16 of checkout root>-<sha16 of branch>.json` (keyed like `binding_dir`/`fix_rounds_store`, under `check_state_root`; agent sessions cannot write there) holding `id` (`secrets.token_hex(8)`), task, model, start time and the title/category captured at launch (T002's launch metadata).
+
+`outcome task` gets an optional trailing `--attempt-id ID`: the row stores `attempt_id`; if a task row with the same `attempt_id`, project and branch is already in the log, it appends nothing and exits 0 (same attempt). Rows without an ID behave as today. The append is one `write` of the line to the file opened for append, then `flush` + `os.fsync` before returning.
+
+New helper `attempt open TASK MODEL TITLE CATEGORY | finish RESULT SECONDS | reconcile` (one place owns the order of writes):
+- `open`: runs `reconcile` first (a stale marker is never overwritten unlogged), then writes the marker durably (temp file in the same directory, `fsync`, `os.replace`, `fsync` of the directory; today's `atomic` has no fsync, so add a durable variant) and prints the ID. The caller starts the session only after `open` returned.
+- `finish`: reads the marker; appends the outcome with its ID, task, model and title/category (dedup above, fsynced), then unlinks the marker and fsyncs the directory. No marker: nothing to do, exit 0 (so a second `finish`, e.g. the EXIT handler after `task_outcome`, is harmless). If the append fails, still remove the marker and print a note on stderr (a missing row is today's nonfatal behaviour; a later `crashed` for a finished attempt would be wrong).
+- `reconcile`: no marker: exit 0. Marker whose ID is already logged: unlink it (+ directory fsync) without appending. Otherwise append one `crashed` row with the marker's ID and seconds 0 (end time unknown; crashed attempts add no time), fsynced, then unlink + directory fsync. Rerunning it after a crash at any boundary yields the same single row.
+Marker and outcome write failures stay nonfatal for the runner (note on stderr, exit 0) except where noted. The helper never takes the checkout lock itself; its callers (T004) hold it. No crash-injection hooks in production code.
+
+Tests (`tests/test_workflow.py`, helper level, new tests named `test_outcome_attempt_*`): build the on-disk state each crash boundary leaves, using the helper's own subcommands, then recover:
+- after the normal append: `attempt open`, `outcome task T001 done … --attempt-id <id>` (what `finish` does first), marker left; `attempt reconcile` twice → exactly one row with that ID, result `done`, `first_pass` true, no marker; `outcomes-report` counts T001 as done;
+- after the reconciliation append: `attempt open`, `outcome task T001 crashed … 0 --attempt-id <id>`, marker left; `reconcile` twice → exactly one `crashed` row, no marker;
+- `finish` twice → one row; `open` over a stale unlogged marker → one `crashed` row for the old ID and a new marker with a new ID;
+- an ID already logged on another branch does not suppress the row (dedup is per project and branch).
 
 ### Likely affected modules
-scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Marker and outcome row carry the same unique attempt ID; `outcome task` never logs an ID twice for the same project and branch.
+- Each boundary state above, recovered once or twice, leaves exactly one row for the attempt with its original result (`done` stays `done`, `crashed` stays single) and no marker.
+- `open`, `finish` and `reconcile` fsync the marker, the outcome line and the directory in the order above (code inspection; the tests cover the resulting states).
+- Rows without an attempt ID (existing callers) are unchanged.
+
+### Validation
+`python3 -m unittest tests.test_workflow -k outcome`; `.ai/bin/ai-check`
+
+### Result / notes
+
+## T004 — Crashed attempts are logged at the next `ai-run` start (R2 wiring)
+Status: TODO
+Dependencies: T003
+Model: opus
+
+### Goal
+R2: `ai-run` opens, finishes and reconciles attempts through T003's helper, so a SIGKILLed attempt is logged once as `crashed` and the recovered run is attempt 2, not a first-time pass.
+
+### Implementation notes
+`scripts/ai-run`: where T002 opens the attempt (implementation sessions only, right before the `claude` invocation), call `ai_helper attempt open …` and start the session only after it returned; where T002 closes it (`task_outcome` and the EXIT handler), call `ai_helper attempt finish RESULT SECONDS` instead of `outcome task` (failures stay a stderr note). `ai_helper attempt reconcile` runs right after `ai_lock`, before task selection (so a live runner's marker is never reconciled; inside `ai-pipeline` the pipeline holds the lock and `ai-run` runs under it). `--triage` never opens an attempt. Docs: "Outcome log" section of `docs/workflow.md` (marker, attempt ID, `crashed`, seconds 0, recovery after a crash at any point keeps one row) and the vault flow chart `agents-flow.md` (one node on the start path; bump `updated:`).
+
+Test: a new mock mode `MOCK_CLAUDE='crash'` SIGKILLs the runner like `triage-crash` does (runner = parent of the mock's parent `timeout`, read from `/proc/<ppid>/stat`), without killing a pipeline. Run `ai-run --approved` with it (expect the kill), then a normal `ai-run --approved`: rows attempt 1 `crashed`, attempt 2 `done`, `first_pass` false, distinct attempt IDs, and no marker left. A normal successful run leaves no marker; a second runner refused by the lock (the test holds the checkout lock itself while a marker exists) does not reconcile that marker. New tests named `test_outcome_crashed_*`.
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
 
 ### Acceptance criteria
 - After a SIGKILLed implementation session and a successful rerun, the outcome log has exactly attempt 1 `crashed` and attempt 2 `done` with `first_pass=false`; no attempt marker remains.
 - Normal, timeout, error and interrupted attempts (T002 tests) leave no marker and log no extra `crashed` row.
 - A runner that fails at `ai_lock` while another holds the lock leaves the other's marker untouched.
 - `--triage` never writes a marker.
-- Docs and flow chart describe the marker and `crashed`.
+- Docs and flow chart describe the marker, the attempt ID and `crashed`.
 
 ### Validation
 `python3 -m unittest tests.test_workflow -k outcome -k runner_no_progress`; `.ai/bin/ai-check`

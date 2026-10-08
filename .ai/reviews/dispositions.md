@@ -1,5 +1,18 @@
 # Review dispositions (Claude)
 
+## Plan review round 6 (HEAD ae9bd39)
+
+Codex plan review, 2026-10-07: BLOCKER 0, MAJOR 3, MINOR 1 — all accepted (revision 6).
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 outcome append + marker removal not crash-safe or idempotent | accepted | Confirmed: `workflow.py` `outcome` (line ~2037) always appends, numbers attempts by counting earlier rows and has no attempt identity or fsync; `outcomes-report` takes the last row per task as its result, so a spurious `crashed` after `done` makes a finished task unfinished. T003 now gives each attempt a unique ID in marker and row, `outcome task --attempt-id` skips an already-logged ID, `attempt finish`/`reconcile` remove a stale marker without appending again, and the write order is durable (marker fsynced before the session; outcome line fsynced before the marker unlink; directory fsyncs). Boundary-state tests after a normal append and after a reconciliation append, each recovered twice. Spec R2 extended. | T003 |
+| P2 Sonnet for locking-sensitive crash recovery | accepted | The CLAUDE.md model rules put concurrency and locking on opus. T003 split into T003 (helper, opus) and T004 (`ai-run` wiring after `ai_lock`, SIGKILL and lock tests, docs; opus); `current-plan.md` updated. | T003, T004 |
+| P3 context preparation failures fall through to the session | accepted | Confirmed: `run_review` calls `claude_attempt "$prompt" \|\| code=$?` (`ai-review` line ~152), where bash suppresses `errexit` in the called functions. T001 now requires an explicit check on every mandatory context command and write, removing the partial context and `ai_die` before `claude` runs; new test with a test-local `git` wrapper failing the context `diff --no-ext-diff` asserts no Claude call, the prior review unchanged and bound, and no context left. Spec R1 extended. | T001 |
+| P4 malformed-queue retry attempt number | accepted | Confirmed: `test_runner_no_progress_denial_and_error_stop_without_retry` runs five modes on T001 in one project and never reruns, so `bad-format` is attempt 5 there. That test now asserts previous attempt + 1 per mode; the retry (attempt 1 `error`, attempt 2 `done`, `first_pass=false`) moves to a fresh fixture `test_outcome_malformed_queue_then_retry`. | T002 |
+
+The no-Bash reviewer design is kept. The handoff's automated-coverage list is now labelled as planned.
+
 ## Plan review round 5 (HEAD 23ea938)
 
 Claude Fable fallback review, 2026-10-07: BLOCKER 0, MAJOR 2, MINOR 3 — all accepted.
