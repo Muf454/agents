@@ -204,6 +204,21 @@ Git hooks remain active and may consume additional time. Monitor your provider u
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
+## Plan review rounds
+
+Each plan review is a round, numbered from host records, not commit subjects: after the host
+commit `chore(ai): record plan review` the pipeline (and a hand-run `ai-review --plan`) runs
+`workflow.py plan-rounds sync BASE`, which appends `{commit, report_digest, plan_digest,
+blockers, majors, minors}` to `plan-rounds-<branch hash>.json` in the host review store, once
+per report and only for a commit whose `plan.md` matches the stored binding. `BASE` is the
+pipeline's `base_sha`; by hand it is the merge-base with `--base REF` (default `main`). Only
+records whose commit is in `BASE..HEAD` count, so a merged-then-recreated branch name starts at
+round 1; an agent commit with the same subject never adds a round. A branch without a store is
+initialised once from existing host-subject commits (this can only raise the number). `plan-rounds
+count|current BASE` read the number; `plan-history BASE [--count]` renders the earlier rounds'
+BLOCKER/MAJOR findings paired with their sections of `.ai/reviews/plan-dispositions.md`. History
+is context only and never approves, counts or skips anything.
+
 ## Pipeline contract (`ai-pipeline`)
 
 Stages, each resumable by rerunning: plan review (only while no task is DONE;

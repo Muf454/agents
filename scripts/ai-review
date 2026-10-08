@@ -3,7 +3,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'EOF'
 Usage: ai-review --base REF [--timeout SECONDS]   review the implementation
-       ai-review --plan [--timeout SECONDS]       review spec/plan/tasks before implementing
+       ai-review --plan [--base REF] [--timeout SECONDS]
+                                                  review spec/plan/tasks before implementing
+                                                  (--base, default main: where plan rounds start)
        ai-review --recheck [--timeout SECONDS]    Codex re-checks the BLOCKER/MAJOR findings
                                                   Claude rejected (withdrawn or upheld each)
 Reviewer: AI_REVIEWER=auto (default: Codex, and a read-only Claude review when Codex
@@ -186,6 +188,11 @@ if [[ "$plan" == yes ]]; then
   ai_helper tasks check
   [[ -f .ai/prompts/plan-review.md ]] || ai_die 'Missing .ai/prompts/plan-review.md; copy it from the toolkit templates.'
   digest=$(ai_helper plan-digest)
+  if [[ -z "${AI_PIPELINE:-}" ]]; then
+    # By hand: rounds count from the merge-base with --base (default main, like ai-pipeline).
+    plan_base=$(git merge-base "${base:-main}" HEAD) || ai_die "Invalid plan review base: ${base:-main} (pass --base REF)."
+    ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot read the host plan review records.'
+  fi
   prompt=$(cat .ai/prompts/plan-review.md)
   prompt+=$'\n\nPLAN SCOPE: HEAD='
   prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
@@ -202,6 +209,8 @@ if [[ "$plan" == yes ]]; then
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$(ai_helper plan-review-info)" == current* && -z "$(git status --porcelain --untracked-files=all)" ]] || \
       ai_die 'Reviewed content changed while recording the plan review (commit hook?); review again.'
+    # Also covers a no-op commit: the newest host commit holding this report gets the record.
+    ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot record the plan review round.'
   fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
   printf 'Plan review by %s saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' \

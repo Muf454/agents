@@ -298,6 +298,7 @@ fi
 reconcile_disputes
 # Plan review: cheapest place to catch gaps, before any Claude usage is spent.
 if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
+  ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
   if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
     step 'Plan review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --plan "${review_args[@]}" || stop 'plan review'
@@ -308,6 +309,8 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$plan_info" == current* ]] || \
       { printf '%s\n' 'reviewed content changed while recording the plan review (commit hook?)' > .ai/local/last-error; stop 'plan review'; }
+    # Records the host commit just made (the newest host-subject commit holding this report).
+    ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
   fi
   read -r _ plan_blockers plan_majors _ <<< "$plan_info"
   if (( plan_blockers + plan_majors > 0 )); then

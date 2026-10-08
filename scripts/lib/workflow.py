@@ -912,11 +912,11 @@ def current_review_rounds():
     return review_rounds(header.group(2), header.group(1))
 
 
-def render_round(number, entry):
+def render_round(number, entry, missing='no triage recorded'):
     lines = [f'### Round {number} (HEAD {entry["head"][:7]})']
     for finding, level, title in entry['findings']:
         if entry['rows'] is None:
-            outcome = 'no triage recorded'
+            outcome = missing
         elif finding not in entry['rows']:
             outcome = 'no disposition'
         else:
@@ -929,19 +929,19 @@ def render_round(number, entry):
     return '\n'.join(lines)
 
 
-def render_rounds(rounds, cap=HISTORY_CAP):
-    """'## Previous review rounds' with the oldest rounds dropped until it fits the cap."""
+def render_rounds(rounds, cap=HISTORY_CAP, title='## Previous review rounds', missing='no triage recorded'):
+    """`title` section with the oldest rounds dropped until it fits the cap."""
     if not rounds:
         return ''
-    blocks = [render_round(number, entry) for number, entry in enumerate(rounds, 1)]
+    blocks = [render_round(number, entry, missing) for number, entry in enumerate(rounds, 1)]
     for omitted in range(len(blocks)):
-        parts = ['## Previous review rounds']
+        parts = [title]
         if omitted:
             parts.append(f'({omitted} earlier rounds omitted)')
         text = '\n\n'.join(parts + blocks[omitted:])
         if len(text) <= cap:
             return text
-    return '\n\n'.join(['## Previous review rounds', f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
+    return '\n\n'.join([title, f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
 
 
 def review_history(arguments):
@@ -1904,6 +1904,7 @@ def finish_summary(arguments):
 
 PLAN_REVIEW = Path('.ai/reviews/plan.md')
 # Workflow records that change without changing what the plan review judged.
+PLAN_REVIEW_SUBJECT = 'chore(ai): record plan review'
 PLAN_BOOKKEEPING = ('.ai/reviews/', '.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')
 
 
@@ -1942,6 +1943,175 @@ def plan_review_info(arguments):
             binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
         fail('Plan review does not match the report ai-review published; Codex must review again.')
     print('current' if reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
+
+
+def verified_plan_review(content):
+    """(plan digest, counts) when `content` is a plan review exactly as ai-review published it
+    (host binding of its plan digest), else None."""
+    reviewed = re.search(r'Plan review of plan digest ([0-9a-f]{64});', content)
+    binding = binding_dir() / f'plan-{reviewed.group(1)}.sha256' if reviewed else None
+    if not binding or not binding.exists() or \
+            binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        return None
+    return reviewed.group(1), review_counts(content)
+
+
+def report_digest(content):
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def plan_rounds_store():
+    """Host-side plan-review round records of the current branch (agents can't write here)."""
+    branch = current_branch()
+    if not branch:
+        fail('Plan review rounds need a branch (detached HEAD).')
+    return binding_dir() / f'plan-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def plan_round_records():
+    path = plan_rounds_store()
+    if not path.exists():
+        return None
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    keys = {'commit', 'report_digest', 'plan_digest', 'blockers', 'majors', 'minors'}
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and set(r) == keys and isinstance(r['commit'], str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['commit'])
+            and re.fullmatch(r'[0-9a-f]{64}', str(r['report_digest'])) for r in records):
+        fail('The host plan round records are unreadable; inspect them before continuing.')
+    return records
+
+
+def write_plan_rounds(records):
+    path = plan_rounds_store()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic(path, json.dumps(records, indent=2) + '\n')
+
+
+def plan_round_entry(commit):
+    """The record for a host plan-review commit, or None when its plan.md does not verify."""
+    content = committed_file(commit, str(PLAN_REVIEW))
+    verified = verified_plan_review(content)
+    if not verified:
+        return None
+    blockers, majors, minors = verified[1]
+    return {'commit': commit, 'report_digest': report_digest(content), 'plan_digest': verified[0],
+            'blockers': blockers, 'majors': majors, 'minors': minors}
+
+
+def reachable_plan_rounds(base):
+    """(base, commits in BASE..HEAD oldest first, all records, records in BASE..HEAD). A store
+    that does not exist yet is initialised once from the exact-subject commits in BASE..HEAD
+    that changed plan.md; that can only raise the round number (a stricter requirement)."""
+    base = git('rev-parse', '--verify', f'{base}^{{commit}}').decode().strip()
+    history = git('log', '--reverse', '--format=%H%x00%s', f'{base}..HEAD').decode().splitlines()
+    commits = [line.split('\0', 1) for line in history if '\0' in line]
+    records = plan_round_records()
+    if records is None:
+        records = []
+        for sha, subject in commits:
+            if subject == PLAN_REVIEW_SUBJECT and str(PLAN_REVIEW) in git(
+                    'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha).decode().split('\n'):
+                entry = plan_round_entry(sha)
+                if entry and all(r['report_digest'] != entry['report_digest'] for r in records):
+                    records.append(entry)
+        write_plan_rounds(records)
+    reachable = {sha for sha, _ in commits}
+    return base, commits, records, [r for r in records if r['commit'] in reachable]
+
+
+def plan_rounds_record(base, commit):
+    base, commits, records, reachable = reachable_plan_rounds(base)
+    commit = git('rev-parse', '--verify', f'{commit}^{{commit}}').decode().strip()
+    if dict(commits).get(commit) != PLAN_REVIEW_SUBJECT:
+        fail(f'{commit} is not a host plan review commit in the review range.')
+    entry = plan_round_entry(commit)
+    if not entry:
+        fail(f'The plan review in {commit} does not match the report ai-review published.')
+    if all(r['report_digest'] != entry['report_digest'] for r in reachable):
+        write_plan_rounds(records + [entry])
+
+
+def plan_rounds_sync(base):
+    """Crash window between the review's host commit and its record: record the newest host
+    commit holding the current verified plan.md, when that report has no record yet."""
+    base, commits, records, reachable = reachable_plan_rounds(base)
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not verified_plan_review(content) or any(
+            r['report_digest'] == report_digest(content) for r in reachable):
+        return
+    for sha, subject in reversed(commits):
+        if subject == PLAN_REVIEW_SUBJECT and committed_file(sha, str(PLAN_REVIEW)) == content:
+            plan_rounds_record(base, sha)
+            return
+
+
+def plan_rounds(arguments):
+    """record BASE COMMIT | sync BASE | count BASE | current BASE: this branch's plan-review
+    rounds, counted only when their host commit is in BASE..HEAD."""
+    action = arguments[0] if arguments else ''
+    if action == 'record' and len(arguments) == 3:
+        plan_rounds_record(arguments[1], arguments[2])
+    elif action == 'sync' and len(arguments) == 2:
+        plan_rounds_sync(arguments[1])
+    elif action in ('count', 'current') and len(arguments) == 2:
+        reachable = reachable_plan_rounds(arguments[1])[3]
+        if action == 'count':
+            print(len(reachable))
+            return
+        content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+        if not reachable or reachable[-1]['report_digest'] != report_digest(content):
+            fail('The current plan review is not the last recorded round; run ai-review --plan.')
+        print(len(reachable), reachable[-1]['report_digest'])
+    else:
+        fail('Usage: plan-rounds record BASE COMMIT | sync BASE | count BASE | current BASE')
+
+
+PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
+PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
+PLAN_DISPOSITION_ROW = re.compile(
+    r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
+    r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+
+
+def plan_history(arguments):
+    """plan-history BASE [--count]: the plan-review rounds before the current one, each with its
+    BLOCKER/MAJOR findings (from the committed plan.md at the record) and the disposition per
+    finding from that round's plan-dispositions section at HEAD. Context only, never authority:
+    nothing here may approve, count or skip anything. Reads no implementation review."""
+    if not arguments or len(arguments) > 2 or (len(arguments) == 2 and arguments[1] != '--count'):
+        fail('Usage: plan-history BASE [--count]')
+    reachable = reachable_plan_rounds(arguments[0])[3]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    earlier = reachable[:-1] if reachable and reachable[-1]['report_digest'] == report_digest(content) \
+        else reachable
+    if len(arguments) == 2:
+        print(len(earlier))
+        return
+    text = committed_file('HEAD', PLAN_DISPOSITIONS)
+    marks = list(PLAN_SECTION.finditer(text))
+    sections = {m.group(2): text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
+                for i, m in reversed(list(enumerate(marks)))}
+    rounds = []
+    for record in earlier:
+        review = committed_file(record['commit'], str(PLAN_REVIEW))
+        findings = []
+        for level in ('BLOCKER', 'MAJOR'):
+            body = section(review, f'{level} findings')
+            seen = set()
+            for match in FINDING_ID.finditer(body):
+                if match.group(1) not in seen:
+                    seen.add(match.group(1))
+                    findings.append((match.group(1), level, finding_title(body, match)))
+        body = sections.get(record['report_digest'])
+        rows = None if body is None else {m.group(1): (m.group(2).lower(), m.group(4))
+                                          for m in PLAN_DISPOSITION_ROW.finditer(body)}
+        rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
+    if rounds:
+        print(render_rounds(rounds, title='## Previous plan review rounds', missing='no revision recorded'))
 
 
 RISK_TITLE = re.compile(
@@ -2409,6 +2579,10 @@ def main():
         publish_plan_review(arguments)
     elif command == 'plan-review-info':
         plan_review_info(arguments)
+    elif command == 'plan-rounds':
+        plan_rounds(arguments)
+    elif command == 'plan-history':
+        plan_history(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':

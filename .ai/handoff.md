@@ -1,7 +1,9 @@
 # Handoff
 
 ## What has been implemented?
-T001 done (supervision settings: config, validation, manifest, recovery restore; no behaviour yet). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+T001 done (supervision settings: config, validation, manifest, recovery restore; no behaviour yet).
+T002 done (host plan-review round records `plan-rounds record|sync|count|current`, `plan-history`;
+`ai-review --plan --base`; pipeline and hand runs record once per review). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -22,6 +24,12 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   `test_supervise_settings_invalid_supervise_stops_hand_run_tools`; manifest capture and resume
   `test_supervise_settings_are_captured_and_survive_a_config_change`; key lists
   `test_supervise_settings_key_lists_are_identical`.
+- T002 plan rounds: history pairing `test_plan_rounds_history_pairs_findings_with_dispositions`,
+  `test_plan_history_marks_rounds_without_a_revision`; forged/agent commits
+  `test_plan_rounds_ignore_agent_commits_and_tampered_reports`; pipeline + hand run
+  `test_plan_rounds_pipeline_and_hand_run_record_once_per_review`; recreated branch
+  `test_plan_rounds_restart_when_a_branch_name_is_recreated`; crash sync
+  `test_plan_rounds_sync_records_a_crashed_review_once`, `test_plan_rounds_sync_ignores_a_forged_report`.
 
 ## Flow chart
 Flow unchanged

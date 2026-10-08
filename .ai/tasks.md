@@ -40,7 +40,7 @@ scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-recover, scripts/ai-p
 ### Result / notes
 
 ## T002 — Host plan-review round records and plan history (context only)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: sonnet
 
@@ -70,6 +70,7 @@ scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-review, tests/test_work
 `python3 -m unittest tests.test_workflow -k plan_rounds`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done. `plan-rounds`/`plan-history` in `scripts/lib/workflow.py`; `ai-review --plan` takes `--base` (default main) and syncs the record after its commit; `ai-pipeline` syncs before the plan-review check and after the host commit (after the hook check, so a hook-changed commit still reports "reviewed content changed"). The pipeline records through `sync` rather than `record ... HEAD`: same host-subject/verification rules, robust to a post-commit hook. 7 new tests pass (`-k plan_rounds -k plan_history`); `.ai/bin/ai-check` OK, 283 tests.
 
 ## T003 — Plan-dispositions section writer and round-specific validator
 Status: TODO

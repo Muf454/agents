@@ -251,10 +251,13 @@ if 'RECHECK SCOPE' in args[-1]:
 if 'PLAN SCOPE' in args[-1]:
     with open(state / 'codex-plan-calls', 'a') as f: f.write('call\n')
     major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
+    items = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_FINDINGS', '').split(';') if item]
+    if not items and major: items = [['P1', 'T001 has no test.']]
     pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
-        '# Plan review\nOverall verdict: ' + ('gap' if major else 'ok') + '\n'
-        'Finding counts: BLOCKER=0 MAJOR=' + ('1' if major else '0') + ' MINOR=0\n'
-        '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- P1: T001 has no test.\n' if major else 'None.\n') +
+        '# Plan review\nOverall verdict: ' + ('gap' if items else 'ok') + '\n'
+        'Finding counts: BLOCKER=0 MAJOR=' + str(len(items)) + ' MINOR=0\n'
+        '## BLOCKER findings\nNone.\n## MAJOR findings\n' +
+        (''.join('- %s: %s\n' % (i, t) for i, t in items) if items else 'None.\n') +
         '## MINOR findings\nNone.\n')
     sys.exit(0)
 mode = os.environ.get('MOCK_CODEX', 'success')
@@ -1622,6 +1625,114 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Run by hand, the same hook makes ai-review --plan fail instead of reporting success.
         self.tool('ai-review', '--plan', expected=1)
         self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
+
+    def plan_round(self, findings, number):
+        """One hand-run plan review (host commit + record); a source change keeps plan digests distinct."""
+        (self.project / 'src.txt').write_text(f'source {number}\n')
+        self.commit(f'source {number}')
+        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS=findings)
+
+    def plan_current(self, expected=0):
+        return self.helper('plan-rounds', 'current', 'main', expected=expected).stdout.split()
+
+    def plan_dispositions(self, number, rows):
+        digest = self.plan_current()[1]
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        text = path.read_text() if path.exists() else '# Plan review dispositions\n'
+        path.write_text(text + f'\n## Plan review round {number} (report {digest})\n\n'
+                        '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n' + rows)
+        self.commit(f'dispositions {number}')
+
+    def plan_store(self):
+        return next((self.base / 'host-state').rglob('plan-rounds-*.json'))
+
+    def test_plan_rounds_history_pairs_findings_with_dispositions(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests;P2|Unrelated area', 1)
+        self.plan_dispositions(1, '| P1 | accepted | add the test | T002 |\n| P2 | rejected | out of scope here | |\n')
+        self.plan_round('P1|Gap in tests again', 2)
+        self.plan_dispositions(2, '| P1 | accepted | tests added now | T002 |\n')
+        # An implementation review in the same range is not plan history.
+        (self.project / '.ai/reviews').mkdir(exist_ok=True)
+        (self.project / '.ai/reviews/current.md').write_text('## MAJOR findings\n- ZZ9: implementation thing\n')
+        self.run_cmd(['git', 'add', '--all'])
+        self.run_cmd(['git', 'commit', '-qm', 'chore(ai): record independent review'])
+        self.plan_round('P1|Gap still open', 3)
+        self.assertEqual(self.plan_current()[0], '3')
+        self.assertEqual(self.helper('plan-history', 'main', '--count').stdout.strip(), '2')
+        history = self.helper('plan-history', 'main').stdout
+        self.assertIn('## Previous plan review rounds', history)
+        self.assertIn('### Round 1', history)
+        self.assertIn('- P1 [MAJOR] Gap in tests — accepted (T002)', history)
+        self.assertIn('- P2 [MAJOR] Unrelated area — rejected', history)
+        self.assertIn('### Round 2', history)
+        self.assertIn('- P1 [MAJOR] Gap in tests again — accepted (T002)', history)
+        self.assertNotIn('Round 3', history)
+        self.assertNotIn('Gap still open', history)
+        self.assertNotIn('ZZ9', history)
+
+    def test_plan_history_marks_rounds_without_a_revision(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_round('P1|Gap in tests', 2)
+        self.assertIn('- P1 [MAJOR] Gap in tests — no revision recorded', self.helper('plan-history', 'main').stdout)
+
+    def test_plan_rounds_ignore_agent_commits_and_tampered_reports(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        (self.project / 'src.txt').write_text('agent change\n')
+        self.commit('chore(ai): record plan review')  # agent-chosen subject, no host record
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('chore(ai): record plan review')
+        self.helper('plan-rounds', 'record', 'main', 'HEAD', expected=1)
+        self.plan_current(expected=1)
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+
+    def test_plan_rounds_pipeline_and_hand_run_record_once_per_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        self.assertEqual(self.plan_current()[0], '1')
+        self.tool('ai-review', '--plan')  # tree changed since: a second review, a second round
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record plan review'])
+        self.helper('plan-rounds', 'record', 'main', 'HEAD')  # same report from another commit
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+
+    def test_plan_rounds_restart_when_a_branch_name_is_recreated(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_round('P1|Gap in tests', 2)
+        self.assertEqual(self.plan_current()[0], '2')
+        self.run_cmd(['git', 'switch', 'main'])
+        self.run_cmd(['git', 'merge', '-q', '--ff-only', 'feature/test'])
+        self.run_cmd(['git', 'branch', '-q', '-d', 'feature/test'])
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/test'])
+        self.plan_round('P1|Gap in tests', 3)
+        self.assertEqual(self.plan_current()[0], '1')
+
+    def test_plan_rounds_sync_records_a_crashed_review_once(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_store().write_text('[]\n')  # the record was lost between the host commit and its write
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '0')
+        self.plan_current(expected=1)
+        self.helper('plan-rounds', 'sync', 'main')
+        self.helper('plan-rounds', 'sync', 'main')
+        self.assertEqual(self.plan_current()[0], '1')
+
+    def test_plan_rounds_sync_ignores_a_forged_report(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_store().write_text('[]\n')
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('chore(ai): record plan review')
+        self.helper('plan-rounds', 'sync', 'main')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '0')
 
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')
