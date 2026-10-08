@@ -1,5 +1,70 @@
 # Review dispositions (Claude)
 
+## Plan review round 7 (HEAD a7956da, 2026-10-08): BLOCKER 0, MAJOR 2, MINOR 1
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 incomplete append swallows the recovery row | deferred | Real, but only in the crash-durable marker design (old T003/T004), which this fix no longer includes: Convergence: rounds 5–7 kept finding durability edge cases in an advisory telemetry log; the marker work moves to backlog CU-5 and R2 documents the SIGKILL limit. | — |
+| P2 existing outcome not proven durable | deferred | Same area and reason as P1 (CU-5). | — |
+| P3 README outcome contract outdated | accepted | T002 updates README's outcome section together with `docs/workflow.md`. | T002 |
+
+## Plan review round 6 (HEAD ae9bd39)
+
+Codex plan review, 2026-10-07: BLOCKER 0, MAJOR 3, MINOR 1 — all accepted (revision 6).
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 outcome append + marker removal not crash-safe or idempotent | accepted | Confirmed: `workflow.py` `outcome` (line ~2037) always appends, numbers attempts by counting earlier rows and has no attempt identity or fsync; `outcomes-report` takes the last row per task as its result, so a spurious `crashed` after `done` makes a finished task unfinished. T003 now gives each attempt a unique ID in marker and row, `outcome task --attempt-id` skips an already-logged ID, `attempt finish`/`reconcile` remove a stale marker without appending again, and the write order is durable (marker fsynced before the session; outcome line fsynced before the marker unlink; directory fsyncs). Boundary-state tests after a normal append and after a reconciliation append, each recovered twice. Spec R2 extended. | T003 |
+| P2 Sonnet for locking-sensitive crash recovery | accepted | The CLAUDE.md model rules put concurrency and locking on opus. T003 split into T003 (helper, opus) and T004 (`ai-run` wiring after `ai_lock`, SIGKILL and lock tests, docs; opus); `current-plan.md` updated. | T003, T004 |
+| P3 context preparation failures fall through to the session | accepted | Confirmed: `run_review` calls `claude_attempt "$prompt" \|\| code=$?` (`ai-review` line ~152), where bash suppresses `errexit` in the called functions. T001 now requires an explicit check on every mandatory context command and write, removing the partial context and `ai_die` before `claude` runs; new test with a test-local `git` wrapper failing the context `diff --no-ext-diff` asserts no Claude call, the prior review unchanged and bound, and no context left. Spec R1 extended. | T001 |
+| P4 malformed-queue retry attempt number | accepted | Confirmed: `test_runner_no_progress_denial_and_error_stop_without_retry` runs five modes on T001 in one project and never reruns, so `bad-format` is attempt 5 there. That test now asserts previous attempt + 1 per mode; the retry (attempt 1 `error`, attempt 2 `done`, `first_pass=false`) moves to a fresh fixture `test_outcome_malformed_queue_then_retry`. | T002 |
+
+The no-Bash reviewer design is kept. The handoff's automated-coverage list is now labelled as planned.
+
+## Plan review round 5 (HEAD 23ea938)
+
+Claude Fable fallback review, 2026-10-07: BLOCKER 0, MAJOR 2, MINOR 3 — all accepted.
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 spec and plan still describe the abandoned allow/deny policy | accepted | Confirmed: spec R1 still required inherited `Bash(...)` entries and `--disallowedTools`; `current-plan.md` said "positive list + deny list"; T001 said no Bash. R1 rewritten to revision 4 (Read/Glob/Grep only, host-prepared context, `.allowlist` = the three tools); the Reference paragraph's live deny-list check marked superseded; plan line updated. | T001 |
+| P2 host context underspecified per mode; acceptance only checks existence | accepted | Confirmed in `scripts/ai-review`: `claude_attempt` gets only the prompt; recheck has `head` but no base in shell scope (only in the review header that `current_review_rounds` parses, `workflow.py:905-908`); plan mode has no range; the code prompt says "Inspect git diff …" and "CHANGED SINCE … inspect git diff" (`ai-review:251,258`). T001 now specifies files per mode (code incl. `since-last-review.patch`; recheck base via a new `review-range` helper sharing the header regex, plus `findings.txt`; plan `files.txt`/`log.txt`, no diff), a separate `claude_prompt` naming the files, mock changes, and acceptance on content (`T001.txt` in `files.txt` and `diff.patch` for code and recheck) and cleanup after success, `MOCK_CLAUDE_REVIEW='error'` and `limit-once`. | T001 |
+| P3 SIGINT/SIGTERM test would hang | accepted | Matches bash semantics (a trapped signal runs after the foreground command returns) and `timeout` running in its own process group. T002 now prescribes a `hold` mock released by a file after the signal, `Popen(start_new_session=True)`, bounded polls and `communicate(timeout=20)`, cleanup in `finally`; 137 via a `self-kill` mock; the deferred delivery (Ctrl-C) is documented. | T002 |
+| P4 targeted validation misses plan/recheck fallback tests | accepted | `-k` is a substring match; `fall_back` ≠ `fallback`, so `test_plan_review_and_recheck_fall_back_to_claude` and `test_recheck_falls_back_to_claude` were not selected. Added `-k fall_back -k reviewer_setting -k pipeline_without_codex -k review_context -k review_range`. | T001 |
+| P5 SIGKILL/power loss leaves no outcome | accepted | `on_exit` cannot run on SIGKILL, and that is exactly the watchdog/`ai-recover` path where R2's "recovery is not a first-time pass" matters. Fix rather than document: host-side attempt marker in the state root (agents cannot write it), opened/closed with T002's attempt, reconciled as one `crashed` outcome after `ai_lock` at the next `ai-run` start; test with a new `crash` mock modelled on `triage-crash`. Split into its own task to keep T002 small; spec R2 extended. | T003 |
+
+Missing-coverage notes also taken into the tasks: cleanup after a failed review and a limit retry (T001), mock changes keeping the "writes outside its scope" case (T001), the named malformed-queue test with per-subtest row indexing (T002), `error` for a limit wait beyond `AI_LIMIT_MAX_WAIT` (T002 docs). Security note (Read not limited to the checkout): one prompt line in T001's `CLAUDE REVIEWER` suffix.
+
+## Plan review round 4 (2026-10-07): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P5 git option abbreviations bypass the deny list | accepted | `git grep --open-files=` (abbreviation) is accepted by git; deny globs can't enumerate abbreviations for any git subcommand. Convergence: the fallback reviewer gets no Bash at all (Read/Glob/Grep); the host prepares diff/log/files context. | T001 |
+| P4 targeted tests miss the invocation test | accepted | `-k review_falls_back` added. | T001 |
+| P6 README promises runner permissions | accepted | README's fallback reviewer section is in T001. | T001 |
+
+
+## Plan review round 3 (HEAD e52ed76, 2026-10-07): BLOCKER 0, MAJOR 2, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 exact runner entries also unsafe | accepted | Third round on the reviewer's runner commands. Convergence: the reviewer inherits no runners at all (exact or wildcard), only read-only file tools; it uses the host's validation evidence like Codex. Tests seeded with unsafe exact and wildcard entries. | T001 |
+| P2 triage would open a task attempt | accepted | `claude_session` serves `--triage` too. Attempt tracking is opt-in for implementation; triage and limit-retry regressions added. | T002 |
+| P3 flow chart deferred to T002 | accepted | T001 updates the chart for the reviewer policy itself. | T001 |
+| P4 targeted tests miss reviewer tests | accepted | Explicit `-k` selection incl. `claude_review`. | T001 |
+
+
+## Plan review (HEAD 00e644d, 2026-10-07): BLOCKER 0, MAJOR 3, MINOR 2 — all accepted, tasks revised
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 retained runners keep write/exec options | accepted | `pytest --junitxml`, `go test -exec`, `tsc --noEmit false` pass the reference policy. T001 now enumerates runners and dangerous forms with a table-driven test; wildcards only where all are denied; live check by mission control. | T001 |
+| P2 outcome logging needs a parseable queue | accepted | `outcome task` reads titles via `tasks()`. T002 makes it tolerant + malformed-queue test. | T002 |
+| P3 no interruption test | accepted | SIGINT/SIGTERM subprocess tests and a separate 137 case added to T002. | T002 |
+| P4 attempt opened before launch | accepted | Attempt now opens right before the invocation; zero-budget case. | T002 |
+| P5 flow chart | accepted | Vault `agents-flow.md` update and "Flow chart updated" in T002. | T002 |
+
+
 Review HEAD: 26463f1d086fe05bbd734ca884066b54a81c592a
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a

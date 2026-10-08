@@ -673,39 +673,13 @@ def claude_text(arguments):
     Path(target).write_text(text.strip() + '\n')
 
 
-# Read-only git subcommands a reviewer may run; every other git entry of the project's
-# allowlist (add, commit, rm, mv, ...) is dropped for reviews.
-REVIEW_GIT = ('status', 'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'rev-parse', 'merge-base')
-
-
-# Commands that write, delete, fetch or run anything by themselves: never for a reviewer.
-REVIEW_DROP_FIRST = (r'(?:git|sudo|su|rm|rmdir|mv|cp|ln|chmod|chown|touch|mkdir|tee|dd|install|truncate|'
-                     r'sed|awk|perl|ruby|find|xargs|env|eval|exec|curl|wget|ssh|scp|rsync|tar|unzip|docker)\b')
-# An interpreter or package runner followed only by a wildcard runs arbitrary code
-# (`bash *`, `node *`, `npx *`, `npm run *`); fixed check commands (`npm test`,
-# `npx vitest run *`) stay.
-REVIEW_DROP_OPEN = r'(?:bash|sh|zsh|python3?|node|deno|bun|npx|pnpm|yarn|npm(?: run| exec)?)(?: \*)?'
-
-
 def review_allowlist(arguments):
-    """--allowedTools entries for the Claude reviewer, one per line: the project's approved
-    read and check commands from .ai/permissions.allow minus everything that writes (Edit,
-    Write, git writes, ai-task) or runs the gate (ai-check, .ai/validate), plus read-only git
-    and writes confined to the ignored probe directory."""
-    entries = ['Read', 'Glob', 'Grep', 'Edit(./.ai/local/review-probes/**)']
-    entries += [f'Bash(git {command})' for command in REVIEW_GIT]
-    entries += [f'Bash(git {command} *)' for command in REVIEW_GIT]
-    for line in Path('.ai/permissions.allow').read_text().splitlines():
-        entry = line.strip()
-        match = re.fullmatch(r'Bash\((.+)\)', entry)
-        if not match or entry in entries:
-            continue
-        command = match.group(1)
-        if re.match(REVIEW_DROP_FIRST, command) or re.fullmatch(REVIEW_DROP_OPEN, command) or \
-                re.search(r'ai-task|ai-check|ai-run|ai-pipeline|\.ai/validate|\bpush\b|deploy|supabase|vercel', command):
-            continue
-        entries.append(entry)
-    print('\n'.join(entries))
+    """--allowedTools entries for the Claude reviewer, one per line: Read, Glob and Grep only.
+    No shell and no write tool: every Bash allow/deny list tried before left a command-argument
+    route to running code or writing files (runner options, git option abbreviations), so the
+    host prepares the git context in .ai/local/review-context/ instead. The project's
+    .ai/permissions.allow is deliberately not read."""
+    print('\n'.join(('Read', 'Glob', 'Grep')))
 
 
 SECRET_PATTERNS = ('.env*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
@@ -905,11 +879,25 @@ def current_review_rounds():
     """Rounds before the current review: M..H from its host header (`HEAD H; merge-base M`),
     which excludes the current review's own commit, so every caller gets the same answer."""
     path = Path('.ai/reviews/current.md')
-    header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});',
-                       path.read_text() if path.exists() else '')
+    header = review_header(path.read_text() if path.exists() else '')
     if not header:
         fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
-    return review_rounds(header.group(2), header.group(1))
+    return review_rounds(header[1], header[0])
+
+
+def review_header(content):
+    """(HEAD, merge-base) from a review's host evidence header, or None."""
+    header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});', content)
+    return header.groups() if header else None
+
+
+def review_range(arguments):
+    """Print 'HEAD MERGE_BASE' of the current, verified review (the re-check's diff range)."""
+    head = review_info_values()[0]
+    header = review_header(Path('.ai/reviews/current.md').read_text())
+    if not header or header[0] != head:
+        fail('Current review has no merge-base in its host evidence header.')
+    print(*header)
 
 
 def render_round(number, entry):
@@ -2034,6 +2022,23 @@ def read_outcomes(paths):
     return records
 
 
+def outcome_title(task_id):
+    """The task's title; a queue that no longer parses (the outcome of that very stop) falls
+    back to a heading scan, then to an empty title, so the attempt is still logged."""
+    try:
+        return next((t['title'] for t in tasks() if t['id'] == task_id), '')
+    except (ValueError, OSError):
+        pass
+    try:
+        for line in Path('.ai/tasks.md').read_text().splitlines():
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading and heading.group(1) == task_id:
+                return heading.group(2)
+    except OSError:
+        pass
+    return ''
+
+
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
@@ -2047,7 +2052,7 @@ def outcome(arguments):
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
     if kind == 'task':
         task_id, result, model, seconds = rest
-        title = next((t['title'] for t in tasks() if t['id'] == task_id), '')
+        title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
         attempt = len(earlier) + 1
@@ -2365,6 +2370,8 @@ def main():
         review_history(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'review-range':
+        review_range(arguments)
     elif command == 'recheck-prepare':
         recheck_prepare(arguments)
     elif command == 'publish-recheck':

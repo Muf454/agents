@@ -110,3 +110,23 @@
 | 2026-10-07T18:29:49Z | runner | T006 | completed | PASS | 0c24798 | Claude checkpointed; continuing queue |
 | 2026-10-07T18:31:54Z | runner | none | queue complete; ready for independent review | PASS | abe04b7 | Human acceptance remains |
 | 2026-10-07T18:37:23Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/18 | PASS | 640ceee | Human acceptance and merge remain |
+| 2026-10-07T18:48:06Z | claude (mission control) | plan | branch rebuilt on master ba330ef (PR #18, parallel gate) from the plan rev 2 commits a3ae4af; T001 WIP saved as reference patch | — | (this commit) | first T001 session timed out on the serial gate |
+| 2026-10-07T18:53:42Z | claude (mission control) | plan rev 3 | plan review round 3 (0/2/2) accepted; Convergence: reviewer inherits no runners; triage outside the attempt lifecycle | — | (this commit) | |
+| 2026-10-07T19:00:43Z | claude (mission control) | plan rev 4 | plan review round 4 (0/1/2) accepted; Convergence: fallback reviewer has no Bash, host-prepared git context | — | (this commit) | |
+| 2026-10-07T19:17:35Z | claude (opus planning) | plan rev 5 | plan review round 5 (Fable fallback, 0/2/3) all accepted: spec R1 = no-Bash reviewer; context per mode; bounded signal tests; crash attempt marker | — | (this commit) | |
+| 2026-10-08T05:04:51Z | claude (opus planning) | plan rev 6 | plan review round 6 (Codex 0/3/1) accepted | — | (this commit) | |
+| 2026-10-08T05:08:54Z | claude (mission control) | plan rev 7 | plan review round 7 (0/2/1): P1/P2 deferred with the crash-durable marker tasks (backlog CU-5), P3 accepted; 2 tasks remain | — | (this commit) | convergence: simplify |
+| 2026-10-08T05:20Z | claude (opus) | T001 | DONE: Claude reviewer Read/Glob/Grep only, host-prepared `.ai/local/review-context/` per mode, `review-range`, docs/prompt/flow chart | targeted 25 OK; ai-check 279 OK | (this commit) | handoff gained `## Flow chart`; live CLI check pending (mission control) |
+| 2026-10-08T05:23:17Z | runner | T001 | completed | PASS | 86a99f8 | Claude checkpointed; continuing queue |
+| 2026-10-08T05:36:19Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38dcdaa | No merge or deployment performed |
+| 2026-10-08T07:10Z | claude (sonnet) | T002 | DONE: signal test now gives the runner 0.5 s to take the signal before the session is released (flaky SIGINT exit 1) | targeted OK; ai-check 287 OK twice | (this commit) | flake not reproduced locally; cause inferred from timing |
+| 2026-10-08T07:04:54Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 091c80e | No merge or deployment performed |
+| 2026-10-08T07:30Z | claude (sonnet) | T002 | DONE: signal test resets SIGINT to default for the runner (background pipelines inherit it ignored); sleep removed; docs note | targeted 10 OK; ai-check 287 OK | (this commit) | SIGINT-ignored shell run not verified (denied); host gate decides |
+| 2026-10-08T07:10:55Z | runner | T002 | completed | PASS | 2a290d8 | Claude checkpointed; continuing queue |
+| 2026-10-08T07:13:02Z | runner | none | queue complete; ready for independent review | PASS | db4f729 | Human acceptance remains |
+| 2026-10-08T07:17:26Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/19 | PASS | 2cc4ce5 | Human acceptance and merge remain |
+| 2026-10-08T08:20:04Z | claude (mission control) | T003 | added: CI timeouts on PR #19 (5 pipeline tests > 25 s on the GitHub runner, twice) | — | (this commit) | |
+| 2026-10-08T08:35Z | claude (sonnet) | T003 | DONE: `ai-pipeline` test invocations get PIPELINE_TIMEOUT 120 s (others 25 s), AI_TEST_TIMEOUT_SCALE override; no product change | targeted 19 OK; ai-check 287 OK | (this commit) | CI re-run on PR #19 still to confirm |
+| 2026-10-08T08:28:19Z | runner | T003 | completed | PASS | 9b62a07 | Claude checkpointed; continuing queue |
+| 2026-10-08T08:30:26Z | runner | none | queue complete; ready for independent review | PASS | 42aef4c | Human acceptance remains |
+| 2026-10-08T08:39:08Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/19 | PASS | 2be3f24 | Human acceptance and merge remain |

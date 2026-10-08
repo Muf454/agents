@@ -532,18 +532,37 @@ an incident as a successful probe. Nothing is installed by `setup-project`.
 pauses and retries under `codex`; under `auto` it switches to `claude_attempt` for this
 review (any other Codex failure stops as before; a missing Codex CLI goes straight to
 Claude). `claude_attempt`: `claude -p --permission-mode dontAsk --output-format json
---tools Read,Glob,Grep,Bash,Edit,Write --allowedTools $(workflow.py review-allowlist)
+--tools Read,Glob,Grep --allowedTools $(workflow.py review-allowlist)
 --setting-sources project --strict-mcp-config --model M --effort E`, stdin `/dev/null`,
-the mode prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` keeps Read/Glob/
-Grep, read-only git subcommands and the project's `Bash(...)` entries except writers,
-runners and open interpreters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`), and
-adds `Edit(./.ai/local/review-probes/**)` (verified live: in dontAsk mode this rule lets
-the Write tool create files there and nowhere else). The probe directory is recreated
-before and removed after the session. A Claude usage limit pauses (`ai_limit_pause
-Claude`) and the loop starts again with Codex. The final text (`claude-text`) becomes
-the report (denials go to `.ai/local/review-denials.log`; the allowlist it got to
-`.ai/local/review-*.allowlist`); the usual "checkout unchanged" check and publish
-helpers follow.
+the mode's Claude prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` prints
+just `Read`, `Glob`, `Grep` and does not read `.ai/permissions.allow`.
+
+No shell, by design: plan review rounds 1–4 each found a new command-argument route
+through Bash allow/deny lists (runner options, exact entries, git option abbreviations
+such as `git grep --open-files=`), so the reviewer gets no Bash, Edit or Write tool. The
+host prepares the git context instead: `review_context`, called by `claude_attempt` right
+before each session (a retry after a Claude usage-limit pause rebuilds it), recreates the
+ignored `.ai/local/review-context/` and writes, with `git … --no-ext-diff --no-textconv`
+and no truncation:
+- code: `diff.patch` (`git diff MERGE_BASE..HEAD`), `log.txt` (`git log --stat`),
+  `files.txt` (`--name-only`), and `since-last-review.patch` when the last reviewed HEAD
+  is an ancestor of HEAD;
+- recheck: the same three for the current review's range from `workflow.py review-range`
+  (`HEAD MERGE_BASE` of the verified review, parsed with the header regex
+  `current_review_rounds` uses; it must match `recheck-prepare`'s HEAD), plus
+  `findings.txt` (the rejected rows);
+- plan: `files.txt` (spec, plan, tasks) and `log.txt` (`git log --stat -n 20`).
+
+`run_review` calls `claude_attempt` in a conditional context, where bash disables
+`errexit`, so every context step is checked explicitly; the first failure removes the
+directory and dies (`Could not prepare the review context; prior review preserved.`)
+before `claude` runs. The directory is removed right after the session, before any
+result check. Each mode builds `claude_prompt` next to the Codex prompt: same template,
+history and output contract, with scope lines naming the context files instead of git
+commands. A Claude usage limit pauses (`ai_limit_pause Claude`) and the loop starts
+again with Codex. The final text (`claude-text`) becomes the report (denials go to
+`.ai/local/review-denials.log`; the tool list to `.ai/local/review-*.allowlist`); the
+usual "checkout unchanged" check and publish helpers follow.
 
 Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching (whole
 words) RLS, row-level, auth/authn/authz/authentication/authorization, permission, policy,
@@ -562,10 +581,29 @@ commits with its own record). `pr-body` titles the review section "Claude fallba
 
 `workflow.py outcome task|review` appends one JSON line to `<state root>/outcomes.jsonl`
 (checked with `check_state_root`: never inside the checkout). `ai-run` writes `done`,
-`blocked`, `validation_failed` or `no_checkpoint` per task attempt with the session
-model and the seconds from session start to result; the attempt number counts earlier
-lines for the same project (main repository name, shared by worktrees), branch and task.
-Failures to write are reported and never stop the run. `outcomes-report` (`ai-status
+`blocked`, `validation_failed`, `no_checkpoint`, `timeout`, `interrupted` or `error` per
+task attempt with the session model and the seconds from session start to result; the
+attempt number counts earlier lines for the same project (main repository name, shared by
+worktrees), branch and task. Failures to write are reported and never stop the run.
+
+An attempt opens immediately before the implementation session's `claude` call (after the
+dependency step and the remaining-time check; `--triage` never opens one) and closes with
+exactly one line: the result above, or, when the runner stops first, from the EXIT handler:
+`timeout` (the session exited 124/137), `interrupted` (the runner exited 130/143) or `error`
+(anything else: a failed session, a malformed queue, a usage-limit wait beyond
+`AI_LIMIT_MAX_WAIT`, ...). A usage-limit pause and retry inside the session belong to the
+same attempt and keep its start time. A run with no time left before the session starts logs
+nothing, and so does a stop because the approved gate changed (the handler never runs a
+project helper after that). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
+from the task's heading, or is empty.
+
+Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
+returns, and GNU `timeout` runs the session in its own process group, so neither a signal to
+the runner nor Ctrl-C reaches the session. The runner exits 130/143 only when the session
+ends (or hits its limit), and the `interrupted` line's time is then, not the keypress. A
+pipeline launched in the background from a non-interactive shell (`nohup … &`) inherits SIGINT
+as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
+`outcomes-report` (`ai-status
 --outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
 minutes) by model, category and both, and reviews by reviewer/model/mode.
 

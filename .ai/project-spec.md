@@ -1,87 +1,50 @@
-# Spec: Efficiency batch: gate speed (FL-11), review context (B3), review convergence (FL-03)
+# Spec: fixes from the Codex catch-up review of the reviewer fallback (M1, M2)
 
 ## Objective
-Efficiency batch: gate speed (FL-11), review context (B3), review convergence (FL-03)
-Cut wasted time and tokens in every pipeline run without touching safety rules: a full gate
-that fits inside one session tool call, Codex reviews that start from what earlier rounds
-already found, and triage that stops patching symptoms when the same area keeps failing.
-
-Source: vault [[agents-backlog]]: FL-11 (new, 2026-10-07), B3 ("Better for both agents",
-P2, S) and FL-03 ("Run flow improvements", P1, S; next in line after batch 2). Chosen by Zack
-on 2026-10-07 as high-impact, low-investment work. Planned by Claude as Zack's delegate on
-2026-10-07; the pipeline's Codex plan review gates it.
-Hub decisions respected: risk-based models with no usage-saving downgrades (2026-10-06),
-roles vs providers, "auto-recovery never changes the gate", gate files are never edited by
-a pipeline session.
-
-Branch note: planned on top of `feature/flow-batch-2` (PR #15) because T003/T004 touch the
-same files. PR #15 is merged (`0818f20`). This branch contains its last commit `55383d7` and
-`git diff 55383d7 0818f20` is empty, but the merge commit itself is not an ancestor (a
-`git merge`/`rebase` of `master` was denied by the session's permissions on 2026-10-07).
-The PR against `master` therefore shows only this batch's commits; the review base is
-`master` (merge-base `55383d7`, same tree).
+Fix the two MAJOR findings of Codex's catch-up review of `0818f20..b98aa66` (PRs #16/#17,
+merged 2026-10-07). Report: `.ai/local/reference/catchup-review-b98aa66.md` (ignored copy;
+also `~/Projects/agents/.ai/reviews/current.md` on the old branch). Triage by Claude (mission
+control) 2026-10-07: M1, M2 accepted; N1–N3 (outcome-report MINORs) deferred to vault backlog
+CU-1..3. Zack: development goes through the toolkit pipeline.
 
 ## Requirements
-- **FL-11 Gate speed.** The full test suite (224+ tests, 611 s serial on 2026-10-07, over the
-  600 s Bash tool limit that sessions use for `.ai/bin/ai-check`) runs in parallel shards.
-  A stdlib-only runner `tests/run_parallel.py` collects every test ID, splits them across
-  worker processes (`AI_TEST_WORKERS`, default `min(8, cpu count)`), each running its share
-  with `python3 -m unittest`, and reports one summary line `Ran N tests in S s` plus
-  `OK` / `FAILED (failures=…, errors=…)`. Exit status non-zero on any failure, error, crash,
-  or when zero tests were collected or the collected count differs from the count run. The
-  output of failing tests is shown in full. Every worker gets the resolved discovery
-  directory on `PYTHONPATH` (test IDs like `test_workflow.…` do not import otherwise).
-  Serial `python3 -m unittest discover -s tests` keeps working unchanged (CI and humans can
-  still use it).
-- **Gate switch is a human step.** `.ai/validate` is a gate file. No pipeline session edits
-  it. After the batch is reviewed, Zack (or the coordinating Claude session with Zack's
-  approval) changes its last line to `python3 tests/run_parallel.py` in the same PR. Until
-  then the gate stays serial (host `ai-check` timeout is 1800 s, so the host gate passes).
-- **Review history helper.** One shared routine finds earlier review rounds and returns them
-  uncapped; a renderer applies the cap. `review-history --base B --head H` (before a new
-  review) uses `B..H`; `review-history --current` (triage, convergence check) uses the
-  current review's host header (`HEAD H; merge-base M`) and `M..H`, which excludes the
-  current review by construction and gives the same answer in every caller; `--count`
-  prints the uncapped number. It prints a compact Markdown summary: for each host commit
-  `chore(ai): record independent review` in the range that changed
-  `.ai/reviews/current.md` (oldest first, numbered from 1): the reviewed HEAD, the BLOCKER and
-  MAJOR finding IDs with their one-line titles, and each finding's disposition from the
-  `.ai/reviews/dispositions.md` committed in the following `chore(ai): record review triage`
-  commit (accepted + task ID / rejected / deferred / "no triage recorded"). Output capped at
-  6000 characters (oldest rounds dropped first, with a line saying how many were dropped).
-  Prints nothing when there is no earlier round. It is context only: it never authorizes,
-  counts or skips anything (fix-round counting stays with `fix-rounds`).
-- **B3 Codex review context.** `ai-review --base` (implementation review only, not plan
-  review or recheck) appends a `PREVIOUS ROUNDS` section from `review-history` and, when an
-  earlier round exists, `CHANGED SINCE THE LAST REVIEW: git diff <last reviewed HEAD>..HEAD`.
-  The review prompt (template `review.md`) says: verify that every earlier accepted finding is
-  really fixed, do not re-raise rejected findings without new evidence, and still review the
-  whole range (cross-cutting defects; Codex's objection to delta-only reviews).
-- **FL-03 Convergence rule.** `ai-run --triage` appends the same `PREVIOUS ROUNDS` section
-  (`--current`) and the round number to the triage prompt; `--since` stays only the triage
-  scope boundary. Template `triage.md` gains the rule: when the same area (module, data
-  model or concern) has had BLOCKER/MAJOR findings in three consecutive rounds counting the
-  current one, do not add another symptom fix: add one design task first ("the model lacks
-  X": a short design note in `.ai/current-plan.md` plus the change) and point the accepted
-  findings at it. Deterministic part: `triage-check --fresh` computes the round from the
-  same routine; when it is round 3 or later it requires a line `Convergence: <text>` (text
-  on the same line) in `dispositions.md`
-  (naming the design task, or saying why no area repeats); missing → the existing triage
-  failure path.
+- **R1 (M1) Read-only reviewer policy** (revision 4: plan review rounds 1–4 each found a new
+  command-argument route through a Bash allow/deny scheme, so the reviewer gets no shell).
+  The Claude fallback reviewer runs with tools `Read`, `Glob`, `Grep` only: no Bash, Edit or
+  Write, no probe directory, nothing inherited from `.ai/permissions.allow`. Before the session
+  the host writes the git context the reviewer used to fetch itself into
+  `.ai/local/review-context/` (ignored; recreated per attempt, removed right after the session,
+  also when the review fails):
+  - code review: diff, `log --stat` and changed paths of `merge-base..HEAD`, plus the diff since
+    the last reviewed HEAD when that HEAD is known and an ancestor;
+  - re-check: the same for the reviewed range (base from the current review's host header
+    `HEAD h; merge-base m`, head from `recheck-prepare`) plus the rejected findings;
+  - plan review: no diff; the plan file paths and recent history.
+  The Claude-path prompt names these files instead of git commands (the Codex prompt keeps its
+  commands); the reviewer also reads the validation evidence (`.ai/local/validation.json`, gate
+  logs) and the source. If any mandatory context command or write fails, the host removes the
+  partial context and stops before Claude starts; the prior review stays (plan review round 6
+  P3). The saved `.allowlist` file lists `Read`, `Glob`, `Grep`. The
+  checkout-unchanged check stays. README, `docs/workflow.md`,
+  `templates/.ai/prompts/claude-review.md` and the vault flow chart describe the same policy.
+- **R2 (M2) Outcome per stopped attempt.** `ai-run` logs exactly one task outcome for a
+  session that stops before its result: `timeout` (session exit 124/137), `interrupted`
+  (runner exit 130/143), else `error`. A later recovery counts as a further attempt and is
+  not a first-time pass. Existing outcomes (`done`, `blocked`, `validation_failed`,
+  `no_checkpoint`) stay single. A runner killed without its EXIT handler (SIGKILL, OOM kill, power loss)
+  logs nothing for that attempt; this is an accepted limit of this fix (the outcome log is
+  advisory model-tuning data). Crash-durable attempt markers were planned in revisions 5–6 and
+  moved to the vault backlog (CU-5) by mission control after plan review round 7, to keep this
+  fix small.
 
-## Non-goals
-- No change to `.ai/validate`, `.ai/bin`, `.ai/prompts`, permissions or the CI workflow in
-  the run itself. No change to fix-round limits, dispute handling or review authority.
-- No E3 (Codex effort per review type) and no E5 (validation reuse): separate backlog items.
+## Reference
+`.ai/local/reference/catchup-m1-m2.patch` is a prototype of both fixes with tests, written by
+hand in the mission-control session (not committed, not gated). **Superseded for M1:** its
+reviewer allow/deny lists, and the live deny-list check done with them (`git log -1
+--output=f` and `git log -1 > f` denied), belong to the abandoned Bash policy; do not copy
+that part. Its M2 part opens the attempt too early (plan review round 1, P4). The implementer
+may reuse what still fits after checking it; it is not evidence of correctness.
 
-## Acceptance
-- Before the `.ai/validate` switch (coordinator evidence, not a session task: sessions may
-  not run the runner): `python3 tests/run_parallel.py` runs the full suite with the same test
-  count as the serial run in three consecutive runs, each finishing under 200 s on this
-  machine (16 cores) with default workers; counts and wall times recorded in the run log.
-- New tests cover `review-history` (no rounds, two rounds with dispositions, missing triage,
-  cap), the `ai-review` prompt content (history present only for implementation review),
-  the triage prompt content, and `triage-check --fresh` with and without `Convergence:` at
-  round 3.
-- README / `docs/workflow.md` describe the parallel runner, the review context and the
-  convergence rule; vault flow chart updated in the task that changes the flow.
+## Constraints
+Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts` or other gate files. The
+repo's installed copy picks the fixes up later via `setup-project --upgrade` (Zack approves).

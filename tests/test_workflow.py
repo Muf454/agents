@@ -4,13 +4,20 @@ import os
 import re
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
+# Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
+# slower than a workstation). AI_TEST_TIMEOUT_SCALE stretches both on slow machines.
+TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
+PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
 
 
 def task(task_id, status='TODO', dependencies='none'):
@@ -35,7 +42,7 @@ Pending.
 
 
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, pathlib, re, subprocess, sys, time
+import json, os, pathlib, re, signal, subprocess, sys, time
 # Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
 args = sys.argv[1:]
@@ -55,8 +62,18 @@ if 'CLAUDE REVIEWER' in prompt:
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
     with open(state / 'claude-review-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
     with open(state / 'claude-review-prompts.log', 'a') as f: f.write(prompt + '\n=====\n')
-    assert pathlib.Path('.ai/local/review-probes').is_dir(), 'no probe directory'
-    pathlib.Path('.ai/local/review-probes/probe.txt').write_text('scenario probe')
+    assert not pathlib.Path('.ai/local/review-probes').exists(), 'probe directory exists'
+    assert 'inspect git diff' not in prompt, 'the Claude prompt names a git command'
+    context = pathlib.Path('.ai/local/review-context')
+    read = lambda name: (context / name).read_text() if (context / name).is_file() else None
+    review_kind = 'recheck' if 'RECHECK SCOPE' in prompt else 'plan' if 'PLAN SCOPE' in prompt else 'code'
+    with open(state / 'claude-review-context.log', 'a') as f:
+        f.write(json.dumps({'mode': review_kind,
+                            'names': sorted(p.name for p in context.iterdir()) if context.is_dir() else None,
+                            'files': (read('files.txt') or '').splitlines(),
+                            'diff': [l for l in (read('diff.patch') or '').splitlines() if l.startswith('diff --git')],
+                            'findings': read('findings.txt')}) + '\n')
+    pass  # the reviewer writes nothing (a test rewrites this line)
     review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success')
     if review_mode == 'limit-once' and not (state / 'claude-review-limit').exists():
         (state / 'claude-review-limit').touch()
@@ -166,6 +183,17 @@ if mode in ('error-once', 'error-once-partial'):
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
+if mode == 'self-kill':
+    os.kill(os.getpid(), signal.SIGKILL)
+if mode == 'hold':
+    # Bounded wait for the test to signal the runner, then release and fail.
+    pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
+    for _ in range(200):
+        if pathlib.Path('.ai/local/mock-release').exists():
+            break
+        time.sleep(0.05)
+    print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+    sys.exit(1)
 if mode == 'error':
     print(json.dumps({'type':'result','subtype':'error','is_error':True}))
     sys.exit(0)
@@ -394,9 +422,9 @@ class ToolkitTest(unittest.TestCase):
                         MOCK_SLEEP_LOG=str(self.base / 'sleep.log'), AI_SLEEP=str(self.mock_bin / 'mock-sleep'),
                         AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
-    def run_cmd(self, command, expected=0, env=None):
+    def run_cmd(self, command, expected=0, env=None, timeout=COMMAND_TIMEOUT):
         result = subprocess.run(command, cwd=self.project, env=env or self.env,
-                                capture_output=True, text=True, timeout=25)
+                                capture_output=True, text=True, timeout=timeout)
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -870,7 +898,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n')
         (self.mock_bin / 'systemctl').chmod(0o755)
         result = subprocess.run([str(self.project / '.ai/bin/ai-watchdog'), str(self.project), '--install-timer'],
-                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=25)
+                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         units = self.config / 'systemd/user'
         hosts = self.base / 'xdg-data/ai-toolkit/watchdog'
@@ -954,7 +982,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def tool(self, name, *args, expected=0, **env):
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
-                            env=dict(self.env, **env))
+                            env=dict(self.env, **env),
+                            timeout=PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT)
 
     def test_setup_dry_run_preservation_and_repeatability(self):
         (self.project / 'CLAUDE.md').write_text('human instructions\n')
@@ -1086,7 +1115,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             with self.subTest(mode=mode):
                 if not (self.project / '.ai').exists():
                     self.ready()
+                before = self.outcome_rows()
                 self.tool('ai-run', '--approved', '--sessions', '5', expected=1, MOCK_CLAUDE=mode)
+                added = self.outcome_rows()[len(before):]
+                self.assertEqual([r['task'] for r in added], ['T001'])
+                self.assertEqual(added[0]['attempt'], len(before) + 1)
+                if mode == 'bad-format':
+                    self.assertEqual(added[0]['result'], 'error')
                 self.assertFalse((self.project / 'T001.txt').exists())
                 (self.project / '.ai/tasks.md').write_text(task('T001'))
                 self.commit('reconcile failed run')
@@ -2281,16 +2316,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         args = self.claude_review_args()[0]
         self.assertEqual(args[args.index('--model') + 1], 'claude-opus-5-5')
         self.assertEqual(args[args.index('--effort') + 1], 'high')
-        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep,Bash,Edit,Write')
+        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep')
         allowed = args[args.index('--allowedTools') + 1:args.index('--setting-sources')]
-        self.assertIn('Edit(./.ai/local/review-probes/**)', allowed)
-        self.assertIn('Bash(git diff *)', allowed)
-        self.assertIn('Bash(cat *)', allowed)
-        for entry in ('Edit', 'Write', 'Bash(git add *)', 'Bash(git commit *)', 'Bash(git rm *)',
-                      'Bash(.ai/bin/ai-task *)', 'Bash(.ai/bin/ai-check)', 'Bash(bash .ai/validate)'):
-            self.assertNotIn(entry, allowed)
+        self.assertEqual(allowed, ['Read', 'Glob', 'Grep'])
         self.assertIn('--strict-mcp-config', args)
         self.assertFalse((self.project / '.ai/local/review-probes').exists())
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
         prompt = (self.base / 'claude-review-prompts.log').read_text()
         self.assertIn('REVIEW SCOPE', prompt)
         self.assertIn('Lock order and deadlocks', prompt)
@@ -2435,11 +2466,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='claude', MOCK_CLAUDE_REVIEW='error')
         self.assertIn('Claude review failed (exit 3); prior review preserved', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_text(), before)
-        self.assertFalse((self.project / '.ai/local/review-probes').exists())
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
         # A reviewer that changes the checkout is never published.
         mock = self.mock_bin / 'claude'
-        mock.write_text(mock.read_text().replace("pathlib.Path('.ai/local/review-probes/probe.txt').write_text('scenario probe')",
-                                                 "pathlib.Path('stray.txt').write_text('outside the probe dir')"))
+        marker = 'pass  # the reviewer writes nothing (a test rewrites this line)'
+        self.assertIn(marker, mock.read_text())
+        mock.write_text(mock.read_text().replace(marker, "pathlib.Path('stray.txt').write_text('written by the reviewer')"))
         result = self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='claude')
         self.assertIn('Checkout changed during review', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_text(), before)
@@ -2457,7 +2489,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('git push origin x', (self.project / '.ai/local/review-denials.log').read_text())
         allowlists = list((self.project / '.ai/local').glob('review-*.allowlist'))
         self.assertEqual(len(allowlists), 1)
-        self.assertIn('Edit(./.ai/local/review-probes/**)', allowlists[0].read_text())
+        self.assertEqual(allowlists[0].read_text().splitlines(), ['Read', 'Glob', 'Grep'])
 
     def test_pipeline_rejects_an_invalid_reviewer_setting_first(self):
         self.ready()
@@ -2474,22 +2506,118 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.base / 'claude-called').exists())
         self.assertIn('Diagnosis unavailable (exit 1)', (self.project / '.ai/local/diagnosis.md').read_text())
 
-    def test_review_allowlist_keeps_only_read_and_check_commands(self):
-        self.setup_project()
+    def test_review_allowlist_is_read_glob_grep_whatever_the_project_allows(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
         allow = self.project / '.ai/permissions.allow'
-        allow.write_text(allow.read_text() + 'Bash(npm test)\nBash(npx vitest run *)\nBash(git push *)\n'
-                         'Bash(npx supabase db push)\nBash(rm -rf *)\nBash(npm run deploy)\nBash(npm run lint)\n'
-                         'Bash(bash *)\nBash(python3 *)\nBash(node *)\nBash(npx *)\nBash(npm run *)\nBash(tee *)\n'
-                         'Bash(sed *)\nBash(find *)\n')
-        entries = self.helper('review-allowlist').stdout.splitlines()
-        for entry in ('Read', 'Bash(npm test)', 'Bash(npx vitest run *)', 'Bash(npm run lint)', 'Bash(git log *)', 'Bash(git blame *)',
-                      'Edit(./.ai/local/review-probes/**)'):
-            self.assertIn(entry, entries)
-        for entry in ('Edit', 'Write', 'Bash(git push *)', 'Bash(npx supabase db push)', 'Bash(rm -rf *)',
-                      'Bash(npm run deploy)', 'Bash(git commit *)', 'Bash(.ai/bin/ai-task *)', 'Bash(bash *)',
-                      'Bash(python3 *)', 'Bash(node *)', 'Bash(npx *)', 'Bash(npm run *)', 'Bash(tee *)',
-                      'Bash(sed *)', 'Bash(find *)'):
-            self.assertNotIn(entry, entries)
+        allow.write_text(allow.read_text() + 'Bash(npm test)\nBash(npx vitest run *)\nBash(git grep *)\n'
+                         'Bash(pytest --basetemp=/x)\nBash(git log *)\nBash(bash *)\nBash(python3 *)\nBash(cat *)\n'
+                         'Edit\nWrite\n')
+        self.commit('fixture: an allowlist full of runners')
+        self.tool('ai-check')
+        self.assertEqual(self.helper('review-allowlist').stdout.splitlines(), ['Read', 'Glob', 'Grep'])
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        args = self.claude_review_args()[-1]
+        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep')
+        self.assertEqual(args[args.index('--allowedTools') + 1:args.index('--setting-sources')], ['Read', 'Glob', 'Grep'])
+        allowlists = list((self.project / '.ai/local').glob('review-*.allowlist'))
+        self.assertEqual([path.read_text().splitlines() for path in allowlists], [['Read', 'Glob', 'Grep']])
+
+    # ------------------------------------------- Claude reviewer context (no shell)
+    def review_contexts(self):
+        path = self.base / 'claude-review-context.log'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def claude_prompts(self):
+        return (self.base / 'claude-review-prompts.log').read_text().split('\n=====\n')[:-1]
+
+    def test_claude_review_context_code_mode(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        [context] = self.review_contexts()
+        self.assertEqual(context['mode'], 'code')
+        self.assertIn('T001.txt', context['files'])
+        self.assertIn('diff --git a/T001.txt b/T001.txt', context['diff'])
+        self.assertEqual(context['names'], ['diff.patch', 'files.txt', 'log.txt'])
+        prompt = self.claude_prompts()[-1]
+        self.assertIn('.ai/local/review-context/diff.patch', prompt)
+        self.assertNotIn('inspect git diff', prompt.lower())
+        self.assertNotIn('since-last-review.patch', prompt)
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
+        self.helper('review-info')
+
+    def test_claude_review_context_second_review_has_the_delta(self):
+        self.first_review_round()
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude')
+        [context] = self.review_contexts()
+        self.assertIn('since-last-review.patch', context['names'])
+        prompt = self.claude_prompts()[-1]
+        self.assertIn('PREVIOUS ROUNDS:', prompt)
+        self.assertIn('CHANGED SINCE THE LAST REVIEW: .ai/local/review-context/since-last-review.patch', prompt)
+
+    def test_claude_review_context_recheck_mode(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n'])
+        self.tool('ai-review', '--recheck', MOCK_CODEX_LIMIT='1')
+        [context] = self.review_contexts()
+        self.assertEqual(context['mode'], 'recheck')
+        self.assertIn('T001.txt', context['files'])
+        self.assertIn('diff --git a/T001.txt b/T001.txt', context['diff'])
+        self.assertIn('M1', context['findings'])
+        self.assertIn('findings.txt', self.claude_prompts()[-1])
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
+
+    def test_claude_review_context_plan_mode(self):
+        self.ready()
+        self.tool('ai-review', '--plan', AI_REVIEWER='claude')
+        [context] = self.review_contexts()
+        self.assertEqual(context['mode'], 'plan')
+        self.assertEqual(context['files'], ['.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md'])
+        self.assertEqual(context['names'], ['files.txt', 'log.txt'])
+        self.assertIn('.ai/local/review-context/files.txt', self.claude_prompts()[-1])
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
+
+    def test_claude_review_context_is_rebuilt_after_a_limit_and_removed(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude', MOCK_CLAUDE_REVIEW='limit-once')
+        contexts = self.review_contexts()
+        self.assertEqual(len(contexts), 2)
+        for context in contexts:
+            self.assertEqual(context['names'], ['diff.patch', 'files.txt', 'log.txt'])
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
+        self.helper('review-info')
+
+    def test_claude_review_context_failure_stops_before_claude(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main')
+        self.commit('record review')
+        before = (self.project / '.ai/reviews/current.md').read_bytes()
+        real_git = shutil.which('git', path=self.env['PATH'].split(os.pathsep, 1)[1])
+        wrapper = self.mock_bin / 'git'
+        # Only the host's context diffs carry --no-ext-diff; preflight git calls pass through.
+        wrapper.write_text(f'#!/usr/bin/env bash\n[[ "$1" == diff && " $* " == *" --no-ext-diff "* ]] && exit 1\n'
+                           f'exec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.tool('ai-review', '--base', 'main', expected=1, AI_REVIEWER='claude')
+        self.assertIn('Could not prepare the review context; prior review preserved.', result.stderr)
+        self.assertEqual(self.review_contexts(), [])
+        self.assertFalse((self.base / 'claude-review-args.log').exists())
+        self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), before)
+        self.helper('review-info')
+        self.assertFalse((self.project / '.ai/local/review-context').exists())
+
+    def test_review_range_prints_head_and_merge_base(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        merge_base = self.run_cmd(['git', 'merge-base', 'main', 'HEAD']).stdout.strip()
+        self.assertEqual(self.helper('review-range').stdout.split(), [head, merge_base])
+        current = self.project / '.ai/reviews/current.md'
+        current.write_text(current.read_text() + '\ntampered\n')
+        self.helper('review-range', expected=1)
 
     def test_setup_installs_the_claude_review_prompt(self):
         self.setup_project()
@@ -2518,6 +2646,117 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         report = self.tool('ai-status', '--outcomes').stdout
         catch_up = report.split('Codex catch-up pending')[1]
         self.assertEqual(catch_up.count('code HEAD'), 2)  # forced Claude reviews are listed too
+
+    def outcome_rows(self):
+        path = self.base / 'host-state/outcomes.jsonl'
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    def task_rows(self):
+        return [(r['attempt'], r['result'], r['first_pass']) for r in self.outcome_rows() if r['kind'] == 'task']
+
+    def test_outcome_stopped_attempts_are_logged_and_numbered(self):
+        self.ready()
+        self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1, MOCK_CLAUDE='timeout')
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.commit('reconcile timeout')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.commit('reconcile error')
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.task_rows(), [(1, 'timeout', False), (2, 'error', False), (3, 'done', False)])
+
+    def test_outcome_validation_failure_logs_once(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nif [[ -e T001.txt ]]; then exit 42; fi\n')
+        self.commit('gate fails for invalid fixture implementation')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='validation-failure')
+        self.assertEqual(self.task_rows(), [(1, 'validation_failed', False)])
+
+    def test_outcome_killed_session_is_a_timeout(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='self-kill')
+        self.assertEqual(self.task_rows(), [(1, 'timeout', False)])
+
+    def test_outcome_signal_to_runner_logs_interrupted_once(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        for attempt, sig in ((1, signal.SIGTERM), (2, signal.SIGINT)):
+            with self.subTest(signal=sig.name):
+                for name in ('mock-session.pid', 'mock-release'):
+                    (local / name).unlink(missing_ok=True)
+                runner = subprocess.Popen([str(self.project / '.ai/bin/ai-run'), '--approved'], cwd=self.project,
+                                          env=dict(self.env, MOCK_CLAUDE='hold'), stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                          # a background-launched pipeline inherits SIGINT ignored, which bash cannot trap
+                                          preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+                try:
+                    for _ in range(200):
+                        if (local / 'mock-session.pid').exists() and (local / 'mock-session.pid').read_text():
+                            break
+                        time.sleep(0.05)
+                    else:
+                        self.fail('the session never started')
+                    runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
+                    (local / 'mock-release').touch()
+                    runner.communicate(timeout=20)
+                finally:
+                    if runner.poll() is None:
+                        os.killpg(runner.pid, signal.SIGKILL)
+                        runner.communicate()
+                    try:
+                        os.kill(int((local / 'mock-session.pid').read_text()), signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass
+                self.assertEqual(runner.returncode, 128 + sig)
+                self.assertEqual([r[:2] for r in self.task_rows()][-1], (attempt, 'interrupted'))
+                self.assertEqual(len(self.task_rows()), attempt)
+                self.commit('reconcile interrupted run')
+        self.tool('ai-run', '--approved')
+        self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted'), (2, 'interrupted'), (3, 'done')])
+
+    def test_outcome_malformed_queue_then_retry(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='bad-format')
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        self.commit('repair the queue')
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.task_rows(), [(1, 'error', False), (2, 'done', False)])
+        self.assertEqual(self.outcome_rows()[0]['title'], 'broken')
+
+    def test_outcome_no_time_left_logs_nothing(self):
+        self.ready()
+        slow = self.mock_bin / 'git'
+        real = shutil.which('git', path=self.env['PATH'].split(os.pathsep, 1)[1])
+        slow.write_text('#!/usr/bin/env bash\n'
+                        'marker="$MOCK_STATE_DIR/slow-once"\n'
+                        'if [[ -e .ai/local/approved-gate.sha256 && ! -e "$marker" ]]; then touch "$marker"; sleep 2; fi\n'
+                        f'exec {real} "$@"\n')
+        slow.chmod(0o755)
+        result = self.tool('ai-run', '--approved', '--run-timeout', '1', expected=1)
+        self.assertIn('Run time limit', result.stderr)
+        self.assertEqual(self.outcome_rows(), [])
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_outcome_triage_runs_log_no_task_outcome(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.tool('ai-run', '--approved', '--triage', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('checkpoint the interrupted triage')
+        self.tool('ai-run', '--approved', '--triage')
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+
+    def test_outcome_limit_pause_stays_in_one_attempt(self):
+        self.ready()
+        nap = self.mock_bin / 'nap'
+        nap.write_text('#!/usr/bin/env bash\nsleep 2\n')
+        nap.chmod(0o755)
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once', AI_SLEEP=str(nap))
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([(r['attempt'], r['result'], r['first_pass']) for r in rows], [(1, 'done', True)])
+        self.assertGreaterEqual(rows[0]['seconds'], 2)  # the wait belongs to the original attempt
 
     def test_runner_logs_blocked_and_failed_validation_attempts(self):
         self.ready(task('T001') + task('T002'))
