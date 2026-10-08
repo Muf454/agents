@@ -377,7 +377,7 @@ scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, README.md, vault 
 2026-10-08: `plan_decision_check` defined before its first use and called after the startup stage dispatch + `reconcile_disputes` (unconditional), in each plan-loop pass (kept) and before the implementation loop; on a decision it syncs plan rounds best-effort only to label the round. New tests `test_needs_human_decision_gate_*` (4): skip path stops with the stored question (exact pipeline message with `AI_AUTO_RECOVER=0`; with recovery, no recovery session), partly done queue stops, unreadable store → `Plan revision stage cannot be completed safely: the plan revision records are unreadable`, no decision + skip implements; no plan review, revision or implementation invocation in the stop cases. `-k needs_human_decision_gate` 4 OK; `-k supervised_plan` 35 OK (unchanged); `.ai/bin/ai-check` 363 tests OK. Docs: README, `docs/workflow.md`; vault `agents-flow.md` decision node. Not done: re-running the new tests against the pre-fix script (the revert command was denied); the review's probe already showed the bypass. `ai-pipeline --help` does not describe the skip, unchanged.
 
 ## T012 — Keep one checkout baseline across a review format retry (review M2)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -401,6 +401,10 @@ scripts/ai-review, tests/test_workflow.py, docs/workflow.md
 `python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`
 
 ### Result / notes
+- `scripts/ai-review`: `review_head` pins one HEAD per plan/code review (the code scope `$head`, the plan scope HEAD now also used in the PLAN SCOPE prompt); `run_review` compares against it (re-checks keep a per-call HEAD). `review_with_format_retry` checks HEAD + clean tree after the notification and before the retry call (`ai_die` "Checkout changed between the review and its format retry"; the EXIT trap logs `stopped, checkout changed between the calls, prior review preserved`) and again before returning to publish, on every path.
+- New `test_format_retry_stops_when_the_checkout_changes_between_the_calls`: code and plan reviews, notification hook commits a change or leaves an uncommitted file → exit 1, one reviewer call, prior `current.md`/`plan.md` unchanged, run-log line says stopped. Existing format_retry tests unchanged.
+- `docs/workflow.md` Format retry paragraph states the checkout must stay unchanged across both calls.
+- Evidence: `python3 -m unittest tests.test_workflow -k format_retry` 8 tests OK; `.ai/bin/ai-check` PASS (364 tests, 8 shards). A first gate run hit one 25 s subprocess timeout in an unrelated `ai-pipeline --max-fix-rounds 2` test under load; the rerun was clean.
 
 ## T013 — Convergence guidance includes the supervised extra round (review N1)
 Status: TODO

@@ -118,12 +118,11 @@ run_review() {
   # Per call: a retry after a Claude fallback must not inherit its label or attribution.
   unset AI_REVIEW_BY AI_REVIEW_LABEL
   review_by='' review_model='' review_effort='' review_reason=''
-  start_head=$(git rev-parse HEAD)
+  # Plan and code reviews pin one HEAD for both calls of a format retry ($review_head).
+  start_head=${review_head:-$(git rev-parse HEAD)}
   report=$(mktemp .ai/local/review-XXXXXXXX.md)
   events="${report%.md}.events.log"
-  unchanged() {
-    [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]]
-  }
+  unchanged() { checkout_unchanged "$start_head"; }
   while true; do
     try_codex=no
     if [[ "$reviewer" == codex ]] || { [[ "$reviewer" == auto ]] && command -v codex >/dev/null; }; then try_codex=yes; fi
@@ -185,26 +184,42 @@ run_review() {
 # with the error appended (AI_SUPERVISE=1); integrity failures stop inside run_review.
 # A retry is logged in the run log after the second call: published below, or by the EXIT
 # trap when anything stops it (so the checkout stays clean between the two calls).
+# Both calls and the publish use ONE checkout: $review_head (set by the caller) and a clean tree.
 review_with_format_retry() {
   local prompt=$1 code=0 error
+  [[ -n "$review_head" ]] || ai_die 'Internal error: no review HEAD.'
   run_review "$prompt"
-  [[ -n "$allow_empty" ]] || return 0
+  [[ -n "$allow_empty" ]] || { review_checkout_check; return 0; }
   error=$(ai_helper review-format-check "$mode" "$report") || code=$?
-  (( code != 0 )) || return 0
+  (( code != 0 )) || { review_checkout_check; return 0; }
   (( code == 2 )) || ai_die "Cannot check the review report $report; prior review preserved."
   format_retry_first=$report format_retry_error=${error//|//}
   printf 'Review format error: %s Asking the reviewer once more (first report: %s).\n' "$error" "$report"
   ai_notify "🔁 Review format retry ($mode): $error"
   trap format_retry_failed EXIT
+  # The retry reviews the same checkout as the first call (the scope prompt names it).
+  if ! checkout_unchanged "$review_head"; then
+    format_retry_stop='stopped, checkout changed between the calls, prior review preserved'
+    ai_die "Checkout changed between the review and its format retry (expected HEAD $review_head, clean tree); prior review preserved, rerun the review."
+  fi
   run_review "$prompt"$'\n\n'"FORMAT ERROR: ${error%.}. Return the full report again in the required structure."
+  review_checkout_check
 }
+review_checkout_check() {
+  checkout_unchanged "$review_head" || \
+    ai_die 'Checkout changed before publishing the review; prior review preserved, rerun the review.'
+}
+checkout_unchanged() {
+  [[ "$(git rev-parse HEAD)" == "$1" && -z "$(git status --porcelain --untracked-files=all)" ]]
+}
+review_head='' format_retry_stop=''
 format_retry_log() {
   ai_log none "review format retry ($mode): $1" 'n/a' "first report $format_retry_first: $format_retry_error"
 }
 format_retry_failed() {
   local code=$?
   [[ -n "$format_retry_first" ]] || return 0
-  (( code == 0 )) || format_retry_log 'stopped again, prior review preserved'
+  (( code == 0 )) || format_retry_log "${format_retry_stop:-stopped again, prior review preserved}"
 }
 # After a successful publish: the retry's run-log line goes into the review's record commit.
 format_retry_published() {
@@ -238,9 +253,10 @@ if [[ "$plan" == yes ]]; then
   if [[ -z "${AI_PIPELINE:-}" ]]; then
     ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot read the host plan review records.'
   fi
+  review_head=$(git rev-parse HEAD)
   prompt=$(cat .ai/prompts/plan-review.md)
   prompt+=$'\n\nPLAN SCOPE: HEAD='
-  prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
+  prompt+="$review_head. Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
   # The review after a plan revision: earlier plan rounds and their dispositions, as context only
   # (never implementation-review rounds); a helper failure must not block the review.
   if ai_helper plan-revisions revised >/dev/null 2>&1; then
@@ -315,7 +331,7 @@ ai_helper tasks complete || ai_die 'Complete the task queue before final review.
 ai_helper stamp verify
 base_sha=$(git rev-parse --verify "${base}^{commit}") || ai_die 'Invalid review base.'
 merge_base=$(git merge-base "$base_sha" HEAD) || ai_die 'Base has no shared history with HEAD.'
-head=$(git rev-parse HEAD)
+head=$(git rev-parse HEAD) review_head=$head
 [[ "$merge_base" != "$head" ]] || ai_die 'Empty review range. Choose the pre-implementation base.'
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='

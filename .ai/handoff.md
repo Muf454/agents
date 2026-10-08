@@ -33,6 +33,9 @@ review; integrity failures and re-checks never retried; per-call reviewer metada
 T011 done (review M1: `ai-pipeline` checks a stored needs-human plan decision on every start,
 after the startup stage dispatch and `reconcile_disputes`, in each plan-review pass and before the
 implementation loop; `--skip-plan-review` or a DONE task no longer bypasses it).
+T012 done (review M2: `ai-review` pins one HEAD (`review_head`) for both calls of a format retry
+and the publish; a HEAD change or dirty tree between the calls stops before the retry, prior
+review kept, run log `stopped, checkout changed between the calls, prior review preserved`).
 
 Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
@@ -162,6 +165,10 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   one call, upheld `test_format_retry_never_for_a_malformed_recheck`; `AI_SUPERVISE=0` → no retry
   `test_format_retry_off_without_supervision`; helper = publish checks
   `test_review_format_check_helper_matches_publish`.
+- T012 one checkout per format retry: code and plan review, malformed first report, the
+  notification commits a change or leaves an uncommitted file → stop, one reviewer call, prior
+  review kept, run log says stopped
+  `test_format_retry_stops_when_the_checkout_changes_between_the_calls`.
 - T011 decision gate: stored needs-human decision + `--skip-plan-review` stops (also with
   auto-recovery: no plan review, revision, implementation or recovery session)
   `test_needs_human_decision_gate_holds_with_skip_plan_review`; with one task DONE and one TODO
@@ -177,10 +184,10 @@ None beyond "Needs you" above.
 
 ## Flow chart
 Flow chart updated (T011: plan-decision check before the pipeline plan review, also on the
-`--skip-plan-review` / task-DONE path)
+`--skip-plan-review` / task-DONE path; T012: format retry note says both calls review one checkout)
 
 ## Next action
 Codex review of HEAD 5b8d86b (MAJOR 2, MINOR 1) triaged: all accepted (`.ai/reviews/dispositions.md`).
-T011 done. Next: T012 (one checkout baseline across a review format retry), T013 (convergence docs), then a new
+T011 and T012 done. Next: T013 (convergence docs), then a new
 independent review and the live supervised trial in "Needs you" above. No run budget in this
 batch (OR-09).

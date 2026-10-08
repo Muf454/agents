@@ -595,9 +595,13 @@ run-log line (`review format retry (<mode>): published` or `stopped again, prior
 preserved`, with the first report's path) is written only after the second call, so both
 calls see a clean checkout; after a publish it is committed with the review record (by
 `ai-pipeline`'s `review_record`, or by the hand-run plan path). A second format error stops
-as before. Never retried: reviewer exit errors, limit handling, a checkout changed during
-either call, unreadable reports, binding writes, re-checks (JSON; a malformed answer stays
-upheld, an empty one stops) and everything with `AI_SUPERVISE=0`.
+as before. The checkout must stay unchanged across both calls: the review pins one HEAD
+(the code review's scope HEAD, the plan scope HEAD) for both calls and the publish, and a
+HEAD change or a dirty tree after the first call (e.g. from the notification) stops before
+the retry (`stopped, checkout changed between the calls, prior review preserved`) and is
+checked again before publishing. Never retried: reviewer exit errors, limit handling, a
+checkout changed during either call, unreadable reports, binding writes, re-checks (JSON; a
+malformed answer stays upheld, an empty one stops) and everything with `AI_SUPERVISE=0`.
 
 Codex tests can be restricted by read-only execution. The report must distinguish
 source inspection, validation evidence, tests actually run, and tests not run. Human

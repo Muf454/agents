@@ -4103,6 +4103,50 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertIn(f'review format retry ({mode}): published', shown)
             self.assertIn(f'🔁 Review format retry ({mode}): ', self.notifications())
 
+    def test_format_retry_stops_when_the_checkout_changes_between_the_calls(self):
+        # Review M2: the notification between the calls commits (or leaves) a change; the
+        # retry must not adopt it as a new baseline.
+        self.ready()
+        self.tool('ai-run', '--approved')
+        notify = self.base / 'notify-mutate'
+        notify.write_text(f'printf "%s\\n" "$1" >> "{self.notify_log}"\n'
+                          'case "$1" in *"Review format retry"*)\n'
+                          '  printf "x\\n" >> unexpected.txt\n'
+                          '  [ "$MUTATE" = commit ] && { git add -- unexpected.txt; git commit -qm moved; }\n'
+                          'esac\n'
+                          'exit 0\n')
+        hook = dict(AI_NOTIFY_CMD=f'bash "{notify}" "$1"', AI_SUPERVISE='1')
+        plan = self.project / '.ai/reviews/plan.md'
+        # Code reviews first (dirty before commit): a committed source change voids the validation stamp.
+        for mutate in ('dirty', 'commit'):
+            with self.subTest(review='code', mutate=mutate):
+                self.reset_review_fixture()
+                original = (self.project / '.ai/reviews/current.md').read_bytes()
+                logged = len(self.format_retry_lines())
+                result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='malformed,success',
+                                   MUTATE=mutate, **hook)
+                self.assertIn('Checkout changed between the review and its format retry', result.stderr)
+                self.assertEqual(self.codex_calls(), 1)  # no second reviewer call
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                lines = self.format_retry_lines()[logged:]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn('review format retry (code): stopped, checkout changed between the calls', lines[0])
+        for number, mutate in enumerate(('dirty', 'commit')):
+            with self.subTest(review='plan', mutate=mutate):
+                self.reset_review_fixture()
+                (self.project / 'src.txt').write_text(f'moved source {number}\n')  # a new plan digest
+                self.commit(f'moved source {number}')
+                before = plan.read_bytes() if plan.exists() else None
+                logged = len(self.format_retry_lines())
+                result = self.tool('ai-review', '--plan', expected=1, MOCK_CODEX_PLAN_FORMAT='malformed,ok',
+                                   MUTATE=mutate, **hook)
+                self.assertIn('Checkout changed between the review and its format retry', result.stderr)
+                self.assertEqual(self.codex_calls('codex-plan-calls'), 1)
+                self.assertEqual(plan.read_bytes() if plan.exists() else None, before)
+                lines = self.format_retry_lines()[logged:]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn('review format retry (plan): stopped, checkout changed between the calls', lines[0])
+
     def test_format_retry_never_for_a_malformed_recheck(self):
         self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
                               '| M2 | rejected | out of scope | none |\n'])
