@@ -1,104 +1,105 @@
-<!-- Plan review of plan digest fdb666135367bd1d36c6cab66b3abf92b19658423752316c098905b9622d815d; saved 2026-10-07T19:20:35Z. -->
+<!-- Plan review of plan digest 1249c96c3d6bafee6cc962ff605900499191cc5e231c3f39dd6635cbe0751004; saved 2026-10-08T05:10:28Z. -->
 
-> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+# Plan review — FL-04 bounded supervisor
 
-I've traced every task against the code and have enough for the review. No file writes were needed; the one timing probe (two full mock pipeline runs) completed in about 6 s each, so the loop tests fit the fixture's 25 s per-command limit.
+Overall verdict: REQUEST CHANGES — resolve the findings below before unattended implementation.
+Finding counts: BLOCKER=1 MAJOR=4 MINOR=2
 
-# Plan review — FL-04 bounded supervisor (revision 2)
+Reviewed HEAD: `dbe85f5cb6cc3f5ae8c507816c125f09db2c67cf`
 
-Overall verdict: REVISE in one small place before unattended implementation. Revision 2 answers round 1 well: the task order is implementable at each checkpoint, host state is the authority everywhere it matters, and the model lines fit the risk. One ordering gap in the plan-revision stage would miscount or mis-model a resumed revision; the rest are contract clarifications that would otherwise cost implementation time or produce needless human stops.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=7
-
-Reviewed HEAD: `dfc03c8e10d35d538bce5a73b7bb3aa2f794b561` (clean worktree). All findings are traced from the plan text against the current source; none required a probe beyond timing the existing pipeline tests.
+Scope: Revision 3 of the spec, plan and T001–T011, checked against the existing scripts, host-state formats, task parser, tests and validation entry point. These are prospective implementation defects; no FL-04 implementation exists yet.
 
 ## BLOCKER findings
 
-None.
+- P1: The successful revision path dirties the checkout immediately before mandatory re-review.
+
+  **Location:** `.ai/tasks.md:205`; `.ai/current-plan.md:100`; `scripts/lib/common.sh:208`; `scripts/ai-review:184`.
+
+  T007 explicitly calls `ai_log` after completing and clearing the revision stage, then loops into `ai-review --plan`. `ai_log` appends to tracked `.ai/run-log.md`, while plan review refuses any dirty checkout. Neither the loop nor T006 commits this new entry. T010’s change to `review_record` happens after review and cannot fix its startup precondition.
+
+  Implementing this sequence literally makes a successful revision stop with “Commit the plan before reviewing it” instead of completing R1’s re-review.
+
+  **Concrete plan change:** Persist the revision log entry within the revision’s host commit, or define a guarded bookkeeping commit before stage closure and re-review. Keep the reviewer’s clean-checkout requirement. T007’s end-to-end test must run with logging enabled and assert a clean checkout immediately before the second reviewer call.
 
 ## MAJOR findings
 
-- P1: The plan-revision stage reserves after `stage-set` and its resume path neither reserves nor chooses the round's model. (demonstrated by trace)
+- P2: Clearing the stage before handling `needs-human` loses the terminal decision across a crash.
 
-  **Location:** `.ai/tasks.md:193` (T007: "else stage-set, `revision-reserve`, model ..., run the stage"), `.ai/tasks.md:165` (T006: `complete_plan_stage` runs `ai-run --approved --revise-plan --since START --host-budget` with no model and no reservation), `.ai/current-plan.md:20` ("before the stage starts").
+  **Location:** `.ai/current-plan.md:85`; `.ai/current-plan.md:98`; `.ai/current-plan.md:103`; `.ai/tasks.md:205`; `.ai/tasks.md:236`.
 
-  Two consequences. First, a crash between `stage-set` and `revision-reserve` leaves an open stage with no reservation; on resume the start dispatch runs `complete_plan_stage`, which completes the revision without ever reserving it, so `revision-count` ends one below the real number and the run gets one extra revision. The existing precedent reserves first: `scripts/ai-recover:65` reserves the attempt "before anything that can be interrupted", and T009 itself orders "reserve ... then triage". Second, `complete_plan_stage` on the start path passes no `--model`, so T005's default (`opus`) applies; a crash during a round ≥ `AI_SUPERVISE_ESCALATE_ROUND` revision resumes on `opus` instead of the escalation model. T008's crash points as listed would not detect either (they kill around the session's commit, not between the two host writes, and nothing says the crash tests run at round 3).
+  `complete_plan_stage` clears the stage before its caller checks the section for `needs-human`. If the process dies between those operations, the next run finds no open stage and a recorded revision, so it goes directly to re-review. The planned loop does not check that completed revision’s unresolved questions first.
 
-  Related wording in T006: "`committed` iff a record commit is in START..HEAD and the tree is clean, else `pending`" makes a dirty tree after the counted commit `pending`, which re-runs `ai-run --revise-plan` and writes a second host commit and `plan-revisions` record for the same report. The triage analog fails closed instead (`scripts/lib/workflow.py:1209-1210`).
+  A subsequent approving review can therefore lead to implementation despite the revision having escalated a scope or irreversible decision. The existing `ai-recover` message patterns cannot protect a stop whose message was never written.
 
-  **Plan change:** In T007 call `revision-reserve DIGEST` before `stage-set`, and in T006 have `complete_plan_stage` call it again (idempotent) before launching `ai-run`. Store the chosen model in the stage record at `stage-set` (or recompute it in `complete_plan_stage` from `plan-rounds current` and the manifest's `AI_SUPERVISE_ESCALATE_*`), so a resume uses the same model; assert it in a T008 test that crashes a round-3 revision. Make `stage-verify` fail on a dirty tree after the record commit, as triage does. Add "crash between stage-set and reserve" to T008's crash list with the expected `revision-count` 1.
+  **Concrete plan change:** Persist the validated revision outcome, including its terminal `needs-human` status, in host state before clearing the stage. Check that outcome at startup and loop entry before re-review or implementation. Add crash tests between stage closure and question handling, resumed through both a human rerun and watchdog recovery; assert no reviewer or implementation session starts while the decision remains unresolved.
+
+- P3: The specified crash accounting contradicts the approved full-grant charge.
+
+  **Location:** `.ai/project-spec.md:71`; `.ai/tasks.md:51`; `.ai/tasks.md:62`.
+
+  The spec says a crashed invocation consumes its **full grant** at the next start. T002 instead instructs `open` to charge `min(now − start, grant)` for a stale record.
+
+  For example, an invocation granted 300 seconds and killed after 10 seconds is charged only 10 seconds under the implementation notes, although the spec and acceptance criteria require 300. A recovery budget could consequently retain time the approved fail-closed rule intended to consume.
+
+  **Concrete plan change:** Make stale-record reconciliation charge the stored grant once, clear the stale record atomically, and share that logic between `open` and `remaining`. Test an immediate crash, recovery after a long delay, and repeated reconciliation; each must charge exactly one full grant.
+
+- P4: Budget exhaustion during an active session still follows the ordinary timeout recovery path.
+
+  **Location:** `.ai/tasks.md:52`; `.ai/tasks.md:64`; `scripts/ai-run:145`; `scripts/ai-run:171`; `scripts/ai-run:267`; `scripts/ai-run:303`; `scripts/ai-recover:147`.
+
+  T002 changes the between-session exhaustion message, but does not address the normal case where GNU `timeout` terminates a session at the budget boundary. That case currently exits with “Claude exited 124 …”, which does not match the proposed always-escalate budget pattern. An implementation stop can therefore launch a Claude recovery session after budget exhaustion.
+
+  The remaining-time checks before final and post-task validation also retain separate ordinary timeout messages. Additionally, `capped_by_budget: remaining < LIMIT` classifies equal limits as a per-call timeout even when the host budget is exhausted simultaneously.
+
+  **Concrete plan change:** Define one exhaustion classifier for every budget-bound exit, including timeout results, validation boundaries and equal budget/per-call limits. Reconcile the budget before choosing recovery, and emit the terminal budget reason whenever the host budget is exhausted. Add active-session timeout and equal-limit tests with `AI_AUTO_RECOVER=1`, asserting no recovery session; retain a separate recoverable per-call timeout test.
+
+- P5: The mandatory re-review path has no budget gate.
+
+  **Location:** `.ai/project-spec.md:73`; `.ai/current-plan.md:87`; `.ai/current-plan.md:93`; `.ai/tasks.md:202`.
+
+  The spec explicitly prohibits starting a re-review after a revision when the budget is exhausted. The loop checks budget only after a significant review, before reserving a revision. Its “review needed” branch starts `ai-review` directly.
+
+  A completed revision that leaves less than the 60-second floor—or a resume that exhausts the budget while reconciling a crashed grant—can therefore start the supervised re-review before stopping.
+
+  **Concrete plan change:** Add an exhaustion check immediately before every revision-triggered re-review, including startup after a recorded revision. Preserve the pending re-review obligation for a later human-started run. Add tests asserting that an exhausted resume makes no new reviewer call and starts no recovery session.
 
 ## MINOR findings
 
-- P2: `plan-rounds` has no base, so a reused branch name inherits rounds from merged history. (suspected, high confidence)
+- P6: T002’s dependency declaration omits its config prerequisite.
 
-  **Location:** `.ai/tasks.md:80` ("records reachable from HEAD"; legacy init "from exact-subject commits in the branch history").
+  **Location:** `.ai/tasks.md:43`; `.ai/tasks.md:21`; `.ai/tasks.md:53`.
 
-  Records are per branch name (`binding_dir()/plan-rounds-<hash>.json`). After `feature/x` is merged and deleted, a new `feature/x` created from master reaches the old commits, so the old records count, round numbering starts above 1, and Convergence and the escalation model apply from the first review. `fix-rounds` avoids this with `count BASE` restricted to `BASE..HEAD` (`scripts/lib/workflow.py:1486-1495`); the pipeline already has `base_sha`. The legacy-init range is also unspecified.
+  T002 requires `AI_RUN_BUDGET` to work from user config, but adding that key to `ai_config` belongs to T001. `Dependencies: none` incorrectly presents T002 as independently implementable and verifiable. The current queue order happens to mask the omission.
 
-  **Plan change:** Give `plan-rounds count|current` and the legacy init a `BASE` argument (the pipeline's `base_sha`, `ai-review --plan` by hand uses `merge-base` with the default base or `--base`), count only records in `BASE..HEAD`, and add a test with a merged-then-recreated branch name.
+  **Concrete plan change:** Set T002’s dependencies to `T001`.
 
-- P3: A crash between the plan-review host commit and `plan-rounds record` turns into a human stop. (demonstrated by trace)
+- P7: The planned budget documentation gives the wrong control for the shared allowance.
 
-  **Location:** `.ai/tasks.md:79-80` (`current` "fails when plan.md's digest is not the last reachable record"), `.ai/tasks.md:191`.
+  **Location:** `.ai/tasks.md:55`; `.ai/current-plan.md:142`; `.ai/project-spec.md:65`.
 
-  On resume the review is `current` with no revision record, so the loop goes straight to the BLOCKER/MAJOR branch, `ai-run --revise-plan` requires `plan-rounds current`, that fails, and the "Plan revision stage" pattern escalates. The triage path survives the same window because `fix-rounds record` is re-run from `ai-run --triage` on completion (`scripts/ai-run:227-230`).
+  T002 says to document pipeline `--run-timeout` as the “whole run” limit, and the risk section advises raising it for the new shared budget. The spec instead makes `AI_RUN_BUDGET` the shared allowance and retains `--run-timeout` as a per-invocation cap. Raising the latter does not increase the manifest budget.
 
-  **Plan change:** Make the pipeline (and `ai-review --plan`) call `plan-rounds record` idempotently on every pass for the newest commit with the host subject whose committed `plan.md` equals the current verified report, before deciding anything; or let `plan-rounds current` record such a commit itself. Add this window to T008's crash list.
-
-- P4: The dispositions-section contract is underspecified for two resume shapes and for a second hand-run revision. (demonstrated by trace)
-
-  **Location:** `.ai/current-plan.md:41-42` ("everything above it byte-identical to the file at the stage start"), `.ai/tasks.md:107-108`, `.ai/tasks.md:134`.
-
-  Hand-run `ai-run --revise-plan` without `--since` uses `since=HEAD`; after a session that committed its rows and crashed before the host commit, the file at START already contains the section, so "above the header" cannot equal the whole START file and the T005 acceptance "an uncommitted but complete section is recorded without a second session" fails. When the file did not exist at START, the host preamble (title and comment) sits above the header with nothing to compare against. Separately, a second hand-run `--revise-plan` for the same report reuses the header, passes the check, and writes a second allow-empty host commit and record.
-
-  **Plan change:** Define the check as: text above the current header equals START's content above the same header when START has it, else the whole START file, else the host preamble. Make `ai-run --revise-plan` refuse when a `plan-revisions` record exists for the current report ("already revised; review again"). Add both resume shapes to T005's tests.
-
-- P5: The test fixture's default for `AI_SUPERVISE` is undecided, and existing tests assume today's stops. (demonstrated)
-
-  **Location:** `tests/test_workflow.py:391` (`setUp` sets `AI_AUTO_RECOVER='0'` because "recovery has its own tests"), `tests/test_workflow.py:1560-1593` (`test_pipeline_plan_review_gates_implementation`, `test_plan_review_is_bound_and_tracks_the_whole_tree` expect the plan stop), `tests/test_workflow.py:1443-1449` and `2593` (malformed and counts-lie reviews).
-
-  With the spec default `AI_SUPERVISE=1` the plan-MAJOR tests would launch a revision session the mock Claude rejects (`assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT'`), and malformed-review tests would get a retry call. T007 and T010 would have to rewrite unrelated tests, and the acceptance lines "existing tests unchanged" (T002, T006) become ambiguous.
-
-  **Plan change:** T001 sets `AI_SUPERVISE='0'` in `ToolkitTest.setUp` with the same comment pattern; supervised tests opt in per call. Note in T007 that the mock Codex needs a once-MAJOR plan mode (`MOCK_CODEX_PLAN=major-once`) beside the always-MAJOR one.
-
-- P6: `AI_RUN_BUDGET` is not wired like the other settings, and the validated values are not exported to children. (demonstrated by trace)
-
-  **Location:** `.ai/tasks.md:52` (T002: "init the budget at a human start from `AI_RUN_BUDGET`"), `.ai/tasks.md:21-24` (T001's key lists and the identity test), `.ai/tasks.md:273` (T010: `ai-review` reads `AI_SUPERVISE`).
-
-  `ai_config` reads only enumerated keys (`scripts/lib/common.sh:37`), so `AI_RUN_BUDGET` in the user config is ignored; adding it to `ai_config` but not to `RUN_SETTINGS` breaks T001's list-identity test, while adding it to `RUN_SETTINGS` is pointless because the total is already in the manifest. `ai_supervise_settings` "sets shell variables"; unless exported, `ai-review` and `ai-run` children see the raw or unset value.
-
-  **Plan change:** State that `AI_RUN_BUDGET` is read from config and environment, validated in `ai_supervise_settings` (`^[1-9][0-9]{0,6}$`), captured only as the manifest budget total, and explicitly excluded from the identity test. Have `ai_supervise_settings` export the four `AI_SUPERVISE*` values and make `ai-review` and `ai-run` call it too (or validate on read).
-
-- P7: Budget exhaustion inside `ai-run --host-budget` goes through a recovery session before the pipeline's own stop. (demonstrated by trace)
-
-  **Location:** `.ai/tasks.md:50-52`, `scripts/ai-run:143` ("Run time limit reached; checkpoint and resume later."), `scripts/ai-recover:102-106`.
-
-  Between sessions `remaining_time` ≤ 0 makes `ai-run` die with the existing message, which is not an escalate pattern, so `AI_AUTO_RECOVER=1` spends one Claude recovery session whose `rerun` then hits the pipeline's `run-budget remaining` check and stops. A tiny grant (say 30 s) also starts a Claude session that the timeout kills immediately.
-
-  **Plan change:** Under `--host-budget`, phrase the limit message as `Run budget exhausted (used U of T s)` and treat a grant below a floor (e.g. 60 s) as exhausted in `run-budget open`; add both to T002's tests (no `recover-calls`, no `mock-invocations`).
-
-- P8: Hardening of the needs-human stop text and the revision session's tool list. (suspected)
-
-  **Location:** `.ai/tasks.md:194` (stop message built from `--questions`), `.ai/tasks.md:136` (`claude_session` allowlist), `scripts/ai-run:154` (`--tools Read,Glob,Grep,Edit,Write,Bash`).
-
-  The questions are model output written to `.ai/local/last-error` and a notification; `ai-recover` reads last-error with `tr '\n' ' '` and the notification command gets it as an argument, so length and newlines should be bounded like `recover_decision` does (`scripts/lib/workflow.py:1666`). The revision session keeps `Write` in `--tools` and relies on `dontAsk` denials alone; dropping it costs nothing.
-
-  **Plan change:** Cap each question (whitespace-collapsed, ~300 chars, at most a few questions) in `--questions`; pass `--tools Read,Glob,Grep,Edit,Bash` for `--revise-plan` and assert it from the mock's args in T005.
-
-## Missing coverage
-
-- Checked against the checklist: lock order (one pipeline per checkout via `ai_lock`; host files written with `atomic`, no new lock), irreversible operations (new host records are append-only JSON, commits are allow-empty host commits, nothing deletes), stale async results (crash windows: P1, P3), data hidden from views (`plan-history` shows only rounds before the current one and only this branch's records: acceptable). Account deletion, tenant isolation, main/alt identity and attribution columns do not apply.
-- T008 lists crash points around the session's commit only; add the two host-write windows from P1 and P3 and a round-3 crash for the model check.
-- T009's trend test should include a run where round 1 was triaged by the old toolkit (legacy bare hash) and rounds 2–3 carry counts, to pin "insufficient history" versus "falling" at the boundary.
-- T010 should assert that the retried review's second `run_review` still fails the `unchanged` checkout check (the `mutates` mock on the second call), not only on the first.
-
-## Security concerns
-
-- The revision allowlist is the right boundary and lands on `opus` (T005). `.claude/settings.json` holds only deny rules, so `--setting-sources project` cannot widen it; the post-session scope check and the byte-identical `plan.md` check give defense in depth. `Bash(git commit *)` still permits `--amend` of commits after START, as in triage today; the scope check covers the resulting tree, so no new exposure.
-- `python3 -m unittest *` survives the review-style filter and can import arbitrary modules; the revision session cannot create files outside the record set, so the exposure matches the existing reviewer allowlist and is not new.
+  **Concrete plan change:** Consistently document `AI_RUN_BUDGET` as the cumulative allowance and `--run-timeout` as the per-call cap. Replace the incorrect risk guidance and add a documentation assertion for this distinction.
 
 ## Validation observed
 
-- Clean worktree at the scoped HEAD; `.ai/validate` runs `bash -n` on all scripts and `tests/run_parallel.py` (same discovery as serial), so every task's `.ai/bin/ai-check` line is a real gate.
-- Timed three existing pipeline tests including two full mock runs: 17.7 s total, about 6 s per run, so the supervised-loop tests (up to three revisions and four plan reviews) fit the fixture's 25 s per-command timeout with margin.
-- Not run: no new code exists to probe; the findings above are traced from the plan text against `scripts/ai-pipeline`, `scripts/ai-run`, `scripts/ai-recover`, `scripts/ai-review` and `scripts/lib/workflow.py` at this HEAD.
+- Confirmed the scoped HEAD and a clean worktree.
+- Read repository guidance, spec, plan, tasks, state, handoff, relevant docs and prior review dispositions.
+- Independently inspected pipeline, runner, reviewer, recovery, host-state helpers and relevant regression tests.
+- Read-only `tasks check` and `tasks untouched` passed.
+- Shell syntax checks and Python AST parsing passed.
+- `tests/run_parallel.py --collect-only` discovered 272 existing tests. Discovery is not a test pass.
+
+Not run: `./scripts/ai-check`, `.ai/bin/ai-check`, targeted runtime tests or the full suite. They write test checkouts, logs, locks or validation evidence and cannot run within this read-only review. No `.ai/local/validation.json` was present.
+
+## Security and architecture concerns
+
+The principal authorization gap is P2: a persisted human-decision requirement must survive stage closure and recovery. Budget accounting and terminal exhaustion must likewise have one authoritative host-side interpretation.
+
+Every task has an explicit `Model:` line. No task’s own failed implementation attempt exists at this scope. The revision allowlist and post-session scope checks remain necessary; they should not be weakened to resolve P1.
+
+The unmerged `fix/catchup-review` prerequisite remains a scope limitation. Preserve the plan’s requirement to rebuild and review against the merged baseline before implementation.
+
+## Testing recommendations
+
+Add the regression cases specified in P1–P5 to the relevant task acceptance criteria. After implementation and deterministic validation, perform T011’s real supervised CLI trial, including a `needs-human` stop and recovery attempt. Mock results must not be recorded as human acceptance.
