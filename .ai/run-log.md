@@ -139,3 +139,4 @@
 | 2026-10-08T21:25Z | claude (sonnet) | T004 | DONE: FL-16 disposition rows accept a `(MAJOR)`-style severity suffix on the finding cell; prompt template + docs updated | 3 new tests OK; ai-check 309 OK | (this commit) | flow unchanged |
 | 2026-10-08T21:21:28Z | runner | T004 | completed | PASS | a9e8822 | Claude checkpointed; continuing queue |
 | 2026-10-08T21:23:55Z | runner | none | queue complete; ready for independent review | PASS | e498fe4 | Human acceptance remains |
+| 2026-10-08T21:27:53Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/22 | PASS | 0d8eb89 | Human acceptance and merge remain |
