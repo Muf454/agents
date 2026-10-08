@@ -673,39 +673,13 @@ def claude_text(arguments):
     Path(target).write_text(text.strip() + '\n')
 
 
-# Read-only git subcommands a reviewer may run; every other git entry of the project's
-# allowlist (add, commit, rm, mv, ...) is dropped for reviews.
-REVIEW_GIT = ('status', 'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'rev-parse', 'merge-base')
-
-
-# Commands that write, delete, fetch or run anything by themselves: never for a reviewer.
-REVIEW_DROP_FIRST = (r'(?:git|sudo|su|rm|rmdir|mv|cp|ln|chmod|chown|touch|mkdir|tee|dd|install|truncate|'
-                     r'sed|awk|perl|ruby|find|xargs|env|eval|exec|curl|wget|ssh|scp|rsync|tar|unzip|docker)\b')
-# An interpreter or package runner followed only by a wildcard runs arbitrary code
-# (`bash *`, `node *`, `npx *`, `npm run *`); fixed check commands (`npm test`,
-# `npx vitest run *`) stay.
-REVIEW_DROP_OPEN = r'(?:bash|sh|zsh|python3?|node|deno|bun|npx|pnpm|yarn|npm(?: run| exec)?)(?: \*)?'
-
-
 def review_allowlist(arguments):
-    """--allowedTools entries for the Claude reviewer, one per line: the project's approved
-    read and check commands from .ai/permissions.allow minus everything that writes (Edit,
-    Write, git writes, ai-task) or runs the gate (ai-check, .ai/validate), plus read-only git
-    and writes confined to the ignored probe directory."""
-    entries = ['Read', 'Glob', 'Grep', 'Edit(./.ai/local/review-probes/**)']
-    entries += [f'Bash(git {command})' for command in REVIEW_GIT]
-    entries += [f'Bash(git {command} *)' for command in REVIEW_GIT]
-    for line in Path('.ai/permissions.allow').read_text().splitlines():
-        entry = line.strip()
-        match = re.fullmatch(r'Bash\((.+)\)', entry)
-        if not match or entry in entries:
-            continue
-        command = match.group(1)
-        if re.match(REVIEW_DROP_FIRST, command) or re.fullmatch(REVIEW_DROP_OPEN, command) or \
-                re.search(r'ai-task|ai-check|ai-run|ai-pipeline|\.ai/validate|\bpush\b|deploy|supabase|vercel', command):
-            continue
-        entries.append(entry)
-    print('\n'.join(entries))
+    """--allowedTools entries for the Claude reviewer, one per line: Read, Glob and Grep only.
+    No shell and no write tool: every Bash allow/deny list tried before left a command-argument
+    route to running code or writing files (runner options, git option abbreviations), so the
+    host prepares the git context in .ai/local/review-context/ instead. The project's
+    .ai/permissions.allow is deliberately not read."""
+    print('\n'.join(('Read', 'Glob', 'Grep')))
 
 
 SECRET_PATTERNS = ('.env*', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', 'id_rsa*',
@@ -783,6 +757,8 @@ def review_counts(content):
 
 DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
                              r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+# Text on the same line: `\s` would cross the newline into the table.
+CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
 
 def start_dispositions(arguments):
@@ -797,7 +773,8 @@ Review HEAD: {head}
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
-explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
+explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
+with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
@@ -806,7 +783,8 @@ explain the risk; makes the PR a draft). Never edit .ai/reviews/current.md. -->
 
 def triage_check(arguments):
     """Validate dispositions against the current review. Prints 'accepted=N deferred=M'.
-    With --fresh (right after triage), accepted findings must point to open TODO tasks."""
+    With --fresh (right after triage), accepted findings must point to open TODO tasks, and
+    from review round 3 on the dispositions need a `Convergence: <text>` line."""
     fresh = '--fresh' in arguments
     review = Path('.ai/reviews/current.md').read_text()
     head = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
@@ -837,7 +815,153 @@ def triage_check(arguments):
                     fail(f'Rejected finding {finding} needs concrete evidence.')
             else:
                 deferred += 1
+    if fresh:
+        # From round 3 on, triage must say whether an area keeps failing (FL-03).
+        number = len(current_review_rounds()) + 1
+        if number >= 3 and not CONVERGENCE_LINE.search(re.sub(r'<!--.*?-->', '', text, flags=re.S)):
+            fail(f'Round {number} triage needs a Convergence: line (see the triage prompt).')
     print(f'accepted={accepted} deferred={deferred}')
+
+
+REVIEW_SUBJECT = 'chore(ai): record independent review'
+TRIAGE_SUBJECT = 'chore(ai): record review triage'
+HISTORY_CAP = 6000
+
+
+def committed_file(commit, path):
+    try:
+        return git('show', f'{commit}:{path}').decode(errors='replace')
+    except subprocess.CalledProcessError:
+        return ''
+
+
+def finding_title(body, match):
+    """The one-line title of the finding whose ID `match` starts (ID and markup stripped)."""
+    line = body[match.start():].split('\n', 1)[0]
+    line = re.sub(r'^[#*\-\s]+', '', line)
+    line = line[len(match.group(1)):] if line.startswith(match.group(1)) else line
+    return re.sub(r'^[\s*:.—–-]+|[\s*]+$', '', line).replace('**', '') or '(untitled)'
+
+
+def review_rounds(base, head):
+    """Earlier review rounds in base..head, oldest first and uncapped. Context only, never
+    authority: commit subjects can be imitated, so nothing here may approve, count or skip
+    anything; the one use beyond context only adds a requirement (triage's Convergence line).
+    A round is a commit titled REVIEW_SUBJECT that changed .ai/reviews/current.md; its
+    disposition per finding comes from dispositions.md at the first later triage commit
+    before the next round."""
+    log = git('log', '--reverse', '--format=%H%x00%s', f'{base}..{head}').decode().splitlines()
+    commits = [line.split('\0', 1) for line in log if '\0' in line]
+    rounds = []
+    for sha, subject in commits:
+        if subject == REVIEW_SUBJECT and '.ai/reviews/current.md' in git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha).decode().split('\n'):
+            review = committed_file(sha, '.ai/reviews/current.md')
+            reviewed = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40});', review)
+            findings = []
+            for level in ('BLOCKER', 'MAJOR'):
+                body = section(review, f'{level} findings')
+                seen = set()
+                for match in FINDING_ID.finditer(body):
+                    if match.group(1) not in seen:
+                        seen.add(match.group(1))
+                        findings.append((match.group(1), level, finding_title(body, match)))
+            rounds.append({'head': reviewed.group(1) if reviewed else sha, 'findings': findings,
+                           'rows': None})
+        elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
+            text = committed_file(sha, '.ai/reviews/dispositions.md')
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+                                  for m in DISPOSITION_ROW.finditer(text)}
+    return rounds
+
+
+def current_review_rounds():
+    """Rounds before the current review: M..H from its host header (`HEAD H; merge-base M`),
+    which excludes the current review's own commit, so every caller gets the same answer."""
+    path = Path('.ai/reviews/current.md')
+    header = review_header(path.read_text() if path.exists() else '')
+    if not header:
+        fail('review-history --current needs .ai/reviews/current.md with a host evidence header.')
+    return review_rounds(header[1], header[0])
+
+
+def review_header(content):
+    """(HEAD, merge-base) from a review's host evidence header, or None."""
+    header = re.search(r'Host evidence: HEAD ([0-9a-f]{7,40}); merge-base ([0-9a-f]{7,40});', content)
+    return header.groups() if header else None
+
+
+def review_range(arguments):
+    """Print 'HEAD MERGE_BASE' of the current, verified review (the re-check's diff range)."""
+    head = review_info_values()[0]
+    header = review_header(Path('.ai/reviews/current.md').read_text())
+    if not header or header[0] != head:
+        fail('Current review has no merge-base in its host evidence header.')
+    print(*header)
+
+
+def render_round(number, entry):
+    lines = [f'### Round {number} (HEAD {entry["head"][:7]})']
+    for finding, level, title in entry['findings']:
+        if entry['rows'] is None:
+            outcome = 'no triage recorded'
+        elif finding not in entry['rows']:
+            outcome = 'no disposition'
+        else:
+            disposition, task_ref = entry['rows'][finding]
+            tasks_found = ', '.join(dict.fromkeys(re.findall(r'T\d{3,}', task_ref)))
+            outcome = f'{disposition} ({tasks_found})' if tasks_found else disposition
+        lines.append(f'- {finding} [{level}] {title} — {outcome}')
+    if not entry['findings']:
+        lines.append('- no BLOCKER or MAJOR findings')
+    return '\n'.join(lines)
+
+
+def render_rounds(rounds, cap=HISTORY_CAP):
+    """'## Previous review rounds' with the oldest rounds dropped until it fits the cap."""
+    if not rounds:
+        return ''
+    blocks = [render_round(number, entry) for number, entry in enumerate(rounds, 1)]
+    for omitted in range(len(blocks)):
+        parts = ['## Previous review rounds']
+        if omitted:
+            parts.append(f'({omitted} earlier rounds omitted)')
+        text = '\n\n'.join(parts + blocks[omitted:])
+        if len(text) <= cap:
+            return text
+    return '\n\n'.join(['## Previous review rounds', f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
+
+
+def review_history(arguments):
+    """Summarise earlier review rounds (context only, never authority).
+    --base B --head H: rounds in B..H. --current: rounds in M..H from the current review's
+    host header. --count: only the uncapped number; --last-head: only the newest reviewed HEAD."""
+    options = {}
+    flags = set()
+    queue = list(arguments)
+    while queue:
+        item = queue.pop(0)
+        if item in ('--base', '--head'):
+            if not queue:
+                fail(f'review-history: {item} needs a value.')
+            options[item] = queue.pop(0)
+        elif item in ('--current', '--count', '--last-head'):
+            flags.add(item)
+        else:
+            fail(f'review-history: unknown argument {item}.')
+    if '--current' in flags:
+        rounds = current_review_rounds()
+    elif '--base' in options and '--head' in options:
+        rounds = review_rounds(options['--base'], options['--head'])
+    else:
+        fail('review-history needs --current or both --base and --head.')
+    if '--count' in flags:
+        print(len(rounds))
+    elif '--last-head' in flags:
+        if rounds:
+            print(rounds[-1]['head'])
+    elif rounds:
+        print(render_rounds(rounds))
 
 
 def state_root():
@@ -1898,6 +2022,23 @@ def read_outcomes(paths):
     return records
 
 
+def outcome_title(task_id):
+    """The task's title; a queue that no longer parses (the outcome of that very stop) falls
+    back to a heading scan, then to an empty title, so the attempt is still logged."""
+    try:
+        return next((t['title'] for t in tasks() if t['id'] == task_id), '')
+    except (ValueError, OSError):
+        pass
+    try:
+        for line in Path('.ai/tasks.md').read_text().splitlines():
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading and heading.group(1) == task_id:
+                return heading.group(2)
+    except OSError:
+        pass
+    return ''
+
+
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
@@ -1911,7 +2052,7 @@ def outcome(arguments):
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
     if kind == 'task':
         task_id, result, model, seconds = rest
-        title = next((t['title'] for t in tasks() if t['id'] == task_id), '')
+        title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
         attempt = len(earlier) + 1
@@ -2225,8 +2366,12 @@ def main():
         start_dispositions(arguments)
     elif command == 'triage-check':
         triage_check(arguments)
+    elif command == 'review-history':
+        review_history(arguments)
     elif command == 'review-info':
         review_info(arguments)
+    elif command == 'review-range':
+        review_range(arguments)
     elif command == 'recheck-prepare':
         recheck_prepare(arguments)
     elif command == 'publish-recheck':
