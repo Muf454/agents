@@ -36,6 +36,21 @@ Pending.
 
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
+def crash_kill(pid, pipeline):
+    # A simulated restart: kill the nearest ai-run ancestor and the pipeline, checking each
+    # name first so a stale pid can never hit an unrelated process.
+    def named(pid, *names):
+        try:
+            return any(part.endswith(names) for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'))
+        except OSError:
+            return False
+    while pid > 1:
+        if named(pid, b'/ai-run'):
+            os.kill(pid, 9)
+            break
+        pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+    if named(pipeline, b'/ai-pipeline', b'/ai-recover'):
+        os.kill(pipeline, 9)
 # Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
 args = sys.argv[1:]
@@ -86,8 +101,7 @@ if 'REVISION CONTRACT' in prompt:
         # or after the session's edits: ai-run (claude <- timeout <- ai-run) and the pipeline die.
         calls = len((state / 'revision-args.log').read_text().splitlines())
         if os.environ.get('MOCK_REVISION_CRASH') == when and calls == int(os.environ.get('MOCK_REVISION_CRASH_CALL', '1')):
-            os.kill(int(pathlib.Path(f'/proc/{os.getppid()}/stat').read_text().rsplit(')', 1)[1].split()[1]), 9)
-            os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 9)
+            crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
             sys.exit(0)
     crash('before')
     mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
@@ -423,15 +437,10 @@ fired = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'crash-hook-fired'
 if message != SUBJECT or fired.exists():
     sys.exit(0)
 fired.touch()
-pid = os.getppid()
-while pid > 1:
-    if any(part.endswith(b'/ai-run') for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')):
-        os.kill(pid, 9)
-        break
-    pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
-os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 9)
+crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
 sys.exit(1 if HOOK == 'commit-msg' else 0)
 '''
+CRASH_HOOK = MOCK_CLAUDE[MOCK_CLAUDE.index('def crash_kill'):MOCK_CLAUDE.index('# Real CLIs')] + CRASH_HOOK
 
 
 class ToolkitTest(unittest.TestCase):
