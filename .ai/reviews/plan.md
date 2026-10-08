@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest c59fd6b58d132fb72fe58e327c51cb3233f77f277782bd92e921d25fce0f0eec; saved 2026-10-08T05:22:44Z. -->
+<!-- Plan review of plan digest 02bd45d8f9ebe43d869467ac389d9a5d1458c17e3791c8e676cb7b0cb1a110db; saved 2026-10-08T05:28:45Z. -->
 
 # Plan review — FL-04 bounded supervisor
 
-Overall verdict: REQUEST CHANGES — T004 reintroduces a demonstrated command-permission bypass.
+Overall verdict: REQUEST CHANGES — clarify startup decision handling before unattended implementation.
 Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
 
-Reviewed HEAD: `93ced44259fcb91f2ad629b37ad2e5a4803a0c0f`
+Reviewed HEAD: `03d8fbad37e0a36f04f03dd22507b670fbbbbb12`.
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, prior reviews/dispositions, relevant source, tests, validation scripts, documentation, Git history, the vault flow chart, and the locally available prerequisite catch-up plan. No implementation changes exist in the reviewed branch.
+Inspected repository instructions, specification, plan, tasks, state, handoff, prior review/dispositions, relevant scripts, tests, validation, documentation, Git history, the flow chart, and the locally available catch-up prerequisite.
 
 ## BLOCKER findings
 
@@ -15,58 +15,58 @@ None.
 
 ## MAJOR findings
 
-- P1: The revision allowlist does not enforce the promised write boundary.
+- P1: The startup decision check lacks a safe first-run and invalid-report contract.
 
-  **Location:** `.ai/tasks.md:115`; `.ai/current-plan.md:158`; `scripts/lib/workflow.py:678`; `scripts/lib/workflow.py:695`.
+  **Location:** `.ai/current-plan.md:84`; `.ai/tasks.md:117`; `.ai/tasks.md:177`.
 
-  T004 proposes read-only git commands and project Bash entries filtered like the existing `review-allowlist`. That filter permits wildcard git arguments, including `Bash(git diff *)` and `Bash(git grep *)`.
+  The pipeline must call `plan-revisions decision` before its first review and stop on exit 2. The helper contract assigns exit 2 to unreadable reports without explicitly handling normal absence. Fresh installations contain no `.ai/reviews/plan.md`; the existing `plan-review-info` reports that absence as an error (`scripts/lib/workflow.py:1934`).
 
-  These commands have writing and execution options. Git’s locally installed documentation confirms that `git diff --output=<file>` writes to a specified file and `git grep --open-files-in-pager=<program>` invokes a selected program. The prerequisite catch-up task explicitly identifies these argument bypasses and removes Bash from reviewers altogether.
+  There is also an existing regression requirement: `test_plan_review_is_bound_and_tracks_the_whole_tree` deliberately forges a report and expects the pipeline to replace it with a fresh review. An unconditional report-verification failure in the new startup decision check would stop before that replacement, contradicting T006’s requirement that this test pass unchanged with supervision disabled.
 
-  The proposed revision mode would restore those capabilities. Scoped `Edit` permissions cannot constrain writes performed through Bash, and checkout scope checks cannot detect changes to the external host-state directory. This undermines R1’s permitted-file boundary and the host authority protecting revision counts and human decisions. Existing weaknesses in the reviewer filter are pre-existing; introducing that policy into the new revision mode is the prospective defect.
-
-  **Concrete plan change:** Give the revision session only `Read,Glob,Grep,Edit`, with Edit restricted to the R1 records. Prepare Git context and perform staging/checkpointing on the host; the existing no-commit revision scenario already supports host checkpointing. Remove inherited project Bash entries and session-side commit instructions. Add invocation assertions proving Bash is unavailable and include a live permission check in a disposable fixture. Do not resolve this by adding another keyword blacklist.
+  **Concrete plan change:** Define the decision helper’s initial-state behavior explicitly. A missing revision store, or a valid store without outstanding needs-human decisions, must permit the normal missing/invalid-report review path. Corrupt authority state, or an unverifiable report when an outstanding human decision might apply, must still fail closed. Apply equivalent absence handling to `plan-rounds sync`. Add tests for a fresh installation, forged-report replacement with `AI_SUPERVISE=0`, and an outstanding needs-human decision with missing or corrupted evidence.
 
 ## MINOR findings
 
-- P2: Unsuccessful format retries lack the required run-log entry.
+- P2: The revision-session security contract still contradicts itself.
 
-  **Location:** `.ai/tasks.md:270`; `.ai/project-spec.md:52`.
+  **Location:** `.ai/tasks.md:115`; `.ai/tasks.md:127`; `.ai/current-plan.md:158`.
 
-  R5 requires every supervised step to append to the run log. T009 appends its retry entry only after a successful retried publication. If the second answer is malformed, or the second invocation fails an integrity check, the retry occurred and was notified but receives no tracked run-log entry.
+  T004’s implementation instructions correctly require exactly `Read,Glob,Grep,Edit`, with no Bash. Its acceptance criteria and the main plan still require `Read,Glob,Grep,Edit,Bash`. T004 and T007 also retain crash scenarios involving a session-side commit, although the revised session must never commit.
 
-  **Concrete plan change:** Record an issued format retry and its outcome on both success and handled failure, without dirtying the checkout between reviewer calls. Preserve the first report path in that entry. Add assertions for malformed-twice and integrity-failure-on-retry cases.
+  These contradictions leave unattended implementation and its tests without one consistent contract. The earlier Bash allowlist design has been replaced in the implementation instructions; this finding concerns the remaining inconsistent requirements.
 
-- P3: README updates are deferred beyond two flow-changing tasks.
+  **Concrete plan change:** Require exactly `Read,Glob,Grep,Edit` everywhere. Replace session-commit crash scenarios with interruption after edits and around the host’s preamble/revision commits. Update the invocation assertions accordingly.
 
-  **Location:** `.ai/tasks.md:150`; `.ai/tasks.md:272`; `.ai/project-spec.md:57`.
+- P3: Repeated `run_review` calls can publish the wrong reviewer label.
 
-  R6 requires README, workflow documentation, and the flow chart to be updated in the same task as each flow change. T005 and T009 specify workflow/flow-chart updates but omit README from both their instructions and affected modules. T010’s later reconciliation does not meet that timing requirement.
+  **Location:** `.ai/tasks.md:271`; `scripts/ai-review:128`; `scripts/ai-review:162`.
 
-  **Concrete plan change:** Add the relevant README recovery and format-retry updates to T005 and T009, with acceptance criteria checking those descriptions against the implemented behavior.
+  T009 adds a second `run_review` call using the same reviewer chain. A successful Claude fallback exports `AI_REVIEW_BY` and `AI_REVIEW_LABEL`; a subsequent successful Codex call sets `review_by=codex` but does not clear those exports.
 
-## Requirements, ordering, and models
+  An in-memory probe of the current function reproduced this sequence: first attempt Claude fallback, second attempt Codex, with the second attempt retaining the Claude fallback label. Publication would therefore disagree with the outcome record and fallback-log decision. The prerequisite’s locally available source retains this behavior.
 
-The earlier dirty-checkout and lost-human-decision findings are addressed explicitly by the revised host commit/record sequence and startup decision checks. The removed cumulative budget is an acknowledged scope decision, so the earlier budget findings are not carried forward.
+  **Concrete plan change:** Reset per-attempt reviewer metadata before each call, and explicitly clear Claude labels on Codex success. Add a malformed-Claude-fallback → valid-Codex retry test asserting consistent report labeling, outcome attribution, and fallback logging.
 
-All ten tasks have explicit model selections. No task’s own failed implementation attempt is recorded. The main authorization and recovery tasks use `opus`; no additional model-selection finding is raised.
+## Ordering, models, and scope
 
-The unmerged `fix/catchup-review` prerequisite remains a scope limitation. Preserve the requirement to rebuild and review against its merged implementation before T001 starts.
+All ten tasks have explicit model selections. No additional model-selection finding was identified, and no failed implementation attempt is recorded.
+
+Preserve the stated prerequisite: merge `fix/catchup-review`, rebuild this branch, and review the plan against the resulting baseline before T001 starts. Removing the cumulative budget is an explicit scope decision; it is not carried forward as a defect.
 
 ## Validation observed
 
-- Confirmed the requested HEAD and clean checkout.
+- Requested HEAD confirmed; checkout remained clean.
 - Read-only `tasks check` and `tasks untouched` passed.
 - Bash syntax checks passed for 13 files.
-- Python AST parsing passed for four source/test files.
-- Test discovery collected 272 existing tests; discovery is not a test pass.
-- An in-memory probe confirmed the existing reviewer filter retains unrestricted git-diff arguments.
-- No `.ai/local/validation.json` was present.
+- Python AST parsing passed for four files.
+- Discovery collected 272 tests; discovery is not a test pass.
+- The in-memory reviewer-metadata probe reproduced P3.
+- No local validation stamp was present.
 
 Not run: targeted integration tests, `./scripts/ai-check`, `.ai/bin/ai-check`, or the full suite, because they create fixtures, locks, logs, or validation artifacts. No files were modified and no network/MCP integrations were invoked.
 
 ## Testing recommendations
 
-Implement the boundary and failure-audit regressions above, then run the targeted checks and full gate in a writable checkout. Retain the planned real supervised trial covering a human-decision stop, crash/recovery, and explicit clearance.
+After reconciling these contracts, run the targeted checks and full gate in a writable checkout. Retain the planned live permission check and supervised trial covering needs-human handling, crash recovery, and explicit human clearance.
 
-This review does not constitute human acceptance.
+This review is not human acceptance.
