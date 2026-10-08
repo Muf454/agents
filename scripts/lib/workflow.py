@@ -1974,7 +1974,11 @@ def publish_plan_review(arguments):
         if field not in content:
             fail(f'Plan review is missing {field}; inspect the local report.')
     review_counts(content)
-    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + reviewer_label() + content
+    # HEAD in the header: a review after a revision commit is always a new report (own round),
+    # even when the plan digest and the reviewer's text repeat within the same second.
+    head = git('rev-parse', 'HEAD').decode().strip()
+    content = f'<!-- Plan review of plan digest {arguments[1]}; HEAD {head}; saved {now()}. -->\n\n' + \
+        reviewer_label() + content
     atomic(PLAN_REVIEW, content)
     # Host-side binding, like implementation reviews: an edited report is not a review.
     directory = binding_dir()
@@ -2132,17 +2136,19 @@ PLAN_DISPOSITION_ROW = re.compile(
 
 
 def plan_history(arguments):
-    """plan-history BASE [--count]: the plan-review rounds before the current one, each with its
-    BLOCKER/MAJOR findings (from the committed plan.md at the record) and the disposition per
-    finding from that round's plan-dispositions section at HEAD. Context only, never authority:
-    nothing here may approve, count or skip anything. Reads no implementation review."""
-    if not arguments or len(arguments) > 2 or (len(arguments) == 2 and arguments[1] != '--count'):
-        fail('Usage: plan-history BASE [--count]')
+    """plan-history BASE [--count | --include-current]: the plan-review rounds before the current
+    one (--include-current: and the current one, for the review that follows its revision), each
+    with its BLOCKER/MAJOR findings (from the committed plan.md at the record) and the disposition
+    per finding from that round's plan-dispositions section at HEAD. Context only, never
+    authority: nothing here may approve, count or skip anything. Reads no implementation review."""
+    if not arguments or len(arguments) > 2 or \
+            (len(arguments) == 2 and arguments[1] not in ('--count', '--include-current')):
+        fail('Usage: plan-history BASE [--count | --include-current]')
     reachable = reachable_plan_rounds(arguments[0])[3]
     content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
     earlier = reachable[:-1] if reachable and reachable[-1]['report_digest'] == report_digest(content) \
-        else reachable
-    if len(arguments) == 2:
+        and arguments[1:] != ['--include-current'] else reachable
+    if arguments[1:] == ['--count']:
         print(len(earlier))
         return
     text = committed_file('HEAD', PLAN_DISPOSITIONS)
@@ -2431,8 +2437,9 @@ def plan_revision_lookup():
 
 
 def plan_revisions(arguments):
-    """record ... | revised | decision. revised: exit 0 when the verified current plan review
-    already has a revision record, 1 when not. decision: exit 0 and print the stored questions
+    """record ... | revised | outcome | decision. revised: exit 0 when the verified current plan
+    review already has a revision record, 1 when not. outcome: as revised, and print the record's
+    'round accepted rejected needs_human'. decision: exit 0 and print the stored questions
     when that record holds needs-human rows (the human answers, commits and runs ai-review
     --plan, which makes a new report and clears it), 1 when not. Both exit 2 on an unreadable
     store, and when the report does not verify while the last revision asked the human."""
@@ -2440,8 +2447,8 @@ def plan_revisions(arguments):
     if action == 'record':
         plan_revisions_record(arguments[1:])
         return
-    if action not in ('revised', 'decision') or len(arguments) != 1:
-        fail('Usage: plan-revisions record BASE COMMIT ... | revised | decision')
+    if action not in ('revised', 'outcome', 'decision') or len(arguments) != 1:
+        fail('Usage: plan-revisions record BASE COMMIT ... | revised | outcome | decision')
     try:
         record, verified, last = plan_revision_lookup()
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
@@ -2457,6 +2464,8 @@ def plan_revisions(arguments):
         sys.exit(1)
     if action == 'decision':
         print(record['questions'])
+    elif action == 'outcome':
+        print(record['round'], record['accepted'], record['rejected'], record['needs_human'])
 
 
 def plan_stage_verify(start, digest):

@@ -235,8 +235,8 @@ characters each, plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-rev
 START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
 
-Plan revision (`ai-run --approved --revise-plan [--since COMMIT] [--base REF] [--model M]`; no
-pipeline caller yet). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE,
+Plan revision (`ai-run --approved --revise-plan [--since COMMIT] [--base REF] [--model M]`; the
+pipeline calls it through the plan revision stage below). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE,
 syncs and reads the round (`plan-rounds current BASE`, BASE = merge-base with `--base`, default
 `main`) and refuses a report that already has a revision record (`this plan review was already
 revised; review again (ai-review --plan)`). When the section already validates (an interrupted
@@ -260,14 +260,15 @@ following `ai-review --plan` starts on a clean checkout. The outcome log gets a 
 line (not part of `ai-status --outcomes`).
 
 `plan-revisions revised` exits 0 when the verified current plan review has a reachable revision
-record, 1 when not; `plan-revisions decision` exits 0 and prints the stored questions when that
+record, 1 when not (`plan-revisions outcome`: the same, printing `round accepted rejected
+needs_human`); `plan-revisions decision` exits 0 and prints the stored questions when that
 record has needs-human rows, 1 when not. Both exit 2 when the store is unreadable, or when the
 plan review does not verify while the last revision is waiting for a human decision (fail
 closed); with no store, or no outstanding decision, an invalid report takes the normal review
 path. A needs-human decision clears only with a new report: answer the question in the plan
 records, commit, and run `ai-review --plan` by hand.
 
-Plan revision stage (`ai-pipeline`; the supervised loop that opens it comes with T006). Before
+Plan revision stage (`ai-pipeline`, opened by the supervised plan-review loop below). Before
 the stage opens, `run-manifest revision-reserve DIGEST LIMIT` reserves the revision for that
 plan-review report in `run.json`: a digest already reserved prints the count unchanged (no limit
 check, so a resume never trips the limit), a new one is appended while the count is below LIMIT
@@ -289,13 +290,35 @@ clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-r
 manifest on resume). It writes nothing to the checkout. A failed check is a `Plan revision stage
 …` stop; a failed reservation is the limit stop; both always need the human.
 
+Supervised plan-review loop (`ai-pipeline`, while no task is DONE and without
+`--skip-plan-review`). Each pass: `plan-rounds sync BASE`; the decision check
+(`plan-revisions decision`: exit 0 stops with `plan review needs your decision (round n):
+<stored questions>`, the bounded text from the host record; exit 2 is a `Plan revision stage`
+stop); right after a completed stage, the notification `🔁 Plan revised (round n/N): accepted a,
+rejected r` (n = revisions reserved this run, N = `AI_SUPERVISE_PLAN_ROUNDS`, counts from the
+record; no checkout write, the revision's run-log line is already in its commit). A review is
+due when the plan review is not current or the current report already has a revision record;
+it runs `ai-review --plan --base <base sha>`, is host-committed and recorded as the next round.
+No BLOCKER/MAJOR → implementation. Otherwise: `AI_SUPERVISE=0` → today's stop (`plan review
+found …`); `revision-reserve DIGEST AI_SUPERVISE_PLAN_ROUNDS` fails → `plan review: supervision
+limit reached (N revisions this run); BLOCKER b, MAJOR m remain`; else `stage-set plan-revision
+HEAD`, `complete_plan_stage`, the gate and clean-checkout checks, and the next pass (which
+checks the decision first and then reviews again). The startup dispatch of an open plan
+revision stage (after `plan-rounds sync`) also leads into this loop. The plan report header
+names HEAD, so the review after a revision commit is always a new report and round. The review
+after a revision gets `PLAN REVISION CONTEXT:` (round n, "dispositions of round n−1:
+.ai/reviews/plan-dispositions.md" and `plan-history BASE --include-current`, which adds the
+just-revised round); never implementation-review rounds. The limit, needs-human and stage
+stops are terminal for `ai-recover`.
+
 ## Pipeline contract (`ai-pipeline`)
 
 Stages, each resumable by rerunning: plan review (only while no task is DONE;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
 host review store; committed as `chore(ai): record plan review`; reused while that digest is
-unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 stops unless `--skip-plan-review`) → implement (`ai-run`) → validate if the stamp is
+unchanged and the report matches its stored hash; BLOCKER+MAJOR > 0 gets a supervised plan
+revision and a new review (above), or stops with `AI_SUPERVISE=0`; `--skip-plan-review` skips it) → implement (`ai-run`) → validate if the stamp is
 stale → review (`ai-review`, then the review is committed as
 `chore(ai): record independent review`) → if BLOCKER+MAJOR > 0 and fewer than
 `--max-fix-rounds` fix rounds are recorded: triage (`ai-run --triage`,

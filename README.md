@@ -230,8 +230,16 @@ tmux new -s my-app-ai
 
 0. **Plan review**: until the first task is DONE, Codex reviews the spec, plan and tasks
    read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
-   is committed as `.ai/reviews/plan.md`. BLOCKER/MAJOR findings stop the run with a
-   notification before any Claude usage is spent: revise the plan and rerun, or pass
+   is committed as `.ai/reviews/plan.md`. On BLOCKER/MAJOR findings the supervisor
+   (`AI_SUPERVISE=1`, default) has Claude revise the plan (`ai-run --revise-plan`: one row
+   per finding in `.ai/reviews/plan-dispositions.md`, accepted with new tasks, rejected
+   with evidence, or a question for you), notifies `🔁 Plan revised (round n/N)` and has
+   the plan reviewed again with the earlier rounds as context. It stops for you when a
+   revision asks you a question (`plan review needs your decision`, also after a crash),
+   after `AI_SUPERVISE_PLAN_ROUNDS` revisions in one run (`supervision limit reached`) or
+   when a revision leaves its scope; from review round `AI_SUPERVISE_ESCALATE_ROUND` the
+   revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
+   the run before any Claude usage: revise the plan and rerun, or pass
    `--skip-plan-review` (on every rerun) to proceed anyway. The verdict is reused while
    the committed tree is unchanged apart from workflow records; any plan, source or
    validation change is reviewed again. Like implementation reviews, the report is

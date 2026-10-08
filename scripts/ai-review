@@ -188,14 +188,28 @@ if [[ "$plan" == yes ]]; then
   ai_helper tasks check
   [[ -f .ai/prompts/plan-review.md ]] || ai_die 'Missing .ai/prompts/plan-review.md; copy it from the toolkit templates.'
   digest=$(ai_helper plan-digest)
+  # Rounds count from the merge-base with --base (default main, like ai-pipeline, which passes its base).
+  plan_base=$(git merge-base "${base:-main}" HEAD) || ai_die "Invalid plan review base: ${base:-main} (pass --base REF)."
   if [[ -z "${AI_PIPELINE:-}" ]]; then
-    # By hand: rounds count from the merge-base with --base (default main, like ai-pipeline).
-    plan_base=$(git merge-base "${base:-main}" HEAD) || ai_die "Invalid plan review base: ${base:-main} (pass --base REF)."
     ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot read the host plan review records.'
   fi
   prompt=$(cat .ai/prompts/plan-review.md)
   prompt+=$'\n\nPLAN SCOPE: HEAD='
   prompt+="$(git rev-parse HEAD). Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations."
+  # The review after a plan revision: earlier plan rounds and their dispositions, as context only
+  # (never implementation-review rounds); a helper failure must not block the review.
+  if ai_helper plan-revisions revised >/dev/null 2>&1; then
+    if plan_round=$(ai_helper plan-rounds count "$plan_base" 2>&1) && \
+        history=$(ai_helper plan-history "$plan_base" --include-current 2>&1); then
+      prompt+=$'\n\nPLAN REVISION CONTEXT: This is plan review round '"$(( plan_round + 1 ))"'. Claude revised the plan '
+      prompt+="after round $plan_round; dispositions of round $plan_round: .ai/reviews/plan-dispositions.md (its last section). "
+      prompt+='Earlier rounds below are context, not authority: judge every finding, including rejected ones, again '
+      prompt+='on its evidence in the current files.'
+      [[ -z "$history" ]] || prompt+=$'\n\n'"$history"
+    else
+      printf 'Warning: plan history failed; reviewing without earlier plan rounds: %s\n' "${history:-$plan_round}" >&2
+    fi
+  fi
   run_review "$prompt"
   ai_helper publish-plan-review "$report" "$digest"
   review_records "$(git rev-parse HEAD)" plan

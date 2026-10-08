@@ -12,7 +12,11 @@ host record `plan-revisions record`, `plan-revisions revised|decision`; no pipel
 T005 done (host `plan-revision` stage bound to the plan report, `run-manifest revision-reserve|revision-count`,
 `complete_plan_stage` in `ai-pipeline` with the round's model, recovery: stored needs-human decision
 escalates before the attempt limit and any resume, new always-escalate reasons, plan-revision
-leftovers checked with `plan-revision-scope`; T006 adds the loop that opens the stage). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+leftovers checked with `plan-revision-scope`).
+T006 done (supervised plan-review loop in `ai-pipeline`: decision check at every pass, revision
+reserved then staged, `🔁 Plan revised (round n/N)` notification, re-review with `PLAN REVISION
+CONTEXT:` and `plan-history --include-current`; limit/needs-human/out-of-scope stops; plan report
+header now names HEAD; `plan-revisions outcome`). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -72,6 +76,16 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   `test_plan_revision_stage_source_leftovers_escalate_without_a_commit`; stored needs-human
   decision after a crash escalates with its questions, also with the allowance used up
   `test_plan_revision_stage_stored_decision_escalates_before_any_resume`.
+- T006 supervised loop: MAJOR → revision → clean re-review → implementation → PR, notification and
+  run-log line in the revision commit `test_supervised_plan_major_once_revises_reviews_again_and_opens_the_pr`;
+  reject-only revision re-reviewed before implementation with `PLAN REVISION CONTEXT:`
+  `test_supervised_plan_reject_only_reviews_again_on_a_clean_checkout`; needs-human stop with the
+  bounded question, no re-review/implementation, rerun with auto-recovery runs no session
+  `test_supervised_plan_needs_human_stops_with_the_bounded_question`; limit
+  `test_supervised_plan_limit_stops_without_recovery`; `AI_SUPERVISE=0`
+  `test_supervised_plan_off_keeps_todays_stop`; revision touching source
+  `test_supervised_plan_revision_touching_source_stops_without_recovery`; opus, opus, escalation
+  model and round 3 Convergence `test_supervised_plan_escalation_model_and_round_three_convergence`.
 
 ## Flow chart
 Flow chart updated
