@@ -137,3 +137,4 @@
 | 2026-10-08T21:30Z | claude (opus) | T003 | DONE: FL-17 start check after triage/re-check settlement (`stop start`), `publish_ready` names "moved past the branch", `ai-recover` arm escalates with full reason on stderr; 7 `test_base_moved_*` tests | targeted 67 OK; ai-check 306 OK | (this commit) | start-path message names origin/main (T002 resolution) |
 | 2026-10-08T21:10:55Z | runner | T003 | completed | PASS | 754d2c1 | Claude checkpointed; continuing queue |
 | 2026-10-08T21:25Z | claude (sonnet) | T004 | DONE: FL-16 disposition rows accept a `(MAJOR)`-style severity suffix on the finding cell; prompt template + docs updated | 3 new tests OK; ai-check 309 OK | (this commit) | flow unchanged |
+| 2026-10-08T21:21:28Z | runner | T004 | completed | PASS | a9e8822 | Claude checkpointed; continuing queue |
