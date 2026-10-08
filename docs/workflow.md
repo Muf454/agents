@@ -581,10 +581,26 @@ commits with its own record). `pr-body` titles the review section "Claude fallba
 
 `workflow.py outcome task|review` appends one JSON line to `<state root>/outcomes.jsonl`
 (checked with `check_state_root`: never inside the checkout). `ai-run` writes `done`,
-`blocked`, `validation_failed` or `no_checkpoint` per task attempt with the session
-model and the seconds from session start to result; the attempt number counts earlier
-lines for the same project (main repository name, shared by worktrees), branch and task.
-Failures to write are reported and never stop the run. `outcomes-report` (`ai-status
+`blocked`, `validation_failed`, `no_checkpoint`, `timeout`, `interrupted` or `error` per
+task attempt with the session model and the seconds from session start to result; the
+attempt number counts earlier lines for the same project (main repository name, shared by
+worktrees), branch and task. Failures to write are reported and never stop the run.
+
+An attempt opens immediately before the implementation session's `claude` call (after the
+dependency step and the remaining-time check; `--triage` never opens one) and closes with
+exactly one line: the result above, or, when the runner stops first, from the EXIT handler:
+`timeout` (the session exited 124/137), `interrupted` (the runner exited 130/143) or `error`
+(anything else: a failed session, a malformed queue, a usage-limit wait beyond
+`AI_LIMIT_MAX_WAIT`, ...). A usage-limit pause and retry inside the session belong to the
+same attempt and keep its start time. A run with no time left before the session starts logs
+nothing, and so does a stop because the approved gate changed (the handler never runs a
+project helper after that). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
+from the task's heading, or is empty.
+
+Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
+returns, and GNU `timeout` runs the session in its own process group, so neither a signal to
+the runner nor Ctrl-C reaches the session. The runner exits 130/143 only when the session
+ends (or hits its limit), and the `interrupted` line's time is then, not the keypress. `outcomes-report` (`ai-status
 --outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
 minutes) by model, category and both, and reviews by reviewer/model/mode.
 

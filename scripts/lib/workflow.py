@@ -2022,6 +2022,23 @@ def read_outcomes(paths):
     return records
 
 
+def outcome_title(task_id):
+    """The task's title; a queue that no longer parses (the outcome of that very stop) falls
+    back to a heading scan, then to an empty title, so the attempt is still logged."""
+    try:
+        return next((t['title'] for t in tasks() if t['id'] == task_id), '')
+    except (ValueError, OSError):
+        pass
+    try:
+        for line in Path('.ai/tasks.md').read_text().splitlines():
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading and heading.group(1) == task_id:
+                return heading.group(2)
+    except OSError:
+        pass
+    return ''
+
+
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
@@ -2035,7 +2052,7 @@ def outcome(arguments):
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
     if kind == 'task':
         task_id, result, model, seconds = rest
-        title = next((t['title'] for t in tasks() if t['id'] == task_id), '')
+        title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
         attempt = len(earlier) + 1

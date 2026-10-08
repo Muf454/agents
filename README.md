@@ -400,7 +400,7 @@ branch) and note the result in the log.
 `~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
-no_checkpoint), attempt, first-time pass, duration; for reviews: mode, reviewer
+no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration.
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
 model, category and model/category, findings per reviewer and model, and the

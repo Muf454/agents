@@ -4,9 +4,11 @@ import os
 import re
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +37,7 @@ Pending.
 
 
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, pathlib, re, subprocess, sys, time
+import json, os, pathlib, re, signal, subprocess, sys, time
 # Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
 args = sys.argv[1:]
@@ -176,6 +178,17 @@ if mode in ('error-once', 'error-once-partial'):
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
+if mode == 'self-kill':
+    os.kill(os.getpid(), signal.SIGKILL)
+if mode == 'hold':
+    # Bounded wait for the test to signal the runner, then release and fail.
+    pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
+    for _ in range(200):
+        if pathlib.Path('.ai/local/mock-release').exists():
+            break
+        time.sleep(0.05)
+    print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+    sys.exit(1)
 if mode == 'error':
     print(json.dumps({'type':'result','subtype':'error','is_error':True}))
     sys.exit(0)
@@ -1096,7 +1109,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             with self.subTest(mode=mode):
                 if not (self.project / '.ai').exists():
                     self.ready()
+                before = self.outcome_rows()
                 self.tool('ai-run', '--approved', '--sessions', '5', expected=1, MOCK_CLAUDE=mode)
+                added = self.outcome_rows()[len(before):]
+                self.assertEqual([r['task'] for r in added], ['T001'])
+                self.assertEqual(added[0]['attempt'], len(before) + 1)
+                if mode == 'bad-format':
+                    self.assertEqual(added[0]['result'], 'error')
                 self.assertFalse((self.project / 'T001.txt').exists())
                 (self.project / '.ai/tasks.md').write_text(task('T001'))
                 self.commit('reconcile failed run')
@@ -2621,6 +2640,115 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         report = self.tool('ai-status', '--outcomes').stdout
         catch_up = report.split('Codex catch-up pending')[1]
         self.assertEqual(catch_up.count('code HEAD'), 2)  # forced Claude reviews are listed too
+
+    def outcome_rows(self):
+        path = self.base / 'host-state/outcomes.jsonl'
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    def task_rows(self):
+        return [(r['attempt'], r['result'], r['first_pass']) for r in self.outcome_rows() if r['kind'] == 'task']
+
+    def test_outcome_stopped_attempts_are_logged_and_numbered(self):
+        self.ready()
+        self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1, MOCK_CLAUDE='timeout')
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.commit('reconcile timeout')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.commit('reconcile error')
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.task_rows(), [(1, 'timeout', False), (2, 'error', False), (3, 'done', False)])
+
+    def test_outcome_validation_failure_logs_once(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nif [[ -e T001.txt ]]; then exit 42; fi\n')
+        self.commit('gate fails for invalid fixture implementation')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='validation-failure')
+        self.assertEqual(self.task_rows(), [(1, 'validation_failed', False)])
+
+    def test_outcome_killed_session_is_a_timeout(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='self-kill')
+        self.assertEqual(self.task_rows(), [(1, 'timeout', False)])
+
+    def test_outcome_signal_to_runner_logs_interrupted_once(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        for attempt, sig in ((1, signal.SIGTERM), (2, signal.SIGINT)):
+            with self.subTest(signal=sig.name):
+                for name in ('mock-session.pid', 'mock-release'):
+                    (local / name).unlink(missing_ok=True)
+                runner = subprocess.Popen([str(self.project / '.ai/bin/ai-run'), '--approved'], cwd=self.project,
+                                          env=dict(self.env, MOCK_CLAUDE='hold'), stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    for _ in range(200):
+                        if (local / 'mock-session.pid').exists() and (local / 'mock-session.pid').read_text():
+                            break
+                        time.sleep(0.05)
+                    else:
+                        self.fail('the session never started')
+                    runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
+                    (local / 'mock-release').touch()
+                    runner.communicate(timeout=20)
+                finally:
+                    if runner.poll() is None:
+                        os.killpg(runner.pid, signal.SIGKILL)
+                        runner.communicate()
+                    try:
+                        os.kill(int((local / 'mock-session.pid').read_text()), signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass
+                self.assertEqual(runner.returncode, 128 + sig)
+                self.assertEqual([r[:2] for r in self.task_rows()][-1], (attempt, 'interrupted'))
+                self.assertEqual(len(self.task_rows()), attempt)
+                self.commit('reconcile interrupted run')
+        self.tool('ai-run', '--approved')
+        self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted'), (2, 'interrupted'), (3, 'done')])
+
+    def test_outcome_malformed_queue_then_retry(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='bad-format')
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        self.commit('repair the queue')
+        self.tool('ai-run', '--approved')
+        self.assertEqual(self.task_rows(), [(1, 'error', False), (2, 'done', False)])
+        self.assertEqual(self.outcome_rows()[0]['title'], 'broken')
+
+    def test_outcome_no_time_left_logs_nothing(self):
+        self.ready()
+        slow = self.mock_bin / 'git'
+        real = shutil.which('git', path=self.env['PATH'].split(os.pathsep, 1)[1])
+        slow.write_text('#!/usr/bin/env bash\n'
+                        'marker="$MOCK_STATE_DIR/slow-once"\n'
+                        'if [[ -e .ai/local/approved-gate.sha256 && ! -e "$marker" ]]; then touch "$marker"; sleep 2; fi\n'
+                        f'exec {real} "$@"\n')
+        slow.chmod(0o755)
+        result = self.tool('ai-run', '--approved', '--run-timeout', '1', expected=1)
+        self.assertIn('Run time limit', result.stderr)
+        self.assertEqual(self.outcome_rows(), [])
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_outcome_triage_runs_log_no_task_outcome(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.tool('ai-run', '--approved', '--triage', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('checkpoint the interrupted triage')
+        self.tool('ai-run', '--approved', '--triage')
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+
+    def test_outcome_limit_pause_stays_in_one_attempt(self):
+        self.ready()
+        nap = self.mock_bin / 'nap'
+        nap.write_text('#!/usr/bin/env bash\nsleep 2\n')
+        nap.chmod(0o755)
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once', AI_SLEEP=str(nap))
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([(r['attempt'], r['result'], r['first_pass']) for r in rows], [(1, 'done', True)])
+        self.assertGreaterEqual(rows[0]['seconds'], 2)  # the wait belongs to the original attempt
 
     def test_runner_logs_blocked_and_failed_validation_attempts(self):
         self.ready(task('T001') + task('T002'))
