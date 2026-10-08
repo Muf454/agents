@@ -29,7 +29,9 @@ limit when x > y > z, notifies `🔁 Extra fix round: findings falling (x → y 
 T009 done (review format retry: `review-format-check plan|code REPORT` shares the publish
 checks; supervised `ai-review --plan`/code reviews ask the reviewer once more on a format error
 or empty answer, `🔁 Review format retry (<mode>): <error>`, run-log line committed with the
-review; integrity failures and re-checks never retried; per-call reviewer metadata reset). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+review; integrity failures and re-checks never retried; per-call reviewer metadata reset).
+
+Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -42,8 +44,19 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
 
 ## Manual testing for the human
 ### Needs you
-1. One real supervised run on a small plan, including a needs-human stop, a recovery attempt on
-   it and clearing it with a hand-run `ai-review --plan` (filled in by T010).
+1. One real supervised run with live Claude and Codex on a throwaway project (not this repo).
+   Steps: install the toolkit there with `setup-project`, configure `.ai/validate`, write a small
+   plan with one deliberately vague task, commit it on a feature branch, then run
+   `.ai/bin/ai-pipeline --approved --base main` in tmux.
+   Expected: a BLOCKER/MAJOR plan finding gives `🔁 Plan revised (round 1/3)` on the phone and a
+   new Codex plan review on a clean checkout; the run continues to implementation once a review is
+   clean. If Claude asks you a question, the run stops with `⛔ plan review needs your decision`
+   and the question text; nothing is implemented.
+   Then: (a) run `ai-recover` (or `ai-watchdog --recover` after a kill) on that stop; expected: no
+   Claude session, the stop stays and names the question; (b) answer the question in
+   `.ai/reviews/plan-dispositions.md`, commit, run `ai-review --plan --base main` by hand, then
+   rerun `ai-pipeline`; expected: the plan review is clean and the run goes on to the first task.
+   Set `AI_SUPERVISE=0` in the environment for one rerun; expected: the old stop, no revision.
 2. This repo's frozen `.ai/prompts` has no `plan-revision.md` yet: run `setup-project --upgrade`
    on this checkout before using `ai-run --revise-plan` here (it stops naming that command).
    Mission control: a live `ai-run --revise-plan` with real Claude in a disposable fixture, checking
@@ -146,6 +159,9 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   one call, upheld `test_format_retry_never_for_a_malformed_recheck`; `AI_SUPERVISE=0` → no retry
   `test_format_retry_off_without_supervision`; helper = publish checks
   `test_review_format_check_helper_matches_publish`.
+- T010 docs: README and `docs/workflow.md` wording guarded by `test_docs_consistency_no_wrong_sentences`,
+  `test_docs_consistency_required_sentences`, `test_docs_consistency_modes_table`; this handoff's flow
+  line and PR body by `test_pr_body_flow_this_repo_declares_the_flow_chart`.
 
 ## Human todos
 None beyond "Needs you" above.
@@ -154,7 +170,6 @@ None beyond "Needs you" above.
 Flow chart updated
 
 ## Next action
-Plan review round 4 of revision 4 (after `fix/catchup-review` merges and this branch is rebuilt
-on master, per the plan's Coordination section). No run budget in this batch (OR-09). Start it
-with `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"` so the flow-changing tasks can
-update `agents-flow.md` themselves.
+All ten tasks (T001–T010) are DONE with the gate passing (see `.ai/run-log.md`). Next: an independent
+Codex review of the branch, then the live supervised trial in "Needs you" above. No run budget in
+this batch (OR-09).

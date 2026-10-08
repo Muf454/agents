@@ -321,7 +321,7 @@ scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_work
 - Limitation: a format retry that then stops leaves its run-log line uncommitted (like other stop bookkeeping; `ai-recover` commits it, a hand rerun needs it committed or discarded first).
 
 ## T010 — Docs reconciliation, flow-chart check, handoff
-Status: TODO
+Status: DONE
 Dependencies: T007, T008, T009
 Model: haiku
 
@@ -341,3 +341,9 @@ README.md, docs/workflow.md, templates/CLAUDE.md, templates/AGENTS.md, tests/tes
 `python3 -m unittest tests.test_workflow -k docs_consistency`; `python3 -m unittest tests.test_workflow -k pr_body_flow`; `.ai/bin/ai-check`
 
 ### Result / notes
+- Docs checked against the code: README and `docs/workflow.md` supervisor text (AI_SUPERVISE settings, plan revision, extra round, format retry) matches T001–T009; `templates/` needed no change.
+- Flow chart (`agents-flow.md`) already lists every flow change of the branch (T005–T009: plan loop, recovery rules, extra round, format retry); T001–T004 changed no flow. No flow edit needed in T010.
+- Handoff: "Needs you" now has the concrete live-trial steps (was "filled in by T010"); "Covered by automated tests" names T005–T009 tests and T010 docs tests; Next action updated.
+- Vault: hub Log line added; the live trial added to `agents-human-todo.md` as an unchecked item (human todo).
+- Evidence: `python3 -m unittest tests.test_workflow -k docs_consistency` OK (3); `-k pr_body_flow` OK (2); `.ai/bin/ai-check` OK (359 tests, 226.9 s).
+- Limitation: the live supervised trial with real Claude/Codex was not run here (needs a human; see handoff "Needs you").
