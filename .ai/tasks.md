@@ -94,7 +94,7 @@ Mission control 2026-10-08: the full gate after the checkpoint (38dcdaa) failed 
 Done 2026-10-08. `scripts/ai-run`: `track_attempt` (set only around the implementation `claude_session`) makes `claude_session` open the attempt (`attempt_open`, `task_started`) right before the `claude` call; `task_outcome` closes it; `on_exit` logs `interrupted` (exit 130/143), `timeout` (session exit 124/137) or `error` for a still-open attempt, but only while the approved gate digest is intact (no project helper runs after a gate change; found by `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`). `scripts/lib/workflow.py`: `outcome_title` falls back to a heading scan, then an empty title, when `.ai/tasks.md` no longer parses. Docs: `docs/workflow.md` Outcome log (lifecycle, limit-wait `error`, deferred signal delivery, gate-change exception), README result list, vault `agents-flow.md` + hub log. Tests: mock modes `hold`/`self-kill`; new `test_outcome_*` (stopped attempts numbered, validation once, 137, SIGTERM/SIGINT, malformed queue retry, no time left, triage, limit pause); `test_runner_no_progress_denial_and_error_stop_without_retry` asserts one row per mode. Mutation check: with tracking disabled the stopped-attempt, 137, signal and malformed-queue tests fail. Targeted: 11 tests OK; `.ai/bin/ai-check`: 287 tests OK.
 
 ## T003 — CI headroom for multi-round pipeline tests
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: sonnet
 
@@ -115,3 +115,4 @@ tests/test_workflow.py, scripts/ai-review (only if the context preparation is un
 `python3 -m unittest tests.test_workflow -k fix_round_count -k convergence -k triage_completion`; `.ai/bin/ai-check`
 
 ### Result / notes
+`tests/test_workflow.py`: `COMMAND_TIMEOUT` (25 s) and `PIPELINE_TIMEOUT` (120 s), both scaled by `AI_TEST_TIMEOUT_SCALE`; `run_cmd` takes a `timeout`, `tool('ai-pipeline', ...)` uses the pipeline bound. A hung pipeline still raises `TimeoutExpired` at 120 s. `ai-review`'s range `git log --stat` spans only the PR's commits, so left unbounded. Targeted run: 19 OK; `.ai/bin/ai-check`: 287 OK. CI re-run on the pushed PR not yet observed.

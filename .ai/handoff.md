@@ -4,6 +4,7 @@
 Branch `fix/catchup-review`: Codex catch-up review M1 and M2.
 - T001 (M1, done): the Claude fallback reviewer has no shell. `claude_attempt` runs `--tools Read,Glob,Grep --allowedTools Read Glob Grep`; `review-allowlist` prints just those three and ignores `.ai/permissions.allow`; the probe directory is gone. `review_context` (in `scripts/ai-review`) writes the git context per mode to `.ai/local/review-context/` right before each Claude session and removes it right after; any failed step stops before Claude with the prior review kept. New helper `review-range` (current review's HEAD and merge-base) for the re-check range. Claude-path prompts name the context files; `claude-review.md` "Evidence" replaces the probe section. README, `docs/workflow.md` and the vault flow chart describe the policy.
 - T002 (M2, done): a task attempt opens right before the implementation session's `claude` call and is logged exactly once: `done`/`blocked`/`validation_failed`/`no_checkpoint`, or from the EXIT handler `timeout` (session exit 124/137), `interrupted` (runner exit 130/143) or `error`. Limit pauses stay in one attempt; `--triage` and a run with no time left log nothing; `outcome task` logs even when `.ai/tasks.md` no longer parses. `docs/workflow.md` "Outcome log" documents the lifecycle and the deferred signal delivery; README and the vault flow chart updated.
+- T003 (CI headroom, done): tests only. `ai-pipeline` invocations in `tests/test_workflow.py` get `PIPELINE_TIMEOUT` (120 s) instead of 25 s; other commands keep 25 s; `AI_TEST_TIMEOUT_SCALE` stretches both. Product code unchanged; the unbounded `git log --stat base..head` in `ai-review` only spans the PR's own commits, so it was left as is.
 
 ## Flow chart
 Flow chart updated
@@ -33,6 +34,8 @@ Flow chart updated
 - No time left logs nothing: `test_outcome_no_time_left_logs_nothing`
 - Triage logs no task outcome: `test_outcome_triage_runs_log_no_task_outcome`
 - Limit pause stays in one attempt: `test_outcome_limit_pause_stays_in_one_attempt`
+
+- CI timeout headroom: the five multi-round pipeline tests pass locally (19 tests in the targeted run); the PR's CI re-run after the push is the remaining evidence.
 
 ## Human todos
 None.
