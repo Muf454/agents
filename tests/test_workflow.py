@@ -81,6 +81,15 @@ if 'REVISION CONTRACT' in prompt:
     with open(state / 'revision-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
     with open(state / 'revision-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
     assert pathlib.Path('.ai/local/revision-context/plan-history.md').exists(), 'no revision context'
+    def crash(when):
+        # The machine "restarts" during revision call MOCK_REVISION_CRASH_CALL (default 1), before
+        # or after the session's edits: ai-run (claude <- timeout <- ai-run) and the pipeline die.
+        calls = len((state / 'revision-args.log').read_text().splitlines())
+        if os.environ.get('MOCK_REVISION_CRASH') == when and calls == int(os.environ.get('MOCK_REVISION_CRASH_CALL', '1')):
+            os.kill(int(pathlib.Path(f'/proc/{os.getppid()}/stat').read_text().rsplit(')', 1)[1].split()[1]), 9)
+            os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 9)
+            sys.exit(0)
+    crash('before')
     mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
     review = pathlib.Path('.ai/reviews/plan.md').read_text()
     majors = review.split('## MAJOR findings')[1].split('## MINOR findings')[0]
@@ -105,6 +114,7 @@ if 'REVISION CONTRACT' in prompt:
         with open(os.environ.get('MOCK_SOURCE_PATH', 'src.txt'), 'a') as f: f.write('# not allowed in a plan revision\n')
     if mode == 'revise-edit-plan-review':
         pathlib.Path('.ai/reviews/plan.md').write_text(review.replace('MAJOR=', 'MAJOR=0 was '))
+    crash('after')
     if mode == 'revise-error':
         print(json.dumps({'type':'result','subtype':'error','is_error':True}))
         sys.exit(0)
@@ -399,6 +409,28 @@ cp deps.lock vendor-deps/
 
 MOCK_SLEEP = r'''#!/usr/bin/env bash
 echo "$1" >> "$MOCK_SLEEP_LOG"
+'''
+
+# Git hook body (HOOK and SUBJECT set above it): at the first host commit with SUBJECT the
+# machine "restarts": the ai-run that commits (if any) and the pipeline die at once.
+# commit-msg aborts the commit (crash before it); post-commit runs after it (crash after it).
+CRASH_HOOK = r'''
+if HOOK == 'commit-msg':
+    message = pathlib.Path(sys.argv[1]).read_text().strip()
+else:
+    message = subprocess.run(['git', 'log', '-1', '--format=%s'], capture_output=True, text=True).stdout.strip()
+fired = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'crash-hook-fired'
+if message != SUBJECT or fired.exists():
+    sys.exit(0)
+fired.touch()
+pid = os.getppid()
+while pid > 1:
+    if any(part.endswith(b'/ai-run') for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')):
+        os.kill(pid, 9)
+        break
+    pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 9)
+sys.exit(1 if HOOK == 'commit-msg' else 0)
 '''
 
 
@@ -2418,6 +2450,293 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.plan_calls(), 3)
         self.assertEqual(self.implementation_calls(), 0)
         self.assertTrue(self.open_stage().startswith('plan-revision '))
+
+    # ---------------------------------------------------------------- supervised plan resume (T007)
+    def crash_hook(self, hook, subject):
+        path = self.project / '.git/hooks' / hook
+        path.write_text('#!/usr/bin/env python3\nimport os, pathlib, subprocess, sys\n'
+                        f'HOOK, SUBJECT = {hook!r}, {subject!r}\n' + CRASH_HOOK)
+        path.chmod(0o755)
+
+    def crash_supervised(self, **env):
+        """A supervised run (auto-recovery approved) that a crash kills: no stop, no recovery."""
+        crashed = self.supervised('--no-pr', expected=None, AI_AUTO_RECOVER='1',
+                                  **dict({'MOCK_CODEX_PLAN': 'major-once'}, **env))
+        self.assertEqual(crashed.returncode, -9, crashed.stdout + crashed.stderr)
+        self.assertTrue((self.project / '.ai/local/pipeline.active').exists())  # what ai-watchdog finds
+
+    def hook_crash(self, hook, subject):
+        self.ready()
+        self.crash_hook(hook, subject)
+        self.crash_supervised()
+
+    def start_supervised_run(self, **env):
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
+                      '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1', AI_SUPERVISE='1', **env))
+
+    def revision_written(self, clear=False, findings='P1|Gap in tests', **env):
+        """Host-write window: the pipeline reserved, opened the stage and its ai-run child recorded
+        the revision; the crash came before stage-clear (or, with clear, right after it)."""
+        start = self.revise_ready(findings)
+        self.start_supervised_run()
+        self.helper('run-manifest', 'revision-reserve', self.plan_current()[1], '3')
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+        self.revise('--since', start, '--base', 'main', **env)
+        if clear:
+            self.helper('run-manifest', 'stage-clear')
+
+    def resume(self, path, expected=0, **env):
+        env = dict({'MOCK_CODEX_PLAN': 'major-once'}, **env)
+        if path == 'human':
+            return self.supervised('--no-pr', expected=expected, **env)
+        # What ai-watchdog --recover starts after a crash: the approved run's settings, kept manifest.
+        return self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=expected, **env)
+
+    def revision_records(self):
+        return json.loads(next((self.base / 'host-state').rglob('plan-revisions-*.json')).read_text())
+
+    def assert_resumed_once(self, counted='1'):
+        """One record and one session for the report, one re-review on a clean checkout, then the tasks."""
+        self.assertEqual(len(self.revision_records()), 1)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), counted)
+        self.assertEqual(len(self.revision_args()), 1)  # no second revision session
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses()[-1], 'clean')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.open_stage(), '')
+
+    # Crash point 1: the session's edits, the host's preamble commit and its revision commit.
+    def session_crash(self):
+        self.ready()
+        self.crash_supervised(MOCK_REVISION_CRASH='after')
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_supervised_plan_resume_session_crash_human_rerun(self):
+        self.session_crash()
+        self.resume('human')
+        self.assert_resumed_once()
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_session_crash_watchdog(self):
+        self.session_crash()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+        self.assertEqual(self.recovery_calls(), [])  # the stage rules decide, no Claude decision
+
+    def open_crash(self, hook):
+        self.hook_crash(hook, 'chore(ai): open plan dispositions')
+        self.assertFalse((self.base / 'revision-args.log').exists())  # died before the session
+
+    def test_supervised_plan_resume_before_the_preamble_commit_human_rerun(self):
+        self.open_crash('commit-msg')
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_preamble_commit_watchdog(self):
+        self.open_crash('commit-msg')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_preamble_commit_human_rerun(self):
+        self.open_crash('post-commit')
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_preamble_commit_watchdog(self):
+        self.open_crash('post-commit')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_revision_commit_human_rerun(self):
+        self.hook_crash('commit-msg', 'chore(ai): record plan revision')
+        self.assertEqual(self.revision_commits(), 0)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_revision_commit_watchdog(self):
+        self.hook_crash('commit-msg', 'chore(ai): record plan revision')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 2: after the host revision commit, before its record (the resume records the
+    # revision with a second host commit; only the record counts).
+    def test_supervised_plan_resume_after_the_revision_commit_human_rerun(self):
+        self.hook_crash('post-commit', 'chore(ai): record plan revision')
+        self.assertEqual(self.revision_commits(), 1)
+        self.revisions('revised', 1)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_revision_commit_watchdog(self):
+        self.hook_crash('post-commit', 'chore(ai): record plan revision')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # After the record, before stage-clear: a human restart closes it without counting it in
+    # its fresh allowance; a recovery resume keeps the reservation.
+    def test_supervised_plan_resume_after_the_record_human_rerun(self):
+        self.revision_written()
+        self.resume('human')
+        self.assert_resumed_once(counted='0')
+        self.assertIn('🔁 Plan revised (in the previous run): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_after_the_record_watchdog(self):
+        self.revision_written()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_after_stage_clear_human_rerun(self):
+        self.revision_written(clear=True)
+        self.resume('human')
+        self.assert_resumed_once(counted='0')
+
+    def test_supervised_plan_resume_after_stage_clear_watchdog(self):
+        self.revision_written(clear=True)
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 3: host-write windows.
+    def reserved_without_stage(self):
+        self.revise_ready()
+        self.start_supervised_run(AI_SUPERVISE_PLAN_ROUNDS='1')
+        self.helper('run-manifest', 'revision-reserve', self.plan_current()[1], '1')
+
+    def test_supervised_plan_resume_reserved_without_a_stage_human_rerun(self):
+        self.reserved_without_stage()
+        self.resume('human', AI_SUPERVISE_PLAN_ROUNDS='1')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_reserved_without_a_stage_watchdog(self):
+        self.reserved_without_stage()
+        self.resume('watchdog')  # a non-idempotent limit check would stop here (limit 1, 1 reserved)
+        self.assert_resumed_once()
+
+    def stage_without_reservation(self):
+        start = self.revise_ready()
+        self.start_supervised_run()
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+
+    def test_supervised_plan_resume_stage_without_a_reservation_human_rerun(self):
+        self.stage_without_reservation()
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_stage_without_a_reservation_watchdog(self):
+        self.stage_without_reservation()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def rounds_crash(self):
+        # The pipeline's host commit of the first plan review, then the crash before its record.
+        self.hook_crash('post-commit', 'chore(ai): record plan review')
+        self.assertEqual(self.plan_calls(), 1)
+        self.assertFalse(list((self.base / 'host-state').rglob('plan-rounds-*.json')))
+
+    def test_supervised_plan_resume_plan_review_without_its_round_record_human_rerun(self):
+        self.rounds_crash()
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_plan_review_without_its_round_record_watchdog(self):
+        self.rounds_crash()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 4: the third revision session dies; its resume runs on the escalation model.
+    def test_supervised_plan_resume_round_three_crash_runs_on_the_escalation_model(self):
+        self.ready()
+        always = dict(MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.crash_supervised(MOCK_REVISION_CRASH='before', MOCK_REVISION_CRASH_CALL='3',
+                              AI_SUPERVISE_ESCALATE_MODEL='claude-test-x', **always)
+        self.assertEqual(self.revision_commits(), 2)
+        self.resume('watchdog', expected=1, MOCK_CONVERGENCE='Convergence: none — one gap, rejected each round', **always)
+        self.assertEqual([call[call.index('--model') + 1] for call in self.revision_args()],
+                         ['opus', 'opus', 'claude-test-x', 'claude-test-x'])
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '3')
+        self.assertEqual([r['round'] for r in self.revision_records()], [1, 2, 3])
+        section = (self.project / '.ai/reviews/plan-dispositions.md').read_text().split('## Plan review round 3 ')[1]
+        self.assertIn('\nConvergence: none — one gap, rejected each round\n', section)
+        self.assertIn('supervision limit reached (3 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+
+    def test_supervised_plan_resume_keeps_the_approved_settings_after_a_config_change(self):
+        self.ready()
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        config = self.config / 'ai-toolkit/config'
+        config.write_text('AI_SUPERVISE_PLAN_ROUNDS=2\nAI_SUPERVISE_ESCALATE_ROUND=1\n'
+                          'AI_SUPERVISE_ESCALATE_MODEL=claude-approved\n')
+        always = dict(MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.crash_supervised(MOCK_REVISION_CRASH='before', **always)
+        config.write_text('AI_SUPERVISE_PLAN_ROUNDS=1\nAI_SUPERVISE_ESCALATE_ROUND=9\n'
+                          'AI_SUPERVISE_ESCALATE_MODEL=claude-changed\n')
+        self.resume('watchdog', expected=1, **always)
+        # The approved limit 2 (not 1) and the approved escalation from round 1 (not 9).
+        self.assertEqual([call[call.index('--model') + 1] for call in self.revision_args()], ['claude-approved'] * 3)
+        self.assertEqual(self.revision_commits(), 2)
+        self.assertEqual(self.plan_calls(), 3)
+        self.assertIn('supervision limit reached (2 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+
+    # Crash point 5: a recorded needs-human decision survives the crash.
+    def assert_decision_survives(self, path, clear):
+        self.revision_written(clear=clear, findings='P1|Rollback choice;P2|Gap in tests',
+                              MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        plan_calls, sessions = self.plan_calls(), len(self.revision_args())
+        if path == 'human':
+            self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        else:
+            self.resume(path, expected=1, MOCK_CODEX_PLAN='major')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('needs your decision', error)
+        self.assertIn('P1: Keep option A or switch to B?', error)
+        self.assertIn('P1: Keep option A or switch to B?', self.notifications())
+        self.assertEqual(self.plan_calls(), plan_calls)
+        self.assertEqual(len(self.revision_args()), sessions)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+        # The human answers, commits and reviews again by hand (approved); the rerun implements.
+        self.commit_leftovers('record the stop')
+        (self.project / '.ai/current-plan.md').write_text('Rollback: option B (human decision).\n')
+        self.commit('answer the plan question')
+        self.tool('ai-review', '--plan')
+        self.supervised('--no-pr')
+        self.helper('tasks', 'complete')
+        self.assertGreater(self.implementation_calls(), 0)
+
+    def test_supervised_plan_resume_decision_after_stage_clear_human_rerun(self):
+        self.assert_decision_survives('human', clear=True)
+
+    def test_supervised_plan_resume_decision_after_stage_clear_watchdog(self):
+        self.assert_decision_survives('watchdog', clear=True)
+
+    def test_supervised_plan_resume_decision_after_the_record_human_rerun(self):
+        self.assert_decision_survives('human', clear=False)
+
+    def test_supervised_plan_resume_decision_after_the_record_watchdog(self):
+        self.assert_decision_survives('watchdog', clear=False)
+
+    def test_supervised_plan_resume_human_restart_after_the_limit_reviews_first(self):
+        self.ready()
+        limit = dict(AI_SUPERVISE_PLAN_ROUNDS='1', MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.supervised('--no-pr', expected=1, **limit)
+        self.assertIn('supervision limit reached (1 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+        self.commit_leftovers('record the stop')
+        # A restart revised the second report, then died right after closing its stage.
+        self.revise(MOCK_CLAUDE='revise-reject')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.supervised('--no-pr', expected=1, **limit)
+        # A fresh allowance, but the recorded revision is not redone: it reviews first.
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--format=%s', f'{head}..HEAD']).stdout.splitlines()
+        self.assertEqual([s for s in subjects if s.startswith('chore(ai): ')],
+                         ['chore(ai): record plan review', 'chore(ai): open plan dispositions',
+                          'chore(ai): record plan revision', 'chore(ai): record plan review'])
+        self.assertEqual(self.plan_calls(), 4)
+        self.assertEqual(len(self.revision_args()), 3)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '1')
+        self.assertIn('supervision limit reached (1 revisions this run)', (self.project / '.ai/local/last-error').read_text())
 
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')

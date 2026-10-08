@@ -235,8 +235,13 @@ if [[ "$revise_plan" == yes ]]; then
     # An interrupted revision whose section is complete: record it, no new session.
     printf '%s\n' 'Plan dispositions are already complete; recording the revision.'
   else
-    [[ -z "$(dirty_beyond_records)" ]] || \
+    # Only the host's own section header may be left uncommitted (a crash before its commit).
+    if [[ -n "$(dirty_beyond_records)" ]] && \
+        { [[ -n "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' \
+                   ':!.ai/handoff.md' ':!.ai/reviews/plan-dispositions.md')" ]] || \
+          ! ai_helper start-plan-dispositions "$plan_base" --pending >/dev/null 2>&1; }; then
       ai_die 'Plan revision stage: incomplete plan revision records are uncommitted; inspect them before continuing.'
+    fi
     # Host-written section bound to this round's report; Claude fills in the rows.
     ai_helper start-plan-dispositions "$plan_base"
     git add -- .ai/reviews/plan-dispositions.md

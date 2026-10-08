@@ -205,7 +205,7 @@ scripts/ai-pipeline, scripts/ai-review, templates/.ai/prompts/plan-review.md, te
 Done. `ai-pipeline`: the single plan-review block is now the loop from the plan (sync → decision check → "Plan revised" notification right after a completed stage → review when not current or already revised → AI_SUPERVISE=0 stop / `revision-reserve` limit stop with "BLOCKER b, MAJOR m remain" / `stage-set plan-revision HEAD` + `complete_plan_stage` + clean check); the startup plan-revision dispatch syncs plan rounds first and feeds the loop; `--help` describes supervision. `ai-review --plan`: merge-base always computed (pipeline passes `--base "$base_sha"`); after a revision the prompt gets `PLAN REVISION CONTEXT:` (round n, dispositions of round n−1, `plan-history BASE --include-current`); a history failure only warns. `workflow.py`: `plan-history --include-current`; `plan-revisions outcome` (record counts for the notification); the plan report header names HEAD, so a review after a revision commit is always a new report/round even if text and second repeat (otherwise the record would be idempotent and the loop would re-review the same report). Template `plan-review.md`: rejected findings re-judged on their evidence. Choices: the notification's n is this run's revision count (`revision-count`), N = `AI_SUPERVISE_PLAN_ROUNDS`; the needs-human stop text joins the stored questions with "; " (one line); an unreadable revision store is a "Plan revision stage" stop (terminal for `ai-recover`). Mocks: `MOCK_CODEX_PLAN=major-once`, per-call `codex-plan-status`. 7 `supervised_plan` tests pass; `test_review_context_plan_review_and_recheck_prompts_have_neither` also asserts no `PLAN REVISION CONTEXT:` without a revision. Docs: README plan-review step, `docs/workflow.md` loop paragraph, vault `agents-flow.md` big picture + note. `.ai/bin/ai-check` OK, 314 tests. Not covered here: crash windows (T007).
 
 ## T007 — Crash and resume scenarios for supervised plan revision
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T006
 Model: opus
 
@@ -235,6 +235,7 @@ tests/test_workflow.py, scripts/ai-pipeline, scripts/ai-run, scripts/ai-recover,
 `python3 -m unittest tests.test_workflow -k supervised_plan_resume`; `.ai/bin/ai-check`
 
 ### Result / notes
+Mission control 2026-10-08 12:45: the first T007 session died at 12:32 without any output (empty result and stderr); its unfinished diff (scripts/ai-pipeline, ai-recover, ai-run, workflow.py, tests; +368/-16) is committed as a WIP checkpoint so the next session can reconcile it. Not validated: check every part against the task before building on it.
 
 ## T008 — Extra fix round from host-verified falling counts
 Status: TODO

@@ -380,7 +380,11 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
       # nothing is written to the checkout before the re-review.
       outcome=$(ai_helper plan-revisions outcome 2>/dev/null) || plan_stage_fail 'the plan revision was not recorded.'
       read -r _ revised_accepted revised_rejected _ <<< "$outcome"
-      ai_notify "🔁 Plan revised (round $(ai_helper run-manifest revision-count 2>/dev/null || printf '?')/$AI_SUPERVISE_PLAN_ROUNDS): accepted $revised_accepted, rejected $revised_rejected"
+      revised_n=$(ai_helper run-manifest revision-count 2>/dev/null) || revised_n='?'
+      revised_round="round $revised_n/$AI_SUPERVISE_PLAN_ROUNDS"
+      # 0: a human restart closed the previous run's recorded revision (not counted again).
+      [[ "$revised_n" != 0 ]] || revised_round='in the previous run'
+      ai_notify "🔁 Plan revised ($revised_round): accepted $revised_accepted, rejected $revised_rejected"
       plan_revised=no
     fi
     # Review needed: no current verified review, or the current one was already revised.

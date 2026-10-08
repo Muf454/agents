@@ -2194,25 +2194,43 @@ def plan_section_heading(number, digest):
     return f'## Plan review round {number} (report {digest})'
 
 
-def start_plan_dispositions(arguments):
-    """Append the host-written section for the current plan-review round (idempotent: a resume
-    whose last section already is that header adds nothing)."""
-    if len(arguments) != 1:
-        fail('Usage: start-plan-dispositions BASE')
-    number, digest = plan_round_current(arguments[0])
+def plan_section_opened(text, number, digest):
+    """TEXT with the host-written section for this round appended, or None when its last
+    section already is that header."""
     heading = plan_section_heading(number, digest)
-    path = Path(PLAN_DISPOSITIONS)
-    text = path.read_text() if path.exists() else PLAN_DISPOSITIONS_PREAMBLE
     marks = list(PLAN_SECTION.finditer(text))
     if marks and marks[-1].group(0).rstrip() == heading:
-        return
+        return None
     if any(mark.group(2) == digest for mark in marks):
         fail(f'{PLAN_DISPOSITIONS} has a section for plan review round {number} that is not the last; '
              'inspect it before revising.')
     head = git('rev-parse', 'HEAD').decode().strip()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic(path, text.rstrip('\n') + f'\n\n{heading}\n\nPlan review HEAD: {head}\n\n'
-           '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n')
+    return text.rstrip('\n') + f'\n\n{heading}\n\nPlan review HEAD: {head}\n\n' \
+        '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n'
+
+
+def start_plan_dispositions(arguments):
+    """Append the host-written section for the current plan-review round (idempotent: a resume
+    whose last section already is that header adds nothing). --pending: exit 0 only when the
+    file differs from HEAD by exactly that host section (a crash between writing it and its
+    commit, before any session ran), so the resume may commit it."""
+    pending = arguments[1:] == ['--pending']
+    if len(arguments) != (2 if pending else 1):
+        fail('Usage: start-plan-dispositions BASE [--pending]')
+    number, digest = plan_round_current(arguments[0])
+    path = Path(PLAN_DISPOSITIONS)
+    if pending:
+        in_head = subprocess.run(['git', 'cat-file', '-e', f'HEAD:{PLAN_DISPOSITIONS}'],
+                                 stderr=subprocess.DEVNULL).returncode == 0
+        expected = plan_section_opened(committed_file('HEAD', PLAN_DISPOSITIONS) if in_head
+                                       else PLAN_DISPOSITIONS_PREAMBLE, number, digest)
+        if expected is None or not path.is_file() or path.read_text() != expected:
+            fail(f'{PLAN_DISPOSITIONS} is not just the uncommitted host section header.')
+        return
+    text = plan_section_opened(path.read_text() if path.exists() else PLAN_DISPOSITIONS_PREAMBLE, number, digest)
+    if text is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic(path, text)
 
 
 def plan_text_above(start, heading):

@@ -106,6 +106,12 @@ decision_rc=0
 questions=$(ai_helper plan-revisions decision 2>&1) || decision_rc=$?
 case "$decision_rc" in
   0) reason="plan review needs your decision: $(printf '%s' "$questions" | tr '\n' ' ')"
+     # A crash before stage-clear: the stage is done (its record exists). Close it, so the run
+     # continues once the human's answer gets a new plan review (else the stage is foreign then).
+     if [[ "$(ai_helper run-manifest stage 2>/dev/null)" == 'plan-revision '* && \
+           "$(ai_helper stage-verify 2>/dev/null)" == committed ]]; then
+       ai_helper run-manifest stage-clear 2>/dev/null || true
+     fi
      escalate 'a plan revision recorded questions only you can answer.' \
        'answer them in .ai/reviews/plan-dispositions.md and the plan, commit, run ai-review --plan, then rerun ai-pipeline.' ;;
   1) ;;
