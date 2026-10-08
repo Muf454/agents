@@ -3,7 +3,9 @@
 ## What has been implemented?
 T001 done (supervision settings: config, validation, manifest, recovery restore; no behaviour yet).
 T002 done (host plan-review round records `plan-rounds record|sync|count|current`, `plan-history`;
-`ai-review --plan --base`; pipeline and hand runs record once per review). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+`ai-review --plan --base`; pipeline and hand runs record once per review).
+T003 done (`start-plan-dispositions BASE`, `plan-dispositions-check --since START --base BASE
+[--fresh] [--questions]`, `plan-revision-scope START`; no caller yet; T004 must pass `--base`). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -30,6 +32,13 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   `test_plan_rounds_pipeline_and_hand_run_record_once_per_review`; recreated branch
   `test_plan_rounds_restart_when_a_branch_name_is_recreated`; crash sync
   `test_plan_rounds_sync_records_a_crashed_review_once`, `test_plan_rounds_sync_ignores_a_forged_report`.
+- T003 plan-dispositions section: complete section, resume and START-with-header
+  `test_plan_dispositions_complete_section_passes_and_counts`; MINOR optional, round 2 without
+  Convergence `test_plan_dispositions_minor_rows_optional_and_round_two_needs_no_convergence`;
+  adversarial rows/tasks/preamble/headers `test_plan_dispositions_reject_adversarial_sections`;
+  older sections never count `test_plan_dispositions_check_only_the_current_round`,
+  `test_plan_dispositions_round_three_needs_its_own_convergence_line`; bounded questions
+  `test_plan_dispositions_questions_are_bounded`; scope `test_plan_dispositions_revision_scope`.
 
 ## Flow chart
 Flow unchanged

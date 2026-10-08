@@ -73,7 +73,7 @@ scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-review, tests/test_work
 Done. `plan-rounds`/`plan-history` in `scripts/lib/workflow.py`; `ai-review --plan` takes `--base` (default main) and syncs the record after its commit; `ai-pipeline` syncs before the plan-review check and after the host commit (after the hook check, so a hook-changed commit still reports "reviewed content changed"). The pipeline records through `sync` rather than `record ... HEAD`: same host-subject/verification rules, robust to a post-commit hook. 7 new tests pass (`-k plan_rounds -k plan_history`); `.ai/bin/ai-check` OK, 283 tests.
 
 ## T003 — Plan-dispositions section writer and round-specific validator
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: opus
 
@@ -101,6 +101,7 @@ scripts/lib/workflow.py, tests/test_workflow.py
 `python3 -m unittest tests.test_workflow -k plan_dispositions`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done. `workflow.py`: `PLAN_REVISION_RECORDS`, host preamble, `start-plan-dispositions BASE`, `plan-dispositions-check`, `plan-revision-scope START` (shares `records_scope` with `triage-scope`), `plan_round_current` (also backs `plan-rounds current`), `bounded_questions` (for T004's record). Deviation for T004: the check is `plan-dispositions-check --since START --base BASE [--fresh] [--questions]`; `--base` is required because the round number (header, Convergence from round 3) must come from host records in `BASE..HEAD`, never from the agent-editable header. `--fresh` adds the TODO/task-status rules (as `triage-check`); `--questions` prints only the bounded questions (`P1: <question>`, `<br>` collapsed), no counts line. Every present row is validated and counted (MINOR rows too). The section also needs its host `Plan review HEAD:` line (an ancestor of HEAD); trailing blank lines above the header are ignored in the byte comparison (the writer separates sections with a blank line). Mock codex gained `MOCK_CODEX_PLAN_MINOR`. 7 new `test_plan_dispositions_*` tests pass; `.ai/bin/ai-check` OK, 290 tests (first run hit one tempdir-cleanup race, `.git/objects` not empty at teardown, not an assertion; rerun clean).
 
 ## T004 — ai-run --revise-plan: prompt, read/plan-only allowlist, host commit with log entry, outcome record
 Status: TODO

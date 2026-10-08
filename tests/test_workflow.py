@@ -253,12 +253,13 @@ if 'PLAN SCOPE' in args[-1]:
     major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
     items = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_FINDINGS', '').split(';') if item]
     if not items and major: items = [['P1', 'T001 has no test.']]
+    minor = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_MINOR', '').split(';') if item]
     pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
         '# Plan review\nOverall verdict: ' + ('gap' if items else 'ok') + '\n'
-        'Finding counts: BLOCKER=0 MAJOR=' + str(len(items)) + ' MINOR=0\n'
+        'Finding counts: BLOCKER=0 MAJOR=' + str(len(items)) + ' MINOR=' + str(len(minor)) + '\n'
         '## BLOCKER findings\nNone.\n## MAJOR findings\n' +
         (''.join('- %s: %s\n' % (i, t) for i, t in items) if items else 'None.\n') +
-        '## MINOR findings\nNone.\n')
+        '## MINOR findings\n' + (''.join('- %s: %s\n' % (i, t) for i, t in minor) if minor else 'None.\n'))
     sys.exit(0)
 mode = os.environ.get('MOCK_CODEX', 'success')
 calls = state / 'codex-calls'
@@ -1626,11 +1627,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-review', '--plan', expected=1)
         self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
 
-    def plan_round(self, findings, number):
+    def plan_round(self, findings, number, **env):
         """One hand-run plan review (host commit + record); a source change keeps plan digests distinct."""
         (self.project / 'src.txt').write_text(f'source {number}\n')
         self.commit(f'source {number}')
-        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS=findings)
+        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS=findings, **env)
 
     def plan_current(self, expected=0):
         return self.helper('plan-rounds', 'current', 'main', expected=expected).stdout.split()
@@ -1733,6 +1734,160 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('chore(ai): record plan review')
         self.helper('plan-rounds', 'sync', 'main')
         self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '0')
+
+    PLAN_ROWS = ('| P1 | accepted | add the missing test | T002 |\n'
+                 '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+    PLAN_REJECTED = ('| P1 | rejected | the test exists in tests/test_x.py:40 | |\n'
+                     '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+
+    def open_plan_section(self, findings='P1|Gap in tests;P2|Unclear rollback', rounds=1, **env):
+        """Plan review `rounds` (earlier rounds get a committed section with a Convergence line),
+        then the host opens the current round's section. Returns START (HEAD before opening)."""
+        self.ready(task('T001', 'DONE') + task('T002', dependencies='T001'))
+        for number in range(1, rounds + 1):
+            if number > 1:
+                self.plan_dispositions(number - 1, self.PLAN_ROWS + 'Convergence: rollback keeps coming back\n')
+            self.plan_round(findings, number, **env)
+        start = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-plan-dispositions', 'main')
+        return start
+
+    def plan_check(self, start, *flags, expected=0):
+        return self.helper('plan-dispositions-check', '--since', start, '--base', 'main', '--fresh', *flags,
+                           expected=expected)
+
+    def test_plan_dispositions_complete_section_passes_and_counts(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        self.run_cmd(['git', 'cat-file', '-e', f'{start}:.ai/reviews/plan-dispositions.md'], expected=128)
+        opened = path.read_text()
+        digest = self.plan_current()[1]
+        self.assertIn(f'## Plan review round 1 (report {digest})\n\nPlan review HEAD: {start}\n\n'
+                      '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n', opened)
+        self.helper('start-plan-dispositions', 'main')  # resume: no second header
+        self.assertEqual(path.read_text(), opened)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.assertEqual(self.plan_check(start, '--questions').stdout, '')
+        # START already holding the same header (rows committed, e.g. a resume) passes too.
+        self.helper('start-plan-dispositions', 'main')
+        self.assertEqual(path.read_text(), opened + self.PLAN_ROWS)
+        self.commit('rows')
+        resumed = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.assertEqual(self.plan_check(resumed).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.helper('plan-dispositions-check', '--since', start, expected=1)  # --base is required
+
+    def test_plan_dispositions_minor_rows_optional_and_round_two_needs_no_convergence(self):
+        start = self.open_plan_section(rounds=2, MOCK_CODEX_PLAN_MINOR='P3|Typo in the plan')
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        self.assertEqual(opened.count('## Plan review round'), 2)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        path.write_text(opened + self.PLAN_ROWS + '| P3 | rejected | wording is already fixed in plan.md | |\n')
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=2 needs_human=0')
+
+    def test_plan_dispositions_reject_adversarial_sections(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        queue = self.project / '.ai/tasks.md'
+        opened, tasks_text = path.read_text(), queue.read_text()
+        digest = self.plan_current()[1]
+        cases = (
+            ('missing row', opened + self.PLAN_ROWS.splitlines(True)[0], None, 'Finding P2 has no row'),
+            ('duplicate', opened + self.PLAN_ROWS + '| P1 | rejected | the test exists already, see x | |\n',
+             None, 'Finding P1 has more than one row'),
+            ('unknown ID', opened + self.PLAN_ROWS + '| P7 | rejected | not a real finding at all | |\n',
+             None, 'P7, which is not a finding of plan review round 1'),
+            ('rejected without evidence', opened + self.PLAN_ROWS.replace('rollback is covered in docs/rollback.md:12',
+                                                                       'no'),
+             None, 'Rejected finding P2 needs concrete evidence'),
+            ('accepted without task', opened + self.PLAN_ROWS.replace('| T002 |', '| |'), None,
+             'Accepted finding P1 needs the task ID'),
+            ('unknown task', opened + self.PLAN_ROWS.replace('T002', 'T009'), None,
+             'Accepted finding P1 references unknown task T009'),
+            ('DONE task', opened + self.PLAN_ROWS.replace('T002', 'T001'), None,
+             'Accepted finding P1 must reference TODO tasks; T001 is DONE'),
+            ('needs-human without question', opened + self.PLAN_ROWS.replace(
+                '| rejected | rollback is covered in docs/rollback.md:12 |', '| needs-human | why? |'), None,
+             'needs-human finding P2 needs the question for the human'),
+            ('status changed', opened + self.PLAN_REJECTED,
+             tasks_text.replace('Status: TODO', 'Status: IN_PROGRESS'), 'Task T002 changed status from TODO'),
+            ('new task DONE', opened + self.PLAN_REJECTED, tasks_text + task('T003', 'DONE', 'T001'),
+             'New task T003 must be TODO'),
+            ('edited preamble', opened.replace('never edit', 'freely edit') + self.PLAN_ROWS, None,
+             'Text above the round 1 section changed'),
+            ('second header', opened + self.PLAN_ROWS + f'\n## Plan review round 1 (report {digest})\n',
+             None, 'has 2 headers for plan review round 1'),
+            ('renumbered header', opened.replace('## Plan review round 1 ', '## Plan review round 2 ')
+             + self.PLAN_ROWS, None, 'header for plan review round 1 was changed'),
+            ('no host HEAD line', opened.replace('Plan review HEAD:', 'Plan HEAD:') + self.PLAN_ROWS, None,
+             'needs its host "Plan review HEAD:" line'),
+        )
+        for name, text, tasks_change, message in cases:
+            with self.subTest(name):
+                path.write_text(text)
+                queue.write_text(tasks_change or tasks_text)
+                self.assertIn(message, self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS)
+        queue.write_text(tasks_text + task('T003', dependencies='T001'))
+        self.plan_check(start)  # a new TODO task is fine
+
+    def test_plan_dispositions_check_only_the_current_round(self):
+        start = self.open_plan_section(rounds=2)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        # The older section holds rows with the same IDs; they don't answer round 2.
+        self.assertIn('Finding P1 has no row in the round 2 section', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened.replace('add the missing test', 'add the test later') + self.PLAN_ROWS)
+        self.assertIn('Text above the round 2 section changed', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.plan_check(start)
+
+    def test_plan_dispositions_round_three_needs_its_own_convergence_line(self):
+        start = self.open_plan_section(rounds=3)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        self.assertIn('Convergence: rollback', opened)  # only in the older sections
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertIn('Plan review round 3 needs a Convergence: line', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS + '<!-- Convergence: hidden -->\n')
+        self.plan_check(start, expected=1)
+        path.write_text(opened + self.PLAN_ROWS + '\nConvergence: redesign rollback as a whole in T002\n')
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+
+    def test_plan_dispositions_questions_are_bounded(self):
+        findings = ';'.join(f'P{n}|Open question {n}' for n in range(1, 6))
+        start = self.open_plan_section(findings=findings)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        question = ('Should the rollback keep  option A <br> or\tswitch to B? ' * 30)[:1000]
+        path.write_text(path.read_text() + ''.join(f'| P{n} | needs-human | {question} | |\n' for n in range(1, 6)))
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=0 rejected=0 needs_human=5')
+        lines = self.plan_check(start, '--questions').stdout.splitlines()
+        self.assertEqual(len(lines), 4)
+        for number, line in enumerate(lines[:3], 1):
+            self.assertTrue(line.startswith(f'P{number}: Should the rollback keep option A or switch to B?'), line)
+            self.assertLessEqual(len(line), 300)
+            self.assertNotIn('<br>', line)
+        self.assertEqual(lines[3], '(+2 more in .ai/reviews/plan-dispositions.md)')
+
+    def test_plan_dispositions_revision_scope(self):
+        start = self.open_plan_section()
+        records = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/reviews/plan-dispositions.md',
+                   '.ai/handoff.md', '.ai/state.md', '.ai/run-log.md')
+        for name in records:
+            file = self.project / name
+            file.write_text((file.read_text() if file.exists() else '') + 'revised\n')
+        self.helper('plan-revision-scope', start)
+        for outside in ('src.txt', '.ai/reviews/plan.md'):
+            with self.subTest(outside):
+                file = self.project / outside
+                original = file.read_text()
+                file.write_text(original + 'agent edit\n')
+                self.assertIn(f'Plan revision changed files outside workflow records: {outside}',
+                              self.helper('plan-revision-scope', start, expected=1).stderr)
+                file.write_text(original)
+        self.helper('plan-revision-scope', start)
 
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')

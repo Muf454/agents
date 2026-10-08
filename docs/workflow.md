@@ -219,6 +219,22 @@ count|current BASE` read the number; `plan-history BASE [--count]` renders the e
 BLOCKER/MAJOR findings paired with their sections of `.ai/reviews/plan-dispositions.md`. History
 is context only and never approves, counts or skips anything.
 
+Plan-review round sections (helpers only; no caller yet). `workflow.py start-plan-dispositions
+BASE` appends `## Plan review round <n> (report <digest>)`, a `Plan review HEAD:` line and an
+empty table to `.ai/reviews/plan-dispositions.md` (creating it with a host preamble), unless the
+last section already is that header. `plan-dispositions-check --since START --base BASE [--fresh]
+[--questions]` validates only that section: unique and last; the text above it unchanged since
+START (START's text above the same header, else START's whole file, else the exact preamble);
+one row per BLOCKER/MAJOR finding of the verified current plan review (MINOR optional, unknown
+IDs and duplicates rejected); `accepted` names existing tasks, `rejected` has evidence,
+`needs-human` has a question (both at least 15 characters); from round 3 a same-section
+`Convergence:` line. `--fresh` also requires accepted tasks to be TODO, every task that existed
+at START to keep its status and new tasks to be TODO. It prints `accepted=a rejected=r
+needs_human=h`; `--questions` prints at most 3 needs-human questions, one line of at most 300
+characters each, plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
+START` fails when anything outside the plan revision records (spec, plan, tasks,
+plan-dispositions, handoff, state, run log) changed since START.
+
 ## Pipeline contract (`ai-pipeline`)
 
 Stages, each resumable by rerunning: plan review (only while no task is DONE;

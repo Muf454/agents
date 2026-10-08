@@ -1171,16 +1171,20 @@ def changed_since(start):
     return sorted({os.fsdecode(name) for name in names if name})
 
 
-def triage_scope(arguments):
-    """Since START, only triage records changed (committed or not)."""
-    start = arguments[0]
+def records_scope(start, records, label):
+    """Since START, only RECORDS changed (committed or not)."""
     if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
                       stderr=subprocess.DEVNULL).returncode != 0:
         fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
-    outside = [name for name in changed_since(start) if name not in TRIAGE_RECORDS]
+    outside = [name for name in changed_since(start) if name not in records]
     if outside:
-        fail('Triage changed files outside workflow records: ' + ' '.join(outside[:8])
+        fail(f'{label} changed files outside workflow records: ' + ' '.join(outside[:8])
              + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
+
+
+def triage_scope(arguments):
+    """Since START, only triage records changed (committed or not)."""
+    records_scope(arguments[0], TRIAGE_RECORDS, 'Triage')
 
 
 def stage_verify(arguments):
@@ -2049,6 +2053,15 @@ def plan_rounds_sync(base):
             return
 
 
+def plan_round_current(base):
+    """(n, report digest) of the current plan review; it must be the last recorded round."""
+    reachable = reachable_plan_rounds(base)[3]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not reachable or reachable[-1]['report_digest'] != report_digest(content):
+        fail('The current plan review is not the last recorded round; run ai-review --plan.')
+    return len(reachable), reachable[-1]['report_digest']
+
+
 def plan_rounds(arguments):
     """record BASE COMMIT | sync BASE | count BASE | current BASE: this branch's plan-review
     rounds, counted only when their host commit is in BASE..HEAD."""
@@ -2057,15 +2070,10 @@ def plan_rounds(arguments):
         plan_rounds_record(arguments[1], arguments[2])
     elif action == 'sync' and len(arguments) == 2:
         plan_rounds_sync(arguments[1])
-    elif action in ('count', 'current') and len(arguments) == 2:
-        reachable = reachable_plan_rounds(arguments[1])[3]
-        if action == 'count':
-            print(len(reachable))
-            return
-        content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
-        if not reachable or reachable[-1]['report_digest'] != report_digest(content):
-            fail('The current plan review is not the last recorded round; run ai-review --plan.')
-        print(len(reachable), reachable[-1]['report_digest'])
+    elif action == 'count' and len(arguments) == 2:
+        print(len(reachable_plan_rounds(arguments[1])[3]))
+    elif action == 'current' and len(arguments) == 2:
+        print(*plan_round_current(arguments[1]))
     else:
         fail('Usage: plan-rounds record BASE COMMIT | sync BASE | count BASE | current BASE')
 
@@ -2112,6 +2120,182 @@ def plan_history(arguments):
         rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
     if rounds:
         print(render_rounds(rounds, title='## Previous plan review rounds', missing='no revision recorded'))
+
+
+# Files a plan revision may change (R1): the plan records and runner bookkeeping.
+PLAN_REVISION_RECORDS = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', PLAN_DISPOSITIONS,
+                         '.ai/handoff.md', '.ai/state.md', '.ai/run-log.md')
+PLAN_DISPOSITIONS_PREAMBLE = """# Plan review dispositions (Claude)
+
+<!-- The host appends one section per plan-review round; fill only the last one and never edit
+earlier sections or .ai/reviews/plan.md. One row per BLOCKER/MAJOR finding of that round's plan
+review (MINOR optional). Disposition: accepted (Task: the new TODO task IDs that answer it),
+rejected (concrete evidence) or needs-human (the question for the human in the Evidence column).
+From plan-review round 3 on, the section also needs a line starting with "Convergence:". -->
+"""
+PLAN_REVIEW_HEAD = re.compile(r'^Plan review HEAD: ([0-9a-f]{40})[ \t]*$', re.M)
+QUESTION_CAP = 300
+QUESTION_LIMIT = 3
+
+
+def plan_section_heading(number, digest):
+    return f'## Plan review round {number} (report {digest})'
+
+
+def start_plan_dispositions(arguments):
+    """Append the host-written section for the current plan-review round (idempotent: a resume
+    whose last section already is that header adds nothing)."""
+    if len(arguments) != 1:
+        fail('Usage: start-plan-dispositions BASE')
+    number, digest = plan_round_current(arguments[0])
+    heading = plan_section_heading(number, digest)
+    path = Path(PLAN_DISPOSITIONS)
+    text = path.read_text() if path.exists() else PLAN_DISPOSITIONS_PREAMBLE
+    marks = list(PLAN_SECTION.finditer(text))
+    if marks and marks[-1].group(0).rstrip() == heading:
+        return
+    if any(mark.group(2) == digest for mark in marks):
+        fail(f'{PLAN_DISPOSITIONS} has a section for plan review round {number} that is not the last; '
+             'inspect it before revising.')
+    head = git('rev-parse', 'HEAD').decode().strip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic(path, text.rstrip('\n') + f'\n\n{heading}\n\nPlan review HEAD: {head}\n\n'
+           '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n')
+
+
+def plan_text_above(start, heading):
+    """What must stand above the round's section: START's text above the same header, else
+    START's whole file, else (no file at START) the host preamble."""
+    if subprocess.run(['git', 'cat-file', '-e', f'{start}:{PLAN_DISPOSITIONS}'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        return PLAN_DISPOSITIONS_PREAMBLE
+    old = committed_file(start, PLAN_DISPOSITIONS)
+    same = [mark for mark in PLAN_SECTION.finditer(old) if mark.group(0).rstrip() == heading]
+    return old[:same[0].start()] if same else old
+
+
+def task_statuses(text):
+    return {block['id']: next((line.split(':', 1)[1].strip() for line in block['lines']
+                               if line.startswith('Status:')), '') for block in task_blocks(text)}
+
+
+def bounded_questions(questions):
+    """At most three questions, each on one line of at most 300 characters, plus a pointer to the rest."""
+    lines = [' '.join(re.sub(r'<br\s*/?>', ' ', question, flags=re.I).split())[:QUESTION_CAP]
+             for question in questions[:QUESTION_LIMIT]]
+    if len(questions) > QUESTION_LIMIT:
+        lines.append(f'(+{len(questions) - QUESTION_LIMIT} more in {PLAN_DISPOSITIONS})')
+    return '\n'.join(lines)
+
+
+def plan_dispositions_check(arguments):
+    """plan-dispositions-check --since START --base BASE [--fresh] [--questions]: validate ONLY
+    the current plan-review round's section (contract in .ai/current-plan.md). Prints
+    'accepted=a rejected=r needs_human=h', or with --questions the bounded needs-human questions.
+    With --fresh (right after the revision), accepted findings must point to TODO tasks, every
+    task that existed at START keeps its status and every new task is TODO."""
+    options, flags, rest = {}, set(), list(arguments)
+    while rest:
+        name = rest.pop(0)
+        if name in ('--since', '--base') and rest:
+            options[name] = rest.pop(0)
+        elif name in ('--fresh', '--questions'):
+            flags.add(name)
+        else:
+            fail('Usage: plan-dispositions-check --since START --base BASE [--fresh] [--questions]')
+    if set(options) != {'--since', '--base'}:
+        fail('Usage: plan-dispositions-check --since START --base BASE [--fresh] [--questions]')
+    start = git('rev-parse', '--verify', f"{options['--since']}^{{commit}}").decode().strip()
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
+    number, digest = plan_round_current(options['--base'])
+    review = PLAN_REVIEW.read_text()
+    if not verified_plan_review(review):
+        fail('Plan review does not match the report ai-review published; Codex must review again.')
+    path = Path(PLAN_DISPOSITIONS)
+    if not path.exists():
+        fail(f'No {PLAN_DISPOSITIONS} for plan review round {number}.')
+    text = path.read_text()
+    heading = plan_section_heading(number, digest)
+    marks = list(PLAN_SECTION.finditer(text))
+    own = [mark for mark in marks if mark.group(2) == digest]
+    if not own:
+        fail(f'{PLAN_DISPOSITIONS} has no section for plan review round {number}.')
+    if len(own) > 1:
+        fail(f'{PLAN_DISPOSITIONS} has {len(own)} headers for plan review round {number}; keep only the host one.')
+    mark = own[0]
+    if mark.group(0).rstrip() != heading:
+        fail(f'The section header for plan review round {number} was changed; it must read: {heading}')
+    if mark is not marks[-1]:
+        fail(f'The section for plan review round {number} must be the last section.')
+    if text[:mark.start()].rstrip('\n') != plan_text_above(start, heading).rstrip('\n'):
+        fail(f'Text above the round {number} section changed: earlier sections and the preamble are read-only.')
+    body = re.sub(r'<!--.*?-->', '', text[mark.end():], flags=re.S)
+    heads = PLAN_REVIEW_HEAD.findall(body)
+    if len(heads) != 1 or subprocess.run(['git', 'merge-base', '--is-ancestor', heads[0], 'HEAD'],
+                                         stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'The round {number} section needs its host "Plan review HEAD:" line.')
+    required = finding_ids(review, 'BLOCKER') + finding_ids(review, 'MAJOR')
+    known = set(required + finding_ids(review, 'MINOR'))
+    rows = {}
+    for row in PLAN_DISPOSITION_ROW.finditer(body):
+        finding = row.group(1)
+        if finding not in known:
+            fail(f'Row for {finding}, which is not a finding of plan review round {number}.')
+        if finding in rows:
+            fail(f'Finding {finding} has more than one row in the round {number} section.')
+        rows[finding] = (row.group(2).lower(), row.group(3), row.group(4))
+    for finding in required:
+        if finding not in rows:
+            fail(f'Finding {finding} has no row in the round {number} section.')
+    queue = {task['id']: task['status'] for task in tasks()}
+    counts = {'accepted': 0, 'rejected': 0, 'needs-human': 0}
+    questions = []
+    for finding, (disposition, evidence, task_ref) in rows.items():
+        counts[disposition] += 1
+        if disposition == 'accepted':
+            refs = list(dict.fromkeys(re.findall(r'T\d{3,}', task_ref)))
+            if not refs:
+                fail(f'Accepted finding {finding} needs the task ID that answers it.')
+            unknown = [ref for ref in refs if ref not in queue]
+            if unknown:
+                fail(f'Accepted finding {finding} references unknown task {unknown[0]}.')
+            done = [ref for ref in refs if queue[ref] != 'TODO']
+            if '--fresh' in flags and done:
+                fail(f'Accepted finding {finding} must reference TODO tasks; {done[0]} is {queue[done[0]]}.')
+        elif disposition == 'rejected':
+            if len(evidence.strip()) < 15:
+                fail(f'Rejected finding {finding} needs concrete evidence.')
+        elif len(evidence.strip()) < 15:
+            fail(f'needs-human finding {finding} needs the question for the human.')
+        else:
+            questions.append(f'{finding}: {evidence.strip()}')
+    if number >= 3 and not CONVERGENCE_LINE.search(body):
+        fail(f'Plan review round {number} needs a Convergence: line in its section.')
+    if '--fresh' in flags:
+        before = task_statuses(committed_file(start, '.ai/tasks.md'))
+        for task_id, status in before.items():
+            if task_id not in queue:
+                fail(f'Task {task_id} was removed; a plan revision keeps existing tasks.')
+            if queue[task_id] != status:
+                fail(f'Task {task_id} changed status from {status} to {queue[task_id]}; '
+                     'a plan revision never changes task status.')
+        for task_id, status in queue.items():
+            if task_id not in before and status != 'TODO':
+                fail(f'New task {task_id} must be TODO, not {status}.')
+    if '--questions' in flags:
+        if questions:
+            print(bounded_questions(questions))
+        return
+    print(f"accepted={counts['accepted']} rejected={counts['rejected']} needs_human={counts['needs-human']}")
+
+
+def plan_revision_scope(arguments):
+    """Since START, only plan revision records changed (committed or not)."""
+    if len(arguments) != 1:
+        fail('Usage: plan-revision-scope START')
+    records_scope(arguments[0], PLAN_REVISION_RECORDS, 'Plan revision')
 
 
 RISK_TITLE = re.compile(
@@ -2583,6 +2767,12 @@ def main():
         plan_rounds(arguments)
     elif command == 'plan-history':
         plan_history(arguments)
+    elif command == 'start-plan-dispositions':
+        start_plan_dispositions(arguments)
+    elif command == 'plan-dispositions-check':
+        plan_dispositions_check(arguments)
+    elif command == 'plan-revision-scope':
+        plan_revision_scope(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':
