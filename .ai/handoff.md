@@ -109,7 +109,9 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   needs-human decision survives (no reviewer, revision, implementation or recovery session; the
   answer + hand `ai-review --plan` continues) `test_supervised_plan_resume_decision_after_*`;
   restart after the limit reviews first `test_supervised_plan_resume_human_restart_after_the_limit_reviews_first`;
-  host header pending check `test_plan_dispositions_pending_accepts_only_the_host_header`.
+  host header pending check `test_plan_dispositions_pending_accepts_only_the_host_header`;
+  simulated crashes never kill a process outside the test fixture (the host runner)
+  `test_supervised_plan_resume_crash_kill_stays_inside_the_fixture`.
 
 ## Human todos
 None beyond "Needs you" above.

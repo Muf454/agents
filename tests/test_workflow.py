@@ -37,19 +37,22 @@ Pending.
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
 def crash_kill(pid, pipeline):
-    # A simulated restart: kill the nearest ai-run ancestor and the pipeline, checking each
-    # name first so a stale pid can never hit an unrelated process.
-    def named(pid, *names):
+    # A simulated restart: kill the nearest ai-run ancestor and the pipeline. Only processes
+    # running in this fixture project count: the walk stops at the first ancestor outside it,
+    # so a test run inside a real pipeline session never reaches the host's ai-run.
+    root = os.path.realpath(os.getcwd())
+    def fixture(pid, *names):
         try:
-            return any(part.endswith(names) for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'))
+            return os.path.realpath(f'/proc/{pid}/cwd') == root and any(
+                part.endswith(names) for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'))
         except OSError:
             return False
-    while pid > 1:
-        if named(pid, b'/ai-run'):
+    while pid > 1 and fixture(pid, b''):
+        if fixture(pid, b'/ai-run'):
             os.kill(pid, 9)
             break
         pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
-    if named(pipeline, b'/ai-pipeline', b'/ai-recover'):
+    if fixture(pipeline, b'/ai-pipeline', b'/ai-recover'):
         os.kill(pipeline, 9)
 # Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
@@ -440,7 +443,8 @@ fired.touch()
 crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
 sys.exit(1 if HOOK == 'commit-msg' else 0)
 '''
-CRASH_HOOK = MOCK_CLAUDE[MOCK_CLAUDE.index('def crash_kill'):MOCK_CLAUDE.index('# Real CLIs')] + CRASH_HOOK
+CRASH_KILL = MOCK_CLAUDE[MOCK_CLAUDE.index('def crash_kill'):MOCK_CLAUDE.index('# Real CLIs')]
+CRASH_HOOK = CRASH_KILL + CRASH_HOOK
 
 
 class ToolkitTest(unittest.TestCase):
@@ -2474,6 +2478,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertTrue(self.open_stage().startswith('plan-revision '))
 
     # ---------------------------------------------------------------- supervised plan resume (T007)
+    def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):
+        # A fake host ai-run/ai-pipeline whose child calls crash_kill in the fixture: outside the
+        # fixture (the real runner of a session running these tests) it survives; inside it dies.
+        code = 'import os, pathlib\n' + CRASH_KILL + 'crash_kill(os.getppid(), os.getppid())\n'
+        for name in ('ai-run', 'ai-pipeline'):
+            fake = self.base / 'host-bin' / name
+            fake.parent.mkdir(exist_ok=True)
+            fake.write_text('#!/usr/bin/env bash\nenv -C "$1" python3 -c "$2"\necho survived\n')
+            fake.chmod(0o755)
+            for cwd, killed in ((self.base, False), (self.project, True)):
+                result = subprocess.run([str(fake), str(self.project), code], cwd=cwd,
+                                        capture_output=True, text=True, timeout=25)
+                self.assertEqual(result.returncode == -9, killed, (name, cwd, result.stdout + result.stderr))
+                self.assertEqual('survived' in result.stdout, not killed)
+
     def crash_hook(self, hook, subject):
         path = self.project / '.git/hooks' / hook
         path.write_text('#!/usr/bin/env python3\nimport os, pathlib, subprocess, sys\n'
