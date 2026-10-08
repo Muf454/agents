@@ -11,6 +11,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
+# Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
+# slower than a workstation). AI_TEST_TIMEOUT_SCALE stretches both on slow machines.
+TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
+PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
 
 
 def task(task_id, status='TODO', dependencies='none'):
@@ -522,9 +527,9 @@ class ToolkitTest(unittest.TestCase):
                         MOCK_SLEEP_LOG=str(self.base / 'sleep.log'), AI_SLEEP=str(self.mock_bin / 'mock-sleep'),
                         AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
-    def run_cmd(self, command, expected=0, env=None):
+    def run_cmd(self, command, expected=0, env=None, timeout=COMMAND_TIMEOUT):
         result = subprocess.run(command, cwd=self.project, env=env or self.env,
-                                capture_output=True, text=True, timeout=25)
+                                capture_output=True, text=True, timeout=timeout)
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -998,7 +1003,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$MOCK_STATE_DIR/systemctl.log"\n')
         (self.mock_bin / 'systemctl').chmod(0o755)
         result = subprocess.run([str(self.project / '.ai/bin/ai-watchdog'), str(self.project), '--install-timer'],
-                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=25)
+                                cwd=cwd, env=dict(self.env, **env), capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         units = self.config / 'systemd/user'
         hosts = self.base / 'xdg-data/ai-toolkit/watchdog'
@@ -1082,7 +1087,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def tool(self, name, *args, expected=0, **env):
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
-                            env=dict(self.env, **env))
+                            env=dict(self.env, **env),
+                            timeout=PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT)
 
     def test_setup_dry_run_preservation_and_repeatability(self):
         (self.project / 'CLAUDE.md').write_text('human instructions\n')
