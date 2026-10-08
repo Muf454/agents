@@ -124,3 +124,4 @@
 | 2026-10-08T07:30Z | claude (sonnet) | T002 | DONE: signal test resets SIGINT to default for the runner (background pipelines inherit it ignored); sleep removed; docs note | targeted 10 OK; ai-check 287 OK | (this commit) | SIGINT-ignored shell run not verified (denied); host gate decides |
 | 2026-10-08T07:10:55Z | runner | T002 | completed | PASS | 2a290d8 | Claude checkpointed; continuing queue |
 | 2026-10-08T07:13:02Z | runner | none | queue complete; ready for independent review | PASS | db4f729 | Human acceptance remains |
+| 2026-10-08T07:17:26Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/19 | PASS | 2cc4ce5 | Human acceptance and merge remain |
