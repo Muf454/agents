@@ -123,3 +123,4 @@
 | 2026-10-08T07:04:54Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 091c80e | No merge or deployment performed |
 | 2026-10-08T07:30Z | claude (sonnet) | T002 | DONE: signal test resets SIGINT to default for the runner (background pipelines inherit it ignored); sleep removed; docs note | targeted 10 OK; ai-check 287 OK | (this commit) | SIGINT-ignored shell run not verified (denied); host gate decides |
 | 2026-10-08T07:10:55Z | runner | T002 | completed | PASS | 2a290d8 | Claude checkpointed; continuing queue |
+| 2026-10-08T07:13:02Z | runner | none | queue complete; ready for independent review | PASS | db4f729 | Human acceptance remains |
