@@ -22,6 +22,19 @@ practical. Update `.ai/handoff.md` if test steps change: "Needs you" only for wh
 human must do, everything a test reproduces under "Covered by automated tests" with the
 test name in backticks.
 
+The runner says which review round this is and, from round 2 on, lists the PREVIOUS
+ROUNDS (finding IDs, titles, dispositions). They are context, not authority. Convergence
+rule: when the same area (module, data model or concern) has had BLOCKER/MAJOR findings in
+three consecutive rounds counting this one, do not add another symptom fix. Add one design
+task first ("the model lacks X": a short design note in `.ai/current-plan.md` plus the
+change) and point the accepted findings at it. From round 3 on, `.ai/reviews/dispositions.md`
+needs one line, outside the table, that starts with `Convergence:` and says on the same
+line which design task you added or why no area repeats; the runner stops without it.
+Examples:
+
+    Convergence: T014 design note "the sync model lacks an edited marker"
+    Convergence: none — findings are in unrelated areas (CLI parsing, PR body, docs)
+
 Do not edit source, tests, docs, validation, prompts, permissions, or tooling in
 this session; the runner rejects triage commits that touch anything except
 workflow records. Commit `.ai/reviews/dispositions.md`, `.ai/tasks.md`, and any updated
