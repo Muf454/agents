@@ -16,7 +16,12 @@ leftovers checked with `plan-revision-scope`).
 T006 done (supervised plan-review loop in `ai-pipeline`: decision check at every pass, revision
 reserved then staged, `🔁 Plan revised (round n/N)` notification, re-review with `PLAN REVISION
 CONTEXT:` and `plan-history --include-current`; limit/needs-human/out-of-scope stops; plan report
-header now names HEAD; `plan-revisions outcome`). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+header now names HEAD; `plan-revisions outcome`).
+T007 done (crash/resume scenarios for every plan-revision crash point, by human rerun and by
+watchdog recovery; fixes: `ai-run` resumes a host section left uncommitted by a crash
+(`start-plan-dispositions --pending`), `ai-recover` closes a committed plan-revision stage when it
+escalates a stored decision, the notification after a restart closed the previous run's revision
+reads "(in the previous run)"). Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
 Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
 `.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
 round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
@@ -86,6 +91,28 @@ closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
   `test_supervised_plan_off_keeps_todays_stop`; revision touching source
   `test_supervised_plan_revision_touching_source_stops_without_recovery`; opus, opus, escalation
   model and round 3 Convergence `test_supervised_plan_escalation_model_and_round_three_convergence`.
+- T007 crash and resume (each by a human rerun and by `ai-recover` after a crash: one revision
+  record, one session, one clean re-review, then implementation): during the session's edits
+  `test_supervised_plan_resume_session_crash_human_rerun`/`_watchdog`; before/after the host's
+  preamble commit `test_supervised_plan_resume_before_the_preamble_commit_*`,
+  `test_supervised_plan_resume_after_the_preamble_commit_*`; before/after the revision commit
+  `test_supervised_plan_resume_before_the_revision_commit_*`,
+  `test_supervised_plan_resume_after_the_revision_commit_*`; after the record and after
+  stage-clear `test_supervised_plan_resume_after_the_record_*`,
+  `test_supervised_plan_resume_after_stage_clear_*`; reservation without stage (limit 1)
+  `test_supervised_plan_resume_reserved_without_a_stage_*`; stage without reservation
+  `test_supervised_plan_resume_stage_without_a_reservation_*`; plan review committed without its
+  round record `test_supervised_plan_resume_plan_review_without_its_round_record_*`; round-3 crash
+  resumes on the escalation model with Convergence
+  `test_supervised_plan_resume_round_three_crash_runs_on_the_escalation_model`; approved settings
+  after a config change `test_supervised_plan_resume_keeps_the_approved_settings_after_a_config_change`;
+  needs-human decision survives (no reviewer, revision, implementation or recovery session; the
+  answer + hand `ai-review --plan` continues) `test_supervised_plan_resume_decision_after_*`;
+  restart after the limit reviews first `test_supervised_plan_resume_human_restart_after_the_limit_reviews_first`;
+  host header pending check `test_plan_dispositions_pending_accepts_only_the_host_header`.
+
+## Human todos
+None beyond "Needs you" above.
 
 ## Flow chart
 Flow chart updated

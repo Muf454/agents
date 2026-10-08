@@ -241,7 +241,9 @@ syncs and reads the round (`plan-rounds current BASE`, BASE = merge-base with `-
 `main`) and refuses a report that already has a revision record (`this plan review was already
 revised; review again (ai-review --plan)`). When the section already validates (an interrupted
 revision), it records it without a session; otherwise it appends the section, commits it as
-`chore(ai): open plan dispositions`, and runs one Claude session (default model `opus`) with
+`chore(ai): open plan dispositions` (the only uncommitted change it accepts beyond bookkeeping
+is exactly that host section, `start-plan-dispositions BASE --pending`: a crash before this
+commit), and runs one Claude session (default model `opus`) with
 `--tools Read,Glob,Grep,Edit` and `--allowedTools` from `workflow.py plan-revision-allowlist`
 (Read, Glob, Grep, and `Edit(./…)` of spec, plan, tasks, plan-dispositions and handoff; nothing
 from `.ai/permissions.allow`, no Bash or Write). The prompt is `.ai/prompts/plan-revision.md`
@@ -257,7 +259,9 @@ needs-human h`) and the state line, `git add` of the plan revision records, `git
 stdin) in `plan-revisions-<branch hash>.json`: `{commit, report_digest, round, accepted,
 rejected, needs_human, questions}`. Nothing writes to the checkout after the commit, so a
 following `ai-review --plan` starts on a clean checkout. The outcome log gets a `plan_revision`
-line (not part of `ai-status --outcomes`).
+line (not part of `ai-status --outcomes`). A crash after the commit but before the record
+leaves the stage `pending`: the resume records the revision with a second host commit (and a
+second run-log line); only the host record counts.
 
 `plan-revisions revised` exits 0 when the verified current plan review has a reachable revision
 record, 1 when not (`plan-revisions outcome`: the same, printing `round accepted rejected
@@ -296,7 +300,9 @@ Supervised plan-review loop (`ai-pipeline`, while no task is DONE and without
 <stored questions>`, the bounded text from the host record; exit 2 is a `Plan revision stage`
 stop); right after a completed stage, the notification `🔁 Plan revised (round n/N): accepted a,
 rejected r` (n = revisions reserved this run, N = `AI_SUPERVISE_PLAN_ROUNDS`, counts from the
-record; no checkout write, the revision's run-log line is already in its commit). A review is
+record; `(in the previous run)` when a human restart closed a revision recorded before it,
+which its fresh allowance does not count; no checkout write, the revision's run-log line is
+already in its commit). A review is
 due when the plan review is not current or the current report already has a revision record;
 it runs `ai-review --plan --base <base sha>`, is host-committed and recorded as the next round.
 No BLOCKER/MAJOR → implementation. Otherwise: `AI_SUPERVISE=0` → today's stop (`plan review
@@ -490,7 +496,9 @@ reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human s
 on finish) before any fallible work; a recorded needs-human plan revision for the current
 plan report (`plan-revisions decision` exit 0) escalates with the stored questions
 (`plan review needs your decision: …`), whatever the recorded reason (also a crash with no
-last-error) and before the attempt limit and any stage resume; an unreadable revision store
+last-error) and before the attempt limit and any stage resume; an open plan-revision stage
+whose `stage-verify` says `committed` is cleared first, so the run continues once the human's
+answer has a new plan review (the stage would be foreign to it); an unreadable revision store
 (exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
 `Triage stage`, `Plan revision stage`, `supervision limit reached`, `needs your decision`);

@@ -2151,6 +2151,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(self.revision_args()), 3)
         self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
 
+    def test_plan_dispositions_pending_accepts_only_the_host_header(self):
+        self.revise_ready()
+        pending = lambda expected: self.helper('start-plan-dispositions', 'main', '--pending', expected=expected)
+        pending(1)  # no file yet
+        self.helper('start-plan-dispositions', 'main')
+        pending(0)  # exactly the host's uncommitted header (a crash before its commit)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + '| P1 | rejected | the plan covers it in current-plan.md:12 | |\n')
+        self.assertIn('is not just the uncommitted host section header', pending(1).stderr)
+        self.commit('rows')
+        pending(1)  # committed: nothing pending
+
     # ---------------------------------------------------------------- plan revision stage (T005)
     def plan_stage_ready(self, findings='P1|Gap in tests', recoverable=False):
         """A MAJOR plan review, an approved run and an open plan-revision stage; returns START."""
@@ -2321,7 +2333,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.recovery_calls(), [])
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
         self.assertIn('needs your decision', (self.project / '.ai/local/last-error').read_text())
-        self.assertTrue(self.open_stage().startswith('plan-revision '))
+        # The recorded stage is closed (no resume): the human's answer gets a new plan review.
+        self.assertEqual(self.open_stage(), '')
         # An unreadable store escalates too, still without a session.
         next((self.base / 'host-state').rglob('plan-revisions-*.json')).write_text('{not json')
         self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
@@ -2635,7 +2648,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # The pipeline's host commit of the first plan review, then the crash before its record.
         self.hook_crash('post-commit', 'chore(ai): record plan review')
         self.assertEqual(self.plan_calls(), 1)
-        self.assertFalse(list((self.base / 'host-state').rglob('plan-rounds-*.json')))
+        self.assertEqual(json.loads(self.plan_store().read_text()), [])  # store initialised, no record
 
     def test_supervised_plan_resume_plan_review_without_its_round_record_human_rerun(self):
         self.rounds_crash()
@@ -2720,7 +2733,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_supervised_plan_resume_human_restart_after_the_limit_reviews_first(self):
         self.ready()
-        limit = dict(AI_SUPERVISE_PLAN_ROUNDS='1', MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        limit = dict(AI_SUPERVISE_PLAN_ROUNDS='1', MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject',
+                     MOCK_CONVERGENCE='Convergence: none — one gap, rejected each round')
         self.supervised('--no-pr', expected=1, **limit)
         self.assertIn('supervision limit reached (1 revisions this run)', (self.project / '.ai/local/last-error').read_text())
         self.commit_leftovers('record the stop')
