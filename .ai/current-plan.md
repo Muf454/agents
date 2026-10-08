@@ -1,9 +1,11 @@
 # Plan: FL-04 bounded supervisor
 
 Branch `feature/supervisor` from `master` (ba330ef), worktree `~/Projects/wt/agents-supervisor`.
-Revision 3 (answers plan review round 2, HEAD dfc03c8; revision 2 answered round 1, HEAD
-cc8c464; dispositions in `.ai/reviews/dispositions.md` → "Plan review round 1" and "Plan review
-round 2").
+Revision 4 (answers plan review round 3, HEAD dbe85f5; revision 3 answered round 2, HEAD dfc03c8;
+revision 2 answered round 1, HEAD cc8c464; dispositions in `.ai/reviews/dispositions.md` →
+"Plan review round 1/2/3"). Revision 4 removes the shared run budget (now OR-09, see the spec's
+decisions): supervision is bounded by counts plus the existing per-call timeouts. Tasks
+renumbered: T001–T010.
 
 ## Coordination
 `fix/catchup-review` (catch-up M1/M2: reviewer allowlist in `ai-review`/`workflow.py`, stopped-
@@ -15,13 +17,12 @@ is reviewed again against the merged baseline before T001 starts.
 | Record | Where | Written by | Used for |
 | --- | --- | --- | --- |
 | Settings `AI_SUPERVISE*` | run manifest `env` (`RUN_SETTINGS`) | `run-manifest start` | restored by `ai-recover` (T001) |
-| Run budget `{total, used, open}` (total from `AI_RUN_BUDGET` at a human start; the setting itself is not in `RUN_SETTINGS`) | run manifest `budget` | `run-budget open/close` from `ai-run --host-budget` | all `ai-run` calls of a pipeline run; gate for supervised steps (T002) |
-| Plan-review rounds `[{commit, report_digest, plan_digest, blockers, majors, minors}]` | `plan-rounds-<branch>.json` | `plan-rounds record BASE COMMIT` / `plan-rounds sync BASE` after the host commit of each plan review (idempotent per report digest) | round number n, history; counted only in `BASE..HEAD` (T003) |
-| Plan revisions `[{commit, report_digest, round}]` | `plan-revisions-<branch>.json` | `ai-run --revise-plan` after its counted commit | "revision done for this report" → re-review due; refuses a second revision (T005) |
-| Revisions reserved this run `[report_digest]` | run manifest `plan_revisions` | `run-manifest revision-reserve DIGEST LIMIT` BEFORE `stage-set` and again (idempotent) on every stage completion | per-run limit, counted once (T006) |
-| Stage `plan-revision start_head report_digest` | `stage-<branch>.json` (existing) | `stage-set plan-revision` | crash completion (T006) |
-| Fix rounds `[{commit, review_head, review_digest, blockers, majors}]` (legacy: bare hashes) | `fix-rounds-<branch>.json` (existing) | `fix-rounds record` in `ai-run --triage` | count (as today) + trend (T009) |
-| Extra fix round reserved `review_digest` | run manifest `extra_fix_round` | before the extra triage stage | once per run (T009) |
+| Plan-review rounds `[{commit, report_digest, plan_digest, blockers, majors, minors}]` | `plan-rounds-<branch>.json` | `plan-rounds record BASE COMMIT` / `plan-rounds sync BASE` after the host commit of each plan review (idempotent per report digest) | round number n, history; counted only in `BASE..HEAD` (T002) |
+| Plan revisions `[{commit, report_digest, round, accepted, rejected, needs_human, questions}]` | `plan-revisions-<branch>.json` | `ai-run --revise-plan` right after its counted commit, in one write (outcome included) | "revision done for this report" → re-review due; refuses a second revision; durable needs-human decision (T004) |
+| Revisions reserved this run `[report_digest]` | run manifest `plan_revisions` | `run-manifest revision-reserve DIGEST LIMIT` BEFORE `stage-set` and again (idempotent) on every stage completion | per-run limit, counted once (T005) |
+| Stage `plan-revision start_head report_digest` | `stage-<branch>.json` (existing) | `stage-set plan-revision` | crash completion (T005) |
+| Fix rounds `[{commit, review_head, review_digest, blockers, majors}]` (legacy: bare hashes) | `fix-rounds-<branch>.json` (existing) | `fix-rounds record` in `ai-run --triage` | count (as today) + trend (T008) |
+| Extra fix round reserved `review_digest` | run manifest `extra_fix_round` | before the extra triage stage | once per run (T008) |
 
 Round numbering: plan-review round n = position of the current `.ai/reviews/plan.md` (its report
 digest must be the last record) among this branch's plan-round records whose commit is in
@@ -40,18 +41,14 @@ BASE` (round n) and the manifest-restored settings (`opus`, or `AI_SUPERVISE_ESC
 n ≥ `AI_SUPERVISE_ESCALATE_ROUND`); `complete_plan_stage` always calls it, so a fresh start and a
 resume of the same revision use the same model.
 
-## Run budget details (T002)
-`AI_RUN_BUDGET` (seconds, `^[1-9][0-9]{0,6}$`, default 57600) is read by `ai_config` from the
-user config or environment, validated by `ai-pipeline` at a human start before any agent, and
-captured only as the manifest budget total; a resume never reads it (the total is already in the
-manifest), so it is deliberately not in `RUN_SETTINGS`/`ai-recover`'s lists. A remaining budget
-below `BUDGET_FLOOR` (60 s) counts as exhausted everywhere (`run-budget open` fails,
-`run-budget remaining` prints 0), so no Claude session starts on a sliver. Under `--host-budget`,
-`ai-run` dies with `Run budget exhausted (used U of T s)` when the budget (not the per-call
-`--run-timeout` cap) is what ran out; that reason is always-escalate in `ai-recover`, so no
-recovery session is spent. The per-call cap keeps today's recoverable "Run time limit reached".
+## Limits (no run budget)
+Per human-started run: ≤ `AI_SUPERVISE_PLAN_ROUNDS` revisions (manifest reservation), ≤ 1 extra
+fix round (manifest reservation), ≤ 1 format retry per review call. Each revision is an
+`ai-run --revise-plan` call with the default per-call `--run-timeout` and the pipeline's
+`--session-timeout`; reviews keep `--review-timeout`; usage-limit pauses keep
+`AI_LIMIT_MAX_WAIT`. A cumulative run/wait budget is OR-09 (later batch).
 
-## Plan-dispositions section contract (T004)
+## Plan-dispositions section contract (T003)
 Host writes (idempotent, appended) before the session:
 
     ## Plan review round <n> (report <64-hex report digest>)
@@ -72,62 +69,86 @@ queue passes `tasks check`, every pre-existing task keeps its status and every n
 (no invented DONE work; the "no task DONE" plan gate stays). Prints
 `accepted=a rejected=r needs_human=h`. `--questions` prints at most 3 needs-human questions, each
 whitespace-collapsed to one line and capped at 300 chars (like `recover_decision`), plus
-`(+k more in .ai/reviews/plan-dispositions.md)`; only this bounded text reaches
-`.ai/local/last-error` and notifications.
+`(+k more in .ai/reviews/plan-dispositions.md)`; only this bounded text reaches the revision
+record, `.ai/local/last-error` and notifications.
 
-## Pipeline plan-review loop (T007)
+## Revision host commit and record (T004)
+After the section validates, `ai-run --revise-plan` in this order: `ai_log plan-revision
+"plan revised (round n): accepted a, rejected r, needs-human h"` and the state line; `git add`
+the R1 records that exist (incl. `.ai/run-log.md`); `git commit --allow-empty -m 'chore(ai):
+record plan revision'`; `ai_guard_verify`; ONE `plan-revisions record HEAD` write holding the
+counts and the bounded `--questions` text; then the clean-checkout and scope checks. Nothing is
+written to the checkout after the commit, so the re-review's clean-checkout precondition
+(`scripts/ai-review:184`) holds. The pipeline only notifies after the stage (no `ai_log`).
+
+`plan-revisions decision`: exit 0 and print the stored questions when the verified current
+`.ai/reviews/plan.md` has a revision record (commit reachable from HEAD) with `needs_human > 0`;
+exit 1 silently when not; exit 2 on an unreadable store or report (callers fail closed). Called
+by the pipeline at every loop entry (T006) and by `ai-recover` before any Claude session (T005).
+The decision clears only when the report changes: the human answers, commits and runs
+`ai-review --plan` by hand.
+
+## Pipeline plan-review loop (T006)
 
 ```mermaid
 flowchart TD
   A[start / resume] --> Y[plan-rounds sync BASE]
   Y --> S{open plan-revision stage?}
   S -- yes --> C[complete_plan_stage]
-  S -- no --> R{plan review current AND no recorded revision for this report?}
-  C --> N
+  S -- no --> D
+  C --> D{plan-revisions decision: needs-human recorded for this report?}
+  D -- yes --> H3[stop: plan review needs your decision: stored questions]
+  D -- no --> P[notify 🔁 Plan revised, only right after C; no checkout write]
+  P --> R{plan review current AND no recorded revision for this report?}
   R -- no --> V[ai-review --plan with plan history + last dispositions; host commit; plan-rounds record]
   R -- yes --> K
   V --> K{BLOCKER+MAJOR > 0?}
   K -- no --> I[implementation]
   K -- yes --> O{AI_SUPERVISE=1?}
   O -- no --> H1[stop: plan review found ...]
-  O -- yes --> L{budget left?}
-  L -- no --> H2[stop: Run budget exhausted]
-  L -- yes --> Q{revision-reserve DIGEST LIMIT: already reserved, or reserved this run < PLAN_ROUNDS?}
+  O -- yes --> Q{revision-reserve DIGEST LIMIT: already reserved, or reserved this run < PLAN_ROUNDS?}
   Q -- no --> H4[stop: supervision limit reached]
   Q -- yes --> T[stage-set plan-revision] --> C
-  N{needs-human rows?}
-  N -- yes --> H3[stop: plan review needs your decision: questions]
-  N -- no --> P[log + notify 🔁 Plan revised] --> R
 ```
+
+The decision check (D) runs at startup and after every stage completion, before any re-review,
+revision or implementation, so a crash between stage closure and the question check cannot skip
+it (the resume reaches D through S → no stage). After C the recorded revision makes R say "review
+needed", so every revision is followed by a fresh review (V records its own round).
 
 `complete_plan_stage` (fresh start and resume alike): `stage-verify`; `committed` → `stage-clear`;
 `pending` → `revision-reserve DIGEST LIMIT` again (idempotent; a stage opened by a crash-
 interrupted start is counted here), `plan_revision_model`, `ai-run --approved --revise-plan --since
-START --base BASE --model M --host-budget`, `stage-verify` must say `committed`, `stage-clear`.
+START --base BASE --model M` (plus `--session-timeout`/`--knowledge-dir` as `triage_args`),
+`stage-verify` must say `committed`, `stage-clear`. The revision record (with its outcome) is
+written before `stage-verify` can say `committed`, so it always exists before `stage-clear`.
 Reserve-before-stage means a crash between the two leaves a reservation without a stage; the
 resume finds the digest already reserved (no second count, no limit stop) and opens the stage.
 
-`H1`–`H4` and "Plan revision stage" failures are terminal: `ai-recover` escalates them without a
-Claude session (T006). Plan reviews after a revision get `PLAN REVISION CONTEXT` (round n, the
-previous section's location, rendered plan history); never implementation-review history.
+`H1`, `H3`, `H4` and "Plan revision stage" failures are terminal: `ai-recover` escalates them
+without a Claude session (T005), and it also escalates whenever `plan-revisions decision` says a
+needs-human decision is recorded, whatever the stop reason (a crash leaves no such message). Plan
+reviews after a revision get `PLAN REVISION CONTEXT` (round n, the previous section's location,
+rendered plan history); never implementation-review history.
 
-## Format retry (T010)
+## Format retry (T009)
 `review-format-check plan|code REPORT` = exactly the content checks `publish-plan-review` /
 `publish-review` run (shared function, no writes). `ai-review` runs it after `run_review`; on
-failure (and `AI_SUPERVISE` on, budget left under the pipeline) it notifies, keeps the first
-report in `.ai/local/`, reruns `run_review` once with `FORMAT ERROR: <message>. Return the full
-report again in the required structure.`, then publishes (a second format failure dies as today).
-After a retried publish it appends a run-log line; the pipeline's `review_record` commits
-`.ai/run-log.md` with the review when dirty.
+failure (and `AI_SUPERVISE` on) it notifies, keeps the first report in `.ai/local/`, reruns
+`run_review` once with `FORMAT ERROR: <message>. Return the full report again in the required
+structure.`, then publishes (a second format failure dies as today). After a retried publish it
+appends a run-log line; the pipeline's `review_record` commits `.ai/run-log.md` with the review
+when dirty.
 
 ## Task order
-T001 settings → T002 run budget → T003 plan-round records/history → T004 section + validator →
-T005 `ai-run --revise-plan` → T006 stage + recovery → T007 pipeline loop → T008 crash/resume
-scenarios → T009 extra fix round → T010 format retry → T011 docs reconciliation/handoff.
+T001 settings → T002 plan-round records/history → T003 section + validator → T004 `ai-run
+--revise-plan` (commit, record, decision) → T005 stage + recovery → T006 pipeline loop → T007
+crash/resume scenarios → T008 extra fix round → T009 format retry → T010 docs
+reconciliation/handoff.
 Test fixture: T001 sets `AI_SUPERVISE='0'` in `ToolkitTest.setUp` (same pattern as
 `AI_AUTO_RECOVER='0'`), so existing plan-stop, malformed-review and counts-lie tests keep today's
 behaviour unchanged; supervised tests opt in with `AI_SUPERVISE='1'` per call.
-Flow-changing tasks (T002, T006, T007, T009, T010) update vault `agents-flow.md` (+ `updated:`)
+Flow-changing tasks (T005, T006, T008, T009) update vault `agents-flow.md` (+ `updated:`)
 and set the handoff `## Flow chart` line to "Flow chart updated" themselves; this needs the
 pipeline started with `--knowledge-dir "$HOME/zWiki/zWiki/20 Projects/agents"`. Without vault
 access a task records the limitation in its result and adds the chart change to the handoff
@@ -139,8 +160,9 @@ access a task records the limitation in its result and adds the chart change to 
 `plan.md`/`current.md` checks are the defense in depth.
 
 ## Risks
-- Budget semantics change for long pipelines with fix rounds (now one shared allowance):
-  documented; Zack may raise `--run-timeout`.
+- No cumulative budget: a run can use up to `AI_SUPERVISE_PLAN_ROUNDS` revisions plus one extra
+  fix round on top of today's calls, each under its per-call limits; Zack lowers
+  `AI_SUPERVISE_PLAN_ROUNDS` or sets `AI_SUPERVISE=0` to tighten it. OR-09 adds the shared budget.
 - `fix-rounds` record format change: legacy bare hashes must keep counting and closing triage
   stages (`stage_verify`), they just carry no counts (insufficient history → no extra round).
 - New prompt `plan-revision.md` reaches this repo's frozen `.ai/prompts` only via a human

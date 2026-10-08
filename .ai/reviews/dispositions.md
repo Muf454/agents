@@ -66,3 +66,23 @@ T006 now also depends on T001). Run budget unchanged (Zack's Q2: 16 h cumulative
 
 Also from the review's "Missing coverage": T009 gains the legacy-round-1 trend boundary test and
 T010 asserts the retried `run_review` still fails the `unchanged` check on a mutating second call.
+
+## Plan review round 3 (HEAD dbe85f5)
+
+Report: `.ai/reviews/plan.md` (plan digest 1249c96c…, BLOCKER=1 MAJOR=4 MINOR=2). Planner (Claude,
+for mission control) 2026-10-08. Each finding verified against the code at dbe85f5; none rejected.
+Plan rewritten as revision 4: the shared run budget (old T002) is removed by mission control's
+decision and stays OR-09; tasks renumbered T001–T010 (old T003→T002 … old T011→T010). Task IDs
+below are the new ones.
+
+Convergence: the run budget drew findings in all three rounds (round 1 P4, round 2 P6/P7, round 3 P3/P4/P5/P7), so it is removed as a whole instead of patched again; supervision is bounded by counts (≤ `AI_SUPERVISE_PLAN_ROUNDS` revisions, ≤ 1 extra fix round, ≤ 1 format retry) plus the existing per-call timeouts, and the remaining revision-path findings (P1, P2) are fixed by making the host's counted commit and record the single place where the revision's log entry and outcome are persisted.
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 | accepted | `ai_log` appends to tracked `.ai/run-log.md` (`scripts/lib/common.sh:208-213`) and plan review dies on any dirty file (`scripts/ai-review:184`); old T007 logged after `stage-clear`. Now `ai-run --revise-plan` writes the log entry and state line before its counted commit and adds `.ai/run-log.md` to it (as triage does, `scripts/ai-run:217-227`); nothing writes the checkout after the commit; the pipeline only notifies. T004 asserts a clean checkout and a startable hand-run `ai-review --plan` after a revision; T006 runs with real logging and the mock Codex records `git status --porcelain` per call, asserting clean at the second plan-review call. | T004, T006, T007 |
+| P2 | accepted | Old `complete_plan_stage` cleared the stage and only then read the section for needs-human; a crash between them left a recorded revision, so the next pass re-reviewed, and `ai-recover` (`scripts/ai-recover:101-106`) only matches written messages. Now the `plan-revisions` record stores accepted/rejected/needs_human and the bounded questions in the same write that makes `stage-verify` say `committed` (always before `stage-clear`); `plan-revisions decision` is checked by the pipeline at startup and after every stage completion before any re-review/revision/implementation, and by `ai-recover` before any Claude session whatever the reason. It clears only when the report changes (the human answers, commits, runs `ai-review --plan`). T007 crash point 5: human rerun and watchdog recovery stop with the questions, no reviewer, revision, implementation or recovery session. | T004, T005, T006, T007 |
+| P3 | accepted | Correct (old T002's `min(now − start, grant)` contradicted the spec's full-grant charge). Resolved by removing the shared run budget from this batch (no stale-grant accounting exists any more); OR-09 must charge the full grant once when it adds the budget. | none (budget removed; OR-09) |
+| P4 | accepted | Correct (`timeout` exit 124 at the budget boundary gave "Claude exited 124", `scripts/ai-run:145,171`, not the always-escalate reason). Resolved by removing the budget: an exhausted per-call `--run-timeout` keeps today's recoverable path, there is no host budget to exhaust. Recorded for OR-09: one exhaustion classifier for every budget-bound exit. | none (budget removed; OR-09) |
+| P5 | accepted | Correct (old loop gated only before a revision, not before the re-review). Resolved by removing the budget: the re-review after a revision needs no budget gate; the revision count (`revision-reserve`) still bounds the loop and a re-review is a Codex call with its own `--review-timeout`. | none (budget removed; OR-09) |
+| P6 | accepted | Old T002 (budget) needed T001's config key; that task is gone and `AI_RUN_BUDGET` no longer exists. The new T002 (plan-round records) also changes `scripts/ai-review` (T001 adds its settings check) and its tests rely on T001's fixture default `AI_SUPERVISE='0'`, so it now declares `Dependencies: T001`; every task reading `AI_SUPERVISE*` depends on T001 directly or transitively. | T002 |
+| P7 | accepted | Correct (old T002/risks called `--run-timeout` the whole-run limit). Resolved by removing the budget: `--run-timeout` stays the per-call cap it is today, docs describe no cumulative allowance, the risk line now says how to tighten supervision (`AI_SUPERVISE_PLAN_ROUNDS`, `AI_SUPERVISE=0`), and T010 requires docs not to promise a cumulative budget. | T010 |
