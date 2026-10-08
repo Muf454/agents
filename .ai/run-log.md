@@ -118,3 +118,4 @@
 | 2026-10-08T05:08:54Z | claude (mission control) | plan rev 7 | plan review round 7 (0/2/1): P1/P2 deferred with the crash-durable marker tasks (backlog CU-5), P3 accepted; 2 tasks remain | — | (this commit) | convergence: simplify |
 | 2026-10-08T05:20Z | claude (opus) | T001 | DONE: Claude reviewer Read/Glob/Grep only, host-prepared `.ai/local/review-context/` per mode, `review-range`, docs/prompt/flow chart | targeted 25 OK; ai-check 279 OK | (this commit) | handoff gained `## Flow chart`; live CLI check pending (mission control) |
 | 2026-10-08T05:23:17Z | runner | T001 | completed | PASS | 86a99f8 | Claude checkpointed; continuing queue |
+| 2026-10-08T05:36:19Z | runner | T002 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38dcdaa | No merge or deployment performed |
