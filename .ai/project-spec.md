@@ -54,9 +54,12 @@ User config (`~/.config/ai-toolkit/config`) or environment, validated before any
 captured in the run manifest and restored on recovery resumes (a changed config file does not
 change a running run): `AI_SUPERVISE` (0|1, default 1), `AI_SUPERVISE_PLAN_ROUNDS` (0–9, default
 3), `AI_SUPERVISE_ESCALATE_ROUND` (1–9, default 3), `AI_SUPERVISE_ESCALATE_MODEL` (model name,
-default `claude-fable-5-1`).
+default `claude-fable-5-1`). The validated values are exported, and `ai-review`/`ai-run` validate
+them too, so children never see a raw value. `AI_RUN_BUDGET` (seconds, default 57600) is read the
+same way but validated only at a human `ai-pipeline` start and kept only as the manifest budget
+total (see decisions).
 
-## Decisions (planning, 2026-10-07; plan review round 1)
+## Decisions (planning, 2026-10-07; plan review rounds 1–2)
 - **Run budget (Zack's Q2 decision, 2026-10-05, OR-09 defaults: 16 h work + 12 h waiting per
   approved run, cumulative across recoveries and fix rounds).** One host-owned budget of Claude
   session time for the whole human-started pipeline run, default 57600 s (16 h, `AI_RUN_BUDGET`):
@@ -69,7 +72,9 @@ default `claude-fable-5-1`).
   start (fails closed). Reviews are Codex/fallback time with their own `--review-timeout` and are
   not charged, but no supervised step (revision, re-review after it, extra fix round, format
   retry) starts when the budget is exhausted; exhaustion stops for the human ("Run budget
-  exhausted"). Hand-run `ai-run` keeps its per-invocation `--run-timeout`.
+  exhausted"; also when it runs out inside an `ai-run --host-budget` call, and below a 60 s
+  floor, so no recovery session or sliver session starts). Hand-run `ai-run` keeps its
+  per-invocation `--run-timeout`.
 - **Separate plan-dispositions file.** Plan-round sections live in
   `.ai/reviews/plan-dispositions.md`, not `dispositions.md`: `start-dispositions` rewrites
   `dispositions.md` for every code review and triage/re-check scan all of its rows, so plan rows
@@ -84,8 +89,11 @@ default `claude-fable-5-1`).
 - All-rejected, dispositions-only revision → a second plan-review call before any implementation.
 - Limit reached, needs-human, budget exhausted, out-of-scope revision → human stop; with
   `AI_AUTO_RECOVER=1` no recovery Claude session runs.
-- Crash before the revision commit, after it, and after stage closure → resume completes and
-  counts the revision exactly once and runs the re-review once.
+- Crash between reservation and stage start, before the revision commit, after it, and after
+  stage closure, and between a plan review's host commit and its round record → resume completes
+  and counts the revision exactly once, runs the re-review once, and a round-≥3 revision resumes
+  on the escalation model.
+- Plan rounds count only from the run's base, so a re-created branch name starts at round 1.
 - Extra fix round only for a strictly falling host-verified trend, once per run.
 - Malformed plan/code review retried once; integrity failures and re-checks never retried.
 - `AI_SUPERVISE=0` → today's behaviour in all three areas.

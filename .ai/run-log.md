@@ -112,3 +112,4 @@
 | 2026-10-07T18:37:23Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/18 | PASS | 640ceee | Human acceptance and merge remain |
 | 2026-10-07T18:48:25Z | claude (mission control) | plan | FL-04 bounded supervisor: spec, plan, T001–T006 (Zack: before the dashboard) | — | (this commit) | |
 | 2026-10-07T19:09:48Z | claude (opus planning + mission control) | plan rev 2 | plan review round 1 (0/10/1) all accepted: 11 tasks (9 opus); run budget = Zack's Q2 (16 h cumulative); plan dispositions in their own file | — | (this commit) | |
+| 2026-10-08T05:06:33Z | claude (opus planning) | plan rev 3 | plan review round 2 (Fable 0/1/7) accepted: reserve before stage-set, model in the stage record, budget wiring | — | (this commit) | |
