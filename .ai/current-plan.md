@@ -60,7 +60,7 @@ Host writes (idempotent, appended) before the session:
 
 `plan-dispositions-check` validates ONLY that section (heading unique, last section, and the text
 above it byte-identical to: START's text above the same header when START's file has that header
-(resume after the session committed its rows); else START's whole file; else, when the file did
+(resume after the session wrote its rows; the host commits them); else START's whole file; else, when the file did
 not exist at START, the exact host preamble (title + contract comment)): exactly one row per BLOCKER/MAJOR ID of
 the verified current plan review, no rows for unknown IDs, no duplicates (MINOR rows optional);
 `accepted` → ≥1 `T###` that exists and is TODO; `rejected` → evidence ≥ 15 chars; `needs-human` →
@@ -155,7 +155,7 @@ access a task records the limitation in its result and adds the chart change to 
 "Needs you" list instead of claiming it.
 
 ## Revision session boundary
-`ai-run --revise-plan` passes `--tools Read,Glob,Grep,Edit,Bash` (no `Write`) and the
+`ai-run --revise-plan` passes `--tools Read,Glob,Grep,Edit` (no Bash, no `Write`; the host prepares context and commits) and the
 `plan-revision-allowlist`; the host scope check after the session and the byte-identical
 `plan.md`/`current.md` checks are the defense in depth.
 

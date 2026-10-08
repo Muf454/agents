@@ -1,5 +1,14 @@
 # Review dispositions (Claude)
 
+## Plan review round 5 (HEAD 03d8fba, 2026-10-08): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 decision check first-run/invalid-report contract | accepted | Initial-state contract and tests added. | T004, T002 |
+| P2 revision-session contract contradicts itself | accepted | Plan and T004 tests said Bash/session commit; now Read,Glob,Grep,Edit everywhere, host commits; crash points moved. | T004, T007 |
+| P3 reviewer label after retries | accepted | Per-attempt metadata reset; fallback→Codex retry test. | T009 |
+
+
 ## Plan review round 4 (HEAD 93ced44, 2026-10-08): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
 
 | Finding | Disposition | Evidence / reason | Fix task |
