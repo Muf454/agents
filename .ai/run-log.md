@@ -126,3 +126,4 @@
 | 2026-10-08T09:40:00Z | claude (opus) | T004 | ai-run --revise-plan (Read/Glob/Grep/Edit session, host commit with run-log line, plan-revisions record/revised/decision), plan-revision.md prompt, plan_revision outcome; docs/workflow.md; 9 tests | ai-check OK (299 tests) | (this commit) | this repo's .ai/prompts needs setup-project --upgrade (human) |
 | 2026-10-08T09:23:59Z | runner | T004 | completed | PASS | 0767f09 | Claude checkpointed; continuing queue |
 | 2026-10-08T10:11:08Z | claude (opus) | T005 | plan-revision stage (stage-set/verify by name), run-manifest revision-reserve/count, complete_plan_stage + round model in ai-pipeline, ai-recover decision check before limit/resume + new escalate reasons + stage scope; docs, README, vault flow chart; 8 tests | ai-check OK (307 tests) | (this commit) | resumed interrupted partial diff |
+| 2026-10-08T10:14:01Z | runner | T005 | completed | PASS | 20c2a28 | Claude checkpointed; continuing queue |
