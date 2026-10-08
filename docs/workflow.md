@@ -348,9 +348,21 @@ and passes the resolved SHA to `ai-review`, the fix-round counter and the disput
 The PR target is still inferred from the name `B`. A rerun resolves again, so the base
 can advance between runs after a fetch.
 
+Base moved past the branch (FL-17): when the resolved base is not an ancestor of HEAD,
+no review can ever be current, so the run stops at the start with `Review base <ref>
+(<sha>) moved past the branch; merge it into <branch> and rerun ai-pipeline`, before the
+plan review, implementation and code review. An interrupted review triage and a pending
+re-check are completed first (both act only on the already published review, and their
+scope checks would reject a merge made while they are open); merge only after this stop.
+Without either, no agent runs at all. The base is fixed for a run and HEAD only gains
+commits, so one check per start suffices; a rerun re-resolves the base and checks again.
+`publish_ready` names the same case (history rewritten by a hook) before its "review
+current" check, and `ai-recover` escalates it by hard rule with the full message on stderr.
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push attempt (failed or successful, before the retry
-wait), the review must verify and be current for HEAD (only workflow records changed
+wait), the review base must be an ancestor of HEAD (else "moved past the branch"), the
+review must verify and be current for HEAD (only workflow records changed
 since the reviewed commit), the validation stamp must be current, the tree clean
 (untracked files too), the committed bytes equal to the validated files on disk
 (`committed-matches-worktree`) and all tasks DONE; a push hook that commits other bytes
@@ -394,7 +406,8 @@ digest must equal the manifest's, the branch must be the manifest's, then one at
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
-`Triage stage`);
+`Triage stage`, and the review base that moved past the branch, whose full recorded
+reason is printed to stderr before the escalation summary);
 an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage stage for the
 branch (also after a watchdog crash recovery) it never commits anything: changes since
 the stage start outside triage records escalate, otherwise it resumes without a Claude

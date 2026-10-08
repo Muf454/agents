@@ -275,10 +275,14 @@ tmux new -s my-app-ai
    required. The review itself compares against `origin/<base>` when that is strictly
    ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
    PRs into the review); the run prints `Review base: <ref> at <sha>`, warns when the two
-   have diverged (then local wins), and never fetches. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   have diverged (then local wins), and never fetches. If that base has moved past your
+   branch, the run stops at the start ("Review base … moved past the branch; merge it
+   into <branch> and rerun"), after finishing any interrupted triage or re-check and
+   before any other agent runs: merge the base only after that stop, then rerun.
+   Recovery escalates this stop and keeps the full message. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every review it requires that the committed bytes equal the validated files.
-   Before and after every push attempt (failed or not) it re-checks that the review is
-   current for HEAD, validation is current, the tree is clean, the committed bytes
+   Before and after every push attempt (failed or not) it re-checks that the base is
+   still contained in HEAD, that the review is current for HEAD, validation is current, the tree is clean, the committed bytes
    equal the validated files and all tasks are DONE, and after a push that origin's
    branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).

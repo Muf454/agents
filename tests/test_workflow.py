@@ -3087,6 +3087,152 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', sha, '--no-pr')
         self.assert_reviewed_against(result, sha, sha)
 
+    # ---------------------------------------------------------------- base moved past the branch (FL-17)
+    def base_moved_message(self, ref, sha):
+        short = self.git_out('rev-parse', '--short', sha)
+        return f'Review base {ref} ({short}) moved past the branch; merge it into feature/test and rerun ai-pipeline'
+
+    def codex_calls(self):
+        calls = self.base / 'codex-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def test_base_moved_stops_before_any_agent(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        for base in ('main', 'origin/main'):
+            with self.subTest(base=base):
+                result = self.tool('ai-pipeline', '--approved', '--base', base, '--no-pr', expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertIn('Pipeline stopped during start', result.stderr)
+                self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+                self.assertFalse((self.base / 'codex-prompts.log').exists())
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn('moved past the branch; merge it', notes)
+        # Merging the base is the fix: the rerun proceeds normally.
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+
+    def test_base_moved_recovery_escalates_without_claude(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn(message, result.stderr)
+        self.assertIn('escalated to the human: the review base moved past the branch.', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertEqual((self.project / '.ai/local/last-error').read_text().strip(), message)
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn(f'Review base origin/main ({self.git_out("rev-parse", "--short", sha)})', notes)
+
+    def open_triage_stage_with_origin(self, counted):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        head = self.git_out('rev-parse', 'HEAD')
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        if counted:
+            self.tool('ai-run', '--approved', '--triage', '--since', head)
+            self.assertEqual(self.triage_rounds(), 1)
+        return self.advance_origin_main()
+
+    def assert_triage_settled_then_merge(self, sha):
+        reviews = self.codex_calls()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX='major-once')
+        self.assertIn('Completing the interrupted review triage', result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertIn(self.base_moved_message('origin/main', sha), result.stderr)
+        self.assertEqual(self.codex_calls(), reviews)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertNotIn('Triage stage', result.stderr)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    def test_base_moved_with_pending_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=False))
+
+    def test_base_moved_with_counted_open_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=True))
+
+    def test_base_moved_with_pending_recheck(self):
+        self.origin_with_main()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CODEX='two-major-once',
+                  MOCK_CLAUDE='triage-mixed-reject', MOCK_RECHECK_FAIL='1')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+        reviews = self.subjects().count('chore(ai): record independent review')
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_RECHECK=self.UPHELD_M2)
+        calls = self.recheck_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('M2\tMAJOR\tthe second defect is handled by the gate', calls[1])
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertIn(message, result.stderr)
+        self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.subjects().count('chore(ai): record independent review'), reviews)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=self.UPHELD_M2)
+        self.assertNotIn('Re-check:', result.stderr)
+        self.assertEqual(len(self.recheck_calls()), 2)
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('--draft', self.created_prs()[0])
+
+    def rewrite_history_while_recording_review(self):
+        """main gains the plan commit; a hook then reparents HEAD onto main^ (same tree, clean
+        checkout, merge-base kept), so main is no longer an ancestor at the publish check."""
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'branch', '-f', 'main', 'HEAD'])
+        self.hook('post-commit', '[[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]] || exit 0\n'
+                                 'git reset -q --soft "$(git commit-tree "HEAD^{tree}" -p main^ -m \'hook: rewritten history\')"\n')
+        return origin
+
+    def assert_publish_names_the_base(self, origin, result):
+        prefix = 'Publish check failed at pull request preparation: Review base main ('
+        for text in (result.stderr, (self.project / '.ai/local/last-error').read_text()):
+            self.assertIn(prefix, text)
+            self.assertIn('moved past the branch; merge it into feature/test', text)
+            self.assertNotIn('reviewed content changed', text)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+        self.assertIn('⛔', self.notifications())
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_base_moved_publish_check_names_the_base(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='1')
+        self.assert_publish_names_the_base(origin, result)
+        self.assertIn('escalated to the human', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_base_moved_publish_check_without_recovery(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_publish_names_the_base(origin, result)
+        self.assertNotIn('escalated to the human', result.stderr)
+
     def test_failed_final_push_is_reported_not_hidden(self):
         self.ready()
         self.add_origin()
