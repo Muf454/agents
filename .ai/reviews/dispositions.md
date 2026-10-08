@@ -1,5 +1,14 @@
 # Review dispositions (Claude)
 
+## Plan review round 4 (HEAD 93ced44, 2026-10-08): BLOCKER 0, MAJOR 1, MINOR 2 — all accepted
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 revision allowlist allows Bash write/exec routes | accepted | Same class the catch-up fix removed from reviewers. The revision session gets Read/Glob/Grep/Edit(records) only; host prepares context and commits. | T004 |
+| P2 format retries not logged | accepted | Run-log entry for every retry and outcome, checkout clean between calls. | T009 |
+| P3 README deferred | accepted | README updates in T005 and T009. | T005, T009 |
+
+
 Review HEAD: 26463f1d086fe05bbd734ca884066b54a81c592a
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a

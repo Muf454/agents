@@ -111,8 +111,8 @@ R1/R5: a standalone, hand-testable revision mode with an enforced edit boundary,
 
 ### Implementation notes
 - `scripts/ai-run --revise-plan [--since COMMIT] [--base REF]` (exclusive with `--triage`; `--since` now valid for both; `--base` default `main`, BASE = its merge-base with HEAD, the pipeline passes `base_sha`): requires a verified plan review with BLOCKER+MAJOR > 0 (`plan-review-info`), `plan-rounds sync BASE` then `plan-rounds current BASE`, `tasks untouched`, and refuses with `Plan revision: this plan review was already revised; review again (ai-review --plan).` when a `plan-revisions` record exists for the current report digest (no second host commit/record for one report). Mirrors the triage block: scope check (`plan-revision-scope`) before and after; if `plan-dispositions-check --since S --fresh` already passes, record without a session; else require no dirty files beyond records, `start-plan-dispositions`, commit it (`chore(ai): open plan dispositions`), run one session, then validate.
-- Session: prompt `templates/.ai/prompts/plan-revision.md` (new; installed by `setup-project` like the other prompts; missing in `.ai/prompts` → die naming `setup-project --upgrade`) + host `REVISION CONTRACT` (round n, report path, section header, editable files, needs-human rule, Convergence rule from round 3 with "redesign the area as a whole", "commit with explicit paths") + `plan-history BASE` output as PREVIOUS PLAN ROUNDS. Model: `--model` from the caller (default `opus` when none; the pipeline always passes it, T005/T006). Per-call limits as any `ai-run` (`--run-timeout`, `--session-timeout`).
-- Allowlist: new `workflow.py plan-revision-allowlist` = `Read`, `Glob`, `Grep`, `Edit(./<path>)` for each editable record, read-only git and `git add`/`git commit`, plus the project's read-only Bash entries filtered like `review-allowlist` (no ai-check, validate, writers, interpreters). `claude_session` takes the allowlist and the `--tools` list as parameters: `--revise-plan` passes `--tools Read,Glob,Grep,Edit,Bash` (no `Write`; the host creates `plan-dispositions.md`), other modes keep today's list. It also checks that `.ai/reviews/plan.md` (and `current.md` as today) is byte-identical after the session.
+- Session: prompt `templates/.ai/prompts/plan-revision.md` (new; installed by `setup-project` like the other prompts; missing in `.ai/prompts` → die naming `setup-project --upgrade`) + host `REVISION CONTRACT` (round n, report path, section header, editable files, needs-human rule, Convergence rule from round 3 with "redesign the area as a whole", "do not commit; the host commits") + `plan-history BASE` output as PREVIOUS PLAN ROUNDS. Model: `--model` from the caller (default `opus` when none; the pipeline always passes it, T005/T006). Per-call limits as any `ai-run` (`--run-timeout`, `--session-timeout`).
+- Allowlist (plan review round 4 P1; same policy as the catch-up fix's no-Bash reviewer): new `workflow.py plan-revision-allowlist` = `Read`, `Glob`, `Grep`, `Edit(./<path>)` for each editable R1 record, nothing else: no Bash at all (no git, no inherited project entries). `claude_session` takes the allowlist and the `--tools` list as parameters: `--revise-plan` passes `--tools Read,Glob,Grep,Edit`. The host prepares the git context the session needs (plan history and the plan files' recent diff in `.ai/local/revision-context/`, removed afterwards) and does all staging and committing itself (the host commit below); the session never commits. Tests: invocation assertions that Bash/Write are absent and the project allowlist is ignored; mission control runs a live check in a disposable fixture after the task.
 - Host commit, exactly in the order of the plan's "Revision host commit and record" (P1/P2 of round 3): counts from `plan-dispositions-check --fresh` and the bounded `--questions` text; `ai_log plan-revision 'plan revised (round n): accepted a, rejected r, needs-human h' ...` and the state line BEFORE the commit; `git add` the existing R1 records incl. `.ai/run-log.md`; `git commit --allow-empty -m 'chore(ai): record plan revision'`; `ai_guard_verify`; then ONE `plan-revisions record HEAD --accepted a --rejected r --needs-human h` write with the questions on stdin (new per-branch store `{commit, report_digest, round, accepted, rejected, needs_human, questions}`; subject must match; questions re-bounded by the helper); post-commit scope + clean check (hook guard). Nothing writes to the checkout after the commit. Outcome log `outcome plan_revision ROUND RESULT MODEL SECONDS` (new kind; `outcomes_report` ignores it; `.ai/local`, not tracked).
 - `workflow.py plan-revisions decision`: as in the plan (exit 0 + stored questions when the verified current `plan.md` has a reachable record with `needs_human > 0`; exit 1 when not; exit 2 on an unreadable store/report). Used by T005/T006.
 - No pipeline change; flow unchanged. `ai-run --help`, `docs/workflow.md` describe the mode and how a needs-human decision is cleared (answer, commit, `ai-review --plan` by hand).
@@ -150,7 +150,7 @@ A host-bound `plan-revision` stage that a crash at any point completes once, and
 - Flow change (recovery rules): vault `agents-flow.md` recovery part + `updated:`, `docs/workflow.md` recovery section, handoff `## Flow chart`.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
+scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md
 
 ### Acceptance criteria
 - Helper tests: stage-set/verify for plan-revision (pending, committed, dirty tree after the record commit fails, foreign report, out-of-scope file, agent commit with the revision subject does not close it); reservation idempotent per digest (also at the limit: LIMIT 1 with the digest reserved passes), a new digest at the limit fails, reset by `start`, kept by a resume.
@@ -158,6 +158,7 @@ scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_wor
 - `ai-recover` with each new reason escalates without a Claude session (`recover-calls` absent) and an interrupted plan-revision stage with source leftovers escalates without a commit.
 - `ai-recover` with last-error `unknown` (crash) and a recorded needs-human revision for the current report escalates with the stored questions, no `recover-calls`, no pipeline resume.
 - Existing triage-stage and recovery tests pass unchanged.
+- README's recovery section describes the plan-revision stage and its resume/terminal rules as implemented (round 4 P3).
 
 ### Validation
 `python3 -m unittest tests.test_workflow -k plan_revision_stage`; `python3 -m unittest tests.test_workflow -k triage_completion`; `.ai/bin/ai-check`
@@ -272,12 +273,14 @@ R4: format errors of Markdown reviews get one retry; integrity failures and re-c
 - Flow change: vault `agents-flow.md` review part + `updated:`, `docs/workflow.md`, handoff `## Flow chart`.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md
+scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md
 
 ### Acceptance criteria
 - Codex plan and code: malformed then valid → published, 2 calls, notification, run-log line committed with the review (checkout clean afterwards); malformed twice → stop, prior report preserved; valid → 1 call; counts-lie → retried as a format error.
 - Claude fallback reviewer: malformed then valid → published.
 - Checkout mutated during review (`mutates`) and Codex exit error → no retry; malformed first report, then the retried `run_review` mutates the checkout → the `unchanged` check still fails on the second call (stop, prior review preserved); malformed re-check JSON → one call, upheld (as `test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld`); `AI_SUPERVISE=0` → no retry.
+- Every issued format retry is logged in the run log with its outcome (success or handled failure) and the first report's path, without dirtying the checkout between the two reviewer calls; tests cover malformed-twice and an integrity failure on the retry (round 4 P2).
+- README describes the format retry as implemented (round 4 P3).
 
 ### Validation
 `python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`

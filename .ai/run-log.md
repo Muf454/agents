@@ -114,3 +114,4 @@
 | 2026-10-07T19:09:48Z | claude (opus planning + mission control) | plan rev 2 | plan review round 1 (0/10/1) all accepted: 11 tasks (9 opus); run budget = Zack's Q2 (16 h cumulative); plan dispositions in their own file | — | (this commit) | |
 | 2026-10-08T05:06:33Z | claude (opus planning) | plan rev 3 | plan review round 2 (Fable 0/1/7) accepted: reserve before stage-set, model in the stage record, budget wiring | — | (this commit) | |
 | 2026-10-08T05:17:06Z | claude (opus planning) | plan rev 4 | plan review round 3 (Codex 1/4/2): shared run budget removed (OR-09), counts-only bounds; run-log entry inside the revision commit; needs-human recorded before stage clear | — | (this commit) | convergence |
+| 2026-10-08T05:23:30Z | claude (mission control) | plan rev 5 | plan review round 4 (0/1/2) accepted: revision session without Bash; retry logging; README in T005/T009 | — | (this commit) | |
