@@ -232,9 +232,12 @@ deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
-reviews need exactly one counts line that agrees with the listed finding IDs, plus the
-verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks for are
-optional, so a renamed one doesn't discard the review.
+reviews need exactly one counts line that agrees with the listed finding IDs, plus (code
+reviews only) a verdict, either an `Overall verdict: <text>` line or an `## Overall verdict`
+heading (optional trailing colon) followed by non-empty text; the PR body shows that text.
+A `## <LEVEL> findings` section may be left out when its count is 0 (FL-14); a count above
+0 with the section missing or only `None.` is still rejected. The other sections the prompt
+asks for are optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
 Convergence (FL-03): the triage prompt gets `This review is round <n>.` and, from round 2,

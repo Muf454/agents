@@ -706,11 +706,13 @@ def publish_review(arguments):
     content = Path(source).read_text()
     # Only what the pipeline relies on is mandatory; the other sections are requested by the
     # prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
-    required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
-                '## MINOR findings')
+    # A section whose count is 0 may be left out: review_counts rejects a missing one above 0.
+    required = ('Finding counts:',)
     for field in required:
         if field not in content:
             fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
+    if not review_verdict(content):
+        fail('Review is missing Overall verdict:; prior review preserved. Inspect local report.')
     review_counts(content)
     header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
@@ -729,6 +731,23 @@ def reviewer_label():
     and AI_REVIEW_LABEL); empty for Codex reviews, so their files are unchanged."""
     label = ' '.join(os.environ.get('AI_REVIEW_LABEL', '').split())
     return f'> **Reviewer: {label}**\n\n' if label else ''
+
+
+VERDICT_LINE = re.compile(r'^(?:\*\*)?Overall verdict:(?:\*\*)?[ \t]*(.*)$', re.M)
+VERDICT_HEADING = re.compile(r'^#{1,6}[ \t]+Overall verdict:?[ \t]*$(.*?)(?=^#{1,6}\s|\Z)', re.M | re.S)
+
+
+def review_verdict(content):
+    """Verdict text from the first 'Overall verdict: <text>' line, else the first non-empty line
+    under an '## Overall verdict' heading; None when the report has neither."""
+    line = VERDICT_LINE.search(content)
+    if line:
+        return line.group(1).strip()
+    heading = VERDICT_HEADING.search(content)
+    if not heading:
+        return None
+    body = re.sub(r'<!--.*?-->', '', heading.group(1), flags=re.S)
+    return next((text.strip() for text in body.splitlines() if text.strip()), None)
 
 
 def finding_ids(content, level):
@@ -1905,7 +1924,7 @@ def plan_digest():
 def publish_plan_review(arguments):
     """Save Codex's plan review, bound to the exact spec/plan/tasks it reviewed."""
     content = Path(arguments[0]).read_text()
-    for field in ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings'):
+    for field in ('Finding counts:',):  # 0-count sections may be left out (review_counts)
         if field not in content:
             fail(f'Plan review is missing {field}; inspect the local report.')
     review_counts(content)
@@ -2308,9 +2327,9 @@ def pr_body(arguments):
         lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
     if review:
-        verdict = re.search(r'^Overall verdict:\s*(.*)$', review, re.M)
+        verdict = review_verdict(review)
         counts = COUNTS.search(review)
-        verdict_text = verdict.group(1).strip().rstrip('.') if verdict else 'unknown'
+        verdict_text = verdict.rstrip('.') if verdict else 'unknown'
         lines.append(f"Rounds: {rounds}. Verdict: {verdict_text}.")
         if counts:
             lines.append(f"Findings in the last review: BLOCKER {counts.group(1)}, MAJOR {counts.group(2)}, "

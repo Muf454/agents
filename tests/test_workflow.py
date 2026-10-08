@@ -307,6 +307,11 @@ if mode == 'counts-lie':
                     '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
                     '## Manual testing recommendations\nx\n')
     sys.exit(0)
+if mode == 'verdict-heading':
+    path.write_text('# Independent review\n## Overall verdict\n\nApprove with two minor notes\n\n'
+                    'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n## BLOCKER findings\nNone found.\n'
+                    '## MAJOR findings\nNone found.\n## Missing test coverage\nx\n')
+    sys.exit(0)
 major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
 two = mode == 'two-major-once' and count == 1
 path.write_text("""# Independent review
@@ -2832,6 +2837,79 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='counts-lie')
         self.assertIn('counts MAJOR=0', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+
+    def publish_report(self, text, plan=False, expected=0):
+        report = self.base / 'format-report.md'
+        report.write_text(text)
+        if plan:
+            digest = self.helper('plan-digest').stdout.strip()
+            return self.helper('publish-plan-review', str(report), digest, expected=expected)
+        return self.helper('publish-review', str(report), 'a' * 40, 'b' * 40, expected=expected)
+
+    def test_review_format_missing_zero_count_sections_are_accepted(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.assertEqual(self.helper('review-info').stdout.split(), ['a' * 40, '0', '1', '0'])
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## BLOCKER findings\nNone.\n## MAJOR findings\n- P1: T001 has no test.\n', plan=True)
+        self.assertEqual(self.helper('plan-review-info').stdout.split(), ['current', '0', '1', '0'])
+
+    def test_review_format_count_mismatches_are_still_rejected(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n', plan=True)
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        plan = (self.project / '.ai/reviews/plan.md').read_bytes()
+        counts = 'Finding counts: BLOCKER=0 MAJOR={} MINOR={}\n'
+        cases = {
+            'minor section missing': counts.format(0, 1),
+            'minor section only none': counts.format(0, 1) + '## MINOR findings\nNone.\n',
+            'major listed but counted 0': counts.format(0, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'major count above ids': counts.format(2, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'no counts line': '## MAJOR findings\nNone.\n',
+            'two counts lines': counts.format(0, 0) + counts.format(0, 0),
+        }
+        for name, body in cases.items():
+            for is_plan in (False, True):
+                with self.subTest(case=name, plan=is_plan):
+                    self.publish_report('# Review\nOverall verdict: ok\n' + body, plan=is_plan, expected=1)
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+                    self.assertEqual((self.project / '.ai/reviews/plan.md').read_bytes(), plan)
+
+    def test_review_format_verdict_heading_is_accepted(self):
+        self.setup_project()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for heading in ('## Overall verdict', '## Overall verdict:', '### Overall verdict'):
+            with self.subTest(heading=heading):
+                self.publish_report(f'# Review\n{heading}\n\n<!-- note -->\nApprove with two minor notes\n\n'
+                                    '## Findings\n' + tail)
+                self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+                body = self.helper('pr-body', '1', '0').stdout
+                self.assertIn('Verdict: Approve with two minor notes.', body)
+
+    def test_review_format_missing_or_empty_verdict_is_rejected(self):
+        self.setup_project()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for name, text in (('no verdict', '# Review\n' + tail),
+                           ('empty heading', '# Review\n## Overall verdict\n\n<!-- x -->\n## Counts\n' + tail),
+                           ('empty heading at end', '# Review\n' + tail + '## Overall verdict\n\n'),
+                           ('empty line', '# Review\nOverall verdict:\n' + tail)):
+            with self.subTest(case=name):
+                result = self.publish_report(text, expected=1)
+                self.assertIn('missing Overall verdict', result.stderr)
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+
+    def test_review_format_verdict_heading_through_ai_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='verdict-heading')
+        report = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('Approve with two minor notes', report)
+        self.assertNotIn('## MINOR findings', report)
+        self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
 
     def test_no_claude_session_may_rewrite_the_codex_review(self):
         self.ready()

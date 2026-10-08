@@ -4,12 +4,12 @@ Project: agents
 Branch: fix/robustness-batch
 Phase: implementing
 Current task: none
-Last completed task: none
-Tasks complete: 0
-Tasks remaining: 4
-Last validation: not run on this branch
+Last completed task: T001
+Tasks complete: 1
+Tasks remaining: 3
+Last validation: .ai/bin/ai-check PASS (292 tests) after T001
 Blocked: no
-Next action: Plan revision 3 (plan review round 2 dispositions recorded; FL-12/T005 deferred to a later batch); implement T001 (FL-14 review report tolerance), then T002–T004 in queue order
+Next action: Implement T002 (FL-15 review base), then T003, T004
 Last updated: 2026-10-08
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

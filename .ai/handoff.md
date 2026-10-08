@@ -2,8 +2,8 @@
 
 ## What has been implemented?
 Branch `fix/robustness-batch` (from origin/master c7d4dee): a robustness batch from the
-2026-10-07 stop analysis. Only the plan exists so far. Queue (see `.ai/tasks.md`):
-- T001 FL-14 (opus): review reports may leave out a 0-count severity section, and the verdict may be a `## Overall verdict` heading. TODO.
+2026-10-07 stop analysis. Queue (see `.ai/tasks.md`):
+- T001 FL-14 (opus): review reports may leave out a 0-count severity section, and the verdict may be a `## Overall verdict` heading (`review_verdict` in `scripts/lib/workflow.py`, also used by the PR body; a bold `**Overall verdict:**` line is accepted too). DONE.
 - T002 FL-15 (opus): `--base B` prefers `origin/B` when it is ahead, prints the resolved base, and passes the SHA to `ai-review`. TODO.
 - T003 FL-17 (opus): the pipeline stops early when the base moved past the branch, after settling an interrupted triage stage or pending re-check. The publish check names the case, and recovery escalates it without Claude, keeping the full message on stderr. TODO.
 - T004 FL-16 (sonnet): triage accepts `| M1 (MAJOR) |`. TODO.
@@ -23,7 +23,7 @@ Flow chart updated (T002, T003; T001 and T004 leave the flow unchanged)
 4. FL-12 stays open: a recovery session that writes prose before its decision still escalates as "gave no valid decision". Keep it in the backlog for a later batch based on `--json-schema` structured output.
 
 ### Covered by automated tests
-- Missing 0-count section, heading verdict, mismatches still rejected (planned): `test_review_format_*`, `test_review_counts_must_match_listed_findings`, `test_failed_or_malformed_reviews_preserve_report`
+- Missing 0-count section (code and plan review), heading verdict and PR body verdict, empty/missing verdict and count mismatches still rejected with the prior review kept, `ai-review` with a heading-verdict report: `test_review_format_missing_zero_count_sections_are_accepted`, `test_review_format_count_mismatches_are_still_rejected`, `test_review_format_verdict_heading_is_accepted`, `test_review_format_missing_or_empty_verdict_is_rejected`, `test_review_format_verdict_heading_through_ai_review`, `test_review_counts_must_match_listed_findings`, `test_failed_or_malformed_reviews_preserve_report`
 - Base resolution (origin ahead, equal, absent, behind, diverged, explicit `origin/`, explicit SHA run) (planned): `test_review_base_*`, `test_pr_base_follows_the_review_base_or_must_be_explicit`
 - Base moved past the branch: stop before any agent, recovery escalates without Claude and keeps the full message on stderr, rerun after merge, pending and counted-but-open triage stages and a pending re-check settled before the stop, publish wording via a history-rewriting hook with recovery enabled and disabled (planned): `test_base_moved_*`
 - Severity suffix in disposition rows (planned): `test_triage_severity_suffix_*`
@@ -32,4 +32,4 @@ Flow chart updated (T002, T003; T001 and T004 leave the flow unchanged)
 None yet (see "Needs you").
 
 ## Next action
-Implement T001.
+Implement T002 (then T003, T004).

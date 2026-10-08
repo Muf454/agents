@@ -5,7 +5,7 @@ Edit `scripts/`, `templates/`, `tests/`, README and docs only; never `.ai/bin`, 
 `feature/supervisor` (FL-04) edits the same files: keep hunks small and local, no refactors of shared code (see `.ai/current-plan.md`).
 
 ## T001 — Review report: missing 0-count section and verdict heading (FL-14)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -40,7 +40,7 @@ scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, README.md
 `python3 -m unittest tests.test_workflow -k review_format -k review_counts -k malformed -k renamed_optional_section -k pr_body`; `.ai/bin/ai-check`
 
 ### Result / notes
-Not started.
+2026-10-08: `publish_review` requires only `Finding counts:` plus a verdict from the new `review_verdict` (next to `reviewer_label`); failure message unchanged ("Review is missing Overall verdict:; prior review preserved. …"). `publish_plan_review` requires only `Finding counts:`. `pr_body` uses `review_verdict`, falling back to `unknown`. `review_counts` unchanged. Small widening beyond the plan: the verdict line may be bolded (`**Overall verdict:** x`), so reports that passed the old substring check in that form are not newly rejected. New mock Codex mode `verdict-heading`; 5 new `test_review_format_*` tests cover every acceptance criterion (missing 0-count sections in code/plan reviews with `review-info`/`plan-review-info`, all six mismatch cases for both report kinds with `current.md`/`plan.md` byte-identical, heading verdict with and without colon and PR body `Verdict: Approve with two minor notes.`, empty/missing verdict rejected, `ai-review --base main` with the heading mode). Targeted command: 14 tests OK; `.ai/bin/ai-check`: 292 tests OK. Docs: `docs/workflow.md` publish rules, README review step. Flow unchanged.
 
 ## T002 — Review base prefers a newer origin branch (FL-15)
 Status: TODO

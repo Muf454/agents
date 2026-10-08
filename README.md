@@ -260,7 +260,8 @@ tmux new -s my-app-ai
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
    from commit messages). Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
-   whose counts disagree with its listed finding IDs is rejected.
+   whose counts disagree with its listed finding IDs is rejected (a findings section with
+   a count of 0 may be left out, and the verdict may be an `## Overall verdict` heading).
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
