@@ -133,3 +133,4 @@
 | 2026-10-08T21:00Z | claude (opus) | T001 | DONE: FL-14 review report tolerance: 0-count findings sections optional (code + plan), `## Overall verdict` heading accepted via `review_verdict`, PR body uses it | targeted 14 OK; ai-check 292 OK | (this commit) | bold verdict line also accepted (no regression vs old substring check) |
 | 2026-10-08T20:47:45Z | runner | T001 | completed | PASS | 67392f1 | Claude checkpointed; continuing queue |
 | 2026-10-08T20:53Z | claude (opus) | T002 | DONE: FL-15 review base: origin/B when local B is behind (no fetch), diverged warning keeps local, `Review base:` line, resolved SHA to `ai-review`, PR target unchanged | targeted 9 OK; ai-check 299 OK | (this commit) | `base_label` + `advance_origin_main()` ready for T003 |
+| 2026-10-08T20:55:39Z | runner | T002 | completed | PASS | 86a26b1 | Claude checkpointed; continuing queue |
