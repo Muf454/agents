@@ -2,14 +2,14 @@
 
 Project: agents
 Branch: feature/dashboard
-Phase: implementing
+Phase: blocked
 Current task: none
 Last completed task: T006
 Tasks complete: 7
 Tasks remaining: 3
 Last validation: FAIL at 2026-10-09T11:41:32Z
 Blocked: yes
-Next action: Continue queue; see task results for any blockers
+Next action: No runnable tasks; resolve blockers/dependencies
 Last updated: 2026-10-09T11:41:56Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
