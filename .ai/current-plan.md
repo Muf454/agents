@@ -1,6 +1,10 @@
 # Plan: Pipeline dashboard (`ai-dashboard`)
 
 ## Revision 9 (rebase on master e9354d9, 2026-10-09)
+Zack reviewed revision 9 with the mockups (2026-10-09) and decided: keep the 120-column box
+layout; compact line shows a stopped stage as `✗<label>` (red) and paused/recovering/crashed as
+`▶<label>` + ⏸/🔧/⚠; `needs_you` runs are never hidden by the 24 h filter; no actions in the
+dashboard; plan and code review by Claude now (Codex catch-up later).
 Master gained the efficiency batch (#18), FL-04 bounded supervisor (#21), the robustness batch
 (#22, FL-14/15/16/17), toolkit upgrade 4 (#23) and the outcome follow-ups (#24) since revision 8
 (master 0818f20). Design, scope, AD-4 and AD-5 are unchanged; changes:

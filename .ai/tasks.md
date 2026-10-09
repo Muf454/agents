@@ -501,8 +501,9 @@ cannot be read safely shows as `unknown` while the others render:
   path, notifications, last error, task titles) through T006's `sanitize()` before it enters
   the snapshot (P29).
 - `snapshot(all_runs=False)`: list sorted needs_you → crashed → running/paused/recovering →
-  finished → idle, then by `updated`; hides only `finished`, `needs_you` and `idle` entries
-  whose `updated` is older than 24 h unless `all_runs` (crashed and live runs always show).
+  finished → idle, then by `updated`; hides only `finished` and `idle` entries whose `updated`
+  is older than 24 h unless `all_runs` (needs_you, crashed and live runs always show; Zack
+  2026-10-09).
 - CLI: `--once` (plain text: per run one title line, one compact stage line, last event;
   T008 replaces this with the shared renderer), `--json`, `--all`. Without `--once`/`--json`
   this task prints the text once too (T008 adds the TUI).
@@ -535,8 +536,8 @@ tests/test_dashboard.py or tests/test_workflow.py
     checkout path via a registry entry) is absent from `--once` and `--json` output (P29);
   - a checkout with a FIFO marker, a FIFO observation and a 10 MiB notification log, next to
     a healthy checkout: `--once` returns within 5 s and shows the healthy run correctly;
-  - old (> 24 h) finished, needs_you and idle runs are hidden without `--all` and shown with
-    it; an old crashed run is shown in both;
+  - old (> 24 h) finished and idle runs are hidden without `--all` and shown with it; an old
+    needs_you run and an old crashed run are shown in both;
   - read-only: a recursive listing with mtimes of the fixture checkouts, the state root, the
     toolkit `scripts/` directory and a freshly installed `.ai/bin` is identical before and
     after `--once` and `--json` run from both the toolkit and the installed copy (no
@@ -589,7 +590,10 @@ scripts/lib/dashboard.py:
   + 6 + 6 + 8 + 2 = 61, plus 4 per box (`│ ` … ` │`) = 93, an overlay in the active box (+3)
   = 96, seven `──` joiners = 110, card indent 2 = 112 ≤ 120 (100 no longer fits eight boxes).
   Width < 120: title line, one compact line
-  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`, latest event. Lines never
+  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`, latest event; a stopped stage
+  renders `✗<label>` in style `stopped`, a paused/recovering/crashed stage `▶<label>` followed by
+  ⏸ / 🔧 / ⚠ (Zack 2026-10-09; golden test at width 60/119 includes one stopped and one paused
+  run). Lines never
   exceed `width` (truncate with `…`; account for wide emoji via
   `unicodedata.east_asian_width`).
 - Header: `AI pipelines  <n> running · <n> needs you · <n> finished  HH:MM  ↑↓ ⏎ a r q`.

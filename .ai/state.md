@@ -9,7 +9,7 @@ Tasks complete: 0
 Tasks remaining: 9
 Last validation: not run
 Blocked: no
-Next action: Zack reviews the plan, then plan review
+Next action: plan review (Claude), then implementation via ai-pipeline (started by mission control after Zack approved the plan, 2026-10-09)
 Last updated: 2026-10-09T12:00:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

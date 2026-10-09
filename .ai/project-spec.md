@@ -97,8 +97,9 @@ providers, gate files are never edited by a pipeline session.
   and escape sequences removed and is length-capped before output.
 - **Output modes.** `ai-dashboard --once` prints a plain-text rendering (no curses; for pipes,
   Remote Control and tests) and `--json` the snapshot; plain `ai-dashboard` opens the TUI.
-  `--all` includes `finished`, `needs_you` and `idle` runs whose newest record is older than
-  24 h (hidden by default); `crashed`, `running`, `paused` and `recovering` are always shown.
+  `--all` includes `finished` and `idle` runs whose newest record is older than 24 h (hidden by
+  default); `needs_you`, `crashed`, `running`, `paused` and `recovering` are always shown (Zack,
+  2026-10-09: a run that needs you never disappears).
   No bytecode is written (`sys.dont_write_bytecode` before sibling imports; wrapper uses
   `python3 -B`); the wrapper resolves its real path (`readlink -f`) so a symlink in
   `~/.local/bin` works.
@@ -116,8 +117,9 @@ providers, gate files are never edited by a pipeline session.
   recovering 🔧, crashed ⚠ inside the box; detail (`T003 · sonnet · 12m`, `round 3 · extra
   (5 → 3 → 1)`, `format retry`) under the active box; last notification line (▶ ✅ ⏸ 🔧 🔁 ⚠
   ⛔ 🏁 …) with its time. Width < 120: one compact line
-  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`. Finished: all ✓ and the 🏁
-  line.
+  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`; a stopped stage is `✗Review`
+  in style `stopped`, a paused/recovering/crashed stage keeps `▶` followed by ⏸ / 🔧 / ⚠ (Zack,
+  2026-10-09, as in the review mockups). Finished: all ✓ and the 🏁 line.
   Keys: `q` quit, `↑/↓` select, `Enter` toggles details (last 8 notifications, last error,
   checkout path), `a` toggle all, `r` refresh; auto refresh every 2 s; resize handled;
   terminal restored on exit and on exceptions; no colours → bold/reverse only.
