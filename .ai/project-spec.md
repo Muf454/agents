@@ -1,109 +1,76 @@
-# Spec: FL-04 bounded supervisor for "needs a human" stops
+# Spec: outcome telemetry and parallel test runner follow-ups (CU-1..CU-4)
 
 ## Objective
-Backlog FL-04 (vault `agents-backlog.md`, "Run flow improvements", approved by Zack 2026-10-06;
-chosen as next agents work by Zack 2026-10-07). Evidence from 2026-10-07: mission control revised
-plans by hand after 7 plan-review stops (raid-planner ownership fixes rounds 1–4, agents catch-up
-fixes, family M2 earlier), each time: read the plan review, accept/reject each finding with
-evidence, revise spec/tasks, record dispositions, commit, rerun `ai-pipeline`. Within limits Zack
-sets, the toolkit does this itself; every step is logged and notified and Codex still reviews
-every plan revision.
+Close the MINOR follow-ups of the Codex catch-up review that the vault backlog
+(`agents-backlog.md`, "Codex catch-up review follow-ups (2026-10-07, MINOR, deferred from
+`chore/toolkit-upgrade-2`)") lists as CU-1..CU-4. Branch `fix/outcome-followups` from
+`origin/master` c7d4dee. CU-5 (crash-durable outcomes) stays in the backlog. CU-2 (Codex
+catch-up coverage) was planned as R4/T004 but is deferred after plan review round 3 (see
+"Deferred" below); this batch delivers CU-1, CU-3 and CU-4.
+
+**Telemetry is advisory.** Nothing here may change what the pipeline does (gates, review
+flow, triage, re-checks, commits, notifications). Only what is recorded in the host outcome
+log (`outcomes.jsonl`) and what `ai-status --outcomes` and the parallel test runner report
+changes. Recording stays nonfatal: a failure to compute a new field drops that field, never
+the line.
+
+## Verified against the code on this branch (2026-10-08)
+- **CU-4: mostly fixed already.** `tests/run_parallel.py` `run_shard` drops `FORCE_COLOR` and
+  sets `NO_COLOR=1` for the shards (previous run, T006 on `fix/catchup-review`, run-log
+  2026-10-07T18:40Z), so the reported trigger (`FORCE_COLOR=3`) no longer breaks parsing.
+  Remaining: on Python 3.13+ `PYTHON_COLORS=1` wins over `NO_COLOR` (`_colorize.can_colorize`
+  checks it first; this machine runs 3.14, whose unittest colours its summary), and no test
+  covers either case. Kept as a small hardening task with a regression test.
+- **CU-1: open.** `workflow.py` `outcomes_report` groups each task's *last* row (`final`) and
+  sums all its attempts' seconds (`spent`), so the "Tasks by model" and "model and category"
+  tables credit every attempt and minute to the final model.
+- **CU-3: open.** `outcome review` skips the report for `mode == 'recheck'`; re-check lines
+  carry no counts. Also, the line's `head` is `git rev-parse HEAD` at logging time, which for
+  a re-check is after the triage commits, not the reviewed HEAD.
+- **CU-2: open (deferred, not in this batch).** `outcomes_report` lists every review whose reviewer starts with `claude`
+  under "Claude-only reviews (Codex catch-up pending)"; nothing records coverage. The
+  catch-up outcome is a hand-written `## Codex catch-up` section in
+  `.ai/reviews/fallback-log.md`. Related defect found while verifying: `fallback_record`
+  appends each new row at the end of the file, so once that section exists new rows land
+  below it (this repo's own log shows two rows after the section).
 
 ## Requirements
-- **R1 Plan-review stop → bounded revision.** When `ai-pipeline`'s plan review returns BLOCKER or
-  MAJOR findings and supervision is enabled, a fresh Claude planning session (`ai-run
-  --revise-plan`; no implementation) evaluates each BLOCKER/MAJOR finding against the repository
-  (accepted / rejected with concrete evidence / needs-human), revises the plan and fills a
-  host-written section for that plan-review round in `.ai/reviews/plan-dispositions.md`. It may
-  change only `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`,
-  `.ai/reviews/plan-dispositions.md`, `.ai/handoff.md`, `.ai/state.md`, `.ai/run-log.md`
-  (host-checked since the stage start, committed or not). The host validates the section, writes
-  the revision's run-log entry, makes the one counted commit `chore(ai): record plan revision`
-  (records and that log entry together) and records it with its outcome in host state. The
-  checkout is therefore clean when the pipeline then ALWAYS runs a fresh plan review (also when
-  only dispositions changed), with the revision's dispositions as context. Limit:
-  `AI_SUPERVISE_PLAN_ROUNDS` (default 3) revisions per human-started run; then it stops for the
-  human ("plan review: supervision limit reached").
-- **R2 Convergence and escalation.** Plan-review round n is the n-th host-recorded plan review on
-  the branch; revision n answers it. From round 3 the section needs a same-line `Convergence:
-  <text>` (as FL-03 for code-review triage) and the prompt asks to redesign a repeating area as a
-  whole. Earlier rounds (findings + dispositions) are supplied as context only. The revision runs
-  on `opus`; from round `AI_SUPERVISE_ESCALATE_ROUND` (default 3) on `AI_SUPERVISE_ESCALATE_MODEL`
-  (default `claude-fable-5-1`; Zack 2026-10-07 for raid-planner).
-- **R3 Fix-round extension.** When the code-review fix-round limit is reached with BLOCKER/MAJOR
-  open, allow ONE extra round per run only if the BLOCKER+MAJOR count fell in each of the last two
-  rounds, judged from host-verified counts (recorded by the host when each round's verified
-  review was triaged, plus the current verified review), never from commit subjects. The
-  allowance is reserved in host state before the round starts. Otherwise stop as today (draft PR).
-- **R4 Malformed review output.** A plan or code review (Markdown) rejected by the host's format
-  checks (missing required field/section, counts line missing or not matching the listed IDs) is
-  retried once with the format error appended to the prompt; the second failure stops as today.
-  Integrity failures (reviewer exit/limit errors, checkout changed, provenance/binding/storage)
-  are never retried. Re-checks (JSON) are out of scope: malformed answers stay "upheld"
-  (fail closed), one call.
-- **R5 Guard rails.** Never edits gate files, prompts, permissions or code; scope and irreversible
-  decisions are escalated, not decided: the session marks such findings `needs-human` with the
-  question, and the pipeline stops (no recovery session). The host stores that outcome (counts and
-  the bounded questions) in its revision record before the stage closes, so the decision survives
-  a crash: while the current plan report has a revision record with needs-human rows, no
-  re-review, revision, implementation or recovery Claude session starts (pipeline start, loop
-  entry and `ai-recover` all check it). The human answers (plan files and/or the section),
-  commits and runs `ai-review --plan` by hand; the new report has no such record, so the next
-  `ai-pipeline` continues. Every supervised step appends to the run log and notifies ("🔁 Plan
-  revised (round n/N): accepted a, rejected b"; "🔁 Extra fix round: findings falling (x → y →
-  z)"; "🔁 Review format retry (mode): <error>"). Supervision is bounded by counts only (see
-  decisions). `AI_SUPERVISE=0` restores today's behaviour exactly: no revision, no extra fix
-  round, no format retry.
-- **R6 Docs and flow chart.** README, `docs/workflow.md`, vault `agents-flow.md` updated in the
-  same task as each flow change; PR says "Flow chart updated".
+- **R1 (CU-4)** Shards run without colour whatever the caller's colour settings
+  (`FORCE_COLOR`, `PYTHON_COLORS`, `NO_COLOR`): the runner sets `PYTHON_COLORS=0` and
+  `NO_COLOR=1` and drops `FORCE_COLOR` for each shard, and parses the summary after stripping
+  ANSI escape sequences. Regression tests with `FORCE_COLOR=3` and `PYTHON_COLORS=1`.
+- **R2 (CU-1)** Per-model statistics count attempts on the model that ran them. The model
+  tables are per attempt: attempts, done, not done, first-time pass (tasks whose attempt 1
+  ran on this model and passed, out of tasks whose attempt 1 ran on it; a task's attempt 1 is
+  its first logged row), avg minutes per
+  attempt. The category table stays per task. A mixed-model retry (attempt 1 sonnet failed,
+  attempt 2 opus done) shows one attempt and its time under each model.
+- **R3 (CU-3)** A re-check outcome line carries `upheld_blocker`, `upheld_major`,
+  `withdrawn_blocker`, `withdrawn_major` (from the verified, published `.ai/reviews/recheck.md`
+  and the level of each rejected finding) and `reviewed_head` (full SHA). The report shows
+  re-checks in their own table with these totals; plan/code reviews keep theirs. Claude
+  re-checks stay listed under "Codex catch-up pending" (R4 below).
+- **R4 (CU-2): deferred.** Not in this batch; the report keeps listing every Claude review
+  under "Codex catch-up pending" and the hand-written `## Codex catch-up` section of
+  `.ai/reviews/fallback-log.md` stays the record. The `fallback_record` row-placement defect
+  above moves with it.
 
-## Settings
-User config (`~/.config/ai-toolkit/config`) or environment, validated before any agent starts,
-captured in the run manifest and restored on recovery resumes (a changed config file does not
-change a running run): `AI_SUPERVISE` (0|1, default 1), `AI_SUPERVISE_PLAN_ROUNDS` (0–9, default
-3), `AI_SUPERVISE_ESCALATE_ROUND` (1–9, default 3), `AI_SUPERVISE_ESCALATE_MODEL` (model name,
-default `claude-fable-5-1`). The validated values are exported, and `ai-review`/`ai-run` validate
-them too, so children never see a raw value.
+## Deferred: CU-2
+Plan review rounds 1–3 each found problems in the same coverage rule, and the result is
+advisory telemetry, so by the convergence rule it leaves this batch. Open design question for
+a later batch: when does a Codex catch-up review cover a Claude fallback review across merges
+(master merged into the branch, rebases, a re-check's parent range)? Candidate rules and the
+remaining sub-questions are in `.ai/current-plan.md` "Deferred: CU-2".
 
-## Decisions (planning, 2026-10-07; plan review rounds 1–3)
-- **Bounded by counts; no run budget in this batch (mission control, 2026-10-08, after plan
-  review round 3).** Supervision is bounded by: at most `AI_SUPERVISE_PLAN_ROUNDS` plan revisions
-  and at most one extra fix round per human-started run, at most one format retry per review
-  call, plus the existing per-call limits (`ai-run --run-timeout` and `--session-timeout`,
-  `--review-timeout`, `AI_LIMIT_MAX_WAIT`). A revision is an ordinary `ai-run` call under those
-  limits. The host-owned cumulative budget of Zack's Q2 decision (2026-10-05: 16 h work + 12 h
-  waiting per approved run, cumulative across recoveries and fix rounds) stays backlog item
-  **OR-09**: the shared budget drew findings in every plan-review round (1–3) and is removed from
-  FL-04 so this batch converges. No `AI_RUN_BUDGET` setting, no `--host-budget` flag, no manifest
-  budget here.
-- **Separate plan-dispositions file.** Plan-round sections live in
-  `.ai/reviews/plan-dispositions.md`, not `dispositions.md`: `start-dispositions` rewrites
-  `dispositions.md` for every code review and triage/re-check scan all of its rows, so plan rows
-  there would be erased or mixed into code-review checks. (This repo's manual round-1 record stays
-  in `dispositions.md`, as requested.)
-- **History is context, records are authority.** Limits, round numbers, revision completion and
-  outcome (needs-human), and fix-round trends come from host state outside the checkout (run
-  manifest, per-branch records), never from commit subjects or checkout files; rendered history
-  only informs prompts.
-
-## Acceptance criteria
-- Mocked pipeline: plan MAJOR → revision → re-review APPROVE → implementation → review → PR; the
-  checkout is clean right before the re-review (the revision's run-log entry is committed).
-- All-rejected, dispositions-only revision → a second plan-review call before any implementation.
-- Limit reached, needs-human, out-of-scope revision → human stop; with `AI_AUTO_RECOVER=1` no
-  recovery Claude session runs.
-- Needs-human survives a crash between stage closure and question handling: a human rerun and a
-  watchdog recovery both stop with the questions and start no reviewer, revision, implementation
-  or recovery session; after the human's hand-run `ai-review --plan` the pipeline continues.
-- Crash between reservation and stage start, before the revision commit, after it, and after
-  stage closure, and between a plan review's host commit and its round record → resume completes
-  and counts the revision exactly once, runs the re-review once, and a round-≥3 revision resumes
-  on the escalation model.
-- Plan rounds count only from the run's base, so a re-created branch name starts at round 1.
-- Extra fix round only for a strictly falling host-verified trend, once per run.
-- Malformed plan/code review retried once; integrity failures and re-checks never retried.
-- `AI_SUPERVISE=0` → today's behaviour in all three areas.
-
-## Non-goals
-No supervisor daemon; no change to who reviews (Codex, Claude fallback); no re-check retry; no
-cumulative run or wait budget (OR-09). FL-02 retrospective is a separate batch.
+## Constraints
+- Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts`, `.ai/validate`,
+  `.ai/permissions.allow` or `.claude/settings.json`. No gate change is needed.
+- No change to `scripts/ai-review`, `scripts/ai-pipeline`, `scripts/ai-recover`: everything
+  happens inside `workflow.py` `outcome`/`outcomes_report` (called with the same arguments as
+  today) and `tests/run_parallel.py`.
+- Tests offline and fast: new test methods; report tests feed hand-written JSONL files to
+  `ai-status --outcomes FILE`.
+- Keep the report heading text "Codex catch-up pending" (existing tests and habits use it).
+- Concurrent work: PR #21 (`feature/supervisor`) and PR #22 (`fix/robustness-batch`) edit
+  `scripts/lib/workflow.py` and `tests/test_workflow.py` (plus scripts this batch does not
+  touch). Keep hunks local to the outcome/report functions and to new test methods.

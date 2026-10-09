@@ -3963,8 +3963,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(lines[0]['branch'], 'feature/test')
         self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1')
         report = self.tool('ai-status', '--outcomes').stdout
-        self.assertIn('## Tasks by model', report)
-        self.assertIn('| sonnet | 1 | 1/1 (100%) | 1 | 0 | 1.0 |', report)
+        self.assertIn('## Attempts by model', report)
+        self.assertIn('| sonnet | 1 | 1 | 0 | 1/1 (100%) |', report)
         self.assertIn('## Tasks by category', report)
         self.assertIn('| claude-fallback | claude-opus-5-5 | code | 1 | 0 | 0 | 0 |', report)
         self.assertIn('Codex catch-up pending', report)
@@ -3974,8 +3974,39 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         catch_up = report.split('Codex catch-up pending')[1]
         self.assertEqual(catch_up.count('code HEAD'), 2)  # forced Claude reviews are listed too
 
+    def outcome_report_for(self, rows):
+        self.setup_project()
+        path = self.base / 'report.jsonl'
+        base = {'kind': 'task', 'project': 'p', 'branch': 'b', 'category': 'feature'}
+        path.write_text(''.join(json.dumps({**base, **row}) + '\n' for row in rows))
+        return self.tool('ai-status', '--outcomes', str(path)).stdout
+
+    def test_outcome_report_credits_each_attempt_to_its_model(self):
+        report = self.outcome_report_for([
+            {'task': 'T001', 'model': 'sonnet', 'attempt': 1, 'result': 'error', 'first_pass': False, 'seconds': 600},
+            {'task': 'T001', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 300},
+            {'task': 'T002', 'model': 'sonnet', 'attempt': 1, 'result': 'done', 'first_pass': True, 'seconds': 60}])
+        self.assertIn('2 task(s), 3 attempt(s)', report)
+        self.assertIn('| sonnet | 2 | 1 | 1 | 1/2 (50%) | 5.5 |', report)
+        self.assertIn('| opus | 1 | 1 | 0 | - | 5.0 |', report)
+        self.assertIn('| sonnet / feature | 2 | 1 | 1 | 1/2 (50%) | 5.5 |', report)
+        self.assertIn('| feature | 2 | 1/2 (50%) | 2 | 0 | 1.5 | 8.0 |', report)  # per task, summed time
+
+    def test_outcome_report_old_lines_without_model_or_attempt(self):
+        report = self.outcome_report_for([
+            {'task': 'T009', 'result': 'error', 'seconds': 60},
+            {'task': 'T009', 'result': 'done', 'seconds': 60}])
+        self.assertIn('| default | 2 | 1 | 1 | 0/1 (0%) | 1.0 |', report)
+
+    def test_outcome_report_old_line_followed_by_new_attempt(self):
+        report = self.outcome_report_for([
+            {'task': 'T010', 'result': 'error', 'seconds': 60},
+            {'task': 'T010', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 120}])
+        self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
+        self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
+
     def outcome_rows(self):
-        path = self.base / 'host-state/outcomes.jsonl'
+        path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
 
     def task_rows(self):
@@ -5480,6 +5511,63 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('model_reasoning_effort="low"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
         self.tool('ai-review', '--recheck', expected=1, AI_RECHECK_EFFORT='huge')
 
+    def recheck_outcomes(self):
+        return [r for r in self.outcome_rows() if r['kind'] == 'review' and r['mode'] == 'recheck']
+
+    def test_outcome_recheck_records_upheld_and_withdrawn_totals(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'])
+        reviewed = self.helper('review-info').stdout.split()[0]
+        answer = json.dumps({'answers': [{'id': 'M1', 'verdict': 'withdrawn', 'reason': 'evidence holds'},
+                                         {'id': 'M2', 'verdict': 'upheld', 'reason': 'not covered'}]})
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=answer)
+        line = self.recheck_outcomes()[-1]
+        self.assertEqual((line['upheld_major'], line['withdrawn_major']), (1, 1))
+        self.assertEqual((line['upheld_blocker'], line['withdrawn_blocker']), (0, 0))
+        full = self.run_cmd(['git', 'rev-parse', reviewed]).stdout.strip()
+        self.assertEqual(line['reviewed_head'], full)
+        self.assertEqual(len(full), 40)
+        self.assertNotEqual(line['reviewed_head'], line['head'])  # the triage commit moved HEAD on
+        self.tool('ai-review', '--recheck', MOCK_RECHECK='not json')  # malformed: every finding upheld
+        line = self.recheck_outcomes()[-1]
+        self.assertEqual((line['upheld_major'], line['withdrawn_major']), (2, 0))
+
+    def test_outcome_recheck_counts_blockers(self):
+        wf = self.recheck_module()
+        answers = {'B1': ('upheld', 'x'), 'B2': ('withdrawn', 'x'), 'M1': ('upheld', 'x'), 'M2': ('withdrawn', 'x')}
+        levels = {'B1': 'BLOCKER', 'B2': 'BLOCKER', 'M1': 'MAJOR', 'M2': 'MAJOR'}
+        self.assertEqual(wf.recheck_counts(answers, levels), (1, 1, 1, 1))
+
+    def test_outcome_recheck_without_report_still_logs_a_line(self):
+        self.ready()
+        before = len(self.outcome_rows())
+        self.helper('outcome', 'review', 'recheck', 'codex', 'gpt', 'medium', '1')
+        rows = self.outcome_rows()
+        self.assertEqual(len(rows), before + 1)
+        self.assertEqual(rows[-1]['mode'], 'recheck')
+        for field in ('upheld_blocker', 'upheld_major', 'withdrawn_blocker', 'withdrawn_major', 'reviewed_head'):
+            self.assertNotIn(field, rows[-1])
+
+    def test_outcome_recheck_report_has_its_own_table(self):
+        self.setup_project()
+        path = self.base / 'recheck.jsonl'
+        review = {'kind': 'review', 'project': 'p', 'branch': 'b', 'mode': 'recheck'}
+        rows = [{**review, 'reviewer': 'codex', 'model': 'gpt', 'seconds': 60, 'upheld_blocker': 1,
+                 'upheld_major': 2, 'withdrawn_blocker': 0, 'withdrawn_major': 3},
+                {**review, 'reviewer': 'codex', 'model': 'gpt', 'seconds': 180, 'upheld_major': 1},
+                {**review, 'reviewer': 'claude-fallback', 'model': 'claude-opus-5-5', 'seconds': 60,
+                 'head': 'abcdef0123456789abcdef'}]
+        path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        report = self.tool('ai-status', '--outcomes', str(path)).stdout
+        self.assertIn('## Re-checks by reviewer', report)
+        self.assertIn('| codex | gpt | 2 | 1 | 3 | 0 | 3 | 2.0 |', report)
+        self.assertNotIn('| recheck |', report)
+        self.assertNotIn('## Reviews by reviewer', report)
+        self.assertIn('recheck HEAD abcdef012345', report.split('Codex catch-up pending')[1])
+        path.write_text(json.dumps(rows[2]) + '\n')
+        report = self.tool('ai-status', '--outcomes', str(path)).stdout
+        self.assertIn('recheck HEAD abcdef012345', report.split('Codex catch-up pending')[1])
+
     def test_triage_severity_suffix_satisfies_triage_check(self):
         dispositions, rows = self.convergence_fixture(rounds=2)
         for cell in ('M1 (MAJOR)', 'M1 (major)', 'M1(MAJOR)'):
@@ -6762,6 +6850,39 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertIn('distinctive failure', result.stdout)
         self.assertIn('FAILED (failing shards:', result.stdout)
         self.assertNotIn('count mismatch', result.stdout)
+
+    def colour_env(self, **colours):
+        for name in ('NO_COLOR', 'FORCE_COLOR', 'PYTHON_COLORS'):
+            self.env.pop(name, None)
+        self.env.update(colours)
+
+    def test_parallel_runner_passes_with_caller_colour_settings(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n')
+        for colours in ({'FORCE_COLOR': '3'}, {'PYTHON_COLORS': '1'},
+                        {'FORCE_COLOR': '3', 'PYTHON_COLORS': '1'}):
+            self.colour_env(**colours)
+            result = self.runner('--start-dir', str(self.suite))
+            self.assertIn('Ran 2 tests', result.stdout, colours)
+            self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+
+    def test_parallel_runner_failing_shard_output_has_no_escapes(self):
+        self.write('test_one.py', '    def test_a(self): pass\n'
+                   '    def test_b(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        self.colour_env(PYTHON_COLORS='1')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertNotIn('\x1b', result.stdout)
+
+    def test_parallel_runner_summary_parses_coloured_and_plain(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        plain = 'Ran 3 tests in 0.001s\n\nOK\n'
+        coloured = '\x1b[1mRan 3 tests in 0.001s\x1b[0m\n\n\x1b[32mOK\x1b[0m\n'
+        self.assertEqual(run_parallel.summary(plain), (3, 'OK'))
+        self.assertEqual(run_parallel.summary(coloured), (3, 'OK'))
+        self.assertEqual(run_parallel.summary('\x1b[31mFAILED (failures=1)\x1b[0m\n'), (None, 'FAILED'))
+        self.assertEqual(run_parallel.summary('boom\n'), (None, None))
 
     def test_parallel_runner_zero_tests_fail(self):
         result = self.runner('--start-dir', str(self.suite), expected=1)

@@ -169,6 +169,13 @@
 | 2026-10-08T08:28:19Z | runner | T003 | completed | PASS | 9b62a07 | Claude checkpointed; continuing queue |
 | 2026-10-08T08:30:26Z | runner | none | queue complete; ready for independent review | PASS | 42aef4c | Human acceptance remains |
 | 2026-10-08T08:39:08Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/19 | PASS | 2be3f24 | Human acceptance and merge remain |
+| 2026-10-09T05:30Z | claude (sonnet) | T001 | DONE: parallel runner sets PYTHON_COLORS=0 and parses summaries ANSI-safe; 3 regression tests, docs | parallel_runner 10 OK; ai-check 290 OK; both mutation checks fail as expected | (this commit) | Python 3.14.7 |
+| 2026-10-09T05:15:11Z | runner | T001 | completed | PASS | 4877b7e | Claude checkpointed; continuing queue |
+| 2026-10-09T05:45Z | claude (sonnet) | T002 | DONE: per-attempt "Attempts by model" tables in outcomes_report, 3 new tests, docs | outcome tests 12 OK; ai-check 293 OK | (this commit) | category table unchanged |
+| 2026-10-09T05:22:21Z | runner | T002 | completed | PASS | 75c3f1c | Claude checkpointed; continuing queue |
+| 2026-10-09T06:00Z | claude (sonnet) | T003 | DONE: re-check outcome lines carry upheld/withdrawn totals and reviewed_head; "Re-checks by reviewer" table; 4 new tests, docs | targeted 40 OK; ai-check 297 OK | (this commit) | flow unchanged |
+| 2026-10-09T05:30:40Z | runner | T003 | completed | PASS | f89b08c | Claude checkpointed; continuing queue |
+| 2026-10-09T05:32:47Z | runner | none | queue complete; ready for independent review | PASS | 6e9d635 | Human acceptance remains |
 | 2026-10-08T21:00Z | claude (opus) | T001 | DONE: FL-14 review report tolerance: 0-count findings sections optional (code + plan), `## Overall verdict` heading accepted via `review_verdict`, PR body uses it | targeted 14 OK; ai-check 292 OK | (this commit) | bold verdict line also accepted (no regression vs old substring check) |
 | 2026-10-08T20:47:45Z | runner | T001 | completed | PASS | 67392f1 | Claude checkpointed; continuing queue |
 | 2026-10-08T20:53Z | claude (opus) | T002 | DONE: FL-15 review base: origin/B when local B is behind (no fetch), diverged warning keeps local, `Review base:` line, resolved SHA to `ai-review`, PR target unchanged | targeted 9 OK; ai-check 299 OK | (this commit) | `base_label` + `advance_origin_main()` ready for T003 |
@@ -180,3 +187,4 @@
 | 2026-10-08T21:23:55Z | runner | none | queue complete; ready for independent review | PASS | e498fe4 | Human acceptance remains |
 | 2026-10-08T21:27:53Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/22 | PASS | 0d8eb89 | Human acceptance and merge remain |
 | 2026-10-09T05:34:30Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/21 | PASS | 13508ff | Human acceptance and merge remain |
+| 2026-10-09T07:37:38Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/24 | PASS | 22546f1 | Human acceptance and merge remain |

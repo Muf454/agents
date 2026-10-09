@@ -2710,6 +2710,15 @@ def outcome_title(task_id):
     return ''
 
 
+def recheck_counts(answers, levels):
+    """(upheld BLOCKER, upheld MAJOR, withdrawn BLOCKER, withdrawn MAJOR) of a re-check's answers."""
+    def count(verdict, level):
+        return sum(1 for finding, (answer, _) in answers.items()
+                   if answer == verdict and levels.get(finding) == level)
+    return (count('upheld', 'BLOCKER'), count('upheld', 'MAJOR'),
+            count('withdrawn', 'BLOCKER'), count('withdrawn', 'MAJOR'))
+
+
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
@@ -2740,6 +2749,16 @@ def outcome(arguments):
                 counts = review_counts(Path(report[0]).read_text())
                 record.update(blocker=counts[0], major=counts[1], minor=counts[2])
             except (OSError, ValueError):
+                pass
+        elif mode == 'recheck':
+            try:
+                head, _, _, answers = recheck_values()
+                levels = {finding: level for finding, level, _ in rejected_rows()[1]}
+                counts = recheck_counts(answers, levels)
+                reviewed = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
+                record.update(upheld_blocker=counts[0], upheld_major=counts[1], withdrawn_blocker=counts[2],
+                              withdrawn_major=counts[3], reviewed_head=reviewed)
+            except (OSError, ValueError, subprocess.CalledProcessError):
                 pass
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
@@ -2782,16 +2801,41 @@ def outcomes_report(arguments):
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
 
+    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
+    for r in task_rows:
+        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
+
+    def attempts_table(title, key):
+        groups = {}
+        for r in task_rows:
+            task_key = (r.get('project'), r.get('branch'), r.get('task'))
+            groups.setdefault(key(r, final[task_key]), []).append((r, first_row[task_key] is r))
+        lines = [f'## Attempts by {title}', '',
+                 f'| {title} | attempts | done | not done | first-time pass | avg minutes |',
+                 '| --- | --- | --- | --- | --- | --- |']
+        for name in sorted(groups, key=str):
+            rows = groups[name]
+            done = sum(r.get('result') == 'done' for r, _ in rows)
+            starts = [r for r, is_first in rows if is_first]
+            first = sum(bool(r.get('first_pass')) for r in starts)
+            rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
+            minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
+            lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')
+        return lines + ['']
+
     lines = ['# Outcomes report', '', f'{len(final)} task(s), {len(task_rows)} attempt(s), '
              f"{sum(r.get('kind') == 'review' for r in records)} review(s).", '']
     if final:
-        lines += table('model', lambda r: r.get('model', 'default'))
+        lines += attempts_table('model', lambda r, last: r.get('model', 'default'))
         lines += table('category', lambda r: r.get('category', 'feature'))
-        lines += table('model and category', lambda r: f"{r.get('model', 'default')} / {r.get('category', 'feature')}")
+        lines += attempts_table('model and category',
+                                lambda r, last: f"{r.get('model', 'default')} / {last.get('category', 'feature')}")
     reviews = [r for r in records if r.get('kind') == 'review']
-    if reviews:
+    rechecks = [r for r in reviews if r.get('mode') == 'recheck']
+    plain = [r for r in reviews if r.get('mode') != 'recheck']
+    if plain:
         groups = {}
-        for r in reviews:
+        for r in plain:
             groups.setdefault((r.get('reviewer'), r.get('model'), r.get('mode')), []).append(r)
         lines += ['## Reviews by reviewer', '', '| reviewer | model | mode | reviews | BLOCKER | MAJOR | MINOR | avg minutes |',
                   '| --- | --- | --- | --- | --- | --- | --- | --- |']
@@ -2800,12 +2844,26 @@ def outcomes_report(arguments):
             lines.append(f'| {reviewer} | {model} | {mode} | {len(rows)} | {total("blocker")} | {total("major")} | '
                          f'{total("minor")} | {total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
-        fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-        if fallback:
-            lines += ['## Claude-only reviews (Codex catch-up pending)', '']
-            lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
-                      f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
-            lines.append('')
+    if rechecks:
+        groups = {}
+        for r in rechecks:
+            groups.setdefault((r.get('reviewer'), r.get('model') or 'default'), []).append(r)
+        lines += ['## Re-checks by reviewer', '',
+                  '| reviewer | model | re-checks | upheld BLOCKER | upheld MAJOR | withdrawn BLOCKER | '
+                  'withdrawn MAJOR | avg minutes |',
+                  '| --- | --- | --- | --- | --- | --- | --- | --- |']
+        for (reviewer, model), rows in sorted(groups.items(), key=str):
+            total = lambda field: sum(r.get(field, 0) or 0 for r in rows)
+            lines.append(f'| {reviewer} | {model} | {len(rows)} | {total("upheld_blocker")} | '
+                         f'{total("upheld_major")} | {total("withdrawn_blocker")} | {total("withdrawn_major")} | '
+                         f'{total("seconds") / len(rows) / 60:.1f} |')
+        lines.append('')
+    fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
+    if fallback:
+        lines += ['## Claude-only reviews (Codex catch-up pending)', '']
+        lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
+                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+        lines.append('')
     print('\n'.join(lines).rstrip('\n'))
 
 

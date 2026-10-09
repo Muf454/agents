@@ -1,433 +1,94 @@
 # Task queue
 
-Branch `feature/supervisor` (FL-04, bounded supervisor for "needs a human" stops). Prioritised by
-Zack 2026-10-07 before the dashboard (DB-01). Revision 4 after plan review round 3 (see
-`.ai/current-plan.md` for the host-state table, section contract, revision commit and loop). The
-shared run budget is not part of this batch (OR-09); tasks were renumbered T001–T010. Edit
-`scripts/`, `templates/`, `tests/`, docs and the vault notes named below. Never edit `.ai/bin`,
-`.ai/prompts` or other gate files of this repo. Every task leaves `.ai/bin/ai-check` passing and
-names its tests with the prefix given in Validation. Flow-chart rule: a task that changes the flow
-updates vault `agents-flow.md` and its `updated:` date and sets `.ai/handoff.md` `## Flow chart`
-to "Flow chart updated" in the same task (see the plan for the no-vault-access case).
+Branch `fix/outcome-followups`: outcome telemetry and parallel runner follow-ups CU-1, CU-3, CU-4 (see `.ai/project-spec.md`). CU-2 (Codex catch-up coverage, was T004) is deferred: see `.ai/current-plan.md` "Deferred: CU-2".
+Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts` or other gate files. Telemetry only: no change to what the pipeline does.
 
-## T001 — Supervision settings: config, validation, manifest, recovery restore
+## T001 — Parallel runner ignores every colour setting (CU-4)
 Status: DONE
 Dependencies: none
 Model: sonnet
 
 ### Goal
-R5/Settings: the four `AI_SUPERVISE*` settings are read from the user config, validated before any agent, captured with the approved run and restored on resume. No behaviour uses them yet.
+R1: `tests/run_parallel.py` parses every shard's summary whatever the caller's colour settings. The reported trigger (`FORCE_COLOR`) is already handled (`run_shard` drops it and sets `NO_COLOR=1`); close the remaining gap and add the missing regression tests.
 
 ### Implementation notes
-- `scripts/lib/common.sh` `ai_config`: add `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`, `AI_SUPERVISE_ESCALATE_ROUND` and `AI_SUPERVISE_ESCALATE_MODEL` to the known keys. Add `ai_supervise_settings` that sets defaults (1, 3, 3, `claude-fable-5-1`), `ai_die`s on invalid values (`AI_SUPERVISE` 0|1; rounds 0–9; escalate round 1–9; model `^[A-Za-z0-9._:-]{1,64}$`) and EXPORTS the four validated values (children never see a raw/unset value).
-- `scripts/lib/workflow.py` `RUN_SETTINGS`: add the four keys. `scripts/ai-recover`: add them to the `unset` list and the restore `case` list.
-- `scripts/ai-pipeline`: call `ai_supervise_settings` next to the `AI_REVIEWER` check (before `ai_lock`/any agent). `scripts/ai-review` and `scripts/ai-run` call it after argument parsing too (hand-run use is validated the same way).
-- Add a test that the key lists in `ai_config`, `RUN_SETTINGS` and both `ai-recover` lists are identical (parsed from the files, no exceptions), so a later setting cannot be half-wired.
-- `tests/test_workflow.py` `ToolkitTest.setUp`: `self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests` beside `AI_AUTO_RECOVER`, so existing plan-stop, malformed-review and counts-lie tests keep today's behaviour unchanged; supervised tests set `AI_SUPERVISE='1'` per call.
-- README/`docs/workflow.md` configuration section: list the settings with defaults ("used by the supervisor"). Flow unchanged in this task.
+On Python 3.13+ `_colorize.can_colorize` checks `PYTHON_COLORS` before `NO_COLOR`, so a caller with `PYTHON_COLORS=1` still gets coloured `Ran N tests`/`OK` lines (Python 3.14 here colours unittest output). In `run_shard` also set `env['PYTHON_COLORS'] = '0'`; update the comment. Factor the parsing into a small function `summary(output)` returning `(ran, status)` that first removes ANSI escape sequences (`re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', output)`), so a future colour source cannot break it either; print the original output for failing shards as today. Docs: one sentence in README "Running the tests" (shards run without colour; `FORCE_COLOR`/`PYTHON_COLORS` are ignored for them) and the matching `docs/workflow.md` paragraph (line ~49). Flow unchanged.
+
+Tests in `ParallelRunnerTest` (new methods `test_parallel_runner_*`): run a two-test suite through the runner with `FORCE_COLOR=3`, with `PYTHON_COLORS=1`, and with both (subtests): exit 0, `Ran 2 tests`, no `crashed`. `setUp` copies the host environment, so each subtest first removes `NO_COLOR`, `FORCE_COLOR` and `PYTHON_COLORS` from its env copy and then sets only that case's variables (a host `NO_COLOR=1` or CI `PYTHON_COLORS=0` must not make a case pass without exercising the fix). Set the env on `self.env` before calling `self.runner()`, which copies it (`tests/test_workflow.py` ~4676). Load the runner with `importlib.util.spec_from_file_location` (as `recheck_module` does for the helper) and check `summary()` on a coloured sample (`'\x1b[1mRan 3 tests in 0.1s\x1b[0m\n\n\x1b[32mOK\x1b[0m\n'` → `(3, 'OK')`; `FAILED (failures=1)` → `'FAILED'`). Because `summary()` strips escapes, the passing-suite cases cannot tell whether the env line is there; the env line gets its own test: run a *failing* two-test suite (as `test_parallel_runner_failing_test_prints_traceback`) with only `PYTHON_COLORS=1` set (same env clean-up) and assert the runner's echoed shard output (`print(output.rstrip())`) contains no `\x1b[`. On Python 3.14+ `_colorize.can_colorize` returns true for `PYTHON_COLORS=1` before any other check, so without the env line unittest's failure output is coloured. Two mutation checks, each run once with the result recorded: removing the `PYTHON_COLORS=0` line fails the no-escape test (Python 3.14+); removing the stripping in `summary()` fails the `summary()` unit test. On older Pythons unittest does not colour, so the first check is vacuous there; record `sys.version_info` used for the checks and their outcome in the result.
 
 ### Likely affected modules
-scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-recover, scripts/ai-pipeline, scripts/ai-review, scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md
+tests/run_parallel.py, tests/test_workflow.py, README.md, docs/workflow.md
 
 ### Acceptance criteria
-- Each invalid value stops `ai-pipeline` with a message naming the setting before any Claude/Codex call (mock call files absent); an invalid `AI_SUPERVISE` also stops a hand-run `ai-review --plan` and `ai-run` before any agent.
-- Values from the config file are captured in the manifest; after the config file changes, a recovery resume (`AI_RECOVERY_ATTEMPT` path) still sees the approved values (pattern: `test_resume_ignores_user_config_the_approved_run_did_not_have`).
-- The key-list consistency test passes.
+- With `FORCE_COLOR=3`, `PYTHON_COLORS=1` or both in the caller's environment, the runner reports `OK` with the right count for a passing suite.
+- `summary()` parses coloured and plain summaries identically.
+- With `PYTHON_COLORS=1` in the caller's environment, no escape sequence reaches the echoed output of a failing shard.
+- Each colour case runs with only its own colour variables set (host `NO_COLOR`/`FORCE_COLOR`/`PYTHON_COLORS` removed first).
+- Mutation checks (once, Python version and outcome recorded in the result): on Python 3.14+ removing the `PYTHON_COLORS=0` line fails the no-escape test; removing the stripping in `summary()` fails the `summary()` unit test.
+- Existing `parallel_runner` tests still pass; `--collect-only` unchanged.
 
 ### Validation
-`python3 -m unittest tests.test_workflow -k supervise_settings`; `.ai/bin/ai-check`
+`python3 -m unittest tests.test_workflow -k parallel_runner`; `.ai/bin/ai-check`
 
 ### Result / notes
+`run_shard` now also sets `PYTHON_COLORS=0`; new `summary()` strips ANSI before parsing. Tests: `test_parallel_runner_passes_with_caller_colour_settings`, `..._failing_shard_output_has_no_escapes`, `..._summary_parses_coloured_and_plain`. Mutation checks on Python 3.14.7: removing `PYTHON_COLORS=0` failed the no-escape test; removing ANSI stripping failed the `summary()` test (both restored). `-k parallel_runner`: 10 OK; `.ai/bin/ai-check`: 290 tests OK. README and docs/workflow.md updated.
 
-## T002 — Host plan-review round records and plan history (context only)
+## T002 — Per-attempt model statistics in the outcome report (CU-1)
 Status: DONE
-Dependencies: T001
+Dependencies: none
 Model: sonnet
 
 ### Goal
-R2: a plan-review round number from host records and a plan-only history that pairs each round's findings with its plan-dispositions section.
+R2: `ai-status --outcomes` credits each attempt and its time to the model that ran it instead of the task's final model.
 
 ### Implementation notes
-- Depends on T001: this task changes `scripts/ai-review` (plan mode `--base`, round recording), which T001 also changes (settings check), and its pipeline/hand-run tests rely on T001's fixture default `AI_SUPERVISE='0'`.
-- Every `plan-rounds` action takes `BASE`: the pipeline passes `base_sha`; `ai-review --plan` by hand uses `merge-base` of `--base REF` (now accepted in plan mode, default `main` like `ai-pipeline`). Only records whose commit is in `BASE..HEAD` count, so a merged-then-recreated branch name starts at round 1.
-- `workflow.py plan-rounds record BASE COMMIT`: COMMIT must be in `BASE..HEAD`, have the subject `chore(ai): record plan review` and a tree whose `.ai/reviews/plan.md` verifies (`plan-review-info` binding); appends `{commit, report_digest, plan_digest, blockers, majors, minors}` to `plan-rounds-<branch hash>.json` beside `fix-rounds`, idempotent per report digest (a second commit holding the same report never adds a round). Call it in `ai-pipeline` after `host_commit 'chore(ai): record plan review'` and in `ai-review --plan` by hand after its own commit (also when the commit was a no-op: record the existing HEAD only if it holds that report).
-- `plan-rounds sync BASE`: when the current verified `plan.md` has no record, records the newest host-subject commit in `BASE..HEAD` whose committed `plan.md` equals it (crash between the review's host commit and its record); no-op otherwise. `ai-pipeline` calls it at the top of the plan-review loop, `ai-review --plan` and `ai-run --revise-plan` before reading `current`.
-- `plan-rounds count BASE` / `plan-rounds current BASE`: records in `BASE..HEAD`; `current` prints `n report_digest` and fails when `.ai/reviews/plan.md`'s digest is not the last such record. Legacy init (no store yet): once, from exact-subject commits in `BASE..HEAD` that changed `plan.md` (document: can only raise n).
-- `workflow.py plan-history BASE [--count]`: for each recorded round (in `BASE..HEAD`) before the current one, findings (ID, level, title via `finding_title`) from the committed `plan.md` at that record, and the disposition per ID from the section `## Plan review round <k> (report <digest>)` of `.ai/reviews/plan-dispositions.md` at HEAD (format in the plan; "no revision recorded" when absent). Rendered like `render_rounds` under `## Previous plan review rounds`, capped. Docstring: context only, never authority. Never reads `current.md` or implementation-review commits.
-- Flow unchanged (records only); `docs/workflow.md` one paragraph on plan rounds.
+`scripts/lib/workflow.py` `outcomes_report`: today `table()` groups `final[key]` (each task's last row) and `spent[key]` (sum of all attempts). Keep that for the category table ("Tasks by category", per task, unchanged columns). Replace "Tasks by model" and "Tasks by model and category" with per-attempt tables "Attempts by model" and "Attempts by model and category", grouped by each attempt row's own `model` (missing → `default`) and the task's category:
+`| model | attempts | done | not done | first-time pass | avg minutes |` where attempts = rows on that model, done = rows with `result == 'done'`, not done = the rest, first-time pass = `x/y (z%)` over tasks whose attempt-1 row ran on this model (x = those whose attempt-1 row has `first_pass` true; print `-` when y is 0), avg minutes = that model's seconds / its attempts / 60. Each task key (`project`, `branch`, `task`) has exactly one attempt-1 row: its first row in file order (files in argument order), whatever its `attempt` field says. Within one log this is the `attempt == 1` row, because `outcome` numbers attempts by counting the task's earlier lines in file order; it also covers old attempt-less rows and a task whose old attempt-less row is followed by a new row numbered `attempt=2`. So a task counts exactly once in y. Keep the summary line (`N task(s), M attempt(s), R review(s).`). Keep the hunk inside `outcomes_report` (a nested helper is fine).
+
+Tests (new `test_outcome_report_*` methods; offline): write a JSONL file by hand in the test's temp dir and run `ai-status --outcomes FILE` in the fixture project: T001 attempt 1 `sonnet` `error` 600 s, attempt 2 `opus` `done` 300 s (`first_pass` false); T002 attempt 1 `sonnet` `done` 60 s (`first_pass` true). Expect the sonnet row `| sonnet | 2 | 1 | 1 | 1/2 (50%) | 5.5 |` and opus `| opus | 1 | 1 | 0 | - | 5.0 |`; the category table still has one row per task with summed time. Old-line case (separate JSONL): task T009 with two rows lacking `model`, `attempt` and `first_pass` (`error` 60 s, then `done` 60 s) gives `| default | 2 | 1 | 1 | 0/1 (0%) | 1.0 |`, so it counts once in y. Mixed old/new case (separate JSONL): task T010 with one row lacking `model`, `attempt` and `first_pass` (`error` 60 s), then a row `model` `opus`, `attempt` 2, `done`, `first_pass` false, 120 s, gives `| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |` and `| opus | 1 | 1 | 0 | - | 2.0 |` (a rule that looks for `attempt == 1` would print `-` for default). Update the one existing assertion in `test_runner_logs_task_outcomes_and_report` (`## Tasks by model` and its `| sonnet | 1 | 1/1 (100%) …` row) to the new table: assert `## Attempts by model` and the row prefix up to the first-time-pass cell, `| sonnet | 1 | 1 | 0 | 1/1 (100%) |`, without the avg-minutes cell (wall-clock time of a real mock run, now the last column), as the current assertion's values do not depend on time; this is a format change, not a weakened check. Docs: README "Outcome log" and `docs/workflow.md` "Outcome log" describe per-attempt model tables. Flow unchanged.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-review, tests/test_workflow.py, docs/workflow.md
+scripts/lib/workflow.py (outcomes_report only), tests/test_workflow.py, README.md, docs/workflow.md
 
 ### Acceptance criteria
-- Three plan rounds (mock Codex plan reviews with different IDs/titles, sections for rounds 1–2 written by the test): history lists rounds 1–2 with dispositions; an area repeated in rounds 1–3 and an unrelated one both appear; earlier implementation reviews in the same history are absent.
-- An agent commit with the plan-review subject (no host record) does not change `plan-rounds count` once the store exists; a tampered `plan.md` fails `record`.
-- The pipeline and a hand-run `ai-review --plan` both leave one record per review; recording the same report from a second commit adds nothing.
-- Merged-then-recreated branch name: `feature/x` with two recorded rounds is merged into `main` and deleted, a new `feature/x` from `main` gets its first review → `plan-rounds current BASE` prints round 1.
-- Host commit of a plan review present but no record (simulated crash): `plan-rounds sync BASE` records it once and `current` succeeds; a forged `plan.md` in such a commit is not recorded.
+- The mixed-model fixture shows one attempt and its minutes under each model (rows above); the old code fails this test.
+- The category table is per task as before.
+- Old lines without `model` or `attempt` still report (as `default`; a task's first row in file order is its attempt 1, counted once in the first-time-pass denominator), including a task whose old attempt-less row is followed by a new `attempt=2` row.
+- `test_runner_logs_task_outcomes_and_report` passes with the updated table assertion.
 
 ### Validation
-`python3 -m unittest tests.test_workflow -k plan_rounds`; `.ai/bin/ai-check`
+`python3 -m unittest tests.test_workflow -k outcome`; `.ai/bin/ai-check`
 
 ### Result / notes
-Done. `plan-rounds`/`plan-history` in `scripts/lib/workflow.py`; `ai-review --plan` takes `--base` (default main) and syncs the record after its commit; `ai-pipeline` syncs before the plan-review check and after the host commit (after the hook check, so a hook-changed commit still reports "reviewed content changed"). The pipeline records through `sync` rather than `record ... HEAD`: same host-subject/verification rules, robust to a post-commit hook. 7 new tests pass (`-k plan_rounds -k plan_history`); `.ai/bin/ai-check` OK, 283 tests.
+Done. `outcomes_report` now prints per-attempt "Attempts by model" and "Attempts by model and category"; the category table is unchanged (per task). First-time pass counts each task's first file-order row once. New tests `test_outcome_report_*` (mixed model, old lines, old line then attempt=2) and the updated `test_runner_logs_task_outcomes_and_report` pass; `.ai/bin/ai-check` PASS (293 tests). README and docs/workflow.md updated.
 
-## T003 — Plan-dispositions section writer and round-specific validator
+## T003 — Re-check outcome lines carry upheld/withdrawn totals (CU-3)
 Status: DONE
 Dependencies: T002
-Model: opus
+Model: sonnet
 
 ### Goal
-R1/R2: a host-bound section per plan-review round and a validator that checks only that section and keeps the plan gate.
+R3: a re-check's outcome line records how many rejected BLOCKER/MAJOR findings were upheld and withdrawn, and which HEAD was reviewed; the report sums them per reviewer.
 
 ### Implementation notes
-- `workflow.py PLAN_DISPOSITIONS = .ai/reviews/plan-dispositions.md`; `PLAN_REVISION_RECORDS` = the R1 file list.
-- `start-plan-dispositions BASE`: from `plan-rounds current BASE` (round n, report digest) and HEAD, create the file (title + comment explaining the contract) if missing and append the section header exactly as in the plan's contract, unless the last section already is that header (resume: no duplicate).
-- `plan-dispositions-check --since START [--fresh]`: implement the full contract from `.ai/current-plan.md` ("Plan-dispositions section contract"); the text above the section is compared with START's committed file by the three-case rule there (START has the header → START's text above it; else START's whole file; no file at START → the exact host preamble); "pre-existing task statuses unchanged" compares with the committed `tasks.md` at START. `PLAN_DISPOSITION_ROW` accepts `accepted|rejected|needs-human`. Prints `accepted=a rejected=r needs_human=h`; `--questions` prints at most 3 needs-human questions, each whitespace-collapsed to one line and capped at 300 chars, plus `(+k more in .ai/reviews/plan-dispositions.md)` when there are more (for the revision record and the bounded stop message).
-- `plan-revision-scope START`: like `triage-scope`, with `PLAN_REVISION_RECORDS`.
-- No caller yet; flow unchanged.
+`scripts/lib/workflow.py` `outcome`, branch `kind == 'review'` and `mode == 'recheck'` (`ai-review` calls `outcome review recheck …` right after `publish-recheck`; do not change `ai-review`). Read the published report with the existing verifier: `head, _, _, answers = recheck_values()` and the levels from `rejected_rows()`, which returns `(head, rows)` with `rows` a list of `(finding, level, evidence)` tuples: `levels = {finding: level for finding, level, _ in rejected_rows()[1]}`. The counting helper takes `(answers, levels)` and returns the four ints, so it can be unit-tested with a BLOCKER level directly. Add `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` (ints, zero included) and `reviewed_head` (`git rev-parse --verify <head>^{commit}`, full SHA). Wrap it in `try … except (OSError, ValueError, subprocess.CalledProcessError)`: on failure omit these fields and still write the line (as the plan/code `review_counts` branch does). Read-only: no new writes, no change to verification.
+
+Report (`outcomes_report`): plan/code reviews stay in "Reviews by reviewer"; re-checks move to a new table "## Re-checks by reviewer": `| reviewer | model | re-checks | upheld BLOCKER | upheld MAJOR | withdrawn BLOCKER | withdrawn MAJOR | avg minutes |`, one row per (`reviewer`, `model`) (missing `model` → `default`), rows sorted with `key=str` like "Reviews by reviewer" (missing fields count 0; old lines still count as re-checks). `reviewed_head` is recorded on the line but not printed in this table (kept for later matching, e.g. the deferred CU-2). "## Claude-only reviews (Codex catch-up pending)" is still built from *all* review lines (plan, code and recheck), independent of the table split: compute it from the unfiltered review list, outside any block that only runs when plan/code reviews exist, so a log whose only reviews are Claude re-checks still prints it.
+
+Tests (new `test_outcome_recheck_*`): reuse `rejected_review` (two MAJOR, M1/M2 rejected) and `MOCK_RECHECK` with M1 withdrawn, M2 upheld (as `test_recheck_command_parses_withdrawn_and_upheld`): the last outcome line has `upheld_major == 1`, `withdrawn_major == 1`, both BLOCKER fields 0, `reviewed_head` = the review's HEAD (full SHA, which differs from the current HEAD after the triage commit). A malformed answer (every finding upheld) gives `upheld_major == 2`. BLOCKER counting: a report test with hand-written JSONL (`upheld_blocker` 1 …) checks the new table row; the same JSONL also has a `claude-fallback` recheck line (with `head`), and the test asserts it appears under "Codex catch-up pending" (`recheck HEAD <first 12 of head>`) and that the "Reviews by reviewer" section has no `| recheck |` row. A second hand-written JSONL with only that `claude-fallback` recheck line asserts the catch-up section is still printed; a module-level check of the counting helper with a BLOCKER level is enough if no mock produces a BLOCKER review. Failure case: call the helper directly (`outcome review recheck codex MODEL EFFORT 1`) in a fixture with no re-check report, so `recheck_values` fails, and assert exactly one new line without the count fields. Docs: README and `docs/workflow.md` "Outcome log" list the new fields. Flow unchanged.
 
 ### Likely affected modules
-scripts/lib/workflow.py, tests/test_workflow.py
+scripts/lib/workflow.py (outcome, outcomes_report), tests/test_workflow.py, README.md, docs/workflow.md
 
 ### Acceptance criteria
-- Adversarial validator tests, each failing with a specific message: missing row; duplicate/conflicting rows; row for an unknown ID; rows only in an older section with the same IDs; Convergence line only in an older section (round 3); rejected without evidence; accepted without a task / with an unknown or DONE task; needs-human without a question; a pre-existing task status changed or a new task DONE; an edited earlier section; a second header for the same round.
-- Complete section passes and prints the counts; MINOR rows are optional; round 2 needs no Convergence line.
-- Above-the-section rule: START already holding the same header (rows committed) passes; file absent at START with the exact preamble passes, an edited preamble fails; START without the header requires its whole file unchanged above.
-- `--questions` with 5 multi-line questions of 1000 chars prints 3 single-line questions of ≤ 300 chars and `(+2 more ...)`.
-- `plan-revision-scope` rejects a source file and accepts every listed record.
+- After a re-check with one withdrawn and one upheld MAJOR, the outcome line carries those totals by severity and the reviewed HEAD.
+- A line is still written, without the new fields, when the re-check report cannot be verified.
+- The report's "Re-checks by reviewer" table sums the totals; "Reviews by reviewer" no longer lists re-checks with zero findings (asserted by the JSONL report test: no `| recheck |` row there).
+- Claude re-checks remain listed under "Codex catch-up pending", also when the log has no plan/code review.
+- `ai-review --recheck` behaviour and its existing tests are unchanged.
 
 ### Validation
-`python3 -m unittest tests.test_workflow -k plan_dispositions`; `.ai/bin/ai-check`
+`python3 -m unittest tests.test_workflow -k outcome -k recheck -k disput` (covers the outcome tests, the re-check command tests, `test_pipeline_fallback_recheck_is_committed_with_the_log` and every disputed-findings test, several of which run a re-check without "recheck" in their names); `.ai/bin/ai-check`
 
 ### Result / notes
-Done. `workflow.py`: `PLAN_REVISION_RECORDS`, host preamble, `start-plan-dispositions BASE`, `plan-dispositions-check`, `plan-revision-scope START` (shares `records_scope` with `triage-scope`), `plan_round_current` (also backs `plan-rounds current`), `bounded_questions` (for T004's record). Deviation for T004: the check is `plan-dispositions-check --since START --base BASE [--fresh] [--questions]`; `--base` is required because the round number (header, Convergence from round 3) must come from host records in `BASE..HEAD`, never from the agent-editable header. `--fresh` adds the TODO/task-status rules (as `triage-check`); `--questions` prints only the bounded questions (`P1: <question>`, `<br>` collapsed), no counts line. Every present row is validated and counted (MINOR rows too). The section also needs its host `Plan review HEAD:` line (an ancestor of HEAD); trailing blank lines above the header are ignored in the byte comparison (the writer separates sections with a blank line). Mock codex gained `MOCK_CODEX_PLAN_MINOR`. 7 new `test_plan_dispositions_*` tests pass; `.ai/bin/ai-check` OK, 290 tests (first run hit one tempdir-cleanup race, `.git/objects` not empty at teardown, not an assertion; rerun clean).
-
-## T004 — ai-run --revise-plan: prompt, read/plan-only allowlist, host commit with log entry, outcome record
-Status: DONE
-Dependencies: T001, T003
-Model: opus
-
-### Goal
-R1/R5: a standalone, hand-testable revision mode with an enforced edit boundary, a counted host commit that leaves the checkout clean (its run-log entry included) and a durable outcome record (needs-human questions), before the pipeline uses it.
-
-### Implementation notes
-- `scripts/ai-run --revise-plan [--since COMMIT] [--base REF]` (exclusive with `--triage`; `--since` now valid for both; `--base` default `main`, BASE = its merge-base with HEAD, the pipeline passes `base_sha`): requires a verified plan review with BLOCKER+MAJOR > 0 (`plan-review-info`), `plan-rounds sync BASE` then `plan-rounds current BASE`, `tasks untouched`, and refuses with `Plan revision: this plan review was already revised; review again (ai-review --plan).` when a `plan-revisions` record exists for the current report digest (no second host commit/record for one report). Mirrors the triage block: scope check (`plan-revision-scope`) before and after; if `plan-dispositions-check --since S --fresh` already passes, record without a session; else require no dirty files beyond records, `start-plan-dispositions`, commit it (`chore(ai): open plan dispositions`), run one session, then validate.
-- Session: prompt `templates/.ai/prompts/plan-revision.md` (new; installed by `setup-project` like the other prompts; missing in `.ai/prompts` → die naming `setup-project --upgrade`) + host `REVISION CONTRACT` (round n, report path, section header, editable files, needs-human rule, Convergence rule from round 3 with "redesign the area as a whole", "do not commit; the host commits") + `plan-history BASE` output as PREVIOUS PLAN ROUNDS. Model: `--model` from the caller (default `opus` when none; the pipeline always passes it, T005/T006). Per-call limits as any `ai-run` (`--run-timeout`, `--session-timeout`).
-- Allowlist (plan review round 4 P1; same policy as the catch-up fix's no-Bash reviewer): new `workflow.py plan-revision-allowlist` = `Read`, `Glob`, `Grep`, `Edit(./<path>)` for each editable R1 record, nothing else: no Bash at all (no git, no inherited project entries). `claude_session` takes the allowlist and the `--tools` list as parameters: `--revise-plan` passes `--tools Read,Glob,Grep,Edit`. The host prepares the git context the session needs (plan history and the plan files' recent diff in `.ai/local/revision-context/`, removed afterwards) and does all staging and committing itself (the host commit below); the session never commits. Tests: invocation assertions that Bash/Write are absent and the project allowlist is ignored; mission control runs a live check in a disposable fixture after the task.
-- Host commit, exactly in the order of the plan's "Revision host commit and record" (P1/P2 of round 3): counts from `plan-dispositions-check --fresh` and the bounded `--questions` text; `ai_log plan-revision 'plan revised (round n): accepted a, rejected r, needs-human h' ...` and the state line BEFORE the commit; `git add` the existing R1 records incl. `.ai/run-log.md`; `git commit --allow-empty -m 'chore(ai): record plan revision'`; `ai_guard_verify`; then ONE `plan-revisions record HEAD --accepted a --rejected r --needs-human h` write with the questions on stdin (new per-branch store `{commit, report_digest, round, accepted, rejected, needs_human, questions}`; subject must match; questions re-bounded by the helper); post-commit scope + clean check (hook guard). Nothing writes to the checkout after the commit. Outcome log `outcome plan_revision ROUND RESULT MODEL SECONDS` (new kind; `outcomes_report` ignores it; `.ai/local`, not tracked).
-- Round 5 P1, initial-state contract: a missing revision store, or a valid store with no outstanding needs-human decision, lets the normal missing/invalid-report review path run (fresh install, `AI_SUPERVISE=0`); corrupt authority state, or an unverifiable report while an outstanding needs-human decision may apply, fails closed. `plan-rounds sync` treats an absent store the same way. Tests: fresh installation; forged `plan.md` replaced with `AI_SUPERVISE=0`; outstanding needs-human with missing or corrupted evidence.
-- `workflow.py plan-revisions decision`: as in the plan (exit 0 + stored questions when the verified current `plan.md` has a reachable record with `needs_human > 0`; exit 1 when not; exit 2 on an unreadable store/report). Used by T005/T006.
-- No pipeline change; flow unchanged. `ai-run --help`, `docs/workflow.md` describe the mode and how a needs-human decision is cleared (answer, commit, `ai-review --plan` by hand).
-
-### Likely affected modules
-scripts/ai-run, scripts/lib/workflow.py, templates/.ai/prompts/plan-revision.md, tests/test_workflow.py, docs/workflow.md
-
-### Acceptance criteria
-- Mock Claude (new `REVISION CONTRACT` branch, modes accept/reject-only/needs-human/touch-source/edit-plan-review/no-commit) by hand: MAJOR plan review → `ai-run --approved --revise-plan` → section filled, one host commit, one host record; reject-only changes only `plan-dispositions.md` (plus the host's `run-log.md`/`state.md` lines).
-- After a successful revision `git status --porcelain --untracked-files=all` is empty, the revision commit contains the new `run-log.md` line, and a following hand-run `ai-review --plan` starts (no "Commit the plan before reviewing it").
-- The record holds the counts; with needs-human rows it holds the bounded questions and `plan-revisions decision` prints them (exit 0); after a hand-run `ai-review --plan` produces a new report, `decision` exits 1; a corrupt store makes it exit 2.
-- Generated `--allowedTools` contains no unrestricted `Edit`/`Write`, no `ai-check`/`validate`; every `Edit(...)` is one of the R1 files; `--tools` is exactly `Read,Glob,Grep,Edit` (asserted from the mock's args; no Bash, round 5 P2).
-- A session touching source, `plan.md` or a gate file stops with nothing counted; an uncommitted but complete section is recorded without a second session; `--triage` behaviour unchanged.
-- Resume shapes: (a) the session wrote its rows (uncommitted; the session never commits) and the run died before the host commit; a hand-run `ai-run --revise-plan` without `--since` (START = HEAD, which already holds the section) records it without a session; (b) first revision (file absent at START) passes with the host preamble. A second `ai-run --revise-plan` for an already recorded report refuses with "already revised", no new commit or record.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k revise_plan`; `.ai/bin/ai-check`
-
-### Result / notes
-Done. `ai-run --revise-plan [--since] [--base]` (exclusive with `--triage`; `--base` only with it); `claude_session PROMPT MODEL TOOLS ALLOWED...`. `workflow.py`: `plan-revision-allowlist` (Read/Glob/Grep + `Edit(./…)` of spec, plan, tasks, plan-dispositions, handoff: the host owns state.md/run-log.md, so they are in scope but not editable), `plan-revisions record BASE COMMIT --accepted --rejected --needs-human` (stdin questions re-bounded; subject, ancestry and committed plan.md = current report checked; idempotent per report), `plan-revisions revised|decision` (0/1/2), outcome kind `plan_revision`. New prompt `templates/.ai/prompts/plan-revision.md` (this repo's frozen `.ai/prompts` needs a human `setup-project --upgrade`). Choices: model is `--model` if given, else `opus` (AI_MODEL is ignored here); the state line is `blocked` when needs-human > 0, else `planning`; the "already revised" check uses `plan-revisions revised` (exit 2 → fail closed). Decision with an unverifiable report fails closed only when the LAST reachable revision record had needs-human rows. 9 `revise_plan` tests pass; `.ai/bin/ai-check` OK, 299 tests. Not done here: live check with real Claude (mission control, per the task notes).
-
-## T005 — Plan-revision stage, per-run reservation and terminal recovery rules
-Status: DONE
-Dependencies: T001, T004
-Model: opus
-
-### Goal
-A host-bound `plan-revision` stage that a crash at any point completes once, and recovery that never sends supervision stops or a recorded needs-human decision to a Claude session.
-
-### Implementation notes
-- `run-manifest stage-set plan-revision START`: binds the verified plan report digest (triage keeps the current-review digest); `stage_fields` accepts both names; messages say "Plan revision stage: ..." for this stage.
-- `stage-verify` dispatches by name: plan-revision → `plan-review-info` verifies, report digest matches, `plan-revision-scope START`; no `plan-revisions` record commit in START..HEAD → `pending`; a record commit with a dirty tree → fail `Plan revision stage: uncommitted changes after the counted revision commit.` (as triage, `workflow.py:1209-1210`; never a second `ai-run`); else `committed`. Since T004 writes the outcome in the same record, `committed` implies the outcome is stored.
-- `run-manifest revision-reserve DIGEST LIMIT`: digest already reserved → prints the count (no change, no limit check); else count < LIMIT → append, print the new count; else fail `plan review: supervision limit reached (N revisions this run)`. Plus `revision-count`; `start` resets the list, a resume keeps it. Reserved BEFORE `stage-set` (precedent: `ai-recover:65` reserves before anything interruptible).
-- `scripts/ai-pipeline`: `plan_revision_model` (round n from `plan-rounds current "$base_sha"`, manifest-restored `AI_SUPERVISE_ESCALATE_*`) and `complete_plan_stage` exactly as in the plan's loop section: `stage-verify`; `committed` → `stage-clear`; `pending` → `revision-reserve DIGEST "$AI_SUPERVISE_PLAN_ROUNDS"` again (idempotent), `ai-run --approved --revise-plan --since START --base "$base_sha" --model "$(plan_revision_model)"` plus `--session-timeout`/`--knowledge-dir` as in `triage_args`, `stage-verify` = committed, `stage-clear`. `complete_plan_stage` writes nothing to the checkout. At start, dispatch the open stage by name (`complete_stage` for triage, `complete_plan_stage` for plan-revision). Fix the "triage stage" wording at the `open_stage` read.
-- `scripts/ai-recover`: open-stage leftovers checked with the stage's own scope helper; add always-escalate patterns `*'Plan revision stage'*`, `*'supervision limit reached'*`, `*'needs your decision'*`. After the open-stage block and before the stop-recording commit and any Claude session: `plan-revisions decision` exit 0 → escalate `plan review needs your decision: <stored questions>` (also when the recorded reason is a crash or unknown); exit 2 → escalate (unreadable record).
-- Flow change (recovery rules): vault `agents-flow.md` recovery part + `updated:`, `docs/workflow.md` recovery section, handoff `## Flow chart`.
-- Round 6 P3: recovery checks stored needs-human decisions after validating host authority and BEFORE the attempt limit and open-stage resume paths. Test: open-stage crash with a stored needs-human decision escalates directly with the stored questions and no resume, also with the recovery allowance exhausted.
-
-### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md
-
-### Acceptance criteria
-- Helper tests: stage-set/verify for plan-revision (pending, committed, dirty tree after the record commit fails, foreign report, out-of-scope file, agent commit with the revision subject does not close it); reservation idempotent per digest (also at the limit: LIMIT 1 with the digest reserved passes), a new digest at the limit fails, reset by `start`, kept by a resume.
-- `complete_plan_stage` on an open stage with a committed record only clears it (no `ai-run` call, no "already revised" error); on a pending stage it passes the model `plan_revision_model` gives for the round (mock args).
-- `ai-recover` with each new reason escalates without a Claude session (`recover-calls` absent) and an interrupted plan-revision stage with source leftovers escalates without a commit.
-- `ai-recover` with last-error `unknown` (crash) and a recorded needs-human revision for the current report escalates with the stored questions, no `recover-calls`, no pipeline resume.
-- Existing triage-stage and recovery tests pass unchanged.
-- README's recovery section describes the plan-revision stage and its resume/terminal rules as implemented (round 4 P3).
-
-### Validation
-`python3 -m unittest tests.test_workflow -k plan_revision_stage`; `python3 -m unittest tests.test_workflow -k triage_completion`; `.ai/bin/ai-check`
-
-### Result / notes
-Done (resumed from an interrupted session's uncommitted diff, reviewed and kept). `workflow.py`: `STAGE_DIGESTS` (`triage` → `review_digest`, `plan-revision` → `report_digest`), `stage-set plan-revision` binds the verified plan report, `stage_fields` validates either, `plan_stage_verify` (digest + `records_scope` with `PLAN_REVISION_RECORDS`; committed only from a host record in START..HEAD), `run-manifest revision-reserve DIGEST LIMIT` / `revision-count` (`plan_revisions` list in `run.json`; `start` rebuilds the manifest, so it resets). `ai-pipeline`: `plan_revision_model`, `plan_stage_fail`, `complete_plan_stage`, open-stage dispatch by name, "open stage" wording (`test_stage_per_branch_unreadable_record_fails_closed` assertion updated to it). `ai-recover`: decision check right after the manifest/gate/branch checks, before hard rules, attempt limit and stage resume; new hard-rule patterns; stage-specific scope helper; usage text. Docs: `docs/workflow.md` (stage paragraph, recovery contract), README auto-recovery, vault `agents-flow.md` recovery diagram + note, hub log. Note: with `AI_AUTO_RECOVER=0` in the approved run, `ai-recover` escalates "auto-recovery is off" before the decision check (no session either way). 8 `plan_revision_stage` tests pass; `triage_completion`/`stage_per_branch`/recovery tests (36) pass; `.ai/bin/ai-check` OK, 307 tests.
-
-## T006 — Supervised plan-review loop in ai-pipeline
-Status: DONE
-Dependencies: T001, T005
-Model: opus
-
-### Goal
-R1/R2/R5: the pipeline revises within limits, always re-reviews after a revision on a clean checkout, and stops for the human on limit, needs-human (also after a crash) or out-of-scope.
-
-### Implementation notes
-- Replace the single plan-review block with the loop in `.ai/current-plan.md`. It starts with `plan-rounds sync "$base_sha"`, then the open-stage dispatch, then the decision check: `plan-revisions decision` exit 0 → `plan review needs your decision (round n): <stored questions>` stop (last-error + notify, bounded text from the record), exit 2 → stop; this check runs at startup and after every `complete_plan_stage`, before any re-review, revision or implementation. Review is needed when `plan-review-info` is not current OR a `plan-revisions` record exists for the current report digest. After each review: host commit, `plan-rounds record "$base_sha" HEAD`, re-check current.
-- Re-review prompt (`ai-review --plan --base "$base_sha"`, host-appended): `PLAN REVISION CONTEXT` with round n, "dispositions of round n−1: .ai/reviews/plan-dispositions.md", and `plan-history`; update `templates/.ai/prompts/plan-review.md` to say rejected findings are re-judged on their evidence. Adjust `test_review_context_plan_review_and_recheck_prompts_have_neither` (plan reviews get plan history only, never implementation rounds).
-- BLOCKER+MAJOR > 0, in this order: `AI_SUPERVISE=0` → today's stop and message; `revision-reserve DIGEST "$AI_SUPERVISE_PLAN_ROUNDS"` fails → `plan review: supervision limit reached (N revisions this run); BLOCKER b, MAJOR m remain`; then `stage-set plan-revision`, `complete_plan_stage` (T005: reserves again idempotently, model from `plan_revision_model`), `ai_guard_verify`. Never `stage-set` before the reservation.
-- After the stage: the decision check above; when it passes, `ai_notify "🔁 Plan revised (round n/N): accepted a, rejected r"` (N = `AI_SUPERVISE_PLAN_ROUNDS`, counts from the record) and the re-review. No `ai_log` and no other checkout write between the stage and the re-review: the revision's log entry is already in its host commit (T004, P1 of round 3).
-- Tests: supervised tests set `AI_SUPERVISE='1'` (fixture default is `0`, T001). Add a mock Codex plan mode `MOCK_CODEX_PLAN=major-once` (MAJOR on the first plan-review call, APPROVE after) beside the existing always-MAJOR `major`; the mock Codex appends `git status --porcelain --untracked-files=all` (empty marker when clean) to a per-call file so tests can assert the checkout state at each plan-review call; the mock Claude's prompt assertion gains the `REVISION CONTRACT` branch (T004). Logging stays enabled (real `ai_log`, tracked `.ai/run-log.md`).
-- Flow change: vault `agents-flow.md` big picture (plan-review loop, stops, escalation, durable needs-human) + `updated:`, README/`docs/workflow.md`, `ai-pipeline --help`, handoff `## Flow chart`.
-
-### Likely affected modules
-scripts/ai-pipeline, scripts/ai-review, templates/.ai/prompts/plan-review.md, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
-
-### Acceptance criteria
-- Mock run (`MOCK_CODEX_PLAN=major-once`): plan MAJOR → revision → APPROVE → implementation → review → PR, with the notification and the revision's run-log line in the revision commit; the checkout is clean at the second plan-review call (asserted from the mock's per-call status file).
-- Existing plan-stop tests (`test_pipeline_plan_review_gates_implementation`, `test_plan_review_is_bound_and_tracks_the_whole_tree`) pass unchanged under the fixture default `AI_SUPERVISE=0`.
-- A needs-human row with a long multi-line question → the stop message and `.ai/local/last-error` hold the bounded single-line text (T003 cap), no second plan-review call, no implementation call.
-- All-rejected dispositions-only revision → `codex-plan-calls` = 2 before any implementation call; the second prompt contains `PLAN REVISION CONTEXT`; the checkout is clean at the second call.
-- Limit (`AI_SUPERVISE_PLAN_ROUNDS=1`, always-MAJOR reviewer) → limit stop after one revision; `AI_SUPERVISE=0` → today's stop, no revision call; needs-human → stop listing the question; revision touching source → stop. With `AI_AUTO_RECOVER=1` none of these run a recovery session.
-- Revisions 1–2 run on `opus`, revision 3 on the escalation model (mock args), and round 3 without a Convergence line fails the stage.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k supervised_plan`; `.ai/bin/ai-check`
-
-### Result / notes
-Done. `ai-pipeline`: the single plan-review block is now the loop from the plan (sync → decision check → "Plan revised" notification right after a completed stage → review when not current or already revised → AI_SUPERVISE=0 stop / `revision-reserve` limit stop with "BLOCKER b, MAJOR m remain" / `stage-set plan-revision HEAD` + `complete_plan_stage` + clean check); the startup plan-revision dispatch syncs plan rounds first and feeds the loop; `--help` describes supervision. `ai-review --plan`: merge-base always computed (pipeline passes `--base "$base_sha"`); after a revision the prompt gets `PLAN REVISION CONTEXT:` (round n, dispositions of round n−1, `plan-history BASE --include-current`); a history failure only warns. `workflow.py`: `plan-history --include-current`; `plan-revisions outcome` (record counts for the notification); the plan report header names HEAD, so a review after a revision commit is always a new report/round even if text and second repeat (otherwise the record would be idempotent and the loop would re-review the same report). Template `plan-review.md`: rejected findings re-judged on their evidence. Choices: the notification's n is this run's revision count (`revision-count`), N = `AI_SUPERVISE_PLAN_ROUNDS`; the needs-human stop text joins the stored questions with "; " (one line); an unreadable revision store is a "Plan revision stage" stop (terminal for `ai-recover`). Mocks: `MOCK_CODEX_PLAN=major-once`, per-call `codex-plan-status`. 7 `supervised_plan` tests pass; `test_review_context_plan_review_and_recheck_prompts_have_neither` also asserts no `PLAN REVISION CONTEXT:` without a revision. Docs: README plan-review step, `docs/workflow.md` loop paragraph, vault `agents-flow.md` big picture + note. `.ai/bin/ai-check` OK, 314 tests. Not covered here: crash windows (T007).
-
-## T007 — Crash and resume scenarios for supervised plan revision
-Status: DONE
-Dependencies: T006
-Model: opus
-
-### Goal
-A supervised run survives crashes and recoveries with exact counting, approved settings and a needs-human decision that cannot be lost.
-
-### Implementation notes
-Tests through `ai-pipeline` with mocks (patterns: `test_triage_completion_crash_after_counted_commit_does_not_count_twice`, `test_triage_completion_watchdog_crash_recovery_completes_once`). Crash points:
-1. Mock Claude revision branch: kill runner + pipeline after the session's edits (uncommitted), and around the host's preamble and revision commits (round 5 P2: the session never commits).
-2. Helper-level interruption after the host revision commit before `plan-revisions record`, after the record before `stage-clear`, and after `stage-clear` before the decision check / re-review.
-3. Host-write windows (state written directly by the test as the crash leaves it, then `ai-pipeline` rerun): reservation present but no stage (crash between `revision-reserve` and `stage-set`), with `AI_SUPERVISE_PLAN_ROUNDS=1` so a non-idempotent limit check would wrongly stop; stage open but no reservation (a stage opened by an older ordering); plan-review host commit present but no `plan-rounds` record.
-4. Round-3 model: always-MAJOR reviewer, crash during the third revision session; the resumed session runs on `AI_SUPERVISE_ESCALATE_MODEL` (mock args), not `opus`.
-5. Needs-human (P2 of round 3): mock revision with a needs-human row; crash after `stage-clear` before the decision check, and after the record before `stage-clear`.
-Fix any defect found in T004–T006 code within this task (record it in the result).
-
-### Likely affected modules
-tests/test_workflow.py, scripts/ai-pipeline, scripts/ai-run, scripts/ai-recover, scripts/lib/workflow.py
-
-### Acceptance criteria
-- Each crash point of 1–3, resumed by `ai-pipeline` (human rerun and `ai-watchdog --recover` path): one `plan-revisions` record, `revision-count` 1, exactly one re-review on a clean checkout, no second revision session for the same report; the plan-rounds window resumes into a revision, not a human stop, with one `plan-rounds` record for that report.
-- Crash point 4: `revision-count` 3, the resumed revision's model is the escalation model, and the section carries the Convergence line.
-- Crash point 5, resumed by a human rerun and by the watchdog recovery path (`AI_AUTO_RECOVER=1`): both stop with "needs your decision" and the stored questions; `codex-plan-calls` unchanged, no new revision or implementation `mock-invocations`, no `recover-calls`. After the test answers (commits a plan change) and runs `ai-review --plan` by hand with an approving mock, a rerun reaches implementation.
-- A human restart after the limit gives a fresh per-run allowance but does not redo a revision already recorded for the current report (it re-reviews first).
-- Config file changed between start and recovery resume: the resume uses the approved `AI_SUPERVISE_PLAN_ROUNDS` and escalation settings.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k supervised_plan_resume`; `.ai/bin/ai-check`
-
-### Result / notes
-BLOCKED by mission control 2026-10-08 13:30 after three T007 sessions died with no output. Root cause (found in the WIP test code): the new `crash_kill` in `MOCK_CLAUDE` walks up the process tree from the mock and SIGKILLs the nearest process whose cmdline ends in `/ai-run`, then the pid in `.ai/local/pipeline.active`. When a crash test runs inside a real pipeline session, the walk can pass the fixture and reach the HOST `ai-run` that runs the session (the session runs the tests), so the real runner is killed (log: `ai-run Killed`), and the session dies with it. Fix before unblocking: the mock may only kill processes inside the test fixture (e.g. require the ancestor's cwd to be the fixture project directory, or a harness-set env marker such as `AI_TEST_FIXTURE_ROOT` matched against the ancestor's `/proc/<pid>/environ`), never climb past it, and the pipeline.active path must be the fixture's; add a test that the crash helper refuses an ancestor outside the fixture. WIP commits 1ce016d, 959276f (+ this one) are unvalidated.
-Mission control 2026-10-08 12:45: the first T007 session died at 12:32 without any output (empty result and stderr); its unfinished diff (scripts/ai-pipeline, ai-recover, ai-run, workflow.py, tests; +368/-16) is committed as a WIP checkpoint so the next session can reconcile it. Not validated: check every part against the task before building on it.
-2026-10-08 (third session): reconciled both WIP checkpoints (1ce016d, 959276f) against the criteria and finished them. 27 `supervised_plan_resume` tests cover crash points 1–3 (session edits; before/after the preamble commit; before/after the revision commit; after the record; after stage-clear; reservation without stage at limit 1; stage without reservation; plan review without its round record), each by human rerun and by `ai-recover` (watchdog path): one record, one session, two plan reviews (last clean), stage closed, tasks complete. Point 4: count 3, models opus, opus, escalation ×2, Convergence line. Point 5: decision survives after the record and after stage-clear, both paths, no plan/revision/implementation/recovery call; answer + hand `ai-review --plan` → implementation. Restart after the limit reviews first; approved settings survive a config change. Defects fixed: `ai-run` accepts exactly the uncommitted host section (`start-plan-dispositions --pending`, test `test_plan_dispositions_pending_accepts_only_the_host_header`); `ai-recover` closes a committed plan-revision stage when escalating a stored decision (T005 test updated); notification "(in the previous run)" instead of "round 0/N". Mission control's BLOCKED defect (above) is fixed: `crash_kill` now kills only processes whose cwd is the fixture project (and whose name is `ai-run`, or `ai-pipeline`/`ai-recover` for the pipeline pid), and its walk stops at the first ancestor outside the fixture, so it can never reach the host runner. Test `test_supervised_plan_resume_crash_kill_stays_inside_the_fixture`: a fake `ai-run`/`ai-pipeline` outside the fixture survives, inside it is killed (the old name-only walk would kill the outside `ai-run`). Evidence: targeted 29 tests OK (245 s); `.ai/bin/ai-check` OK (343 tests). docs/workflow.md, handoff, vault flow chart and log updated.
-
-## T008 — Extra fix round from host-verified falling counts
-Status: DONE
-Dependencies: T001
-Model: opus
-
-### Goal
-R3: one extra fix round per run, only for a strictly falling host-verified trend, reserved before it starts.
-
-### Implementation notes
-- `fix-rounds record COMMIT`: also store the verified review it triaged (`review_info_values()` at record time: head, digest, blockers, majors) as a dict record; readers accept legacy bare hashes (no counts). Keep `stage_verify`, `count` and `init` working with both shapes.
-- `fix-rounds trend BASE`: the last two records reachable in BASE..HEAD that carry counts, plus the current verified review (`review-info`, must be a different review head than the last record); prints `x y z` or fails `insufficient history`.
-- `run-manifest extra-round-reserve DIGEST` / `extra-round`: once per run (reset by `start`, kept by resumes).
-- `ai-pipeline` at `fixes >= max_fix_rounds`: with `AI_SUPERVISE=1`, no reservation yet and x > y > z → reserve with the current review digest, `ai_log`, notify `🔁 Extra fix round: findings falling (x → y → z)`, then triage as round max+1 (the triage commit carries the log line, as today's triage); a reservation for the current review digest found on resume allows that one round; otherwise today's draft path.
-- Flow change: vault `agents-flow.md` fix-round part + `updated:`, README/`docs/workflow.md`, handoff `## Flow chart`.
-- Round 6 P1: the trend uses the last two reachable round records; both must carry verified counts, else `insufficient history` (no extra round). Tests: a legacy (uncounted) record as the most recent one and between counted ones; keep the legacy-round-1-then-counted-2–3 boundary test.
-
-### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
-
-### Acceptance criteria
-- Falling 3 → 2 → 1 with `--max-fix-rounds 2` → one extra round, notification, then draft/PR as the review says; a further limit → draft, no second extra round.
-- Flat or rising counts, legacy records, fewer than two counted rounds, agent commits imitating review/triage subjects, records from another branch → no extra round (draft as today).
-- Boundary: round 1 triaged by the old toolkit (legacy bare hash), rounds 2–3 with counts and a falling current review → `trend` uses only rounds 2–3 + current (x > y > z → extra round); with only round 3 counted → `insufficient history`.
-- Crash right after the reservation → resume uses the reserved round once; `AI_SUPERVISE=0` → draft as today.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k extra_fix_round`; `python3 -m unittest tests.test_workflow -k fix_round_count`; `.ai/bin/ai-check`
-
-### Result / notes
-2026-10-08: `workflow.py`: fix-round records are dicts `{commit, review_head, review_digest,
-blockers, majors}` (legacy bare hashes accepted; `fix_round_commits()` for `stage-verify`/count);
-`fix-rounds trend BASE`; `run-manifest extra-round-reserve DIGEST` / `extra-round` (manifest key
-`extra_fix_round`, reset by `start`). `ai-pipeline`: at `fixes == max_fix_rounds` with
-`AI_SUPERVISE=1`, a reservation for the current review digest resumes the round; else no
-reservation and x > y > z → reserve, notify, then stage-set and an `ai_log` line (committed by the
-triage commit). Reservation and notification come before stage-set so a crash there leaves a
-clean checkout. Tests: 8 `extra_fix_round` tests (new mock `MOCK_CODEX=counts`) — OK; `-k
-fix_round_count -k stage` OK (35 incl. extra); `.ai/bin/ai-check` OK (351 tests). Docs: README,
-`docs/workflow.md`, vault `agents-flow.md` (diagram edge, bullet, notification row).
-Note: "agent commits imitating subjects" is covered as: they never add counted records (flat
-test with imitated subjects; another branch inits legacy records from subjects → insufficient
-history).
-
-## T009 — Retry a malformed plan or code review once
-Status: DONE
-Dependencies: T001
-Model: opus
-
-### Goal
-R4: format errors of Markdown reviews get one retry; integrity failures and re-checks never do.
-
-### Implementation notes
-- `workflow.py`: extract the content checks of `publish_review` and `publish_plan_review` into one function per mode, used by both publish paths and by `review-format-check plan|code REPORT` (no writes; prints the error, exit 1).
-- `scripts/ai-review` plan and code paths only: after `run_review`, format check; on failure with `AI_SUPERVISE` ≠ 0 and no retry used yet → notify `🔁 Review format retry (<mode>): <error>`, keep the first report path in the log line, rerun `run_review` with `FORMAT ERROR: <message>. Return the full report again in the required structure.` appended (same reviewer chain incl. Claude fallback), then publish (a second format failure dies as today, prior review preserved). After a retried publish append one run-log line (`ai_log`); `ai-pipeline review_record` adds `.ai/run-log.md` when dirty; the hand-run plan path commits it with the record.
-- Re-check path unchanged. Codex non-zero exit, limit handling, `unchanged` checkout check and binding writes stay `ai_die` with no retry.
-- Flow change: vault `agents-flow.md` review part + `updated:`, `docs/workflow.md`, handoff `## Flow chart`.
-- Round 6 P2: empty text from an otherwise successful reviewer call goes through the Markdown format validation (so it gets the one retry); unsuccessful calls, invalid envelopes, unreadable report storage and checkout mutation still fail at once; verify checkout integrity before the retry. Tests: empty-then-valid and empty-twice for Codex plan/code and the Claude fallback, and with `AI_SUPERVISE=0`.
-
-### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-review, scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, vault agents-flow.md, README.md
-- Round 5 P3: reset per-attempt reviewer metadata (label, model, fallback reason) before each reviewer call and clear Claude labels when Codex succeeds, so a retry after a Claude fallback publishes the right label, outcome attribution and fallback-log row.
-
-### Acceptance criteria
-- Codex plan and code: malformed then valid → published, 2 calls, notification, run-log line committed with the review (checkout clean afterwards); malformed twice → stop, prior report preserved; valid → 1 call; counts-lie → retried as a format error.
-- Claude fallback reviewer: malformed then valid → published.
-- Checkout mutated during review (`mutates`) and Codex exit error → no retry; malformed first report, then the retried `run_review` mutates the checkout → the `unchanged` check still fails on the second call (stop, prior review preserved); malformed re-check JSON → one call, upheld (as `test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld`); `AI_SUPERVISE=0` → no retry.
-- Every issued format retry is logged in the run log with its outcome (success or handled failure) and the first report's path, without dirtying the checkout between the two reviewer calls; tests cover malformed-twice and an integrity failure on the retry (round 4 P2).
-- README describes the format retry as implemented (round 4 P3).
-- Malformed Claude fallback → valid Codex retry: report label, outcome reviewer and fallback log are all Codex-consistent (test).
-
-### Validation
-`python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`
-
-### Result / notes
-- `workflow.py`: `review_format_error(mode, content)` (empty report, required fields, `review_counts`) used by `publish_review`, `publish_plan_review` and the new `review-format-check plan|code REPORT` (no writes; exit 2 + error on stdout, other failures exit 1); `claude-text --allow-empty` writes an empty report for a blank result (non-string result still fails).
-- `ai-review`: `review_with_format_retry` for plan and code (not re-check): format check after `run_review`; with `AI_SUPERVISE=1` one more `run_review` with `FORMAT ERROR: <msg>. Return the full report again in the required structure.`, notification `🔁 Review format retry (<mode>): <error>`, first report kept in `.ai/local/`. Run-log line written after the second call only: `published` (before the hand-run plan record commit, which now adds `.ai/run-log.md`) or, via an EXIT trap, `stopped again, prior review preserved` on any later stop. Empty text from a successful call goes to the format check only when the retry is on; unreadable report, Codex errors, limit handling and `unchanged` stay fatal (the `unchanged` check runs on each call). `run_review` resets `AI_REVIEW_BY`/`AI_REVIEW_LABEL`/review_by/model/effort/reason per call and clears them on Codex success. `ai-pipeline review_record` adds a dirty `.ai/run-log.md`.
-- Tests (8): `test_format_retry_code_review_once_then_publish_or_stop`, `test_format_retry_off_without_supervision`, `test_format_retry_claude_fallback_reviewer`, `test_format_retry_after_claude_fallback_attributes_the_codex_review`, `test_format_retry_plan_review_by_hand`, `test_format_retry_pipeline_commits_the_run_log_line_with_each_review`, `test_format_retry_never_for_a_malformed_recheck`, `test_review_format_check_helper_matches_publish`; mocks gained per-call sequences (`MOCK_CODEX='malformed,success'`, `MOCK_CODEX_PLAN_FORMAT`, `MOCK_CLAUDE_REVIEW='empty,success'`).
-- Docs: README (fix-round paragraph), `docs/workflow.md` (Format retry), `ai-review --help`; vault `agents-flow.md` reviewer chart + note + notification row (`updated:` already 2026-10-08); handoff covered-tests list.
-- Validation: `python3 -m unittest tests.test_workflow -k format_retry -k review_format_check` Ran 8 OK; `.ai/bin/ai-check` Ran 359 OK (227.6 s, 8 shards).
-- Limitation: a format retry that then stops leaves its run-log line uncommitted (like other stop bookkeeping; `ai-recover` commits it, a hand rerun needs it committed or discarded first).
-
-## T010 — Docs reconciliation, flow-chart check, handoff
-Status: DONE
-Dependencies: T007, T008, T009
-Model: haiku
-
-### Goal
-R6: docs and the flow chart match the code; the PR body has the right test instructions.
-
-### Implementation notes
-Read README, `docs/workflow.md`, `templates/CLAUDE.md`, `templates/AGENTS.md` against the code of T001–T009; fix contradictions only (no new behaviour). Add `docs_consistency` REQUIRED phrases (e.g. `ai_supervise=0`, `plan-dispositions.md`, `needs-human`, `supervision limit reached`). Docs must not promise a cumulative run budget (OR-09). Check vault `agents-flow.md` covers T005, T006, T008, T009 and its `updated:` date; append a dated hub `agents.md` Log line (no checkbox ticks). `.ai/handoff.md`: "Manual testing for the human" (Needs you: one real supervised run on a small plan with a deliberately incomplete task, including a needs-human stop, a crash/recovery attempt on it and clearing it with a hand-run `ai-review --plan`; everything else listed under "Covered by automated tests" with test names), `## Flow chart` = "Flow chart updated".
-
-### Likely affected modules
-README.md, docs/workflow.md, templates/CLAUDE.md, templates/AGENTS.md, tests/test_workflow.py, .ai/handoff.md, vault agents-flow.md, vault agents.md
-
-### Acceptance criteria
-- `docs_consistency` tests pass with the new phrases; the flow chart lists every flow change of this branch; handoff names the tests.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k docs_consistency`; `python3 -m unittest tests.test_workflow -k pr_body_flow`; `.ai/bin/ai-check`
-
-### Result / notes
-- Docs checked against the code: README and `docs/workflow.md` supervisor text (AI_SUPERVISE settings, plan revision, extra round, format retry) matches T001–T009; `templates/` needed no change.
-- Flow chart (`agents-flow.md`) already lists every flow change of the branch (T005–T009: plan loop, recovery rules, extra round, format retry); T001–T004 changed no flow. No flow edit needed in T010.
-- Handoff: "Needs you" now has the concrete live-trial steps (was "filled in by T010"); "Covered by automated tests" names T005–T009 tests and T010 docs tests; Next action updated.
-- Vault: hub Log line added; the live trial added to `agents-human-todo.md` as an unchecked item (human todo).
-- Evidence: `python3 -m unittest tests.test_workflow -k docs_consistency` OK (3); `-k pr_body_flow` OK (2); `.ai/bin/ai-check` OK (359 tests, 226.9 s).
-- Limitation: the live supervised trial with real Claude/Codex was not run here (needs a human; see handoff "Needs you").
-
-## T011 — Check stored needs-human decisions outside the optional plan-review loop (review M1)
-Status: DONE
-Dependencies: T010
-Model: opus
-
-### Goal
-R5: a recorded needs-human plan revision for the current plan report stops the pipeline before any re-review, revision or implementation session, regardless of `--skip-plan-review` or the task queue's state (review M1).
-
-### Implementation notes
-- `scripts/ai-pipeline`: move the `plan_decision_check` definition above its first use and call it unconditionally after the startup open-stage dispatch / `reconcile_disputes` (also after a completed startup plan-revision stage when the plan loop is skipped), keep the call inside the plan-review loop, and call it again before entering the implementation loop. `--skip-plan-review` only skips the optional review; it never clears a recorded decision. Exit 2 (unreadable records) still stops as a `Plan revision stage` failure.
-- No change to `workflow.py plan-revisions decision` semantics (it already keys on the verified report, not task state); no change to `ai-recover` (already checks first).
-- Docs: `docs/workflow.md` / README sentence that `--skip-plan-review` does not bypass a recorded needs-human decision; `ai-pipeline --help` if it describes the skip. Flow change: vault `agents-flow.md` (decision check also on the skip/partly-done path) + `updated:`, handoff `## Flow chart`.
-
-### Likely affected modules
-scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md, README.md, vault agents-flow.md
-
-### Acceptance criteria
-- Regression: a stored needs-human decision for the current plan report + `--skip-plan-review` → stop `plan review needs your decision` with the stored questions; no plan-review, revision or implementation mock invocation; also with `AI_AUTO_RECOVER=1`, no recovery session.
-- Regression: a stored needs-human decision with one task DONE and another TODO (plan loop skipped by `tasks untouched`) → same stop, no implementation invocation.
-- Regression: an unreadable revision store on the skip path → fails closed (Plan revision stage stop), no agent.
-- No decision recorded + `--skip-plan-review` → behaviour unchanged (implementation runs); existing `supervised_plan` and plan-stop tests pass unchanged.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k needs_human_decision_gate`; `python3 -m unittest tests.test_workflow -k supervised_plan`; `.ai/bin/ai-check`
-
-### Result / notes
-2026-10-08: `plan_decision_check` defined before its first use and called after the startup stage dispatch + `reconcile_disputes` (unconditional), in each plan-loop pass (kept) and before the implementation loop; on a decision it syncs plan rounds best-effort only to label the round. New tests `test_needs_human_decision_gate_*` (4): skip path stops with the stored question (exact pipeline message with `AI_AUTO_RECOVER=0`; with recovery, no recovery session), partly done queue stops, unreadable store → `Plan revision stage cannot be completed safely: the plan revision records are unreadable`, no decision + skip implements; no plan review, revision or implementation invocation in the stop cases. `-k needs_human_decision_gate` 4 OK; `-k supervised_plan` 35 OK (unchanged); `.ai/bin/ai-check` 363 tests OK. Docs: README, `docs/workflow.md`; vault `agents-flow.md` decision node. Not done: re-running the new tests against the pre-fix script (the revert command was denied); the review's probe already showed the bypass. `ai-pipeline --help` does not describe the skip, unchanged.
-
-## T012 — Keep one checkout baseline across a review format retry (review M2)
-Status: DONE
-Dependencies: T010
-Model: opus
-
-### Goal
-R4/T009: both reviewer calls of a format retry review the same checkout; a HEAD change or a dirty tree between the calls stops before the retry and nothing is published (review M2).
-
-### Implementation notes
-- `scripts/ai-review`: capture the expected HEAD once per review operation (the outer `$head` for code reviews, the plan scope HEAD for plan reviews) and have `run_review` compare against it instead of a fresh per-call `start_head` (e.g. an optional expected-HEAD argument or a variable set by `review_with_format_retry`). Before the retry call (after the format check and the notification) verify HEAD equals that value and the tree is clean, else `ai_die` with a checkout-changed message (prior review preserved; the EXIT trap logs the retry as stopped). Recheck the same before publishing.
-- Re-check path unchanged; integrity failures stay non-retried.
-- Docs: `docs/workflow.md` Format retry paragraph mentions that the checkout must stay unchanged across both calls.
-
-### Likely affected modules
-scripts/ai-review, tests/test_workflow.py, docs/workflow.md
-
-### Acceptance criteria
-- Regression (code review and plan review): first report malformed, a clean committed checkout change is made between the calls (e.g. by the mock's notification hook or between mock calls) → stop with a checkout-changed message, no second publish, prior `.ai/reviews/current.md` / `plan.md` preserved, run-log line says stopped.
-- Same with an uncommitted change between the calls → stop.
-- Existing `format_retry` tests pass unchanged (malformed then valid on an unchanged checkout still publishes).
-
-### Validation
-`python3 -m unittest tests.test_workflow -k format_retry`; `.ai/bin/ai-check`
-
-### Result / notes
-Mission control 2026-10-08: the gate after T012 failed only on TimeoutExpired in two multi-round `ai-pipeline` tests ("timed out after 25 seconds") while four pipelines ran on this PC. This branch predates master's PR #19 T003, which gave whole-pipeline test commands a larger bound. Port that change into `tests/test_workflow.py` exactly as on master (`git show origin/master:tests/test_workflow.py`, lines 15-20: `TIMEOUT_SCALE`, `PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE`, `COMMAND_TIMEOUT`, and the `tool()` call that uses `PIPELINE_TIMEOUT` for `ai-pipeline`), so the later merge with master is trivial, then re-run the gate.
-Resumed 2026-10-08: ported as on master: `TIMEOUT_SCALE`/`COMMAND_TIMEOUT`/`PIPELINE_TIMEOUT` constants, `run_cmd(..., timeout=COMMAND_TIMEOUT)`, `tool()` passes `PIPELINE_TIMEOUT` for `ai-pipeline`, `assert_install` uses `COMMAND_TIMEOUT` (all three hunks match master's text). Branch-only fixed timeouts (crash_kill containment test 25 s, recover 60 s) left as they are. `-k format_retry` 8 OK; `.ai/bin/ai-check` 364 tests OK (224.5 s).
-- `scripts/ai-review`: `review_head` pins one HEAD per plan/code review (the code scope `$head`, the plan scope HEAD now also used in the PLAN SCOPE prompt); `run_review` compares against it (re-checks keep a per-call HEAD). `review_with_format_retry` checks HEAD + clean tree after the notification and before the retry call (`ai_die` "Checkout changed between the review and its format retry"; the EXIT trap logs `stopped, checkout changed between the calls, prior review preserved`) and again before returning to publish, on every path.
-- New `test_format_retry_stops_when_the_checkout_changes_between_the_calls`: code and plan reviews, notification hook commits a change or leaves an uncommitted file → exit 1, one reviewer call, prior `current.md`/`plan.md` unchanged, run-log line says stopped. Existing format_retry tests unchanged.
-- `docs/workflow.md` Format retry paragraph states the checkout must stay unchanged across both calls.
-- Evidence: `python3 -m unittest tests.test_workflow -k format_retry` 8 tests OK; `.ai/bin/ai-check` PASS (364 tests, 8 shards). A first gate run hit one 25 s subprocess timeout in an unrelated `ai-pipeline --max-fix-rounds 2` test under load; the rerun was clean.
-
-## T013 — Convergence guidance includes the supervised extra round (review N1)
-Status: DONE
-Dependencies: T010
-Model: haiku
-
-### Goal
-R6: docs and the flow chart say round-three triage (Convergence line) is reached either with `--max-fix-rounds` ≥ 3 or through the supervised extra round at the default limit (review N1).
-
-### Implementation notes
-- `docs/workflow.md:373`: replace "only reachable with `--max-fix-rounds` ≥ 3" with wording covering the supervised extra fix round. Vault `agents-flow.md` "Convergence rule" note: same fix + `updated:`.
-- Add the old phrase to the `docs_consistency` wrong-sentences list (or a required phrase for the new wording).
-
-### Likely affected modules
-docs/workflow.md, tests/test_workflow.py, vault agents-flow.md
-
-### Acceptance criteria
-- `docs/workflow.md` no longer says round three is only reachable with `--max-fix-rounds` ≥ 3; a `docs_consistency` assertion fails on the old wording.
-
-### Validation
-`python3 -m unittest tests.test_workflow -k docs_consistency`; `.ai/bin/ai-check`
-
-### Result / notes
-Done. `docs/workflow.md` Convergence paragraph now says round three is reached "with `--max-fix-rounds` ≥ 3, or by the supervised extra fix round at the default limit, see Extra fix round below" (was "only reachable with `--max-fix-rounds` ≥ 3"). `tests/test_workflow.py` `DocsConsistencyTest.FORBIDDEN` gained "only reachable with `--max-fix-rounds`", so `test_docs_consistency_no_wrong_sentences` fails on the old wording. The new wording is not a REQUIRED phrase, because that list applies to README.md too, which does not carry it. Vault `agents-flow.md` Convergence rule updated (same wording, `updated:` already 2026-10-08). Evidence: `python3 -m unittest tests.test_workflow -k docs_consistency` 3 OK; `.ai/bin/ai-check` OK (364 tests, 8 shards).
+DONE: `recheck_counts` helper and `outcome` re-check branch add upheld/withdrawn totals and `reviewed_head` (omitted if unverifiable); report gets "Re-checks by reviewer" and builds the catch-up list from all reviews. 4 new `test_outcome_recheck_*` tests, README and docs/workflow.md updated. Validation: targeted command 40 OK; `.ai/bin/ai-check` 297 OK.

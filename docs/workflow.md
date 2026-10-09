@@ -49,7 +49,9 @@ Gate speed (FL-11): test suites can run in parallel shards. A stdlib-only runner
 `tests/run_parallel.py` discovers every test ID, splits them round-robin into
 `AI_TEST_WORKERS` shards (default `min(8, cpu count)`), and runs each shard with
 `python3 -m unittest`. It exits non-zero when a shard fails, crashes, collects zero
-tests, or when the shards ran a different number of tests than it collected.
+tests, or when the shards ran a different number of tests than it collected. Shards run
+without colour whatever the caller's `FORCE_COLOR`/`NO_COLOR`/`PYTHON_COLORS`, and the
+summary parser strips ANSI escapes.
 Switching `.ai/validate` to the parallel runner is a gate change that a human approves.
 
 Evidence in ignored `.ai/local/validation.json` includes outcome, timestamp, exit
@@ -775,6 +777,13 @@ task attempt with the session model and the seconds from session start to result
 attempt number counts earlier lines for the same project (main repository name, shared by
 worktrees), branch and task. Failures to write are reported and never stop the run.
 
+A `review recheck` line records, instead of finding counts, how many rejected BLOCKER and
+MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `withdrawn_blocker`,
+`withdrawn_major`) and the full SHA the re-checked review covered (`reviewed_head`), read from the
+verified `recheck.md`. If that cannot be verified the line is still written without these
+fields. `ai-status --outcomes` sums them in "Re-checks by reviewer"; re-checks are not listed
+under "Reviews by reviewer", but Claude re-checks still appear under "Codex catch-up pending".
+
 An attempt opens immediately before the implementation session's `claude` call (after the
 dependency step and the remaining-time check; `--triage` never opens one) and closes with
 exactly one line: the result above, or, when the runner stops first, from the EXIT handler:
@@ -794,5 +803,8 @@ pipeline launched in the background from a non-interactive shell (`nohup … &`)
 as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
 `outcomes-report` (`ai-status
 --outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
-minutes) by model, category and both, and reviews by reviewer/model/mode.
+minutes) by category, and every attempt by the model that ran it ("Attempts by model",
+"Attempts by model and category": attempts, done, not done, first-time pass over tasks
+whose first line ran on that model, average minutes per attempt), and reviews by
+reviewer/model/mode.
 

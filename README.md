@@ -435,9 +435,13 @@ branch) and note the result in the log.
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
 no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
-(codex, claude-fallback, claude), model, effort, finding counts, duration.
+(codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
+line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
+`reviewed_head` instead (omitted when the re-check report cannot be verified).
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
-model, category and model/category, findings per reviewer and model, and the
+category (per task) and per model and model/category (per attempt, each credited to the
+model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks
+per reviewer, and the
 Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
 move to haiku and which keep failing on sonnet.
 
@@ -730,7 +734,8 @@ python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
 runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
 crashes, when it collects no tests, or when the shards ran a different number of tests than
-it collected. Switching `.ai/validate` to the parallel runner is a gate change that a human
+it collected. Shards always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
+`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
 approves.
 
 ## Deliberately manual for now
