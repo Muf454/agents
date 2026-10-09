@@ -112,7 +112,9 @@ itself is unchanged.
   (`test_dashboard_render_writer_to_renderer_stops_and_overlays`), legacy/malformed, line widths
   40–200, empty state, expanded events, and under a pty `test_dashboard_render_curses_smoke`,
   `test_dashboard_render_curses_interaction` (scroll, Enter, resize, quit) and
-  `test_dashboard_render_curses_failure_restores_the_terminal`.
+  `test_dashboard_render_curses_failure_restores_the_terminal`; the run list changing between
+  empty and non-empty (review M1): `test_dashboard_render_curses_runs_appear_and_disappear`,
+  `test_dashboard_render_curses_all_toggle_with_only_old_runs`.
 - Observation record actions, schema, pause/resume, `detail`, `done`, `pid`/`branch`:
   `test_observation_writer_actions_and_schema`, `test_observation_writer_detail_only_on_recorded_stage`,
   `test_observation_writer_done_records_pr`, `test_observation_writer_pid_and_branch`.

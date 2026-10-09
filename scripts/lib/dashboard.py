@@ -622,9 +622,10 @@ def interface(screen, all_runs):
     data, selected, expanded, offset = snapshot(all_runs), 0, set(), 0
     while True:
         runs = data['runs']
-        selected = min(selected, len(runs) - 1) if runs else None
-        header, cards = layout(runs, screen.getmaxyx()[1], selected, expanded, None, data['state_root'])
-        offset = draw(screen, header, cards, selected, offset, attributes)
+        selected = max(min(selected, len(runs) - 1), 0)
+        shown = selected if runs else None
+        header, cards = layout(runs, screen.getmaxyx()[1], shown, expanded, None, data['state_root'])
+        offset = draw(screen, header, cards, shown, offset, attributes)
         key = screen.getch()
         if key in (ord('q'), ord('Q')):
             return

@@ -799,6 +799,45 @@ class RenderTest(DashboardTest):
         self.assertEqual(self.finish(pid, fd, seen), 0, seen[0][-400:])
         self.assertIn(b'\x1b[?1049l', seen[0])
 
+    def test_dashboard_render_curses_runs_appear_and_disappear(self):
+        empty, name = 'No pipelines found', 'qxzjwvkp'
+        pid, fd = self.pty_run([str(ROOT / 'scripts/ai-dashboard')])
+        seen = [b'']
+        self.read_until(fd, seen, empty)
+        checkout = self.checkout(name)
+        (checkout / '.ai/local/observation.json').write_text(json.dumps(
+            {'stage': 'build', 'state': 'active', 'detail': '', 'note': '', 'since': ''}))
+        self.register(f'{name}.json', checkout)
+        self.read_until(fd, seen, name)  # picked up by the 2 s auto-refresh
+        seen[0] = b''
+        (self.state / 'pipelines' / f'{name}.json').unlink()
+        os.write(fd, b'r')
+        self.read_until(fd, seen, empty)
+        os.write(fd, b'q')
+        self.assertEqual(self.finish(pid, fd, seen), 0, seen[0][-400:])
+        self.assertNotIn(b'Traceback', seen[0])
+
+    def test_dashboard_render_curses_all_toggle_with_only_old_runs(self):
+        empty, name = 'No pipelines found', 'qxzjwvkp'
+        checkout = self.checkout(name)
+        observation = checkout / '.ai/local/observation.json'
+        observation.write_text(json.dumps(
+            {'stage': 'pr', 'state': 'done', 'detail': '', 'note': '', 'since': ''}))
+        old = time.time() - 25 * 3600
+        os.utime(observation, (old, old))
+        self.register(f'{name}.json', checkout)
+        pid, fd = self.pty_run([str(ROOT / 'scripts/ai-dashboard')])
+        seen = [b'']
+        self.read_until(fd, seen, empty)
+        os.write(fd, b'a')
+        self.read_until(fd, seen, name)
+        seen[0] = b''
+        os.write(fd, b'a')
+        self.read_until(fd, seen, empty)
+        os.write(fd, b'q')
+        self.assertEqual(self.finish(pid, fd, seen), 0, seen[0][-400:])
+        self.assertNotIn(b'Traceback', seen[0])
+
     def test_dashboard_render_curses_failure_restores_the_terminal(self):
         self.fixture_runs(2)
         code = ('import sys\nsys.path.insert(0, %r)\nimport dashboard\n'

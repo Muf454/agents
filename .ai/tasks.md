@@ -1054,7 +1054,7 @@ tests, OK; `.ai/bin/ai-check`: Ran 541 tests, OK (8 shards) on the final run; an
 terminal is not done here (human todo). Flow unchanged.
 
 ## T011 — TUI survives the run list changing between empty and non-empty (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: sonnet
 
