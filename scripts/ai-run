@@ -106,15 +106,17 @@ attempt_open=no
 session_code=
 on_exit() {
   local code=$?
-  # Never run a project helper after the approved gate changed: a stop for that reason logs nothing.
-  if [[ "$attempt_open" == yes && "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+  # Never run a project helper after the approved gate changed: a stop for that reason logs
+  # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
+  local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
+  if [[ "$attempt_open" == yes && "$gate_ok" == yes ]]; then
     if (( code == 130|| code == 143 )); then task_outcome interrupted
     elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
     else task_outcome error
     fi
   fi
   if [[ "$finished" != yes ]]; then
-    if [[ -n "${revision_started:-}" ]]; then
+    if [[ -n "${revision_started:-}" && "$gate_ok" == yes ]]; then
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
         2>/dev/null || true
     fi

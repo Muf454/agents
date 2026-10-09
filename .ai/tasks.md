@@ -224,7 +224,7 @@ Also fixed test isolation in `tests/test_workflow.py` setUp: `AI_SUPERVISE_PLAN_
 leaked into the fixture and failed two supervisor-settings tests in this run's gate.
 
 ## T010 — Gate-broken guard: no project helper runs after the approved gate changed
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -325,6 +325,20 @@ Targeted: `python3 -m unittest discover -s tests -k gate_changes` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude opus): done. `scripts/lib/common.sh`: `ai_gate_check GATE` (unreadable
+digest = broken; sets `AI_GATE_BROKEN=1`, never exported), `ai_guard_verify` sets the flag
+before both `ai_die` calls, `ai_deps` uses `ai_gate_check`, new `ai_observe` and
+`ai_notify_log` skip themselves when the flag is set. ai-run `on_exit` and ai-pipeline
+`stop()` compute `gate_ok` with the written-out form; the pipeline's approval and resume gate
+stops set the flag; ai-recover's first check (`ai_guard_digest >/dev/null || { flag; escalate }`)
+and its five comparisons use `ai_gate_check` (escalate messages unchanged; the `current_gate`
+variable was unused otherwise and is gone). Extra, same rule: ai-run's EXIT handler no
+longer runs `ai_helper outcome plan_revision` when the gate changed (it is project code).
+Tests: 6 `test_observation_gate_*` in `tests/test_workflow.py` (`-k observation_gate`: Ran 6,
+OK; `-k gate_changes`: Ran 2, OK). Full gate `.ai/bin/ai-check`: 440 tests OK.
+Docs: `docs/workflow.md` (gate section, outcome-log note). No flow-chart change.
+Note: ai-recover's later comparisons now discard the verifier's stderr detail (only the
+escalate message prints), as `ai_deps` and the pipeline already did.
 
 ## T002 — Notification mirror and pause overlay (common.sh)
 Status: TODO

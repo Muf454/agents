@@ -122,12 +122,12 @@ open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this bran
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
-AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
+AI_APPROVED_GATE=$(ai_guard_digest) || { AI_GATE_BROKEN=1; ai_die 'Cannot approve missing/unsafe workflow gate.'; }
 readonly AI_APPROVED_GATE
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   # A resume must run under the gate and branch the human approved (host-side manifest).
   [[ "$AI_APPROVED_GATE" == "$(ai_helper run-manifest gate 2>/dev/null)" ]] || \
-    ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'
+    { AI_GATE_BROKEN=1; ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'; }
   [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
     ai_die 'Resumed on a different branch than the approved run.'
 else
@@ -144,9 +144,10 @@ stop() {
   local stage=$1 reason
   reason=$(cat .ai/local/last-error 2>/dev/null || true)
   reason=${reason:-see terminal}
+  # Sets AI_GATE_BROKEN on a changed gate, so no project helper records this stop.
+  local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
   # Only hand over to checkout code that is still exactly the approved gate.
-  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && \
-        "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && "$gate_ok" == yes ]]; then
     # Bounded auto-recovery takes over this process (same PID, lock and marker).
     [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
     exec "$AI_BIN/ai-recover" --stage "$stage"

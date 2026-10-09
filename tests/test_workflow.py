@@ -1397,6 +1397,94 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-run', '--approved', expected=1)
         self.assertIn('Approved workflow gate changed', result.stderr)
 
+    # ---------------------------------------------------------------- gate-broken guard (T010)
+    def gate_shell(self, script, *args, expected=0):
+        return self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh\n' + script, 'gate-test', *args],
+                            expected=expected)
+
+    def gate_digest(self):
+        return self.gate_shell('ai_guard_digest').stdout.strip()
+
+    def test_observation_gate_flag_skips_record_helpers(self):
+        self.setup_project()
+        ran = self.base / 'helper-ran'
+        (self.project / '.ai/bin/lib/workflow.py').write_text(
+            'import os, sys\n'
+            f'with open({str(ran)!r}, "a") as f: f.write(" ".join(sys.argv[1:]) + "\\n")\n')
+        result = self.gate_shell('AI_GATE_BROKEN=1 ai_observe step build; echo "observe=$?"\n'
+                                 'AI_GATE_BROKEN=1 ai_notify_log m; echo "log=$?"')
+        self.assertEqual(result.stdout, 'observe=0\nlog=0\n')
+        self.assertFalse(ran.exists())
+        result = self.gate_shell('ai_observe step build; echo "observe=$?"\n'
+                                 'ai_notify_log m; echo "log=$?"')
+        self.assertEqual(result.stdout, 'observe=0\nlog=0\n')
+        self.assertEqual(ran.read_text().splitlines(),
+                         ['observe step build', f'notify-log {self.project} m'])
+
+    def test_observation_gate_check_sets_flag_on_changed_or_unreadable_gate(self):
+        self.setup_project()
+        digest = self.gate_digest()
+        probe = ('if ai_gate_check "$1"; then rc=0; else rc=1; fi\n'
+                 'printf "rc=%s flag=%s\\n" "$rc" "${AI_GATE_BROKEN:-unset}"')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=0 flag=unset\n')
+        check = self.project / '.ai/bin/ai-check'
+        original = check.read_bytes()
+        check.write_bytes(original + b'#')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=1 flag=1\n')
+        check.write_bytes(original)
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=0 flag=unset\n')
+        # .ai/bin replaced by a symlink: the digest is unreadable, which counts as broken.
+        (self.project / '.ai/bin').rename(self.project / '.ai/bin-real')
+        (self.project / '.ai/bin').symlink_to('bin-real')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=1 flag=1\n')
+
+    def test_observation_gate_ok_form_sets_flag_in_calling_shell(self):
+        self.setup_project()
+        script = ('AI_APPROVED_GATE=0000; readonly AI_APPROVED_GATE\n'
+                  'written() { local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi\n'
+                  '  printf "gate_ok=%s\\n" "$gate_ok"; }\n'
+                  # Counter-example (never use it): the flag is set in the subshell only.
+                  'substituted() { local gate_ok; gate_ok=$(ai_gate_check "$AI_APPROVED_GATE" && echo yes || echo no)\n'
+                  '  printf "gate_ok=%s\\n" "$gate_ok"; }\n'
+                  '"$1"\nprintf "flag=%s\\n" "${AI_GATE_BROKEN:-unset}"')
+        self.assertEqual(self.gate_shell(script, 'written').stdout, 'gate_ok=no\nflag=1\n')
+        self.assertEqual(self.gate_shell(script, 'substituted').stdout, 'gate_ok=no\nflag=unset\n')
+
+    def test_observation_gate_pipeline_resume_gate_stop_unchanged(self):
+        self.ready()
+        validate = self.project / '.ai/validate'
+        original = validate.read_bytes()
+        validate.write_bytes(original + b'# approved before a change\n')
+        self.approve_run()
+        validate.write_bytes(original)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Error: Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.',
+                      result.stderr)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertIn('Gate files changed since the run was approved', self.notifications())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_observation_gate_deps_installer_changing_gate_sets_flag(self):
+        self.deps_ready()
+        with (self.project / '.ai/ci-setup').open('a') as file:
+            file.write("printf '# installer\\n' >> .ai/bin/lib/workflow.py\n")
+        (self.project / '.ai/local').mkdir(exist_ok=True)  # ai_root makes it in the scripts
+        result = self.gate_shell('gate=$(ai_guard_digest)\n'
+                                 'if ai_deps "$gate" 60; then echo installed; fi\n'
+                                 'printf "error=%s\\nflag=%s\\n" "$AI_DEPS_ERROR" "${AI_GATE_BROKEN:-unset}"')
+        self.assertRegex(result.stdout, r'error=Dependency setup \(\.ai/ci-setup\) changed the approved workflow '
+                                        r'gate; see \.ai/local/deps-\w{8}\.log\nflag=1\n$')
+        self.assertNotIn('installed', result.stdout)
+
+    def test_observation_gate_runner_tamper_stop_runs_no_helper(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertIn('Error: Approved workflow gate changed during this run. Stop, inspect the diff, '
+                      'and explicitly reapprove before resuming.', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertEqual(self.notifications().count('⛔ STOPPED, needs you: runner stopped at T001'), 1)
+
     def test_integrity_verifier_cannot_import_project_modules(self):
         self.ready()
         # An unrelated project module must not replace the verifier's hashlib.

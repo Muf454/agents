@@ -7,6 +7,12 @@ descriptors, bounded nonblocking reads incl. tail mode, bounded flock, temp + re
 (always exit 0, warning on failure), plus `tasks counts`. No caller yet (T002–T005).
 Tests in `tests/test_observation.py`. Also: the `tests/test_workflow.py` fixture now drops
 the `AI_SUPERVISE_*` limits a supervised pipeline exports (they leaked into two tests).
+T010 (2026-10-09): gate-broken guard in `scripts/lib/common.sh` (`ai_gate_check`,
+`AI_GATE_BROKEN` set by every gate comparison incl. `ai_guard_verify` and `ai_deps`; record
+helpers `ai_observe` and `ai_notify_log` skip themselves once it is set; no callers until
+T002). ai-run `on_exit`, ai-pipeline `stop()` and its approval/resume gate stops, and every
+ai-recover comparison set it; ai-run's EXIT handler also no longer writes the plan-revision
+outcome line after a gate change. Messages and exit codes unchanged.
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -29,8 +35,8 @@ renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See al
 `.ai/project-spec.md`, `.ai/tasks.md`.
 
 ## Validation run
-2026-10-09 after T001: `.ai/bin/ai-check` OK (434 tests, 8 shards); targeted
-`python3 -m unittest discover -s tests -k observation_writer`: 23 OK.
+2026-10-09 after T010: `.ai/bin/ai-check` OK (440 tests, 8 shards); targeted
+`-k observation_gate`: 6 OK, `-k gate_changes`: 2 OK, `-k observation_writer` (T001): 23 OK.
 
 ## Assumptions
 - Finished/stopped/idle runs older than 24 h are hidden by default (`--all` shows them).
@@ -75,9 +81,16 @@ Not done yet.
   `test_observation_writer_pipeline_register_keeps_replaced_entry`,
   `test_observation_writer_pipeline_register_unusable_directory`.
 - `tasks counts`: `test_observation_writer_tasks_counts`.
+- No project helper after a changed gate: `test_observation_gate_flag_skips_record_helpers`,
+  `test_observation_gate_check_sets_flag_on_changed_or_unreadable_gate`,
+  `test_observation_gate_ok_form_sets_flag_in_calling_shell`,
+  `test_observation_gate_pipeline_resume_gate_stop_unchanged`,
+  `test_observation_gate_deps_installer_changing_gate_sets_flag`,
+  `test_observation_gate_runner_tamper_stop_runs_no_helper`, and the existing
+  `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`.
 
 ## Human todos
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001 done; next T010 (gate-broken guard), then T002.
+T001 and T010 done; next T002 (notification mirror and pause overlay).

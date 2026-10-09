@@ -153,11 +153,30 @@ except (OSError, ValueError) as error:
     sys.exit(1)
 PY
 }
+# Never run a project helper after the approved gate changed: AI_GATE_BROKEN (a plain shell
+# variable, never exported, never set inside a command substitution) makes the observation
+# and notification-log helpers below skip themselves for the rest of this shell.
+# Usage: ai_gate_check GATE. An unreadable digest counts as broken.
+ai_gate_check() {
+  local actual
+  if actual=$(ai_guard_digest 2>/dev/null) && [[ "$actual" == "$1" ]]; then return 0; fi
+  AI_GATE_BROKEN=1
+  return 1
+}
 ai_guard_verify() {
   local actual
-  actual=$(ai_guard_digest) || ai_die 'Approved workflow gate is missing or unsafe; inspect changes.'
-  [[ "$actual" == "$AI_APPROVED_GATE" ]] || \
-    ai_die 'Approved workflow gate changed during this run. Stop, inspect the diff, and explicitly reapprove before resuming.'
+  actual=$(ai_guard_digest) || { AI_GATE_BROKEN=1; ai_die 'Approved workflow gate is missing or unsafe; inspect changes.'; }
+  [[ "$actual" == "$AI_APPROVED_GATE" ]] || { AI_GATE_BROKEN=1
+    ai_die 'Approved workflow gate changed during this run. Stop, inspect the diff, and explicitly reapprove before resuming.'; }
+}
+# Dashboard records (best effort, never fatal); skipped once the gate is known bad.
+ai_observe() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  ai_helper observe "$@" || true
+}
+ai_notify_log() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true
 }
 # Host-side dependency install (FL-01): run .ai/ci-setup when deps-status says stale.
 # Usage: ai_deps EXPECTED_GATE LIMIT_SECONDS. Returns 1 with AI_DEPS_ERROR set (every
@@ -184,7 +203,7 @@ ai_deps() {
   timeout --signal=TERM --kill-after=10s "$limit" bash .ai/ci-setup < /dev/null > "$log" 2>&1
   code=$?
   set -e
-  if [[ "$(ai_guard_digest 2>/dev/null)" != "$gate" ]]; then
+  if ! ai_gate_check "$gate"; then
     AI_DEPS_ERROR="Dependency setup (.ai/ci-setup) changed the approved workflow gate; see $log"
   elif ! after=$(ai_helper tree-snapshot 2>&1) || [[ "$after" != "$before" ]]; then
     AI_DEPS_ERROR="Dependency setup changed project files (.ai/ci-setup must only install ignored dependencies); see $log"
