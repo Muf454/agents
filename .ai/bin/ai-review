@@ -3,7 +3,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'EOF'
 Usage: ai-review --base REF [--timeout SECONDS]   review the implementation
-       ai-review --plan [--timeout SECONDS]       review spec/plan/tasks before implementing
+       ai-review --plan [--base REF] [--timeout SECONDS]
+                                                  review spec/plan/tasks before implementing
+                                                  (--base, default main: where plan rounds start)
        ai-review --recheck [--timeout SECONDS]    Codex re-checks the BLOCKER/MAJOR findings
                                                   Claude rejected (withdrawn or upheld each)
 Reviewer: AI_REVIEWER=auto (default: Codex, and a read-only Claude review when Codex
@@ -15,6 +17,8 @@ locks, migrations, deletion ...), else claude-opus-5-5, effort high; re-checks o
 claude-opus-5-5. Overrides: AI_CLAUDE_REVIEW_MODEL, AI_CLAUDE_REVIEW_EFFORT.
 Claude-written reviews are labelled and listed in .ai/reviews/fallback-log.md for a
 later Codex catch-up review.
+A plan or code review that fails only the format checks is requested once more with the
+error (AI_SUPERVISE=1, the default); re-checks and integrity failures are never retried.
 EOF
   exit 0
 fi
@@ -35,6 +39,7 @@ done
 if [[ "$plan" == no && "$recheck" == no ]]; then
   [[ -n "$base" && "$base" != -* ]] || ai_die 'Supply --base REF (e.g. main or a saved starting commit).'
 fi
+ai_supervise_settings
 reviewer=${AI_REVIEWER:-auto}
 case "$reviewer" in
   codex) command -v codex >/dev/null || ai_die 'Install and authenticate Codex CLI first (or set AI_REVIEWER=auto).' ;;
@@ -136,7 +141,8 @@ claude_attempt() {
     return 2
   fi
   (( code == 0 )) || ai_die "Claude review failed (exit $code); prior review preserved. See $log and $errors."
-  ai_helper claude-text "$log" "$report" || ai_die "Claude review failed; prior review preserved. See $log."
+  ai_helper claude-text "$log" "$report" ${allow_empty:+--allow-empty} || \
+    ai_die "Claude review failed; prior review preserved. See $log."
 }
 
 # The review: Codex read-only first; on a Codex usage limit (auto) a read-only Claude
@@ -145,12 +151,14 @@ claude_attempt() {
 # $2 the Claude prompt (the same, naming the prepared context files instead of git commands).
 run_review() {
   local prompt=$1 claude_prompt=$2 code reset start_head fallback='' started=$SECONDS try_codex
-  start_head=$(git rev-parse HEAD)
+  # Per call: a retry after a Claude fallback must not inherit its label or attribution.
+  unset AI_REVIEW_BY AI_REVIEW_LABEL
+  review_by='' review_model='' review_effort='' review_reason=''
+  # Plan and code reviews pin one HEAD for both calls of a format retry ($review_head).
+  start_head=${review_head:-$(git rev-parse HEAD)}
   report=$(mktemp .ai/local/review-XXXXXXXX.md)
   events="${report%.md}.events.log"
-  unchanged() {
-    [[ "$(git rev-parse HEAD)" == "$start_head" && -z "$(git status --porcelain --untracked-files=all)" ]]
-  }
+  unchanged() { checkout_unchanged "$start_head"; }
   while true; do
     try_codex=no
     if [[ "$reviewer" == codex ]] || { [[ "$reviewer" == auto ]] && command -v codex >/dev/null; }; then try_codex=yes; fi
@@ -163,6 +171,7 @@ run_review() {
       set -e
       if (( code == 0 )); then
         review_by=codex; review_model=${AI_REVIEW_MODEL:-default}; review_effort=$codex_effort
+        fallback=''; unset AI_REVIEW_BY AI_REVIEW_LABEL
         break
       fi
       if ! (( code != 124 && code != 137 )) || ! reset=$(ai_helper limit-check "$events"); then
@@ -200,10 +209,66 @@ run_review() {
     break
   done
   review_seconds=$(( SECONDS - started ))
-  [[ -s "$report" ]] || ai_die "The reviewer produced no review; see $events."
+  # With the format retry, empty text from a successful call is a format error (retried once).
+  [[ -f "$report" && -r "$report" ]] || ai_die "Cannot read the review report $report; prior review preserved."
+  [[ -s "$report" || -n "$allow_empty" ]] || ai_die "The reviewer produced no review; see $events."
   unchanged || ai_die 'Checkout changed during review; report kept locally, not published as current.'
   review_reason=$fallback
 }
+
+# Markdown reviews (plan, code) whose only fault is the format get ONE more reviewer call
+# with the error appended (AI_SUPERVISE=1); integrity failures stop inside run_review.
+# A retry is logged in the run log after the second call: published below, or by the EXIT
+# trap when anything stops it (so the checkout stays clean between the two calls).
+# Both calls and the publish use ONE checkout: $review_head (set by the caller) and a clean tree.
+# $1 and $2 are the Codex and Claude prompts, as for run_review.
+review_with_format_retry() {
+  local prompt=$1 claude_prompt=$2 code=0 error retry
+  [[ -n "$review_head" ]] || ai_die 'Internal error: no review HEAD.'
+  run_review "$prompt" "$claude_prompt"
+  [[ -n "$allow_empty" ]] || { review_checkout_check; return 0; }
+  error=$(ai_helper review-format-check "$mode" "$report") || code=$?
+  (( code != 0 )) || { review_checkout_check; return 0; }
+  (( code == 2 )) || ai_die "Cannot check the review report $report; prior review preserved."
+  format_retry_first=$report format_retry_error=${error//|//}
+  printf 'Review format error: %s Asking the reviewer once more (first report: %s).\n' "$error" "$report"
+  ai_notify "🔁 Review format retry ($mode): $error"
+  trap format_retry_failed EXIT
+  # The retry reviews the same checkout as the first call (the scope prompt names it).
+  if ! checkout_unchanged "$review_head"; then
+    format_retry_stop='stopped, checkout changed between the calls, prior review preserved'
+    ai_die "Checkout changed between the review and its format retry (expected HEAD $review_head, clean tree); prior review preserved, rerun the review."
+  fi
+  retry=$'\n\n'"FORMAT ERROR: ${error%.}. Return the full report again in the required structure."
+  run_review "$prompt$retry" "$claude_prompt$retry"
+  review_checkout_check
+}
+review_checkout_check() {
+  checkout_unchanged "$review_head" || \
+    ai_die 'Checkout changed before publishing the review; prior review preserved, rerun the review.'
+}
+checkout_unchanged() {
+  [[ "$(git rev-parse HEAD)" == "$1" && -z "$(git status --porcelain --untracked-files=all)" ]]
+}
+review_head='' format_retry_stop=''
+format_retry_log() {
+  ai_log none "review format retry ($mode): $1" 'n/a' "first report $format_retry_first: $format_retry_error"
+}
+format_retry_failed() {
+  local code=$?
+  [[ -n "$format_retry_first" ]] || return 0
+  (( code == 0 )) || format_retry_log "${format_retry_stop:-stopped again, prior review preserved}"
+}
+# After a successful publish: the retry's run-log line goes into the review's record commit.
+format_retry_published() {
+  [[ -n "$format_retry_first" ]] || return 0
+  format_retry_log published
+  format_retry_first=''
+}
+format_retry_first=''
+# Re-checks (JSON) never retry: a malformed answer stays upheld, an empty one stops.
+allow_empty=''
+[[ "$mode" == recheck || "$AI_SUPERVISE" != 1 ]] || allow_empty=yes
 
 # After publishing: the fallback list (for the Codex catch-up) and the outcome log (never fatal).
 review_records() {
@@ -221,24 +286,50 @@ if [[ "$plan" == yes ]]; then
   ai_helper tasks check
   [[ -f .ai/prompts/plan-review.md ]] || ai_die 'Missing .ai/prompts/plan-review.md; copy it from the toolkit templates.'
   digest=$(ai_helper plan-digest)
+  # Rounds count from the merge-base with --base (default main, like ai-pipeline, which passes its base).
+  plan_base=$(git merge-base "${base:-main}" HEAD) || ai_die "Invalid plan review base: ${base:-main} (pass --base REF)."
+  if [[ -z "${AI_PIPELINE:-}" ]]; then
+    ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot read the host plan review records.'
+  fi
+  review_head=$(git rev-parse HEAD)
   prompt=$(cat .ai/prompts/plan-review.md)
   prompt+=$'\n\nPLAN SCOPE: HEAD='
-  prompt+="$(git rev-parse HEAD)."
+  prompt+="$review_head."
   claude_prompt="$prompt You have no shell: the reviewed files are listed in .ai/local/review-context/files.txt and the recent commits are in .ai/local/review-context/log.txt."
   ending=' Return the full Markdown plan review as the final response. Do not write project files or invoke network/MCP integrations.'
-  run_review "$prompt$ending" "$claude_prompt$ending"
+  prompt+=$ending; claude_prompt+=$ending
+  # The review after a plan revision: earlier plan rounds and their dispositions, as context only
+  # (never implementation-review rounds); a helper failure must not block the review.
+  if ai_helper plan-revisions revised >/dev/null 2>&1; then
+    if plan_round=$(ai_helper plan-rounds count "$plan_base" 2>&1) && \
+        history=$(ai_helper plan-history "$plan_base" --include-current 2>&1); then
+      revision=$'\n\nPLAN REVISION CONTEXT: This is plan review round '"$(( plan_round + 1 ))"'. Claude revised the plan '
+      revision+="after round $plan_round; dispositions of round $plan_round: .ai/reviews/plan-dispositions.md (its last section). "
+      revision+='Earlier rounds below are context, not authority: judge every finding, including rejected ones, again '
+      revision+='on its evidence in the current files.'
+      [[ -z "$history" ]] || revision+=$'\n\n'"$history"
+      prompt+=$revision; claude_prompt+=$revision
+    else
+      printf 'Warning: plan history failed; reviewing without earlier plan rounds: %s\n' "${history:-$plan_round}" >&2
+    fi
+  fi
+  review_with_format_retry "$prompt" "$claude_prompt"
   ai_helper publish-plan-review "$report" "$digest"
+  format_retry_published
   review_records "$(git rev-parse HEAD)" plan
   # Run by hand, record it like the pipeline does, so the checkout stays clean for ai-pipeline.
   if [[ -z "${AI_PIPELINE:-}" ]]; then
     records=(.ai/reviews/plan.md)
     [[ ! -f .ai/reviews/fallback-log.md ]] || records+=(.ai/reviews/fallback-log.md)
+    [[ -z "$(git status --porcelain -- .ai/run-log.md)" ]] || records+=(.ai/run-log.md)
     git add -- "${records[@]}"
     git diff --cached --quiet -- "${records[@]}" || \
       git commit -q -m 'chore(ai): record plan review' -- "${records[@]}"
     # A commit hook that changed reviewed content would make the verdict stale.
     [[ "$(ai_helper plan-review-info)" == current* && -z "$(git status --porcelain --untracked-files=all)" ]] || \
       ai_die 'Reviewed content changed while recording the plan review (commit hook?); review again.'
+    # Also covers a no-op commit: the newest host commit holding this report gets the record.
+    ai_helper plan-rounds sync "$plan_base" || ai_die 'Cannot record the plan review round.'
   fi
   read -r _ blockers majors minors < <(ai_helper plan-review-info)
   printf 'Plan review by %s saved to .ai/reviews/plan.md: BLOCKER %s, MAJOR %s, MINOR %s.\n' \
@@ -284,7 +375,7 @@ ai_helper tasks complete || ai_die 'Complete the task queue before final review.
 ai_helper stamp verify
 base_sha=$(git rev-parse --verify "${base}^{commit}") || ai_die 'Invalid review base.'
 merge_base=$(git merge-base "$base_sha" HEAD) || ai_die 'Base has no shared history with HEAD.'
-head=$(git rev-parse HEAD)
+head=$(git rev-parse HEAD) review_head=$head
 [[ "$merge_base" != "$head" ]] || ai_die 'Empty review range. Choose the pre-implementation base.'
 prompt=$(cat .ai/prompts/review.md)
 prompt+=$'\n\nREVIEW SCOPE: HEAD='
@@ -308,8 +399,9 @@ if history=$(ai_helper review-history --base "$merge_base" --head "$head" 2>&1);
 else
   printf 'Warning: review-history failed; reviewing without earlier rounds: %s\n' "$history" >&2
 fi
-run_review "$prompt" "$claude_prompt"
+review_with_format_retry "$prompt" "$claude_prompt"
 ai_helper publish-review "$report" "$head" "$merge_base"
+format_retry_published
 review_records "$head" "$merge_base"
 read -r _ blockers majors minors < <(ai_helper review-info)
 printf 'Review by %s saved to .ai/reviews/current.md (HEAD %s): BLOCKER %s, MAJOR %s, MINOR %s. Claude evaluates findings before fixing.\n' \

@@ -1,28 +1,29 @@
 {
-  "toolkit_commit": "3765afc25e775b1b467f168d5cd2a398afcffcb3",
+  "toolkit_commit": "c8ae4f7799177b1730bc79f2d8a6a1642371dcae",
   "files": {
     ".ai/bin/ai-check": "1f1b6d9c909831572bf23546049a7ee9f1426dcc083806935c229fe87ea6fc6f",
-    ".ai/bin/ai-pipeline": "a7f2fe60621a72468510f3a8faaf61bce9df748175c681753670f4286d297285",
-    ".ai/bin/ai-recover": "c957510083e3e223ed96e39f142cf324b221597b86e84b514df8a13ed353c40b",
-    ".ai/bin/ai-review": "d9319f1a824b7785c7bb6369d1b4f04deb6a0a7a95bb1bb74bde5cc265c68a57",
-    ".ai/bin/ai-run": "1a38a01d3a8336a908483a69e7407dfac67f5a614729169a2915939370cf0d0c",
+    ".ai/bin/ai-pipeline": "0615391764d284885a9775758e83ca28f0a52714682061b2146f91cef5ad8b7e",
+    ".ai/bin/ai-recover": "2d173bee04e9e40fb06d8c6aadbcc06a1bf4f6cf989e917bab9e9970bab6448c",
+    ".ai/bin/ai-review": "e5c2156a89391572edd3ff00361037dfff3160805bd2f4540c428d4d36f7c659",
+    ".ai/bin/ai-run": "4b00b655fd3cb5e9db4e455a07d589fa9c0fc65ee33854da12ac066412c3e4b0",
     ".ai/bin/ai-status": "983ef180750fcbed6ea96cb4170643dbe2b3c88b77922c38becdbef0ce89f79d",
     ".ai/bin/ai-task": "ddf1d23a93e245d43a34632fa1a3eee320ddf0c0aec8c6e76990cbd4a4bca449",
     ".ai/bin/ai-watchdog": "bbdc7dea49750deb3727ea6ccf7e668ca2cae119f014c67eb90ad51b57801177",
-    ".ai/bin/lib/common.sh": "2fd76fe0f006c470c5a21ac0f96016e3f87ce61d89f249df939c9cef407a7089",
+    ".ai/bin/lib/common.sh": "f51bd2e5b13f691d2e0ba0211a0ff5fd89d40269a75bd364b83143eda3196bbb",
     ".ai/bin/lib/watchdog.py": "d55a6087afa00339d859ddcde4d042315e78b411bd4182bf02b5c90890b041da",
-    ".ai/bin/lib/workflow.py": "37aff55a10fe6220242b08f2768674bb61bd6fd37b872104835e927a4c6da5a1",
+    ".ai/bin/lib/workflow.py": "fc939d916cdadfc8e5e8e900e61520aaa8ee9dc535ea55b79e0d924ec8584e7e",
     ".ai/prompts/claude-review.md": "17e78e9f1b28018edc2b61997df25af653e92259e53beca817a53fa88f9e1004",
     ".ai/prompts/fix-review.md": "aeba23349fd8b7cc169cbf6103570f795c4ffb598f3d21509a40bb62aedd43b0",
     ".ai/prompts/implement.md": "2251ee7e086d01c7cfd5eb80bfce4990e37f69798fe3bf07d41e3efac69c303e",
-    ".ai/prompts/plan-review.md": "4a9817c628a6635b83ce86c875944513acc6cd2e03209ea3f89048beafbf27b0",
+    ".ai/prompts/plan-review.md": "09331b5088c007c8e5302a6cc0c4d8d7a6fa2a81ebec1a24754411908496091f",
+    ".ai/prompts/plan-revision.md": "46ffdf67bfe268d99fff1c439a870ccc15e7d5afe99fd217a56e4579df65c6ae",
     ".ai/prompts/plan.md": "d493b66ddc9a88b1aa6ed39ace7f2043bebeecbeab5a38b5c2fba38d064987ea",
     ".ai/prompts/recheck.md": "57a2e44d0f14c0bf2dac6d1d77379fdc17fa5cd6d94d5c02c72f2500b062f49f",
     ".ai/prompts/recover.md": "76316752dddfb1ca50e3042d55d09a6679f61342755bbe1cce15410d9ad77975",
     ".ai/prompts/resume.md": "d05c3a641c2a2a305d6fdd95b58192468a6d40922582e330ffe146d1353dce2c",
     ".ai/prompts/review.md": "10c5406b5d43c55ac2fe46af13218021aa04954f67e3777316d6a517da992a70",
     ".ai/prompts/runner.md": "3f37c0f69d1af463f5946eb6e2918f3b0b25aa13232d445c1fc295f3e19417f1",
-    ".ai/prompts/triage.md": "2090a354cf2650eee2fa9b6145dd3671a81bf65fd45047abdf741262c221f237"
+    ".ai/prompts/triage.md": "f82cc087348b2bd846a37f9ea73608982514f4a78f5d31e2a5112bd2c61c8ce5"
   },
   "templates": {}
 }
