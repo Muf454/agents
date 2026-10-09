@@ -206,3 +206,4 @@
 | 2026-10-09T10:30Z | claude (sonnet) | T002 | DONE: `ai_notify` mirrors every message to `.ai/local/notifications.log` (also without `AI_NOTIFY_CMD`); `ai_limit_pause` records `observe pause`/`resume`; vault flow note added | observation_notify 6 OK; ai-check 446 OK | (this commit) | what is sent unchanged; gate-changed stop logs nothing; flow unchanged |
 | 2026-10-09T10:19:01Z | runner | T002 | completed | PASS | e9dfac4 | Claude checkpointed; continuing queue |
 | 2026-10-09T10:50Z | claude (sonnet) | T003 | DONE: ai-pipeline stage records (`step KEY`, start, stop, done note, decision, extra round), `ai_die` stop record, checkout registration; vault flow note extended | observation_pipeline 14 OK; ai-check 460 OK | (this commit) | flow unchanged |
+| 2026-10-09T10:33:44Z | runner | T003 | completed | PASS | 64a0fee | Claude checkpointed; continuing queue |
