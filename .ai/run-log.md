@@ -211,3 +211,4 @@
 | 2026-10-09T11:00:47Z | runner | T004 | completed | PASS | 3149768 | Claude checkpointed; continuing queue |
 | 2026-10-09T11:30Z | claude (sonnet) | T005 | DONE: `ai-recover` recovering/plan_revision/checks records, stop in `escalate` and `on_exit`; mocks snapshot the record | observation_recovery 10 OK; ai-check 482 OK | (this commit) | flow unchanged |
 | 2026-10-09T11:16:30Z | runner | T005 | completed | PASS | 0944104 | Claude checkpointed; continuing queue |
+| 2026-10-09T11:40Z | claude (opus) | T006 | DONE: read-only `scripts/lib/dashboard.py`: `ProcSource` (injectable `/proc`), `discover` (registry + runner cwd, realpath dedupe, root filter), `liveness` (alive/crashed/gone, watchdog semantics, bounded marker reads), `sanitize` | dashboard_liveness 10 OK; dashboard_sanitize 3 OK; ai-check 495 OK | (this commit) | two mutation checks fail as expected; no caller until T007; flow unchanged |

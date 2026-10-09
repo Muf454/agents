@@ -673,7 +673,7 @@ changing recovery install on setup, stored decision, base moved, changed gate). 
 (`obs-recover`, `deps-obs`; `MOCK_RECOVER_KILL`). Targeted: Ran 10 tests OK; `.ai/bin/ai-check`: 482 tests OK.
 
 ## T006 — Discovery and liveness (marker + process identity)
-Status: TODO
+Status: DONE
 Dependencies: T005
 Model: opus
 
@@ -755,6 +755,17 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_sanitize` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude opus): `scripts/lib/dashboard.py` with `ProcSource`, `discover`, `marker`,
+`liveness`, `sanitize` as specified; imports `checkout_fds`/`read_record`/`state_root` from
+workflow.py and `is_runner` from watchdog.py only. `discover`'s `only_under` defaults to
+`AI_DASHBOARD_ROOT` at call time (sentinel; `None` disables the filter). A marker that changes
+(not vanishes) between the reads is re-evaluated, at most three times, then the no-marker rule
+applies. An unreadable marker (FIFO, symlink, garbage, symlinked `.ai/local`) counts as no
+marker. Evidence: `-k dashboard_liveness` Ran 10 tests OK; `-k dashboard_sanitize` Ran 3
+tests OK; `.ai/bin/ai-check` OK (495 tests, 8 shards). Mutation checks: skipping the second
+marker read fails `..._marker_removed_between_reads_is_gone`; dropping the start-time check
+fails `..._reused_pid_is_crashed`. No-write test runs the module from a copied lib via
+`runpy.run_path` and compares the temp tree's mtimes and checks for `__pycache__`.
 
 ## T007 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
 Status: TODO

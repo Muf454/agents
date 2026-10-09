@@ -23,6 +23,11 @@ Checks (post-task and final), the checkpointed Build detail and standalone triag
 T005 (2026-10-09): `ai-recover` records `recovering` (attempt/max, stopped stage kept), `plan_revision`
 for a stored decision, `checks` during leftover validation; `escalate` and the unexpected-exit
 handler record a stop that keeps the substage (gate escalations record nothing, T010).
+T006 (2026-10-09): new read-only `scripts/lib/dashboard.py`: `ProcSource` (`/proc` or the
+test-only `AI_DASHBOARD_PROC` fixture tree), `discover` (host registry + live runners' cwd,
+realpath dedupe, test-only `AI_DASHBOARD_ROOT` filter), `liveness` (watchdog semantics on the
+bounded marker read: alive/crashed/gone) and `sanitize` (escapes, controls, bidi, cap). No
+caller yet (T007). Tests in `tests/test_dashboard.py`.
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -45,6 +50,8 @@ renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See al
 `.ai/project-spec.md`, `.ai/tasks.md`.
 
 ## Validation run
+2026-10-09 after T006: `.ai/bin/ai-check` OK (495 tests, 8 shards); targeted
+`-k dashboard_liveness`: 10 OK, `-k dashboard_sanitize`: 3 OK.
 2026-10-09 after T010: `.ai/bin/ai-check` OK (440 tests, 8 shards); targeted
 `-k observation_gate`: 6 OK, `-k gate_changes`: 2 OK, `-k observation_writer` (T001): 23 OK.
 
@@ -118,9 +125,15 @@ itself is unchanged.
 - Recovery records (`test_observation_recovery_*`): kept stage and resumed-pipeline replacement,
   validation on checks and its failure, later-stop labels, TERM and failing-command exits (one ⛔),
   recovery install on setup, stored decision, base moved, changed gate (no stop record, no log line).
+- Discovery and liveness (`test_dashboard_liveness_*`): real `ai-pipeline`/`ai-recover` processes
+  alive (`real_pipeline_and_recover`), reused PID crashed, marker removed mid-snapshot gone,
+  orphaned `ai-run` crashed, legacy runner alive / nothing gone, root filter, FIFO marker and
+  symlinked `.ai/local` (bounded, gone), registry/process skips and merge, nothing written.
+- Terminal-safe text (`test_dashboard_sanitize_*`): CSI, OSC 8/52, DCS/APC/PM/SOS, 8-bit C1,
+  bare ESC, CR/backspace, DEL, bidi overrides removed; UTF-8 kept; length cap.
 
 ## Human todos
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001, T010, T002, T003, T004 and T005 done; next T006 (discovery and liveness).
+T001, T010, T002, T003, T004, T005 and T006 done; next T007 (snapshot, `--once`/`--json`).
