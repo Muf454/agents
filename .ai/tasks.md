@@ -874,7 +874,7 @@ session's permissions ("don't ask mode"). The git index already has mode 100755
 `chmod +x scripts/ai-dashboard`, full gate PASS (516 tests OK), T007 set DONE.
 
 ## T008 — Curses TUI with the flow as boxes
-Status: TODO
+Status: DONE
 Dependencies: T007
 Model: sonnet
 
@@ -978,6 +978,19 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_render` (must say 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude sonnet): DONE. `dashboard.py` gained the pure renderer (`layout`/`render`,
+segments of `(text, style)`; box layout from 120 columns, compact line below, `fit`/`cols`/`clip`
+count wide characters), `render_text` (shared by `--once`/pipes; width from the terminal, else 140),
+the curses view (`terminal_attributes`, `draw`, `interface`: q ↑ ↓ Enter a r, resize, scrolling that
+keeps the selected card visible, 256-colour pairs or basic/bold/reverse) and `main` (TUI on a TTY,
+otherwise `--once`; Ctrl-C exits 0). Deviations: a `selected` style was added for the selected
+title; compact mode adds one `⛔ note` line for stopped/unknown runs so a decision's question stays
+visible; the T007 text format (`stage … (state)`) is gone, one T007 assertion was updated to count
+✓ marks. 15 `dashboard_render_*` tests (golden 140/120/119/60, worst case, stop/finished, plan
+revision/decision/extra round/format retry, recheck, stop at start, P44 incl. `--once`, writer →
+renderer for the 12 stop labels and overlays via `workflow.py observe`, legacy/malformed, widths
+40–200, empty/expanded, pty smoke/interaction/failure). Targeted `-k dashboard_render` 15 OK;
+`.ai/bin/ai-check` OK (541 tests, 8 shards).
 
 ## T009 — Docs and final audit for the dashboard
 Status: TODO

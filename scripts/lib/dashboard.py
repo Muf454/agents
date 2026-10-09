@@ -2,12 +2,15 @@
 terminal text. Nothing here writes a file: checkouts are read only through workflow.py's pinned,
 bounded readers, processes only through a ProcSource (`/proc` or a test fixture tree)."""
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
+import unicodedata
 
 # No __pycache__: .ai/bin is part of the approved gate digest.
 sys.dont_write_bytecode = True
@@ -308,28 +311,336 @@ def title_line(run):
     return f"{run['project']} · {run['branch']} · {run['status']}{progress}"
 
 
-def stage_line(run):
+# The flow, left to right: (stage key, label, compact label, role). `recheck` shares Triage's box.
+FLOW = (('plan_review', 'Plan check', 'Plan', 'codex'), ('plan_revision', 'Plan revision', 'Revise', 'claude'),
+        ('setup', 'Setup', 'Setup', 'script'), ('build', 'Build', 'Build', 'claude'),
+        ('checks', 'Checks', 'Checks', 'script'), ('review', 'Review', 'Review', 'codex'),
+        ('triage', 'Triage', 'Triage', 'claude'), ('pr', 'PR', 'PR', 'script'))
+BOX_OF = {**{key: index for index, (key, *_rest) in enumerate(FLOW)}, 'recheck': 6}
+WIDE_FROM = 120
+OVERLAYS = {'paused': '⏸', 'recovering': '🔧', 'crashed': '⚠'}
+ACTIVE = ('running', 'paused', 'recovering', 'crashed', 'needs_you')
+SINGLE, DOUBLE = '┌─┐│└─┘', '╔═╗║╚═╝'
+LABEL_ROOM = 11
+
+
+def cols(text):
+    """Terminal columns of TEXT: wide characters count 2, combining marks 0."""
+    return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in 'WF' else 1
+               for char in text)
+
+
+def clip(text, room):
+    """TEXT within ROOM columns, ending in `…` when it was cut."""
+    if cols(text) <= room:
+        return text
+    kept, used = '', 0
+    for char in text:
+        if used + cols(char) > room - 1:
+            break
+        kept, used = kept + char, used + cols(char)
+    return kept + '…' if room > 0 else ''
+
+
+def fit(line, width):
+    """The segments of LINE cut to WIDTH columns."""
+    out, used = [], 0
+    for text, style in line:
+        room = width - used
+        if cols(text) > room:
+            out.append((clip(text, room), style))
+            break
+        out.append((text, style))
+        used += cols(text)
+    return out
+
+
+def clock(stamp):
+    try:
+        moment = datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        return moment.astimezone().strftime('%H:%M')
+    except ValueError:
+        return stamp[:16] or '--:--'
+
+
+def position(run):
+    """(box index or None, mode): where the flow stands. The box is always the observation's
+    stage; the state only decorates it."""
+    observation, status = run['observation'], run['status']
+    index = BOX_OF.get(run['stage']) if observation else None
+    if status == 'finished':
+        return len(FLOW), 'done'
+    if status == 'needs_you':
+        return index, 'stopped'
+    if index is None:
+        return None, 'unknown'
+    return index, {'running': 'active', 'paused': 'paused', 'recovering': 'recovering',
+                   'crashed': 'crashed'}.get(status, 'idle')
+
+
+def box_label(run, index, here):
+    key, label, _compact, _role = FLOW[index]
+    if run['stage'] == 'recheck' and here:
+        label = 'Re-check'
+    elif key == 'build' and here and run['tasks'] and run['tasks']['total']:
+        label = clip(f"Build {min(run['tasks']['done'] + 1, run['tasks']['total'])}/{run['tasks']['total']}",
+                     LABEL_ROOM)
+    return label
+
+
+def role_of(run, index):
+    return 'codex' if run['stage'] == 'recheck' and index == BOX_OF['recheck'] else FLOW[index][3]
+
+
+def stop_note(run):
     observation = run['observation']
-    text = f"stage {run['stage']}"
-    if observation:
-        text += f" ({observation['state']})"
-        extra = ' — '.join(part for part in (observation['detail'], observation['note']) if part)
-        text += f' · {extra}' if extra else ''
+    if observation and observation['state'] == 'stopped' and observation['note']:
+        return observation['note']
+    return run['last_error']
+
+
+def marker_text(run, index, mode):
+    """(text, style) under the active box."""
+    observation = run['observation']
+    if mode == 'stopped':
+        note = stop_note(run)
+        if index is None:
+            return ' · '.join(part for part in ('⛔ stopped before Plan check', note) if part), 'stopped'
+        return f"⛔ {note or 'stopped'}", 'stopped'
+    if mode == 'unknown':
+        text = 'stage unknown' if observation else 'stage unknown (older toolkit)'
+        return text, 'dim'
+    if mode == 'crashed':
+        return ' · '.join(part for part in ('⚠ pipeline process is gone', observation['detail']) if part), 'stopped'
+    parts = [observation['detail'], observation['note'] if mode in ('paused', 'recovering') else '']
+    return ' · '.join(part for part in parts if part), 'dim'
+
+
+def box_rows(run, index, mode):
+    """[(top, middle, bottom) segment lists, x offset, width] per box, and the next x."""
+    boxes, x = [], 2
+    for i, (key, _label, _compact, _role) in enumerate(FLOW):
+        here = i == index
+        overlay = f' {OVERLAYS[mode]}' if here and mode in OVERLAYS else ''
+        label = box_label(run, i, here) + overlay
+        if mode == 'done' or (index is not None and i < index):
+            style = 'done'
+        elif not here:
+            style = 'pending'
+        elif mode in ('stopped', 'crashed'):
+            style = 'stopped'
+        elif mode == 'idle':
+            style = 'dim'
+        else:
+            style = 'active_' + role_of(run, i)
+        tl, h, tr, v, bl, _h, br = DOUBLE if here and mode != 'idle' else SINGLE
+        inner = cols(label) + 2
+        boxes.append(((tl + h * inner + tr, f'{v} {label} {v}', bl + h * inner + br), x, inner + 2, style))
+        x += inner + 4
+    return boxes
+
+
+def wide_card(run, width):
+    index, mode = position(run)
+    boxes = box_rows(run, index, mode)
+    lines = [[('  ', 'dim')] for _ in range(3)]
+    for i, (rows, _x, _w, style) in enumerate(boxes):
+        for row, text in enumerate(rows):
+            if i:
+                lines[row].append(('──' if row == 1 else '  ', 'dim'))
+            lines[row].append((text, style))
+    marker, used = [], 0
+
+    def place(column, text, style):
+        nonlocal used
+        marker.extend([(' ' * (column - used), 'dim'), (text, style)])
+        used = column + cols(text)
+
+    for i, (_rows, x, _w, _style) in enumerate(boxes):
+        if mode == 'done' or (index is not None and i < index):
+            place(x + 2, '✓', 'done')
+    if mode != 'done':
+        text, style = marker_text(run, index, mode)
+        start = boxes[index][1] if index is not None else 2
+        if start + cols(text) > width:
+            start = max(used + 1, width - cols(text))
+        if text:
+            place(max(start, used + 1 if used else start), text, style)
+    return [*lines, marker]
+
+
+def compact_card(run):
+    index, mode = position(run)
+    line = [('  ', 'dim')]
+    for i, (_key, _label, short, _role) in enumerate(FLOW):
+        here = i == index
+        if mode == 'done' or (index is not None and i < index):
+            mark, style = '✓', 'done'
+        elif not here:
+            mark, style = '·', 'pending'
+        elif mode == 'stopped':
+            mark, style = '✗', 'stopped'
+        elif mode == 'idle':
+            mark, style = '·', 'dim'
+        else:
+            mark, style = '▶', 'stopped' if mode == 'crashed' else 'active_' + role_of(run, i)
+        text = box_label(run, i, here) if here and FLOW[i][0] == 'build' else short
+        if here and run['stage'] == 'recheck':
+            text = 'Re-check'
+        line.append((f'{mark}{text}' + (f' {OVERLAYS[mode]}' if here and mode in OVERLAYS else '') + ' ', style))
+    lines = [line]
+    if mode == 'stopped' or mode == 'unknown':
+        text, style = marker_text(run, index, mode)
+        lines.append([('  ' + text, style)])
+    return lines
+
+
+def event_line(run):
+    index, mode = position(run)
+    if mode == 'done':
+        return [('  🏁 ' + (run['observation']['note'] or 'finished') if run['observation'] else '  🏁 finished',
+                 'event')]
+    if not run['events']:
+        return [('  no events', 'dim')]
+    event = run['events'][-1]
+    return [(f"  {clock(event['ts'])} {event['message']}", 'event')]
+
+
+def expanded_lines(run):
+    lines = [[(f"  path: {run['checkout']}", 'dim')]]
     if run['last_error']:
-        text += f" · error: {run['last_error']}"
-    return text
+        lines.append([(f"  error: {run['last_error']}", 'stopped')])
+    if run['tasks'] and run['tasks']['current']:
+        lines.append([(f"  task: {run['tasks']['current']}", 'dim')])
+    for event in run['events'][-8:]:
+        lines.append([(f"  {clock(event['ts'])} {event['message']}", 'event')])
+    return lines
 
 
-def render_text(data):
-    """Plain text: per run a title line, a compact stage line and the last event."""
-    if not data['runs']:
-        return f"No pipelines found (watching {data['state_root']}).\n"
-    lines = []
-    for run in data['runs']:
-        event = run['events'][-1] if run['events'] else None
-        lines += [title_line(run), '  ' + stage_line(run),
-                  '  ' + (f"{event['ts']} {event['message']}" if event else 'no events')]
-    return '\n'.join(lines) + '\n'
+def card(run, width, selected, expanded):
+    title = [(f"{'›' if selected else ' '} {title_line(run)}", 'selected' if selected else 'title')]
+    body = wide_card(run, width) if width >= WIDE_FROM else compact_card(run)
+    lines = [title, *body, event_line(run), *(expanded_lines(run) if run['checkout'] in expanded else [])]
+    return [fit(line, width) for line in lines]
+
+
+def layout(runs, width, selected=None, expanded=frozenset(), now=None, state_root=''):
+    """(header lines, [card lines per run]); a line is a list of (text, style) segments and never
+    wider than WIDTH."""
+    now = time.time() if now is None else now
+    running = sum(run['status'] in ('running', 'paused', 'recovering') for run in runs)
+    needs = sum(run['status'] in ('needs_you', 'crashed') for run in runs)
+    finished = sum(run['status'] == 'finished' for run in runs)
+    header = [fit([(f"AI pipelines  {running} running · {needs} needs you · {finished} finished  "
+                    f"{time.strftime('%H:%M', time.localtime(now))}  ↑↓ ⏎ a r q", 'title')], width)]
+    if not runs:
+        text = (f'No pipelines found (state root {state_root}). '
+                'Start one with .ai/bin/ai-pipeline --approved (in tmux).')
+        return header, [[fit([(text, 'dim')], width)]]
+    return header, [card(run, width, i == selected, expanded) for i, run in enumerate(runs)]
+
+
+def render(runs, width, selected=None, expanded=frozenset(), now=None, state_root=''):
+    """Every line of the view: the header, then the cards separated by a blank line."""
+    header, cards = layout(runs, width, selected, expanded, now, state_root)
+    lines = list(header)
+    for lines_of in cards:
+        lines += [[]] + lines_of
+    return lines
+
+
+def render_text(data, width=140, now=None):
+    """Plain text of the view (styles dropped) for `--once` and pipes."""
+    lines = render(data['runs'], width, None, frozenset(), now, data['state_root'])
+    return '\n'.join(''.join(text for text, _style in line).rstrip() for line in lines) + '\n'
+
+
+def terminal_attributes(curses):
+    """Style name -> curses attribute: 256-colour pairs matching the flow chart, basic colours
+    on poorer terminals, bold/reverse without colour."""
+    names = ('title', 'selected', 'active_claude', 'active_codex', 'active_script', 'done', 'pending',
+             'stopped', 'dim', 'event')
+    plain = {'title': curses.A_BOLD, 'selected': curses.A_REVERSE, 'active_claude': curses.A_BOLD,
+             'active_codex': curses.A_BOLD, 'active_script': curses.A_BOLD, 'done': curses.A_DIM,
+             'pending': curses.A_DIM, 'stopped': curses.A_REVERSE, 'dim': curses.A_DIM, 'event': 0}
+    if not curses.has_colors():
+        return plain
+    curses.use_default_colors()
+    rich = curses.COLORS >= 256
+    colours = {'active_claude': (208 if rich else curses.COLOR_YELLOW),
+               'active_codex': (33 if rich else curses.COLOR_BLUE),
+               'active_script': (245 if rich else curses.COLOR_WHITE),
+               'stopped': curses.COLOR_RED, 'done': (71 if rich else curses.COLOR_GREEN),
+               'pending': (240 if rich else -1), 'dim': (245 if rich else -1)}
+    attributes = dict(plain)
+    for number, name in enumerate(names, 1):
+        if name in colours:
+            curses.init_pair(number, colours[name], -1)
+            bold = curses.A_BOLD if name.startswith('active_') or name == 'stopped' else 0
+            attributes[name] = curses.color_pair(number) | bold
+    attributes['selected'] = curses.A_REVERSE | curses.A_BOLD
+    return attributes
+
+
+def draw(screen, header, cards, selected, offset, attributes):
+    """Paint the header and the visible slice of the cards; returns the scroll offset that keeps
+    the selected card in view."""
+    import curses
+    height, width = screen.getmaxyx()
+    body = [line for lines in cards for line in [[], *lines]][1:]
+    room = max(height - len(header), 1)
+    if selected is not None and cards:
+        start = sum(len(lines) + 1 for lines in cards[:selected])
+        end = start + len(cards[selected])
+        if start < offset:
+            offset = start
+        elif end > offset + room:
+            offset = min(start, end - room)
+    offset = max(0, min(offset, max(len(body) - room, 0)))
+    screen.erase()
+    for row, line in enumerate([*header, *body[offset:offset + room]][:height]):
+        column = 0
+        for text, style in fit(line, width):
+            try:
+                screen.addstr(row, column, text, attributes.get(style, 0))
+            except curses.error:
+                pass  # The bottom-right cell cannot be written.
+            column += cols(text)
+    screen.refresh()
+    return offset
+
+
+def interface(screen, all_runs):
+    import curses
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    attributes = terminal_attributes(curses)
+    screen.keypad(True)
+    screen.timeout(2000)
+    data, selected, expanded, offset = snapshot(all_runs), 0, set(), 0
+    while True:
+        runs = data['runs']
+        selected = min(selected, len(runs) - 1) if runs else None
+        header, cards = layout(runs, screen.getmaxyx()[1], selected, expanded, None, data['state_root'])
+        offset = draw(screen, header, cards, selected, offset, attributes)
+        key = screen.getch()
+        if key in (ord('q'), ord('Q')):
+            return
+        if key == curses.KEY_DOWN and runs:
+            selected = min(selected + 1, len(runs) - 1)
+        elif key == curses.KEY_UP and runs:
+            selected = max(selected - 1, 0)
+        elif key in (10, 13, curses.KEY_ENTER) and runs:
+            expanded ^= {runs[selected]['checkout']}
+        elif key in (ord('a'), ord('A')):
+            all_runs = not all_runs
+        if key in (-1, ord('r'), ord('R'), ord('a'), ord('A')):
+            current = runs[selected]['checkout'] if runs else None
+            data = snapshot(all_runs)
+            paths = [run['checkout'] for run in data['runs']]
+            selected = paths.index(current) if current in paths else selected
 
 
 def main(arguments=None):
@@ -338,11 +649,19 @@ def main(arguments=None):
     parser.add_argument('--json', action='store_true', help='print the snapshot as JSON and exit')
     parser.add_argument('--all', action='store_true', help='also show old finished and idle runs')
     args = parser.parse_args(arguments)
-    data = snapshot(args.all)
     if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        print(json.dumps(snapshot(args.all), ensure_ascii=False, indent=2))
+    elif args.once or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        width = shutil.get_terminal_size((140, 24)).columns
+        sys.stdout.write(render_text(snapshot(args.all), width))
     else:
-        sys.stdout.write(render_text(data))
+        import curses
+        import locale
+        locale.setlocale(locale.LC_ALL, '')
+        try:
+            curses.wrapper(interface, args.all)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 

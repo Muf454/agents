@@ -1,14 +1,20 @@
 """Dashboard discovery, liveness and text sanitising (scripts/lib/dashboard.py, T006). Every test
 sets AI_DASHBOARD_ROOT to its temp base, and AI_DASHBOARD_PROC to a fixture process tree unless
 it needs a real process: the parallel gate and the host run real pipelines elsewhere."""
+import fcntl
 import importlib.util
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
+import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 from unittest import mock
@@ -420,7 +426,7 @@ class SnapshotTest(DashboardTest):
         result = self.run_cli('--once')
         self.assertLess(time.monotonic() - start, BOUND)
         self.assertIn('healthy · main', result.stdout)
-        self.assertIn('stage checks (active)', result.stdout)
+        self.assertEqual(result.stdout.count('✓'), 4)  # the four boxes before Checks, healthy run only
         runs = self.runs()
         self.assertEqual(runs['healthy']['stage'], 'checks')
         self.assertEqual(runs['hostile']['stage'], 'unknown')
@@ -495,6 +501,319 @@ class SnapshotTest(DashboardTest):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for path in installed:
             self.assertTrue(path.is_file(), result.stdout)
+
+
+def fake_run(stage='build', state='active', status='running', detail='T003 · sonnet · 12m', note='',
+             tasks=(2, 7), last_error='', observed=True, events=None):
+    """A snapshot run dict, as `inspect` would return it."""
+    if events is None:
+        events = [{'ts': '2026-10-09T10:00:00Z', 'message': '🔁 Round 2'}]
+    observation = {'stage': stage, 'state': state, 'detail': detail, 'note': note, 'since': ''}
+    return {'project': 'demo', 'checkout': '/x/demo', 'branch': 'feature/x', 'liveness': 'alive',
+            'observation': observation if observed else None, 'events': events, 'last_error': last_error,
+            'tasks': {'done': tasks[0], 'total': tasks[1], 'current': ''} if tasks else None,
+            'status': status, 'stage': stage if observed else 'unknown', 'since': '', 'updated': 0.0}
+
+
+def plain(lines):
+    return [''.join(text for text, _style in line).rstrip() for line in lines]
+
+
+def styles(lines):
+    """[(text, style)] of every segment of every line."""
+    return [segment for line in lines for segment in line]
+
+
+HEADER = 'AI pipelines  1 running · 0 needs you · 0 finished  00:00  ↑↓ ⏎ a r q'
+WIDE_BOXES = [
+    '  ┌────────────┐  ┌───────────────┐  ┌───────┐  ╔═══════════╗  ┌────────┐  ┌────────┐  ┌────────┐  ┌────┐',
+    '  │ Plan check │──│ Plan revision │──│ Setup │──║ Build 3/7 ║──│ Checks │──│ Review │──│ Triage │──│ PR │',
+    '  └────────────┘  └───────────────┘  └───────┘  ╚═══════════╝  └────────┘  └────────┘  └────────┘  └────┘',
+]
+WIDE_MARKS = '    ✓' + ' ' * 15 + '✓' + ' ' * 18 + '✓' + ' ' * 8 + 'T003 · sonnet · 12m'
+WRITER_STAGES = {'start': None, 'plan review': 'plan_review', 'plan revision': 'plan_revision',
+                 'implementation': 'build', 'validation': 'checks', 'review': 'review',
+                 'triage': 'triage', 're-check': 'recheck', 'pull request preparation': 'pr',
+                 'push': 'pr', 'pull request': 'pr', 'final push': 'pr'}
+
+
+class RenderTest(DashboardTest):
+    """The shared renderer and the curses view (T008)."""
+
+    def setUp(self):
+        super().setUp()
+        zone = mock.patch.dict(os.environ, {'TZ': 'UTC'})
+        zone.start()
+        time.tzset()
+        self.addCleanup(time.tzset)
+        self.addCleanup(zone.stop)
+
+    def view(self, run, width=140, **options):
+        return render_lines(run, width, **options)
+
+    def run_cli(self, *options):
+        result = subprocess.run([sys.executable, '-B', str(LIB / 'dashboard.py'), *options], cwd=self.base,
+                                capture_output=True, text=True, timeout=BOUND * 3)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def observe(self, checkout, *arguments):
+        result = subprocess.run([sys.executable, '-B', str(LIB / 'workflow.py'), 'observe', *arguments],
+                                env={**os.environ, 'AI_ROOT': str(checkout)}, capture_output=True,
+                                text=True, timeout=BOUND * 3, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+
+    def test_dashboard_render_golden_widths(self):
+        wide = plain(self.view(fake_run()))
+        self.assertEqual(wide, [HEADER, '', '  demo · feature/x · running · 2/7 tasks', *WIDE_BOXES,
+                                WIDE_MARKS, '  10:00 🔁 Round 2'])
+        self.assertEqual(plain(self.view(fake_run(), 120)), wide)
+        compact = ['  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2']
+        self.assertEqual(plain(self.view(fake_run(), 119))[2:], ['  demo · feature/x · running · 2/7 tasks',
+                                                                *compact])
+        narrow = plain(self.view(fake_run(), 60))
+        self.assertEqual(narrow[3], '  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·…')
+        self.assertTrue(all(dash.cols(line) <= 60 for line in narrow))
+
+    def test_dashboard_render_styles_of_the_active_box(self):
+        segments = styles(self.view(fake_run()))
+        self.assertIn(('║ Build 3/7 ║', 'active_claude'), segments)
+        self.assertIn(('│ Plan check │', 'done'), segments)
+        self.assertIn(('│ Checks │', 'pending'), segments)
+
+    def test_dashboard_render_worst_case_row_is_not_truncated(self):
+        lines = plain(self.view(fake_run('plan_revision', 'paused', 'paused', note='limit'), 120))
+        for line in lines[3:6]:
+            self.assertNotIn('…', line)
+        self.assertIn('║ Plan revision ⏸ ║', lines[4])
+        self.assertLessEqual(max(dash.cols(line) for line in lines), 120)
+        longest = ['Plan check', 'Plan revision ⏸', 'Setup', 'Build 99/99', 'Checks', 'Review', 'Re-check', 'PR']
+        self.assertLessEqual(sum(dash.cols(label) + 4 for label in longest) + 14 + 2, 120)
+        lines = plain(self.view(fake_run('build', tasks=(99, 120)), 120))
+        self.assertIn('Build 100/…', lines[4])
+
+    def test_dashboard_render_stopped_review_and_finished(self):
+        stopped = self.view(fake_run('review', 'stopped', 'needs_you', note='2 blockers'))
+        self.assertIn(('║ Review ║', 'stopped'), styles(stopped))
+        self.assertIn('⛔ 2 blockers', plain(stopped)[6])
+        self.assertFalse([s for s in styles(stopped) if s[1].startswith('active_')])
+        done = plain(self.view(fake_run('pr', 'done', 'finished', note='PR open')))
+        self.assertEqual(done[6].count('✓'), 8)
+        self.assertEqual(done[7], '  🏁 PR open')
+
+    def test_dashboard_render_plan_revision_stored_decision_extra_round_format_retry(self):
+        running = self.view(fake_run('plan_revision', detail='1/3 · round 2'))
+        self.assertIn(('║ Plan revision ║', 'active_claude'), styles(running))
+        self.assertTrue(plain(running)[6].rstrip().endswith('1/3 · round 2'))
+        decision = self.view(fake_run('plan_revision', 'stopped', 'needs_you', note='Which database?'))
+        self.assertIn(('║ Plan revision ║', 'stopped'), styles(decision))
+        self.assertIn('⛔ Which database?', plain(decision)[6])
+        extra = plain(self.view(fake_run('triage', detail='round 3 · extra (5 → 3 → 1)')))[6]
+        self.assertEqual(extra.index('round 3'), 83)  # the Triage box column; Build is short here
+        retry = plain(self.view(fake_run('review', detail='format retry')))[6]
+        self.assertEqual(retry.index('format retry'), 71)
+
+    def test_dashboard_render_recheck_is_the_triage_box(self):
+        lines = self.view(fake_run('recheck'))
+        self.assertIn(('║ Re-check ║', 'active_codex'), styles(lines))
+        self.assertNotIn('Triage', plain(lines)[4])
+
+    def test_dashboard_render_stop_at_start_highlights_no_box(self):
+        lines = self.view(fake_run('none', 'stopped', 'needs_you', note='base moved', detail=''))
+        self.assertFalse([s for s in styles(lines) if s[1] in ('stopped', 'done') and '│' in s[0]])
+        self.assertNotIn('╔', ''.join(plain(lines)))
+        self.assertEqual(plain(lines)[6], '  ⛔ stopped before Plan check · base moved')
+
+    def test_dashboard_render_needs_you_with_active_record_and_last_error(self):
+        run = fake_run('build', 'active', 'needs_you', last_error='gate broken', detail='T003')
+        lines = self.view(run)
+        self.assertIn(('║ Build 3/7 ║', 'stopped'), styles(lines))
+        self.assertFalse([s for s in styles(lines) if s[1].startswith('active_')])
+        self.assertTrue(plain(lines)[6].endswith('⛔ gate broken'))
+        checkout = self.checkout('broken')
+        (checkout / '.ai/local/observation.json').write_text(json.dumps(
+            {'stage': 'build', 'state': 'active', 'detail': 'T003', 'note': '', 'since': ''}))
+        self.register('broken.json', checkout)
+        error = checkout / '.ai/local/last-error'
+        error.write_text('gate broken\nmore\n')
+        future = time.time() + 5
+        os.utime(error, (future, future))
+        output = self.run_cli('--once').stdout
+        self.assertIn('⛔ gate broken', output)
+        self.assertIn('║ Build ║', output)
+
+    def test_dashboard_render_writer_to_renderer_stops_and_overlays(self):
+        for label, stage in WRITER_STAGES.items():
+            with self.subTest(label=label):
+                checkout = self.checkout('stop-' + label.replace(' ', '-'))
+                if stage:
+                    self.observe(checkout, 'step', stage)
+                self.observe(checkout, 'stop', label, 'because')
+                run = dash.inspect(str(checkout), [], time.time())
+                texts = [text for text, style in styles(self.view(run)) if style == 'stopped']
+                if stage is None:
+                    self.assertIn('⛔ stopped before Plan check · because', texts)
+                else:
+                    box = 'Re-check' if stage == 'recheck' else dict((k, v) for k, v, *_ in dash.FLOW)[stage]
+                    self.assertTrue(any(f' {box} ' in text for text in texts), texts)
+                    self.assertIn('⛔ because', texts)
+        cases = {'build': ('active_claude', '⏸', 'pause'), 'review': ('active_codex', '⏸', 'pause'),
+                 'plan_revision': ('active_claude', '⏸', 'pause'),
+                 'checks': ('active_script', '🔧', 'recovering')}
+        for stage, (style, overlay, action) in cases.items():
+            with self.subTest(stage=stage, action=action):
+                checkout = self.checkout('overlay-' + stage + action)
+                self.observe(checkout, 'step', stage)
+                self.observe(checkout, action, 'note')
+                run = dash.inspect(str(checkout), [(1, '1')], time.time())
+                segments = styles(self.view(run))
+                self.assertTrue(any(s == style and overlay in t for t, s in segments), segments)
+
+    def test_dashboard_render_legacy_and_malformed_show_no_active_box(self):
+        lines = self.view(fake_run(observed=False, tasks=None))
+        self.assertEqual(plain(lines)[6], '  stage unknown (older toolkit)')
+        self.assertFalse([s for s in styles(lines) if s[1].startswith('active_') or s[1] == 'done'])
+        self.assertNotIn('╔', ''.join(plain(lines)))
+        checkout = self.checkout('bad')
+        (checkout / '.ai/local/observation.json').write_text('{"stage": "bogus", "state": "active"}')
+        self.register('bad.json', checkout)
+        self.proc.add(7000, ['bash', '/x/.ai/bin/ai-run'], checkout)
+        output = self.run_cli('--once').stdout
+        self.assertIn('stage unknown', output)
+        self.assertNotIn('╔', output)
+        self.assertIn('bad · unknown · running', output)
+
+    def test_dashboard_render_overlays_and_line_widths(self):
+        runs = [fake_run(), fake_run('plan_revision', 'paused', 'paused', note='x' * 300),
+                fake_run('review', 'recovering', 'recovering'), fake_run('pr', 'active', 'crashed'),
+                fake_run('recheck', 'stopped', 'needs_you', note='y' * 300),
+                fake_run('none', 'stopped', 'needs_you', note='z' * 300), fake_run('pr', 'done', 'finished'),
+                fake_run(observed=False), fake_run(detail='d' * 400, tasks=(99, 120))]
+        for width in range(40, 201):
+            for run in runs:
+                for line in plain(render_lines(run, width, expanded=frozenset({'/x/demo'}))):
+                    self.assertLessEqual(dash.cols(line), width, (width, line))
+        crashed = plain(self.view(runs[3], 119))
+        self.assertIn('▶PR ⚠', crashed[3])
+        paused = plain(self.view(runs[1], 119))
+        self.assertIn('▶Revise ⏸', paused[3])
+        stopped = plain(self.view(runs[4], 60))
+        self.assertIn('✗Re-check', stopped[3])
+
+    def test_dashboard_render_empty_state_and_expanded_events(self):
+        empty = plain(dash.render([], 140, now=0, state_root='/some/root'))
+        self.assertIn('No pipelines found (state root /some/root)', empty[2])
+        self.assertIn('.ai/bin/ai-pipeline --approved', empty[2])
+        events = [{'ts': '2026-10-09T10:00:00Z', 'message': f'm{n}'} for n in range(12)]
+        lines = plain(self.view(fake_run(events=events), expanded=frozenset({'/x/demo'})))
+        shown = [line for line in lines if line.startswith('  10:00 m')]
+        self.assertEqual([line[8:] for line in shown], ['m11'] + [f'm{n}' for n in range(4, 12)])
+        self.assertIn('  path: /x/demo', lines)
+
+    def pty_run(self, argv, rows=30, columns=140):
+        """Start ARGV on a pty of the given size; returns (pid, master fd)."""
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
+                os.execvpe(argv[0], argv, {**os.environ, 'TERM': 'xterm-256color', 'LC_ALL': 'C.UTF-8'})
+            finally:
+                os._exit(127)
+        self.addCleanup(self.reap, pid, fd)
+        return pid, fd
+
+    def reap(self, pid, fd):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def read_until(self, fd, seen, text=None, limit=15):
+        """Append pty output to SEEN until TEXT shows in it (or EOF); fails after LIMIT seconds."""
+        deadline = time.monotonic() + limit * TIMEOUT_SCALE
+        while text is None or text not in seen[0].decode('utf-8', 'replace'):
+            if time.monotonic() > deadline:
+                self.fail(f'timed out waiting for {text!r}; saw {seen[0][-600:]!r}')
+            if not select.select([fd], [], [], 0.2)[0]:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            seen[0] += chunk
+
+    def finish(self, pid, fd, seen):
+        self.read_until(fd, seen)
+        _, status = os.waitpid(pid, 0)
+        return os.waitstatus_to_exitcode(status)
+
+    def fixture_runs(self, count=10):
+        for n in range(count):
+            # The last run has a name no other shares a character with: curses redraws only
+            # the characters that changed, so a similar name would never show whole.
+            name = 'qxzjwvkp' if n == count - 1 and count > 5 else f'run{n:02d}'
+            checkout = self.checkout(name)
+            state = 'stopped' if n == 0 else 'done' if n == 1 else 'active'
+            (checkout / '.ai/local/observation.json').write_text(json.dumps(
+                {'stage': 'pr' if n == 1 else 'build', 'state': state, 'detail': '', 'note': 'why',
+                 'since': ''}))
+            then = time.time() - n
+            os.utime(checkout / '.ai/local/observation.json', (then, then))
+            self.register(f'{name}.json', checkout)
+
+    def test_dashboard_render_curses_smoke(self):
+        self.fixture_runs(3)
+        pid, fd = self.pty_run([str(ROOT / 'scripts/ai-dashboard')])
+        seen = [b'']
+        self.read_until(fd, seen, 'AI pipelines  0 running · 1 needs you · 1 finished')
+        os.write(fd, b'q')
+        self.assertEqual(self.finish(pid, fd, seen), 0, seen[0][-400:])
+        self.assertIn(b'\x1b[?1049l', seen[0])
+
+    def test_dashboard_render_curses_interaction(self):
+        self.fixture_runs(10)
+        pid, fd = self.pty_run([str(ROOT / 'scripts/ai-dashboard')], 30, 140)
+        seen = [b'']
+        self.read_until(fd, seen, 'AI pipelines  0 running · 1 needs you · 1 finished')
+        self.assertNotIn('qxzjwvkp', seen[0].decode('utf-8', 'replace'))
+        os.write(fd, b'\x1bOB' * 9)
+        self.read_until(fd, seen, 'qxzjwvkp')
+        os.write(fd, b'\n')
+        self.read_until(fd, seen, 'path: ')
+        self.assertNotIn('✓Setup', seen[0].decode('utf-8', 'replace'))
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 20, 100, 0, 0))
+        os.kill(pid, signal.SIGWINCH)
+        self.read_until(fd, seen, '·Build')
+        os.write(fd, b'q')
+        self.assertEqual(self.finish(pid, fd, seen), 0, seen[0][-400:])
+        self.assertIn(b'\x1b[?1049l', seen[0])
+
+    def test_dashboard_render_curses_failure_restores_the_terminal(self):
+        self.fixture_runs(2)
+        code = ('import sys\nsys.path.insert(0, %r)\nimport dashboard\n'
+                'def boom(*a, **k):\n    raise RuntimeError("injected")\n'
+                'dashboard.layout = boom\nsys.exit(dashboard.main([]))\n' % str(LIB))
+        pid, fd = self.pty_run([sys.executable, '-B', '-c', code])
+        seen = [b'']
+        status = self.finish(pid, fd, seen)
+        self.assertNotEqual(status, 0)
+        self.assertIn(b'\x1b[?1049l', seen[0])
+        self.assertIn(b'injected', seen[0])
+
+
+def render_lines(run, width, **options):
+    return dash.render([run], width, now=0, state_root='/s', **options)
 
 
 if __name__ == '__main__':
