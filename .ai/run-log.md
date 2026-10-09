@@ -217,3 +217,4 @@
 | 2026-10-09T11:41:56Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | e86d862 | No merge or deployment performed |
 - 2026-10-09T11:48:13Z — mission control — T007 unblocked: `chmod +x scripts/ai-dashboard` (the runner may not chmod), gate PASS 516 tests, T007 DONE; pipeline resumed.
 | 2026-10-09T12:00Z | claude (sonnet) | T008 | DONE: shared renderer (eight flow boxes ≥120 cols, compact line below), `--once`/pipes use it, curses TUI (↑↓ Enter a r q, resize, scroll, colours); 15 `dashboard_render_*` tests incl. pty smoke/interaction/failure | dashboard_render 15 OK; ai-check 541 OK | (this commit) | one T007 assertion updated (old text format replaced); flow unchanged |
+| 2026-10-09T12:06:10Z | runner | T008 | completed | PASS | ed3b832 | Claude checkpointed; continuing queue |
