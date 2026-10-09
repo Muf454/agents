@@ -526,8 +526,10 @@ class ToolkitTest(unittest.TestCase):
         self.project.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
-                     'AI_DISPUTES_BASE'):
-            # set when the gate runs inside a pipeline (or one resumed by ai-recover)
+                     'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
+                     'AI_SUPERVISE_ESCALATE_MODEL'):
+            # set when the gate runs inside a pipeline (or one resumed by ai-recover); the
+            # supervision settings would override the fixture's config file
             self.env.pop(name, None)
         self.run_cmd(['git', 'init', '-b', 'main'])
         self.run_cmd(['git', 'config', 'user.name', 'Toolkit Test'])

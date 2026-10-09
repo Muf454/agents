@@ -61,7 +61,7 @@ into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside
 watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
 
 ## T001 — Safe record I/O: observation, notification log, host registry, bounded readers
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -203,6 +203,25 @@ Targeted: `python3 -m unittest discover -s tests -k observation_writer` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude opus): done. `scripts/lib/workflow.py` gains the safe record I/O section
+(`open_dir`, `checkout_fds`, `local_dir_fd`, `read_record` with `tail`, `lock_record`,
+`write_record`, `git_branch`) and the writers `observe`, `notify-log`, `pipeline-register`
+(dispatched through `record_command`: always exit 0, `Warning: …` on stderr), plus
+`tasks counts`. Tests: `tests/test_observation.py`, 23 `test_observation_writer_*` tests
+(`python3 -m unittest discover -s tests -k observation_writer`: Ran 23, OK). Full gate
+`.ai/bin/ai-check`: 434 tests OK.
+Choices: the checkout root itself is opened following symlinks (it is the human's path; every
+component below it is no-follow); `observe` serialises its read-modify-write with
+`.ai/local/observation.lock` (same bounded flock); `resume` only lifts a `paused` record (a
+stop or recovery recorded meanwhile stays); a symlink/FIFO at `observation.json` or
+`notifications.log` is replaced with a warning; `notify-log` drops non-JSON lines on rewrite;
+registry entries that cannot be read safely are left alone (only invalid JSON or a missing
+checkout is pruned); `PRUNE_HOOK` is a test-only hook.
+Limitation: "through the pipeline fixture the outcome is unchanged" for hard-linked records
+needs the callers (T002/T003); the helper-level hard-link test passes here.
+Also fixed test isolation in `tests/test_workflow.py` setUp: `AI_SUPERVISE_PLAN_ROUNDS`,
+`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL` exported by a supervised pipeline
+leaked into the fixture and failed two supervisor-settings tests in this run's gate.
 
 ## T010 — Gate-broken guard: no project helper runs after the approved gate changed
 Status: TODO
