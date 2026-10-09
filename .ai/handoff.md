@@ -16,6 +16,10 @@ outcome line after a gate change. Messages and exit codes unchanged.
 T002 (2026-10-09): `ai_notify` also writes every message to `.ai/local/notifications.log` (via
 `ai_notify_log`, also without `AI_NOTIFY_CMD`; what is sent is unchanged); `ai_limit_pause`
 records `observe pause`/`resume`. Covers the watchdog, ai-review and pipeline notifications.
+T003 (2026-10-09): `ai-pipeline` stage records, stops, finish note and checkout registration.
+T004 (2026-10-09): `ai_deps` records Setup; `ai-run` records Build (with task id, model, count),
+Checks (post-task and final), the checkpointed Build detail and standalone triage/revise-plan;
+`ai-review` records the `format retry` detail.
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -102,9 +106,14 @@ itself is unchanged.
   revision detail, stored needs-human decision, extra fix round detail, base moved, clean-check
   death, resume gate stop leaves the record untouched, hook-changed gate runs no helper, registry
   on start/resume and an unusable registry only warns.
+- Runner, setup and review records (`test_observation_runner_*`): build/checks during a run, failing
+  post-task/final gate ends on checks, failing install on setup, no Setup with current dependencies,
+  recovery install `setup`/`recovering`, session limit between tasks on build, pipeline triage detail
+  kept, standalone triage/revise-plan, format retry on both review boxes and a by-hand retry leaving
+  another stage alone.
 
 ## Human todos
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001, T010, T002 and T003 done; next T004 (ai-run, ai_deps, ai-review records).
+T001, T010, T002, T003 and T004 done; next T005 (ai-recover records).

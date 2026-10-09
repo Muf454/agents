@@ -199,6 +199,11 @@ ai_deps() {
   fi
   [[ "$status" == stale* ]] || return 0
   printf 'Dependency setup (.ai/ci-setup): %s\n' "${status#stale }"
+  if [[ -n "${AI_OBSERVE_RECOVERY:-}" ]]; then
+    ai_observe recovering "$AI_OBSERVE_RECOVERY" setup
+  else
+    ai_observe step setup
+  fi
   if ! [[ "$limit" =~ ^-?[0-9]+$ ]] || (( limit <= 0 )); then
     AI_DEPS_ERROR='Dependency setup (.ai/ci-setup) not run: run time limit reached.'; return 1
   fi

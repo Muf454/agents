@@ -233,6 +233,7 @@ review_with_format_retry() {
   format_retry_first=$report format_retry_error=${error//|//}
   printf 'Review format error: %s Asking the reviewer once more (first report: %s).\n' "$error" "$report"
   ai_notify "🔁 Review format retry ($mode): $error"
+  if [[ "$mode" == plan ]]; then ai_observe detail plan_review 'format retry'; else ai_observe detail review 'format retry'; fi
   trap format_retry_failed EXIT
   # The retry reviews the same checkout as the first call (the scope prompt names it).
   if ! checkout_unchanged "$review_head"; then

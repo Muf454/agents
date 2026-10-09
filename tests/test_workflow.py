@@ -1558,7 +1558,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((during['state'], during['stage']), ('paused', 'build'))
         self.assertIn('Claude until', during['note'])
         after = json.loads((self.project / '.ai/local/observation.json').read_text())
-        self.assertEqual((after['state'], after['stage'], after['note']), ('active', 'build', ''))
+        # ai-run goes on to its own validation (T004), so the resumed run ends on the checks box
+        self.assertEqual((after['state'], after['stage'], after['note']), ('active', 'checks', ''))
 
     def test_observation_notify_codex_pause_marks_the_stage_paused(self):
         self.ready()
@@ -7029,6 +7030,126 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('pipeline-register', result.stderr)
         self.assertTrue(list((self.base / 'host-state').rglob('run.json')))
         self.assertTrue(directory.is_file())
+
+    # ---------------------------------------------------------------- runner records (T004)
+    RECORDING_VALIDATE = """#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import json, os, pathlib, sys
+path = pathlib.Path('.ai/local/observation.json')
+record = json.loads(path.read_text()) if path.exists() else {}
+with open('.ai/local/val-history', 'a') as f: f.write(json.dumps(record) + '\\n')
+fail = os.environ.get('MOCK_VALIDATE_FAIL')
+if fail and fail in (record.get('detail'), 'all'): sys.exit(1)
+PY
+"""
+
+    def runner_ready(self, queue=None):
+        """The fixture gate records the observation it runs under (val-history) and fails on demand."""
+        self.ready(queue)
+        (self.project / '.ai/validate').write_text(self.RECORDING_VALIDATE)
+        self.commit('recording fixture gate')
+
+    def validated(self):
+        path = self.project / '.ai/local/val-history'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def runner_pipeline(self, expected=1, **env):
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                         **dict({'AI_AUTO_RECOVER': '0'}, **env))
+
+    def test_observation_runner_normal_run_shows_build_then_checks(self):
+        self.runner_ready()
+        self.tool('ai-run', '--approved')
+        built = [r for r in self.seen() if r['stage'] == 'build']
+        self.assertEqual(len(built), 1)
+        self.assertRegex(built[0]['detail'], r'^T001 · .+ · 1/1$')
+        details = [r['detail'] for r in self.validated() if r['stage'] == 'checks']
+        self.assertEqual(details, ['T001', 'final'])
+        final = self.observation()
+        self.assertEqual((final['stage'], final['state'], final['detail']), ('checks', 'active', 'final · passed'))
+
+    def test_observation_runner_failing_post_task_gate_ends_on_checks(self):
+        self.runner_ready()
+        self.runner_pipeline(MOCK_VALIDATE_FAIL='T001')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+
+    def test_observation_runner_failing_final_gate_ends_on_checks(self):
+        self.runner_ready()
+        self.runner_pipeline(MOCK_VALIDATE_FAIL='final')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+        self.assertIn('Final validation failed', stopped['note'])
+
+    def test_observation_runner_failing_install_ends_on_setup(self):
+        self.deps_ready()
+        self.runner_pipeline(MOCK_DEPS='fail')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('setup', 'stopped'))
+        self.assertIn('Dependency setup', stopped['note'])
+
+    def test_observation_runner_current_dependencies_record_no_setup(self):
+        self.runner_ready()
+        self.tool('ai-run', '--approved')
+        self.assertNotIn('setup', [r['stage'] for r in self.seen() + self.validated()])
+
+    def test_observation_runner_recovery_install_records_setup_recovering(self):
+        self.deps_ready()
+        self.plant_observation(stage='build', state='recovering', note='1/2')
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_deps "$1" 100', 'deps', gate],
+                     env=dict(self.env, AI_OBSERVE_RECOVERY='2'))
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('setup', 'recovering', '2'))
+
+    def test_observation_runner_session_limit_between_tasks_stops_on_build(self):
+        self.runner_ready(task('T001') + task('T002'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--sessions', '1', expected=1,
+                  AI_AUTO_RECOVER='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state'], stopped['detail']),
+                         ('build', 'stopped', 'T001 · checkpointed · 1/2'))
+        self.assertIn('Session limit reached', stopped['note'])
+
+    def test_observation_runner_triage_in_a_pipeline_keeps_the_pipeline_detail(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('4,3,2,1')
+        details = [r['detail'] for r in self.seen() if r['stage'] == 'triage']
+        self.assertIn('round 1', details)
+        self.assertNotIn('', details)
+
+    def test_observation_runner_standalone_triage_records_triage(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.plant_observation()
+        self.tool('ai-run', '--approved', '--triage')
+        self.assertEqual([(r['stage'], r['state']) for r in self.seen()][-1:], [('triage', 'active')])
+
+    def test_observation_runner_standalone_revise_plan_records_the_round_and_model(self):
+        self.revise_ready()
+        self.revise()
+        revision = [r for r in self.seen() if r['stage'] == 'plan_revision']
+        self.assertEqual([r['detail'] for r in revision], ['round 1 · opus'])
+
+    def test_observation_runner_format_retry_shows_on_the_review_boxes(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_SUPERVISE='1',
+                  MOCK_CODEX_PLAN_FORMAT='malformed,ok', MOCK_CODEX='empty,success')
+        seen = [(r['stage'], r['detail']) for r in self.seen()]
+        self.assertIn(('plan_review', 'format retry'), seen)
+        self.assertIn(('review', 'format retry'), seen)
+
+    def test_observation_runner_by_hand_plan_review_retry_leaves_another_stage_alone(self):
+        self.ready()
+        self.plant_observation(stage='build', state='active', detail='T001 · busy')
+        before = (self.project / '.ai/local/observation.json').read_bytes()
+        self.tool('ai-review', '--plan', AI_SUPERVISE='1', MOCK_CODEX_PLAN_FORMAT='malformed,ok')
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual((self.project / '.ai/local/observation.json').read_bytes(), before)
 
 
 class ReviewHistoryTest(unittest.TestCase):

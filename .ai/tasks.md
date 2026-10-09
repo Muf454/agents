@@ -503,7 +503,7 @@ agents now append `observation.json` to `.ai/local/obs-history` per session. Ful
 `.ai/bin/ai-check`: 460 tests OK. Vault `agents-flow.md` note extended.
 
 ## T004 — Runner, setup and review records (ai-run, ai_deps, ai-review)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: sonnet
 
@@ -576,6 +576,14 @@ Targeted: `python3 -m unittest discover -s tests -k observation_runner` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude sonnet): `ai_deps` records Setup (`recovering … setup` when `AI_OBSERVE_RECOVERY`
+is set, else `step setup`) once the install is known stale. `ai-run` records `build` (id · model or
+`default` · done+1/total, from `tasks counts`), `checks` before the post-task and final gates,
+`build … checkpointed` after a passing post-task gate, `detail checks 'final · passed'` after the
+final gate; standalone `--triage` / `--revise-plan` record `triage` / `plan_revision` (skipped when
+`AI_PIPELINE` is set). `ai-review` sets the `format retry` detail on `plan_review`/`review`. 12
+`observation_runner_*` tests OK; the T002 usage-limit pause test now expects the resumed run to end
+on `checks`. Full gate `.ai/bin/ai-check`: 472 tests OK.
 
 ## T005 — Recovery records (ai-recover)
 Status: TODO

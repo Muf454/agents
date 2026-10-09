@@ -207,3 +207,4 @@
 | 2026-10-09T10:19:01Z | runner | T002 | completed | PASS | e9dfac4 | Claude checkpointed; continuing queue |
 | 2026-10-09T10:50Z | claude (sonnet) | T003 | DONE: ai-pipeline stage records (`step KEY`, start, stop, done note, decision, extra round), `ai_die` stop record, checkout registration; vault flow note extended | observation_pipeline 14 OK; ai-check 460 OK | (this commit) | flow unchanged |
 | 2026-10-09T10:33:44Z | runner | T003 | completed | PASS | 64a0fee | Claude checkpointed; continuing queue |
+| 2026-10-09T11:00Z | claude (sonnet) | T004 | DONE: `ai_deps` Setup record, `ai-run` build/checks/checkpointed/final records and standalone triage/revise-plan, `ai-review` format retry detail; vault flow note extended | observation_runner 12 OK; ai-check 472 OK | (this commit) | T002 pause test now expects `checks` after the resumed run; flow unchanged |
