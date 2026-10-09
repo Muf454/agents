@@ -43,6 +43,24 @@ Pending.
 
 MOCK_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, pathlib, re, signal, subprocess, sys, time
+def crash_kill(pid, pipeline):
+    # A simulated restart: kill the nearest ai-run ancestor and the pipeline. Only processes
+    # running in this fixture project count: the walk stops at the first ancestor outside it,
+    # so a test run inside a real pipeline session never reaches the host's ai-run.
+    root = os.path.realpath(os.getcwd())
+    def fixture(pid, *names):
+        try:
+            return os.path.realpath(f'/proc/{pid}/cwd') == root and any(
+                part.endswith(names) for part in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'))
+        except OSError:
+            return False
+    while pid > 1 and fixture(pid, b''):
+        if fixture(pid, b'/ai-run'):
+            os.kill(pid, 9)
+            break
+        pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+    if fixture(pipeline, b'/ai-pipeline', b'/ai-recover'):
+        os.kill(pipeline, 9)
 # Real CLIs read extra prompt input from an open stdin and can hang; it must be /dev/null.
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'claude stdin not /dev/null'
 args = sys.argv[1:]
@@ -74,7 +92,13 @@ if 'CLAUDE REVIEWER' in prompt:
                             'diff': [l for l in (read('diff.patch') or '').splitlines() if l.startswith('diff --git')],
                             'findings': read('findings.txt')}) + '\n')
     pass  # the reviewer writes nothing (a test rewrites this line)
-    review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success')
+    review_mode = os.environ.get('MOCK_CLAUDE_REVIEW', 'success').split(',')
+    # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
+    review_mode = review_mode[min(len((state / 'claude-review-args.log').read_text().splitlines()), len(review_mode)) - 1]
+    if review_mode in ('malformed', 'empty'):
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],
+                          'result': 'looks fine' if review_mode == 'malformed' else '  \n'}))
+        sys.exit(0)
     if review_mode == 'limit-once' and not (state / 'claude-review-limit').exists():
         (state / 'claude-review-limit').touch()
         print(json.dumps({'type':'result','subtype':'error','is_error':True,
@@ -91,6 +115,50 @@ if 'CLAUDE REVIEWER' in prompt:
                 '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- M1: demonstrated by a probe.\n' if major else 'None.\n') +
                 '## MINOR findings\nNone.\n')
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[],'result':text}))
+    sys.exit(0)
+if 'REVISION CONTRACT' in prompt:
+    # A plan revision session: Read/Glob/Grep/Edit only, never commits (it has no shell).
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'revision-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
+    with open(state / 'revision-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    assert pathlib.Path('.ai/local/revision-context/plan-history.md').exists(), 'no revision context'
+    def crash(when):
+        # The machine "restarts" during revision call MOCK_REVISION_CRASH_CALL (default 1), before
+        # or after the session's edits: ai-run (claude <- timeout <- ai-run) and the pipeline die.
+        calls = len((state / 'revision-args.log').read_text().splitlines())
+        if os.environ.get('MOCK_REVISION_CRASH') == when and calls == int(os.environ.get('MOCK_REVISION_CRASH_CALL', '1')):
+            crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
+            sys.exit(0)
+    crash('before')
+    mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
+    review = pathlib.Path('.ai/reviews/plan.md').read_text()
+    majors = review.split('## MAJOR findings')[1].split('## MINOR findings')[0]
+    ids = re.findall(r'^- (P\d+):', majors, re.M)
+    section = pathlib.Path('.ai/reviews/plan-dispositions.md')
+    tasks_file = pathlib.Path('.ai/tasks.md')
+    rows = ''
+    for number, finding in enumerate(ids):
+        if mode == 'revise-needs-human' and number == 0:
+            rows += f'| {finding} | needs-human | ' + os.environ.get('MOCK_QUESTION', 'Should the rollback keep option A or switch to B?') + ' | |\n'
+        elif mode in ('revise-reject', 'revise-needs-human', 'revise-touch-source', 'revise-edit-plan-review'):
+            rows += f'| {finding} | rejected | the plan covers it in current-plan.md:12 | |\n'
+        else:
+            text = tasks_file.read_text()
+            new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
+            tasks_file.write_text(text.rstrip('\n') + '\n\n' + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id))
+            rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
+    if os.environ.get('MOCK_CONVERGENCE'):
+        rows += os.environ['MOCK_CONVERGENCE'] + '\n'
+    section.write_text(section.read_text() + rows)
+    if mode == 'revise-touch-source':
+        with open(os.environ.get('MOCK_SOURCE_PATH', 'src.txt'), 'a') as f: f.write('# not allowed in a plan revision\n')
+    if mode == 'revise-edit-plan-review':
+        pathlib.Path('.ai/reviews/plan.md').write_text(review.replace('MAJOR=', 'MAJOR=0 was '))
+    crash('after')
+    if mode == 'revise-error':
+        print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+        sys.exit(0)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
@@ -152,6 +220,11 @@ if 'TRIAGE CONTRACT' in prompt:
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
                              if mode == 'triage-mixed-reject' else '')
+                          # MOCK_CODEX=counts: the further MAJOR findings share the fix task.
+                          + ''.join(f'| {finding} | accepted | fixture defect confirmed | {new_id} |\n'
+                                    for finding in re.findall(r'^- (M\d+):',
+                                                              pathlib.Path('.ai/reviews/current.md').read_text(), re.M)
+                                    if finding != 'M1' and os.environ.get('MOCK_CODEX') == 'counts')
                           + (convergence + '\n' if convergence else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
@@ -252,7 +325,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'permissi
 '''
 
 MOCK_CODEX = r'''#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, subprocess, sys
 assert os.path.samestat(os.fstat(0), os.stat('/dev/null')), 'codex stdin not /dev/null'
 args = sys.argv[1:]
 assert args[0] == 'exec'
@@ -278,17 +351,45 @@ if 'RECHECK SCOPE' in args[-1]:
     sys.exit(0)
 if 'PLAN SCOPE' in args[-1]:
     with open(state / 'codex-plan-calls', 'a') as f: f.write('call\n')
-    major = os.environ.get('MOCK_CODEX_PLAN') == 'major'
+    plan_calls = (state / 'codex-plan-calls').read_text().count('call')
+    # The checkout as each plan review saw it ('clean' when nothing is uncommitted).
+    status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=all'],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    with open(state / 'codex-plan-status', 'a') as f: f.write((status or 'clean').replace('\n', ' ') + '\n')
+    # MOCK_CODEX_PLAN_FORMAT='malformed,ok': report format of plan call 1, 2, ...; the last one repeats.
+    formats = os.environ.get('MOCK_CODEX_PLAN_FORMAT', 'ok').split(',')
+    plan_format = formats[min(plan_calls, len(formats)) - 1]
+    out = pathlib.Path(args[args.index('--output-last-message')+1])
+    if plan_format == 'error': sys.exit(17)
+    if plan_format == 'empty': sys.exit(0)
+    if plan_format == 'malformed':
+        out.write_text('looks fine')
+        sys.exit(0)
+    if plan_format == 'counts-lie':
+        out.write_text('# Plan review\nOverall verdict: gap\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+                       '## BLOCKER findings\nNone.\n## MAJOR findings\n- P1: T001 has no test.\n## MINOR findings\nNone.\n')
+        sys.exit(0)
+    if plan_format == 'mutates':
+        pathlib.Path('unexpected.txt').write_text('unexpected concurrent edit')
+    major = os.environ.get('MOCK_CODEX_PLAN') == 'major' or \
+        (os.environ.get('MOCK_CODEX_PLAN') == 'major-once' and plan_calls == 1)
+    items = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_FINDINGS', '').split(';') if item]
+    if not items and major: items = [['P1', 'T001 has no test.']]
+    minor = [item.split('|', 1) for item in os.environ.get('MOCK_CODEX_PLAN_MINOR', '').split(';') if item]
     pathlib.Path(args[args.index('--output-last-message')+1]).write_text(
-        '# Plan review\nOverall verdict: ' + ('gap' if major else 'ok') + '\n'
-        'Finding counts: BLOCKER=0 MAJOR=' + ('1' if major else '0') + ' MINOR=0\n'
-        '## BLOCKER findings\nNone.\n## MAJOR findings\n' + ('- P1: T001 has no test.\n' if major else 'None.\n') +
-        '## MINOR findings\nNone.\n')
+        '# Plan review\nOverall verdict: ' + ('gap' if items else 'ok') + '\n'
+        'Finding counts: BLOCKER=0 MAJOR=' + str(len(items)) + ' MINOR=' + str(len(minor)) + '\n'
+        '## BLOCKER findings\nNone.\n## MAJOR findings\n' +
+        (''.join('- %s: %s\n' % (i, t) for i, t in items) if items else 'None.\n') +
+        '## MINOR findings\n' + (''.join('- %s: %s\n' % (i, t) for i, t in minor) if minor else 'None.\n'))
     sys.exit(0)
 mode = os.environ.get('MOCK_CODEX', 'success')
 calls = state / 'codex-calls'
 calls.write_text(calls.read_text() + 'call\n' if calls.exists() else 'call\n')
 count = calls.read_text().count('call')
+if ',' in mode:
+    # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
+    mode = mode.split(',')[min(count, len(mode.split(','))) - 1]
 if mode == 'error': sys.exit(17)
 if mode == 'limit-once' and count == 1:
     print('ERROR: usage_limit_reached. You have hit your usage limit. Try again in 3 minutes.')
@@ -307,15 +408,28 @@ if mode == 'counts-lie':
                     '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
                     '## Manual testing recommendations\nx\n')
     sys.exit(0)
+if mode == 'verdict-heading':
+    path.write_text('# Independent review\n## Overall verdict\n\nApprove with two minor notes\n\n'
+                    'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n## BLOCKER findings\nNone found.\n'
+                    '## MAJOR findings\nNone found.\n## Missing test coverage\nx\n')
+    sys.exit(0)
 major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
 two = mode == 'two-major-once' and count == 1
+majors = 2 if two else 1 if major else 0
+if mode == 'counts':
+    # MOCK_CODEX_MAJORS='3,2,1': MAJOR findings of review call 1, 2, 3; the last one repeats.
+    series = [int(n) for n in os.environ['MOCK_CODEX_MAJORS'].split(',')]
+    majors = series[min(count, len(series)) - 1]
+    major = majors > 0
 path.write_text("""# Independent review
 Overall verdict: """ + ('one major finding' if major else 'no demonstrated findings in inspected fixture') + """
-Finding counts: BLOCKER=0 MAJOR=""" + ('2' if two else '1' if major else '0') + """ MINOR=0
+Finding counts: BLOCKER=0 MAJOR=""" + str(majors) + """ MINOR=0
 ## BLOCKER findings
 None found.
 ## MAJOR findings
-""" + ('- M1: fixture defect at T001.txt:1.' + ('\n- M2: second defect, out of scope.' if two else '') if major else 'None found.') + """
+""" + ('- M1: fixture defect at T001.txt:1.' + ('\n- M2: second defect, out of scope.' if two else '')
+       + ''.join(f'\n- M{n}: fixture defect {n}.' for n in range(2, majors + 1) if mode == 'counts')
+       if major else 'None found.') + """
 ## MINOR findings
 None found.
 ## Missing test coverage
@@ -384,6 +498,24 @@ MOCK_SLEEP = r'''#!/usr/bin/env bash
 echo "$1" >> "$MOCK_SLEEP_LOG"
 '''
 
+# Git hook body (HOOK and SUBJECT set above it): at the first host commit with SUBJECT the
+# machine "restarts": the ai-run that commits (if any) and the pipeline die at once.
+# commit-msg aborts the commit (crash before it); post-commit runs after it (crash after it).
+CRASH_HOOK = r'''
+if HOOK == 'commit-msg':
+    message = pathlib.Path(sys.argv[1]).read_text().strip()
+else:
+    message = subprocess.run(['git', 'log', '-1', '--format=%s'], capture_output=True, text=True).stdout.strip()
+fired = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'crash-hook-fired'
+if message != SUBJECT or fired.exists():
+    sys.exit(0)
+fired.touch()
+crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
+sys.exit(1 if HOOK == 'commit-msg' else 0)
+'''
+CRASH_KILL = MOCK_CLAUDE[MOCK_CLAUDE.index('def crash_kill'):MOCK_CLAUDE.index('# Real CLIs')]
+CRASH_HOOK = CRASH_KILL + CRASH_HOOK
+
 
 class ToolkitTest(unittest.TestCase):
     def setUp(self):
@@ -415,6 +547,7 @@ class ToolkitTest(unittest.TestCase):
         template.write_text(task('TXXX'))
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
+        self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
@@ -1657,6 +1790,1134 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-review', '--plan', expected=1)
         self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
 
+    def plan_round(self, findings, number, **env):
+        """One hand-run plan review (host commit + record); a source change keeps plan digests distinct."""
+        (self.project / 'src.txt').write_text(f'source {number}\n')
+        self.commit(f'source {number}')
+        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS=findings, **env)
+
+    def plan_current(self, expected=0):
+        return self.helper('plan-rounds', 'current', 'main', expected=expected).stdout.split()
+
+    def plan_dispositions(self, number, rows):
+        digest = self.plan_current()[1]
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        text = path.read_text() if path.exists() else '# Plan review dispositions\n'
+        path.write_text(text + f'\n## Plan review round {number} (report {digest})\n\n'
+                        '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n' + rows)
+        self.commit(f'dispositions {number}')
+
+    def plan_store(self):
+        return next((self.base / 'host-state').rglob('plan-rounds-*.json'))
+
+    def test_plan_rounds_history_pairs_findings_with_dispositions(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests;P2|Unrelated area', 1)
+        self.plan_dispositions(1, '| P1 | accepted | add the test | T002 |\n| P2 | rejected | out of scope here | |\n')
+        self.plan_round('P1|Gap in tests again', 2)
+        self.plan_dispositions(2, '| P1 | accepted | tests added now | T002 |\n')
+        # An implementation review in the same range is not plan history.
+        (self.project / '.ai/reviews').mkdir(exist_ok=True)
+        (self.project / '.ai/reviews/current.md').write_text('## MAJOR findings\n- ZZ9: implementation thing\n')
+        self.run_cmd(['git', 'add', '--all'])
+        self.run_cmd(['git', 'commit', '-qm', 'chore(ai): record independent review'])
+        self.plan_round('P1|Gap still open', 3)
+        self.assertEqual(self.plan_current()[0], '3')
+        self.assertEqual(self.helper('plan-history', 'main', '--count').stdout.strip(), '2')
+        history = self.helper('plan-history', 'main').stdout
+        self.assertIn('## Previous plan review rounds', history)
+        self.assertIn('### Round 1', history)
+        self.assertIn('- P1 [MAJOR] Gap in tests — accepted (T002)', history)
+        self.assertIn('- P2 [MAJOR] Unrelated area — rejected', history)
+        self.assertIn('### Round 2', history)
+        self.assertIn('- P1 [MAJOR] Gap in tests again — accepted (T002)', history)
+        self.assertNotIn('Round 3', history)
+        self.assertNotIn('Gap still open', history)
+        self.assertNotIn('ZZ9', history)
+
+    def test_plan_history_marks_rounds_without_a_revision(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_round('P1|Gap in tests', 2)
+        self.assertIn('- P1 [MAJOR] Gap in tests — no revision recorded', self.helper('plan-history', 'main').stdout)
+
+    def test_plan_rounds_ignore_agent_commits_and_tampered_reports(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        (self.project / 'src.txt').write_text('agent change\n')
+        self.commit('chore(ai): record plan review')  # agent-chosen subject, no host record
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('chore(ai): record plan review')
+        self.helper('plan-rounds', 'record', 'main', 'HEAD', expected=1)
+        self.plan_current(expected=1)
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+
+    def test_plan_rounds_pipeline_and_hand_run_record_once_per_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '1')
+        self.assertEqual(self.plan_current()[0], '1')
+        self.tool('ai-review', '--plan')  # tree changed since: a second review, a second round
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record plan review'])
+        self.helper('plan-rounds', 'record', 'main', 'HEAD')  # same report from another commit
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+
+    def test_plan_rounds_restart_when_a_branch_name_is_recreated(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_round('P1|Gap in tests', 2)
+        self.assertEqual(self.plan_current()[0], '2')
+        self.run_cmd(['git', 'switch', 'main'])
+        self.run_cmd(['git', 'merge', '-q', '--ff-only', 'feature/test'])
+        self.run_cmd(['git', 'branch', '-q', '-d', 'feature/test'])
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/test'])
+        self.plan_round('P1|Gap in tests', 3)
+        self.assertEqual(self.plan_current()[0], '1')
+
+    def test_plan_rounds_sync_records_a_crashed_review_once(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_store().write_text('[]\n')  # the record was lost between the host commit and its write
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '0')
+        self.plan_current(expected=1)
+        self.helper('plan-rounds', 'sync', 'main')
+        self.helper('plan-rounds', 'sync', 'main')
+        self.assertEqual(self.plan_current()[0], '1')
+
+    def test_plan_rounds_sync_ignores_a_forged_report(self):
+        self.ready()
+        self.plan_round('P1|Gap in tests', 1)
+        self.plan_store().write_text('[]\n')
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('chore(ai): record plan review')
+        self.helper('plan-rounds', 'sync', 'main')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '0')
+
+    PLAN_ROWS = ('| P1 | accepted | add the missing test | T002 |\n'
+                 '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+    PLAN_REJECTED = ('| P1 | rejected | the test exists in tests/test_x.py:40 | |\n'
+                     '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+
+    def open_plan_section(self, findings='P1|Gap in tests;P2|Unclear rollback', rounds=1, **env):
+        """Plan review `rounds` (earlier rounds get a committed section with a Convergence line),
+        then the host opens the current round's section. Returns START (HEAD before opening)."""
+        self.ready(task('T001', 'DONE') + task('T002', dependencies='T001'))
+        for number in range(1, rounds + 1):
+            if number > 1:
+                self.plan_dispositions(number - 1, self.PLAN_ROWS + 'Convergence: rollback keeps coming back\n')
+            self.plan_round(findings, number, **env)
+        start = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-plan-dispositions', 'main')
+        return start
+
+    def plan_check(self, start, *flags, expected=0):
+        return self.helper('plan-dispositions-check', '--since', start, '--base', 'main', '--fresh', *flags,
+                           expected=expected)
+
+    def test_plan_dispositions_complete_section_passes_and_counts(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        self.run_cmd(['git', 'cat-file', '-e', f'{start}:.ai/reviews/plan-dispositions.md'], expected=128)
+        opened = path.read_text()
+        digest = self.plan_current()[1]
+        self.assertIn(f'## Plan review round 1 (report {digest})\n\nPlan review HEAD: {start}\n\n'
+                      '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n', opened)
+        self.helper('start-plan-dispositions', 'main')  # resume: no second header
+        self.assertEqual(path.read_text(), opened)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.assertEqual(self.plan_check(start, '--questions').stdout, '')
+        # START already holding the same header (rows committed, e.g. a resume) passes too.
+        self.helper('start-plan-dispositions', 'main')
+        self.assertEqual(path.read_text(), opened + self.PLAN_ROWS)
+        self.commit('rows')
+        resumed = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.assertEqual(self.plan_check(resumed).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.helper('plan-dispositions-check', '--since', start, expected=1)  # --base is required
+
+    def test_plan_dispositions_minor_rows_optional_and_round_two_needs_no_convergence(self):
+        start = self.open_plan_section(rounds=2, MOCK_CODEX_PLAN_MINOR='P3|Typo in the plan')
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        self.assertEqual(opened.count('## Plan review round'), 2)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        path.write_text(opened + self.PLAN_ROWS + '| P3 | rejected | wording is already fixed in plan.md | |\n')
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=2 needs_human=0')
+
+    def test_plan_dispositions_reject_adversarial_sections(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        queue = self.project / '.ai/tasks.md'
+        opened, tasks_text = path.read_text(), queue.read_text()
+        digest = self.plan_current()[1]
+        cases = (
+            ('missing row', opened + self.PLAN_ROWS.splitlines(True)[0], None, 'Finding P2 has no row'),
+            ('duplicate', opened + self.PLAN_ROWS + '| P1 | rejected | the test exists already, see x | |\n',
+             None, 'Finding P1 has more than one row'),
+            ('unknown ID', opened + self.PLAN_ROWS + '| P7 | rejected | not a real finding at all | |\n',
+             None, 'P7, which is not a finding of plan review round 1'),
+            ('rejected without evidence', opened + self.PLAN_ROWS.replace('rollback is covered in docs/rollback.md:12',
+                                                                       'no'),
+             None, 'Rejected finding P2 needs concrete evidence'),
+            ('accepted without task', opened + self.PLAN_ROWS.replace('| T002 |', '| |'), None,
+             'Accepted finding P1 needs the task ID'),
+            ('unknown task', opened + self.PLAN_ROWS.replace('T002', 'T009'), None,
+             'Accepted finding P1 references unknown task T009'),
+            ('DONE task', opened + self.PLAN_ROWS.replace('T002', 'T001'), None,
+             'Accepted finding P1 must reference TODO tasks; T001 is DONE'),
+            ('needs-human without question', opened + self.PLAN_ROWS.replace(
+                '| rejected | rollback is covered in docs/rollback.md:12 |', '| needs-human | why? |'), None,
+             'needs-human finding P2 needs the question for the human'),
+            ('status changed', opened + self.PLAN_REJECTED,
+             tasks_text.replace('Status: TODO', 'Status: IN_PROGRESS'), 'Task T002 changed status from TODO'),
+            ('new task DONE', opened + self.PLAN_REJECTED, tasks_text + task('T003', 'DONE', 'T001'),
+             'New task T003 must be TODO'),
+            ('edited preamble', opened.replace('never edit', 'freely edit') + self.PLAN_ROWS, None,
+             'Text above the round 1 section changed'),
+            ('second header', opened + self.PLAN_ROWS + f'\n## Plan review round 1 (report {digest})\n',
+             None, 'has 2 headers for plan review round 1'),
+            ('renumbered header', opened.replace('## Plan review round 1 ', '## Plan review round 2 ')
+             + self.PLAN_ROWS, None, 'header for plan review round 1 was changed'),
+            ('no host HEAD line', opened.replace('Plan review HEAD:', 'Plan HEAD:') + self.PLAN_ROWS, None,
+             'needs its host "Plan review HEAD:" line'),
+        )
+        for name, text, tasks_change, message in cases:
+            with self.subTest(name):
+                path.write_text(text)
+                queue.write_text(tasks_change or tasks_text)
+                self.assertIn(message, self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS)
+        queue.write_text(tasks_text + task('T003', dependencies='T001'))
+        self.plan_check(start)  # a new TODO task is fine
+
+    def test_plan_dispositions_check_only_the_current_round(self):
+        start = self.open_plan_section(rounds=2)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        # The older section holds rows with the same IDs; they don't answer round 2.
+        self.assertIn('Finding P1 has no row in the round 2 section', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened.replace('add the missing test', 'add the test later') + self.PLAN_ROWS)
+        self.assertIn('Text above the round 2 section changed', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS)
+        self.plan_check(start)
+
+    def test_plan_dispositions_round_three_needs_its_own_convergence_line(self):
+        start = self.open_plan_section(rounds=3)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        self.assertIn('Convergence: rollback', opened)  # only in the older sections
+        path.write_text(opened + self.PLAN_ROWS)
+        self.assertIn('Plan review round 3 needs a Convergence: line', self.plan_check(start, expected=1).stderr)
+        path.write_text(opened + self.PLAN_ROWS + '<!-- Convergence: hidden -->\n')
+        self.plan_check(start, expected=1)
+        path.write_text(opened + self.PLAN_ROWS + '\nConvergence: redesign rollback as a whole in T002\n')
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+
+    def test_plan_dispositions_questions_are_bounded(self):
+        findings = ';'.join(f'P{n}|Open question {n}' for n in range(1, 6))
+        start = self.open_plan_section(findings=findings)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        question = ('Should the rollback keep  option A <br> or\tswitch to B? ' * 30)[:1000]
+        path.write_text(path.read_text() + ''.join(f'| P{n} | needs-human | {question} | |\n' for n in range(1, 6)))
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=0 rejected=0 needs_human=5')
+        lines = self.plan_check(start, '--questions').stdout.splitlines()
+        self.assertEqual(len(lines), 4)
+        for number, line in enumerate(lines[:3], 1):
+            self.assertTrue(line.startswith(f'P{number}: Should the rollback keep option A or switch to B?'), line)
+            self.assertLessEqual(len(line), 300)
+            self.assertNotIn('<br>', line)
+        self.assertEqual(lines[3], '(+2 more in .ai/reviews/plan-dispositions.md)')
+
+    def test_plan_dispositions_revision_scope(self):
+        start = self.open_plan_section()
+        records = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/reviews/plan-dispositions.md',
+                   '.ai/handoff.md', '.ai/state.md', '.ai/run-log.md')
+        for name in records:
+            file = self.project / name
+            file.write_text((file.read_text() if file.exists() else '') + 'revised\n')
+        self.helper('plan-revision-scope', start)
+        for outside in ('src.txt', '.ai/reviews/plan.md'):
+            with self.subTest(outside):
+                file = self.project / outside
+                original = file.read_text()
+                file.write_text(original + 'agent edit\n')
+                self.assertIn(f'Plan revision changed files outside workflow records: {outside}',
+                              self.helper('plan-revision-scope', start, expected=1).stderr)
+                file.write_text(original)
+        self.helper('plan-revision-scope', start)
+
+    def revise_ready(self, findings='P1|Gap in tests'):
+        """A MAJOR plan review recorded by hand; returns HEAD (the revision's START)."""
+        self.ready()
+        self.plan_round(findings, 1)
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def revise(self, *args, expected=0, **env):
+        return self.tool('ai-run', '--approved', '--revise-plan', *args, expected=expected, **env)
+
+    def revision_commits(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines().count('chore(ai): record plan revision')
+
+    def revisions(self, action, expected):
+        return self.helper('plan-revisions', action, expected=expected)
+
+    def revision_args(self):
+        return [json.loads(line) for line in (self.base / 'revision-args.log').read_text().splitlines()]
+
+    def test_revise_plan_accept_commits_once_and_leaves_a_clean_checkout(self):
+        start = self.revise_ready()
+        self.revisions('revised', 1)
+        self.revisions('decision', 1)  # fresh install: no store, nothing outstanding
+        self.revise()
+        section = (self.project / '.ai/reviews/plan-dispositions.md').read_text()
+        self.assertTrue(section.startswith('# Plan review dispositions (Claude)'))  # host preamble, file absent at START
+        self.assertIn('| P1 | accepted | the plan lacks this test | T002 |', section)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.run_cmd(['git', 'log', '--format=%s', f'{start}..HEAD']).stdout.splitlines(),
+                         ['chore(ai): record plan revision', 'chore(ai): open plan dispositions'])
+        committed = self.run_cmd(['git', 'show', 'HEAD', '--', '.ai/run-log.md']).stdout
+        self.assertIn('plan revised (round 1): accepted 1, rejected 0, needs-human 0', committed)
+        records = json.loads(next((self.base / 'host-state').rglob('plan-revisions-*.json')).read_text())
+        self.assertEqual(len(records), 1)
+        self.assertEqual({k: records[0][k] for k in ('round', 'accepted', 'rejected', 'needs_human', 'questions')},
+                         {'round': 1, 'accepted': 1, 'rejected': 0, 'needs_human': 0, 'questions': ''})
+        self.assertEqual(records[0]['commit'], self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.revisions('revised', 0)
+        self.revisions('decision', 1)
+        self.assertFalse((self.project / '.ai/local/revision-context').exists())
+        outcomes = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        self.assertEqual([(o['kind'], o['round'], o['result'], o['model']) for o in outcomes
+                          if o['kind'] == 'plan_revision'], [('plan_revision', 1, 'revised', 'opus')])
+        # Session boundary: read tools and Edit of the plan records only, no shell, no project allowlist.
+        (call,) = self.revision_args()
+        self.assertEqual(call[call.index('--tools') + 1], 'Read,Glob,Grep,Edit')
+        self.assertEqual(call[call.index('--model') + 1], 'opus')
+        allowed = call[call.index('--allowedTools') + 1:call.index('--setting-sources')]
+        editable = {'.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md',
+                    '.ai/reviews/plan-dispositions.md', '.ai/handoff.md'}
+        for entry in allowed:
+            self.assertNotIn('Bash', entry)
+            self.assertNotIn('Write', entry)
+            self.assertNotIn('ai-check', entry)
+            self.assertNotIn('validate', entry)
+            if entry.startswith('Edit'):
+                self.assertRegex(entry, r'^Edit\(\./[^*]+\)$')
+                self.assertIn(entry[7:-1], editable)
+            else:
+                self.assertIn(entry, ('Read', 'Glob', 'Grep'))
+        prompt = (self.base / 'revision-prompts.log').read_text()
+        self.assertIn('REVISION CONTRACT: This is plan review round 1', prompt)
+        self.assertIn('Do not commit; the host validates the section and commits it.', prompt)
+        self.assertNotIn('Convergence:', prompt.split('REVISION CONTRACT')[1])
+        # The same report again: refused, no second commit or record.
+        result = self.revise(expected=1)
+        self.assertIn('this plan review was already revised; review again (ai-review --plan)', result.stderr)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the refused run's stop line
+        self.tool('ai-review', '--plan')  # starts: no "Commit the plan before reviewing it"
+        self.revisions('revised', 1)
+
+    def test_revise_plan_reject_only_changes_only_the_dispositions(self):
+        start = self.revise_ready('P1|Gap in tests;P2|Unclear rollback')
+        self.revise(MOCK_CLAUDE='revise-reject')
+        changed = self.run_cmd(['git', 'diff', '--name-only', start, 'HEAD']).stdout.split()
+        self.assertEqual(sorted(changed), ['.ai/reviews/plan-dispositions.md', '.ai/run-log.md', '.ai/state.md'])
+        self.assertIn('plan revised (round 1): accepted 0, rejected 2, needs-human 0',
+                      (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual(self.helper('tasks', 'count').stdout.strip(), '1')
+
+    def test_revise_plan_needs_human_record_and_decision(self):
+        self.revise_ready('P1|Rollback choice;P2|Gap in tests')
+        question = ('Should the rollback keep  option A <br> or switch to B? ' * 20)[:1000]
+        result = self.revise(MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION=question)
+        self.assertIn('Your decision is needed:', result.stdout)
+        self.assertIn('accepted 0, rejected 1, needs-human 1', (self.project / '.ai/run-log.md').read_text())
+        self.assertIn('Phase: blocked', (self.project / '.ai/state.md').read_text())
+        lines = self.revisions('decision', 0).stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('P1: Should the rollback keep option A or switch to B?'), lines[0])
+        self.assertLessEqual(len(lines[0]), 300)
+        store = next((self.base / 'host-state').rglob('plan-revisions-*.json'))
+        self.assertEqual(json.loads(store.read_text())[0]['questions'], lines[0])
+        # Outstanding decision with forged or missing evidence fails closed.
+        review = self.project / '.ai/reviews/plan.md'
+        original = review.read_text()
+        review.write_text(original.replace('Rollback choice', 'Nothing to decide'))
+        self.assertIn('waiting for your decision', self.revisions('decision', 2).stderr)
+        review.unlink()
+        self.revisions('decision', 2)
+        review.write_text(original)
+        good = store.read_text()
+        store.write_text('{not json')
+        self.revisions('decision', 2)
+        self.revisions('revised', 2)
+        store.write_text(json.dumps([dict(json.loads(good)[0], needs_human='1')]))
+        self.revisions('decision', 2)
+        store.write_text(good)
+        self.revisions('decision', 0)
+        # The human answers, commits, and reviews again by hand: the new report clears it.
+        (self.project / '.ai/current-plan.md').write_text('Rollback: option B (human decision).\n')
+        self.commit('answer the plan question')
+        self.tool('ai-review', '--plan', MOCK_CODEX_PLAN_FINDINGS='P1|Another gap')
+        self.revisions('decision', 1)
+
+    def test_revise_plan_forged_report_without_a_decision_takes_the_normal_path(self):
+        self.revise_ready()
+        review = self.project / '.ai/reviews/plan.md'
+        review.write_text(review.read_text().replace('Gap in tests', 'Nothing to see'))
+        self.commit('forged report')
+        self.revisions('decision', 1)  # no store: the normal invalid-report path handles it
+        self.revisions('revised', 1)
+        self.assertIn('does not match the report ai-review published', self.revise(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', '.ai/run-log.md'])  # the stopped run's log line
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')  # AI_SUPERVISE=0: reviews again
+        self.revisions('decision', 1)
+
+    def revise_out_of_bounds(self, message, **env):
+        self.revise_ready()
+        self.assertIn(message, self.revise(expected=1, **env).stderr)
+        self.assertEqual(self.revision_commits(), 0)
+        self.revisions('revised', 1)
+
+    def test_revise_plan_touching_source_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('Plan revision changed files outside workflow records: src.txt',
+                                  MOCK_CLAUDE='revise-touch-source')
+
+    def test_revise_plan_editing_the_plan_review_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('A Claude session modified .ai/reviews/plan.md', MOCK_CLAUDE='revise-edit-plan-review')
+
+    def test_revise_plan_touching_a_gate_file_stops_with_nothing_counted(self):
+        self.revise_out_of_bounds('Approved workflow gate changed during this run',
+                                  MOCK_CLAUDE='revise-touch-source', MOCK_SOURCE_PATH='.ai/validate')
+
+    def test_revise_plan_resumes_an_uncommitted_complete_section_without_a_session(self):
+        start = self.revise_ready()
+        # The session wrote its rows (it never commits), then the run died before the host commit.
+        self.assertIn('Claude session failed', self.revise(expected=1, MOCK_CLAUDE='revise-error').stderr)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        result = self.revise()  # no --since: START = HEAD, which already holds the section header
+        self.assertIn('already complete; recording the revision', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        self.revisions('revised', 0)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.helper('plan-revision-scope', start)
+
+    def test_revise_plan_preconditions_and_round_three_contract(self):
+        self.revise_ready()
+        self.assertIn('exclusive', self.tool('ai-run', '--approved', '--triage', '--revise-plan', expected=1).stderr)
+        self.assertIn('--base only applies', self.tool('ai-run', '--approved', '--base', 'main', expected=1).stderr)
+        prompt = self.project / '.ai/prompts/plan-revision.md'
+        saved = prompt.read_text()
+        prompt.unlink()
+        self.commit('drop the prompt')
+        self.assertIn('setup-project --upgrade', self.revise(expected=1).stderr)
+        prompt.write_text(saved)
+        self.commit('restore the prompt')
+        # Rounds 1 and 2 answered, round 3 needs a Convergence line in its own section.
+        self.revise(MOCK_CLAUDE='revise-reject')
+        self.plan_round('P1|Gap in tests', 2)
+        self.revise(MOCK_CLAUDE='revise-reject')
+        self.plan_round('P1|Gap in tests', 3)
+        self.assertIn('Plan review round 3 needs a Convergence: line',
+                      self.revise(expected=1, MOCK_CLAUDE='revise-reject').stderr)
+        self.assertIn('redesign the area as a whole', (self.base / 'revision-prompts.log').read_text().split('=== PROMPT ===')[-1])
+        self.assertEqual(self.revision_commits(), 2)
+        # Resume with the missing line: an uncommitted complete section is recorded without a session.
+        section = self.project / '.ai/reviews/plan-dispositions.md'
+        section.write_text(section.read_text() + 'Convergence: none — one gap, redesigned in T001\n')
+        self.revise()
+        self.assertEqual(self.revision_commits(), 3)
+        self.assertEqual(len(self.revision_args()), 3)
+        self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
+
+    def test_plan_dispositions_pending_accepts_only_the_host_header(self):
+        self.revise_ready()
+        pending = lambda expected: self.helper('start-plan-dispositions', 'main', '--pending', expected=expected)
+        pending(1)  # no file yet
+        self.helper('start-plan-dispositions', 'main')
+        pending(0)  # exactly the host's uncommitted header (a crash before its commit)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + '| P1 | rejected | the plan covers it in current-plan.md:12 | |\n')
+        self.assertIn('is not just the uncommitted host section header', pending(1).stderr)
+        self.commit('rows')
+        pending(1)  # committed: nothing pending
+
+    # ---------------------------------------------------------------- plan revision stage (T005)
+    def plan_stage_ready(self, findings='P1|Gap in tests', recoverable=False):
+        """A MAJOR plan review, an approved run and an open plan-revision stage; returns START."""
+        start = self.revise_ready(findings)
+        self.start_recoverable_run() if recoverable else self.start_run('feature/test')
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+        return start
+
+    def stage_verify(self, expected=0):
+        return self.helper('stage-verify', expected=expected)
+
+    def commit_leftovers(self, message):
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit(message)
+
+    def start_recoverable_run(self):
+        """An approved run whose captured settings allow auto-recovery (the fixture default is off)."""
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
+                      '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1'))
+
+    def test_plan_revision_stage_set_and_verify(self):
+        start = self.plan_stage_ready()
+        digest = self.plan_current()[1]
+        self.assertEqual(self.open_stage(), f'plan-revision {start} {digest}')
+        self.assertEqual(self.stage_verify().stdout.strip(), 'pending')
+        # An agent commit with the revision subject is not a host record.
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record plan revision'])
+        self.assertEqual(self.stage_verify().stdout.strip(), 'pending')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        # Out-of-scope leftovers and a forged report fail closed.
+        (self.project / 'src.txt').write_text('agent edit\n')
+        self.assertIn('Plan revision stage: Plan revision changed files outside workflow records: src.txt',
+                      self.stage_verify(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', 'src.txt'])
+        review = self.project / '.ai/reviews/plan.md'
+        original = review.read_text()
+        review.write_text(original.replace('Gap in tests', 'Nothing to see'))
+        self.assertIn('Plan revision stage: the plan review does not match', self.stage_verify(expected=1).stderr)
+        self.assertIn('Plan revision stage: the plan review does not match',
+                      self.helper('run-manifest', 'stage-set', 'plan-revision', start, expected=1).stderr)
+        review.write_text(original)
+        # The host revision record closes it; a dirty tree after the record commit fails.
+        self.revise('--since', start)
+        self.assertEqual(self.stage_verify().stdout.strip(), 'committed')
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(handoff.read_text() + 'late edit\n')
+        self.assertIn('Plan revision stage: uncommitted changes after the counted revision commit.',
+                      self.stage_verify(expected=1).stderr)
+        self.run_cmd(['git', 'checkout', '--', '.ai/handoff.md'])
+        # A foreign report: the stage stays bound to the one it started on.
+        self.plan_round('P1|Another gap', 2)
+        self.assertIn('Plan revision stage: the current plan review is not the one this revision started on.',
+                      self.stage_verify(expected=1).stderr)
+        # A stage record without its report digest is invalid.
+        stage_file = next((self.base / 'host-state').rglob('stage-*.json'))
+        stage_file.write_text(json.dumps({'branch': 'feature/test',
+                                          'stage': {'name': 'plan-revision', 'start_head': start}}))
+        self.assertIn('Plan revision stage: the stage record is invalid.',
+                      self.helper('run-manifest', 'stage', expected=1).stderr)
+
+    def test_plan_revision_stage_reservation_per_run(self):
+        self.ready()
+        self.start_run('feature/test')
+        first, second = 'a' * 64, 'b' * 64
+        reserve = lambda digest, limit, expected=0: self.helper('run-manifest', 'revision-reserve', digest, limit,
+                                                                expected=expected)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')
+        self.assertEqual(reserve(first, '1').stdout.strip(), '1')
+        self.assertEqual(reserve(first, '1').stdout.strip(), '1')  # idempotent, also at the limit
+        self.assertIn('plan review: supervision limit reached (1 revisions this run)',
+                      reserve(second, '1', expected=1).stderr)
+        self.assertEqual(reserve(second, '2').stdout.strip(), '2')
+        self.assertIn('Usage: run-manifest revision-reserve', reserve('xyz', '2', expected=1).stderr)
+        self.assertIn('Usage: run-manifest revision-reserve', reserve(first, '10', expected=1).stderr)
+        # A recovery (attempt reserved, no start) keeps the list; a human (re)start resets it.
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '2')
+        self.start_run('feature/test')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')
+        manifest = next((self.base / 'host-state').rglob('run.json'))
+        manifest.write_text(json.dumps(dict(json.loads(manifest.read_text()), plan_revisions=['short'])))
+        self.assertIn('reservations are unreadable', self.helper('run-manifest', 'revision-count', expected=1).stderr)
+
+    def test_plan_revision_stage_committed_record_only_clears_the_stage(self):
+        start = self.plan_stage_ready()
+        self.revise('--since', start)  # the pipeline's revision child recorded it, then the pipeline died
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                           MOCK_CODEX_PLAN='major')
+        self.assertIn('Completing the interrupted plan revision', result.stdout)
+        self.assertNotIn('already revised', result.stderr)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '0')  # nothing reserved
+
+    def test_plan_revision_stage_pending_runs_the_round_model(self):
+        self.plan_stage_ready()
+        # --model is the implementation model; the revision gets opus below the escalation round.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--model', 'sonnet', expected=1,
+                  MOCK_CODEX_PLAN='major', AI_SUPERVISE_ESCALATE_ROUND='2', AI_SUPERVISE_ESCALATE_MODEL='claude-test-x')
+        (call,) = self.revision_args()
+        self.assertEqual(call[call.index('--model') + 1], 'opus')
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertIn('plan review found', (self.project / '.ai/local/last-error').read_text())  # re-reviewed
+        # Round 2 (the re-review) reaches the escalation round.
+        self.commit_leftovers('record the stop')
+        self.assertEqual(self.plan_current()[0], '2')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'stage-set', 'plan-revision', head)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CLAUDE='revise-reject',
+                  MOCK_CODEX_PLAN='major', AI_SUPERVISE_ESCALATE_ROUND='2', AI_SUPERVISE_ESCALATE_MODEL='claude-test-x')
+        call = self.revision_args()[-1]
+        self.assertEqual(call[call.index('--model') + 1], 'claude-test-x')
+        self.assertEqual(self.revision_commits(), 2)
+
+    def test_plan_revision_stage_limit_stops_before_the_session(self):
+        self.plan_stage_ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  AI_SUPERVISE_PLAN_ROUNDS='0')
+        self.assertIn('plan review: supervision limit reached (0 revisions this run)',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertFalse((self.base / 'revision-args.log').exists())
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+        self.assertTrue(self.open_stage().startswith('plan-revision '))
+
+    def test_plan_revision_stage_recovery_reasons_always_escalate(self):
+        self.ready()
+        self.start_recoverable_run()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        for reason in ('Plan revision stage cannot be completed safely: the plan revision was not recorded.',
+                       'plan review: supervision limit reached (3 revisions this run); BLOCKER 0, MAJOR 1 remain',
+                       'plan review needs your decision (round 2): P1: keep A or B?'):
+            with self.subTest(reason):
+                (self.project / '.ai/local/last-error').write_text(reason + '\n')
+                self.tool('ai-recover', '--stage', 'plan review', expected=1, AI_AUTO_RECOVER='1')
+                self.assertIn(f'stopped during plan review: {reason}', self.notifications())
+                self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+
+    def test_plan_revision_stage_source_leftovers_escalate_without_a_commit(self):
+        self.plan_stage_ready(recoverable=True)
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        (self.project / 'src.txt').write_text('agent edit\n')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        notes = self.notifications()
+        self.assertIn('the interrupted plan revision left changes outside its scope', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+        self.assertIn(' M src.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_plan_revision_stage_stored_decision_escalates_before_any_resume(self):
+        start = self.plan_stage_ready('P1|Rollback choice;P2|Gap in tests', recoverable=True)
+        self.revise('--since', start, MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or B?')
+        # A crash after the record, before stage-clear; the recovery allowance is already used up.
+        for _ in range(3):
+            self.helper('run-manifest', 'reserve-attempt')
+        (self.project / '.ai/local/last-error').unlink(missing_ok=True)
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        notes = self.notifications()
+        self.assertIn('plan review needs your decision: P1: Keep option A or B?', notes)
+        self.assertIn('a plan revision recorded questions only you can answer', notes)
+        self.assertNotIn('already tried', notes)
+        self.assertNotIn('Resuming the pipeline', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
+        self.assertIn('needs your decision', (self.project / '.ai/local/last-error').read_text())
+        # The recorded stage is closed (no resume): the human's answer gets a new plan review.
+        self.assertEqual(self.open_stage(), '')
+        # An unreadable store escalates too, still without a session.
+        next((self.base / 'host-state').rglob('plan-revisions-*.json')).write_text('{not json')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('the plan revision records are unreadable', self.notifications())
+        self.assertEqual(self.recovery_calls(), [])
+
+    # ---------------------------------------------------------------- supervised plan review loop (T006)
+    def supervised(self, *args, expected=0, **env):
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', *args, expected=expected,
+                         **dict({'AI_SUPERVISE': '1'}, **env))
+
+    def plan_calls(self):
+        calls = self.base / 'codex-plan-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def plan_statuses(self):
+        return (self.base / 'codex-plan-status').read_text().splitlines()
+
+    def implementation_calls(self):
+        calls = self.project / '.ai/local/mock-invocations'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def subjects_oldest_first(self):
+        return self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+
+    def test_supervised_plan_major_once_revises_reviews_again_and_opens_the_pr(self):
+        self.ready()
+        self.add_origin()
+        result = self.supervised(MOCK_CODEX_PLAN='major-once')
+        self.assertIn('Pull request: https://github.com/example/project/pull/7', result.stdout)
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses(), ['clean', 'clean'])  # the re-review starts on a clean checkout
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 1, rejected 0', self.notifications())
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        self.assertIn('plan revised (round 1): accepted 1, rejected 0, needs-human 0',
+                      self.run_cmd(['git', 'show', revision, '--', '.ai/run-log.md']).stdout)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')  # the accepted task ran
+        self.helper('tasks', 'complete')
+        self.assertTrue(any(c[:2] == ['pr', 'create'] for c in self.gh_calls()))
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_supervised_plan_reject_only_reviews_again_on_a_clean_checkout(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-reject')
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses(), ['clean', 'clean'])
+        subjects = self.subjects_oldest_first()
+        # Both plan reviews (and the revision between them) before any implementation commit.
+        self.assertEqual([s for s in subjects if s.startswith(('chore(ai): record plan', 'implement'))][:4],
+                         ['chore(ai): record plan review', 'chore(ai): record plan revision',
+                          'chore(ai): record plan review', 'implement T001'], subjects)
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 0, rejected 1', self.notifications())
+        first, second = [p for p in self.prompts() if 'PLAN SCOPE' in p]
+        self.assertNotIn('PLAN REVISION CONTEXT:', first)
+        context = second.split('PLAN REVISION CONTEXT:')[1]
+        self.assertIn('This is plan review round 2', context)
+        self.assertIn('dispositions of round 1: .ai/reviews/plan-dispositions.md', context)
+        self.assertIn('## Previous plan review rounds', context)
+        self.assertIn('rejected', context)
+        self.assertNotIn('PREVIOUS ROUNDS:', second)  # never implementation-review rounds
+
+    def test_supervised_plan_needs_human_stops_with_the_bounded_question(self):
+        self.ready()
+        question = ('Should the rollback keep  option A <br> or switch to B? ' * 20)[:1000]
+        self.supervised('--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                        MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION=question)
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertEqual(len(error.splitlines()), 1)
+        self.assertTrue(error.startswith('Pipeline stopped during plan review: plan review needs your decision '
+                                         '(round 1): P1: Should the rollback keep option A or switch to B?'), error)
+        self.assertLessEqual(len(error), 400)  # the stored question is capped at 300 characters
+        self.assertIn('stopped during plan review: plan review needs your decision (round 1)', self.notifications())
+        self.assertEqual(self.plan_calls(), 1)  # no re-review of a report waiting for the human
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertNotIn('🔁 Plan revised', self.notifications())
+        # A human rerun with auto-recovery on stops again at the stored decision, no session at all.
+        self.commit_leftovers('record the stop')
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assertIn('needs your decision', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.plan_calls(), 1)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    # ---------------------------------------------------------------- needs-human decision gate (T011)
+    def decision_recorded(self, queue=None):
+        """A supervised run whose plan revision asked the human, stopped and committed."""
+        self.ready(queue)
+        self.supervised('--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                        MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        self.commit_leftovers('record the stop')
+        (self.project / '.ai/local/last-error').unlink()
+        return self.plan_calls(), len(self.revision_args())
+
+    def assert_decision_stop(self, plan_calls, sessions, recovery):
+        error = (self.project / '.ai/local/last-error').read_text()
+        if recovery:  # ai-recover escalates the pipeline's stop with its own wording
+            self.assertIn('plan review needs your decision: P1: Keep option A or switch to B?', error)
+        else:
+            self.assertEqual(error, 'Pipeline stopped during plan review: plan review needs your decision '
+                                    '(round 1): P1: Keep option A or switch to B?\n')
+        self.assertEqual(self.plan_calls(), plan_calls)
+        self.assertEqual(len(self.revision_args()), sessions)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_needs_human_decision_gate_holds_with_skip_plan_review(self):
+        calls = self.decision_recorded()
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='0', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=False)
+        (self.project / '.ai/local/last-error').unlink()
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=True)
+
+    def test_needs_human_decision_gate_holds_with_tasks_partly_done(self):
+        calls = self.decision_recorded(task('T001') + task('T002'))
+        tasks = self.project / '.ai/tasks.md'
+        tasks.write_text(tasks.read_text().replace('Status: TODO', 'Status: DONE', 1))
+        self.commit('T001 done by hand')
+        self.helper('tasks', 'untouched', expected=1)
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='0', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=False)
+        (self.project / '.ai/local/last-error').unlink()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assert_decision_stop(*calls, recovery=True)
+
+    def test_needs_human_decision_gate_unreadable_store_fails_closed_with_skip(self):
+        calls = self.decision_recorded()
+        next((self.base / 'host-state').rglob('plan-revisions-*.json')).write_text('{not json')
+        self.supervised('--no-pr', '--skip-plan-review', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage cannot be completed safely: the plan revision records are unreadable', error)
+        self.assertEqual(self.plan_calls(), calls[0])
+        self.assertEqual(len(self.revision_args()), calls[1])
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_needs_human_decision_gate_absent_skip_plan_review_implements(self):
+        self.ready()
+        self.supervised('--no-pr', '--skip-plan-review', MOCK_CODEX_PLAN='major')
+        self.assertEqual(self.plan_calls(), 0)
+        self.assertGreater(self.implementation_calls(), 0)
+        self.helper('tasks', 'complete')
+
+    def test_supervised_plan_limit_stops_without_recovery(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', AI_SUPERVISE_PLAN_ROUNDS='1',
+                        MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.assertEqual((self.project / '.ai/local/last-error').read_text().strip(),
+                         'plan review: supervision limit reached (1 revisions this run); BLOCKER 0, MAJOR 1 remain')
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('this kind of stop always needs a human', self.notifications())
+
+    def test_supervised_plan_off_keeps_todays_stop(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, AI_SUPERVISE='0', AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        self.assertIn('plan review found BLOCKER 0, MAJOR 1', (self.project / '.ai/local/last-error').read_text())
+        self.assertFalse((self.base / 'revision-args.log').exists())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_supervised_plan_revision_touching_source_stops_without_recovery(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major',
+                        MOCK_CLAUDE='revise-touch-source')
+        self.assertIn('Plan revision changed files outside workflow records: src.txt',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertEqual(self.plan_calls(), 1)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_supervised_plan_escalation_model_and_round_three_convergence(self):
+        self.ready()
+        self.supervised('--no-pr', '--model', 'sonnet', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CLAUDE='revise-reject', AI_SUPERVISE_ESCALATE_MODEL='claude-test-x')
+        models = [call[call.index('--model') + 1] for call in self.revision_args()]
+        self.assertEqual(models, ['opus', 'opus', 'claude-test-x'])
+        self.assertIn('Plan review round 3 needs a Convergence: line', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.revision_commits(), 2)
+        self.assertEqual(self.plan_calls(), 3)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertTrue(self.open_stage().startswith('plan-revision '))
+
+    # ---------------------------------------------------------------- supervised plan resume (T007)
+    def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):
+        # A fake host ai-run/ai-pipeline whose child calls crash_kill in the fixture: outside the
+        # fixture (the real runner of a session running these tests) it survives; inside it dies.
+        code = 'import os, pathlib\n' + CRASH_KILL + 'crash_kill(os.getppid(), os.getppid())\n'
+        for name in ('ai-run', 'ai-pipeline'):
+            fake = self.base / 'host-bin' / name
+            fake.parent.mkdir(exist_ok=True)
+            fake.write_text('#!/usr/bin/env bash\nenv -C "$1" python3 -c "$2"\necho survived\n')
+            fake.chmod(0o755)
+            for cwd, killed in ((self.base, False), (self.project, True)):
+                result = subprocess.run([str(fake), str(self.project), code], cwd=cwd,
+                                        capture_output=True, text=True, timeout=25)
+                self.assertEqual(result.returncode == -9, killed, (name, cwd, result.stdout + result.stderr))
+                self.assertEqual('survived' in result.stdout, not killed)
+
+    def crash_hook(self, hook, subject):
+        path = self.project / '.git/hooks' / hook
+        path.write_text('#!/usr/bin/env python3\nimport os, pathlib, subprocess, sys\n'
+                        f'HOOK, SUBJECT = {hook!r}, {subject!r}\n' + CRASH_HOOK)
+        path.chmod(0o755)
+
+    def crash_supervised(self, **env):
+        """A supervised run (auto-recovery approved) that a crash kills: no stop, no recovery."""
+        crashed = self.supervised('--no-pr', expected=None, AI_AUTO_RECOVER='1',
+                                  **dict({'MOCK_CODEX_PLAN': 'major-once'}, **env))
+        self.assertEqual(crashed.returncode, -9, crashed.stdout + crashed.stderr)
+        self.assertTrue((self.project / '.ai/local/pipeline.active').exists())  # what ai-watchdog finds
+
+    def hook_crash(self, hook, subject):
+        self.ready()
+        self.crash_hook(hook, subject)
+        self.crash_supervised()
+
+    def start_supervised_run(self, **env):
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
+                      '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1', AI_SUPERVISE='1', **env))
+
+    def revision_written(self, clear=False, findings='P1|Gap in tests', **env):
+        """Host-write window: the pipeline reserved, opened the stage and its ai-run child recorded
+        the revision; the crash came before stage-clear (or, with clear, right after it)."""
+        start = self.revise_ready(findings)
+        self.start_supervised_run()
+        self.helper('run-manifest', 'revision-reserve', self.plan_current()[1], '3')
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+        self.revise('--since', start, '--base', 'main', **env)
+        if clear:
+            self.helper('run-manifest', 'stage-clear')
+
+    def resume(self, path, expected=0, **env):
+        env = dict({'MOCK_CODEX_PLAN': 'major-once'}, **env)
+        if path == 'human':
+            return self.supervised('--no-pr', expected=expected, **env)
+        # What ai-watchdog --recover starts after a crash: the approved run's settings, kept manifest.
+        return self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=expected, **env)
+
+    def revision_records(self):
+        return json.loads(next((self.base / 'host-state').rglob('plan-revisions-*.json')).read_text())
+
+    def assert_resumed_once(self, counted='1'):
+        """One record and one session for the report, one re-review on a clean checkout, then the tasks."""
+        self.assertEqual(len(self.revision_records()), 1)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), counted)
+        self.assertEqual(len(self.revision_args()), 1)  # no second revision session
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses()[-1], 'clean')
+        self.assertEqual(self.helper('plan-rounds', 'count', 'main').stdout.strip(), '2')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.open_stage(), '')
+
+    # Crash point 1: the session's edits, the host's preamble commit and its revision commit.
+    def session_crash(self):
+        self.ready()
+        self.crash_supervised(MOCK_REVISION_CRASH='after')
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_supervised_plan_resume_session_crash_human_rerun(self):
+        self.session_crash()
+        self.resume('human')
+        self.assert_resumed_once()
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_session_crash_watchdog(self):
+        self.session_crash()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+        self.assertEqual(self.recovery_calls(), [])  # the stage rules decide, no Claude decision
+
+    def open_crash(self, hook):
+        self.hook_crash(hook, 'chore(ai): open plan dispositions')
+        self.assertFalse((self.base / 'revision-args.log').exists())  # died before the session
+
+    def test_supervised_plan_resume_before_the_preamble_commit_human_rerun(self):
+        self.open_crash('commit-msg')
+        self.assertIn('.ai/reviews/plan-dispositions.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_preamble_commit_watchdog(self):
+        self.open_crash('commit-msg')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_preamble_commit_human_rerun(self):
+        self.open_crash('post-commit')
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_preamble_commit_watchdog(self):
+        self.open_crash('post-commit')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_revision_commit_human_rerun(self):
+        self.hook_crash('commit-msg', 'chore(ai): record plan revision')
+        self.assertEqual(self.revision_commits(), 0)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_before_the_revision_commit_watchdog(self):
+        self.hook_crash('commit-msg', 'chore(ai): record plan revision')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 2: after the host revision commit, before its record (the resume records the
+    # revision with a second host commit; only the record counts).
+    def test_supervised_plan_resume_after_the_revision_commit_human_rerun(self):
+        self.hook_crash('post-commit', 'chore(ai): record plan revision')
+        self.assertEqual(self.revision_commits(), 1)
+        self.revisions('revised', 1)
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_after_the_revision_commit_watchdog(self):
+        self.hook_crash('post-commit', 'chore(ai): record plan revision')
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # After the record, before stage-clear: a human restart closes it without counting it in
+    # its fresh allowance; a recovery resume keeps the reservation.
+    def test_supervised_plan_resume_after_the_record_human_rerun(self):
+        self.revision_written()
+        self.resume('human')
+        self.assert_resumed_once(counted='0')
+        self.assertIn('🔁 Plan revised (in the previous run): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_after_the_record_watchdog(self):
+        self.revision_written()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+        self.assertIn('🔁 Plan revised (round 1/3): accepted 1, rejected 0', self.notifications())
+
+    def test_supervised_plan_resume_after_stage_clear_human_rerun(self):
+        self.revision_written(clear=True)
+        self.resume('human')
+        self.assert_resumed_once(counted='0')
+
+    def test_supervised_plan_resume_after_stage_clear_watchdog(self):
+        self.revision_written(clear=True)
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 3: host-write windows.
+    def reserved_without_stage(self):
+        self.revise_ready()
+        self.start_supervised_run(AI_SUPERVISE_PLAN_ROUNDS='1')
+        self.helper('run-manifest', 'revision-reserve', self.plan_current()[1], '1')
+
+    def test_supervised_plan_resume_reserved_without_a_stage_human_rerun(self):
+        self.reserved_without_stage()
+        self.resume('human', AI_SUPERVISE_PLAN_ROUNDS='1')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_reserved_without_a_stage_watchdog(self):
+        self.reserved_without_stage()
+        self.resume('watchdog')  # a non-idempotent limit check would stop here (limit 1, 1 reserved)
+        self.assert_resumed_once()
+
+    def stage_without_reservation(self):
+        start = self.revise_ready()
+        self.start_supervised_run()
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+
+    def test_supervised_plan_resume_stage_without_a_reservation_human_rerun(self):
+        self.stage_without_reservation()
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_stage_without_a_reservation_watchdog(self):
+        self.stage_without_reservation()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    def rounds_crash(self):
+        # The pipeline's host commit of the first plan review, then the crash before its record.
+        self.hook_crash('post-commit', 'chore(ai): record plan review')
+        self.assertEqual(self.plan_calls(), 1)
+        self.assertEqual(json.loads(self.plan_store().read_text()), [])  # store initialised, no record
+
+    def test_supervised_plan_resume_plan_review_without_its_round_record_human_rerun(self):
+        self.rounds_crash()
+        self.resume('human')
+        self.assert_resumed_once()
+
+    def test_supervised_plan_resume_plan_review_without_its_round_record_watchdog(self):
+        self.rounds_crash()
+        self.resume('watchdog')
+        self.assert_resumed_once()
+
+    # Crash point 4: the third revision session dies; its resume runs on the escalation model.
+    def test_supervised_plan_resume_round_three_crash_runs_on_the_escalation_model(self):
+        self.ready()
+        always = dict(MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.crash_supervised(MOCK_REVISION_CRASH='before', MOCK_REVISION_CRASH_CALL='3',
+                              AI_SUPERVISE_ESCALATE_MODEL='claude-test-x', **always)
+        self.assertEqual(self.revision_commits(), 2)
+        self.resume('watchdog', expected=1, MOCK_CONVERGENCE='Convergence: none — one gap, rejected each round', **always)
+        self.assertEqual([call[call.index('--model') + 1] for call in self.revision_args()],
+                         ['opus', 'opus', 'claude-test-x', 'claude-test-x'])
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '3')
+        self.assertEqual([r['round'] for r in self.revision_records()], [1, 2, 3])
+        section = (self.project / '.ai/reviews/plan-dispositions.md').read_text().split('## Plan review round 3 ')[1]
+        self.assertIn('\nConvergence: none — one gap, rejected each round\n', section)
+        self.assertIn('supervision limit reached (3 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+
+    def test_supervised_plan_resume_keeps_the_approved_settings_after_a_config_change(self):
+        self.ready()
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        config = self.config / 'ai-toolkit/config'
+        config.write_text('AI_SUPERVISE_PLAN_ROUNDS=2\nAI_SUPERVISE_ESCALATE_ROUND=1\n'
+                          'AI_SUPERVISE_ESCALATE_MODEL=claude-approved\n')
+        always = dict(MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject')
+        self.crash_supervised(MOCK_REVISION_CRASH='before', **always)
+        config.write_text('AI_SUPERVISE_PLAN_ROUNDS=1\nAI_SUPERVISE_ESCALATE_ROUND=9\n'
+                          'AI_SUPERVISE_ESCALATE_MODEL=claude-changed\n')
+        self.resume('watchdog', expected=1, **always)
+        # The approved limit 2 (not 1) and the approved escalation from round 1 (not 9).
+        self.assertEqual([call[call.index('--model') + 1] for call in self.revision_args()], ['claude-approved'] * 3)
+        self.assertEqual(self.revision_commits(), 2)
+        self.assertEqual(self.plan_calls(), 3)
+        self.assertIn('supervision limit reached (2 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+
+    # Crash point 5: a recorded needs-human decision survives the crash.
+    def assert_decision_survives(self, path, clear):
+        self.revision_written(clear=clear, findings='P1|Rollback choice;P2|Gap in tests',
+                              MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        plan_calls, sessions = self.plan_calls(), len(self.revision_args())
+        if path == 'human':
+            self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major')
+        else:
+            self.resume(path, expected=1, MOCK_CODEX_PLAN='major')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('needs your decision', error)
+        self.assertIn('P1: Keep option A or switch to B?', error)
+        self.assertIn('P1: Keep option A or switch to B?', self.notifications())
+        self.assertEqual(self.plan_calls(), plan_calls)
+        self.assertEqual(len(self.revision_args()), sessions)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.recovery_calls(), [])
+        # The human answers, commits and reviews again by hand (approved); the rerun implements.
+        self.commit_leftovers('record the stop')
+        (self.project / '.ai/current-plan.md').write_text('Rollback: option B (human decision).\n')
+        self.commit('answer the plan question')
+        self.tool('ai-review', '--plan')
+        self.supervised('--no-pr')
+        self.helper('tasks', 'complete')
+        self.assertGreater(self.implementation_calls(), 0)
+
+    def test_supervised_plan_resume_decision_after_stage_clear_human_rerun(self):
+        self.assert_decision_survives('human', clear=True)
+
+    def test_supervised_plan_resume_decision_after_stage_clear_watchdog(self):
+        self.assert_decision_survives('watchdog', clear=True)
+
+    def test_supervised_plan_resume_decision_after_the_record_human_rerun(self):
+        self.assert_decision_survives('human', clear=False)
+
+    def test_supervised_plan_resume_decision_after_the_record_watchdog(self):
+        self.assert_decision_survives('watchdog', clear=False)
+
+    def test_supervised_plan_resume_human_restart_after_the_limit_reviews_first(self):
+        self.ready()
+        limit = dict(AI_SUPERVISE_PLAN_ROUNDS='1', MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject',
+                     MOCK_CONVERGENCE='Convergence: none — one gap, rejected each round')
+        self.supervised('--no-pr', expected=1, **limit)
+        self.assertIn('supervision limit reached (1 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+        self.commit_leftovers('record the stop')
+        # A restart revised the second report, then died right after closing its stage.
+        self.revise(MOCK_CLAUDE='revise-reject')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.supervised('--no-pr', expected=1, **limit)
+        # A fresh allowance, but the recorded revision is not redone: it reviews first.
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--format=%s', f'{head}..HEAD']).stdout.splitlines()
+        self.assertEqual([s for s in subjects if s.startswith('chore(ai): ')],
+                         ['chore(ai): record plan review', 'chore(ai): open plan dispositions',
+                          'chore(ai): record plan revision', 'chore(ai): record plan review'])
+        self.assertEqual(self.plan_calls(), 4)
+        self.assertEqual(len(self.revision_args()), 3)
+        self.assertEqual(self.helper('run-manifest', 'revision-count').stdout.strip(), '1')
+        self.assertIn('supervision limit reached (1 revisions this run)', (self.project / '.ai/local/last-error').read_text())
+
     def test_progress_notifications_for_done_and_blocked_tasks(self):
         title_task = task('T001').replace('Verify T001', 'Fix "$(touch pwned)" & `id`; rm -rf x')
         self.ready(title_task + '\n' + task('T002'))
@@ -1900,6 +3161,69 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Control: a human start does read it.
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertNotIn('AI_MODEL', manifest['env'])
+
+    def test_supervise_settings_invalid_values_stop_before_any_agent(self):
+        self.ready()
+        for key, value in (('AI_SUPERVISE', '2'), ('AI_SUPERVISE_PLAN_ROUNDS', '10'),
+                           ('AI_SUPERVISE_ESCALATE_ROUND', '0'), ('AI_SUPERVISE_ESCALATE_MODEL', 'bad model!')):
+            with self.subTest(key=key):
+                result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                                   expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+                for name in ('codex-calls', 'codex-plan-calls'):
+                    self.assertFalse((self.base / name).exists())
+
+    def test_supervise_settings_invalid_supervise_stops_hand_run_tools(self):
+        self.ready()
+        result = self.tool('ai-review', '--plan', expected=1, AI_SUPERVISE='yes')
+        self.assertIn('Invalid AI_SUPERVISE: yes', result.stderr)
+        result = self.tool('ai-run', '--approved', expected=1, AI_SUPERVISE='yes')
+        self.assertIn('Invalid AI_SUPERVISE: yes', result.stderr)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        for name in ('codex-calls', 'codex-plan-calls'):
+            self.assertFalse((self.base / name).exists())
+
+    def test_supervise_settings_are_captured_and_survive_a_config_change(self):
+        self.ready()
+        (self.config / 'ai-toolkit').mkdir(parents=True, exist_ok=True)
+        (self.config / 'ai-toolkit/config').write_text(
+            'AI_SUPERVISE_PLAN_ROUNDS=5\nAI_SUPERVISE_ESCALATE_MODEL=model-one\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        manifest_file = next((self.base / 'host-state').rglob('run.json'))
+        env = json.loads(manifest_file.read_text())['env']
+        self.assertEqual(env['AI_SUPERVISE_PLAN_ROUNDS'], '5')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_MODEL'], 'model-one')
+        self.assertEqual(env['AI_SUPERVISE'], '0')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_ROUND'], '3')
+        (self.config / 'ai-toolkit/config').write_text(
+            'AI_SUPERVISE_PLAN_ROUNDS=7\nAI_SUPERVISE_ESCALATE_MODEL=model-two\n')
+        self.tool('ai-recover', '--stage', 'implementation', MOCK_RECOVER='rerun',
+                  AI_SUPERVISE_PLAN_ROUNDS='9')
+        env = json.loads(manifest_file.read_text())['env']
+        self.assertEqual(env['AI_SUPERVISE_PLAN_ROUNDS'], '5')
+        self.assertEqual(env['AI_SUPERVISE_ESCALATE_MODEL'], 'model-one')
+
+    def test_supervise_settings_key_lists_are_identical(self):
+        root = Path(__file__).resolve().parent.parent / 'scripts'
+        key = r'AI_[A-Z_]+'
+        common = (root / 'lib/common.sh').read_text()
+        config = re.search(r'case "\$key" in ((?:%s\|)*%s)\) ;;' % (key, key), common)
+        recover = (root / 'ai-recover').read_text()
+        unset = re.search(r'^unset ((?:%s ?)+)$' % key, recover, re.M)
+        case = re.search(r'^\s+((?:%s\|)*%s)\)$' % (key, key), recover, re.M)
+        py = re.search(r'RUN_SETTINGS = \(([^)]*)\)', (root / 'lib/workflow.py').read_text())
+        self.assertTrue(config and unset and case and py)
+        lists = {
+            'ai_config': set(config.group(1).split('|')),
+            'unset': set(unset.group(1).split()),
+            'case': set(case.group(1).split('|')),
+            'RUN_SETTINGS': set(re.findall(r"'(AI_[A-Z_]+)'", py.group(1))),
+        }
+        for name, keys in lists.items():
+            self.assertEqual(keys, lists['RUN_SETTINGS'], name)
+        self.assertIn('AI_SUPERVISE_ESCALATE_MODEL', lists['RUN_SETTINGS'])
 
     def test_committed_content_must_match_validated_files(self):
         self.ready()
@@ -2185,6 +3509,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for prompt in (plan, recheck):
             self.assertNotIn('PREVIOUS ROUNDS:', prompt)
             self.assertNotIn('CHANGED SINCE THE LAST REVIEW: inspect', prompt)
+        # Plan reviews only ever get plan history, and only after a plan revision
+        # (test_supervised_plan_reject_only_reviews_again_on_a_clean_checkout).
+        self.assertNotIn('PLAN REVISION CONTEXT:', plan)
 
     def test_review_context_failing_helper_still_produces_a_review(self):
         self.first_review_round()
@@ -2864,6 +4191,335 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('counts MAJOR=0', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
 
+    # ------------------------------------------------------------- review format retry (T009)
+    def reset_review_fixture(self):
+        """Undo one review attempt: reviewer call counters, uncommitted records, stray files."""
+        for name in ('codex-calls', 'codex-plan-calls', 'codex-prompts.log', 'claude-review-args.log',
+                     'claude-review-prompts.log', 'notifications.log'):
+            (self.base / name).unlink(missing_ok=True)
+        (self.project / 'unexpected.txt').unlink(missing_ok=True)
+        self.run_cmd(['git', 'checkout', '--', '.ai'])
+        self.run_cmd(['git', 'clean', '-fdq', '--', '.ai/reviews'])
+
+    def format_retry_lines(self):
+        return [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if 'review format retry' in line]
+
+    def codex_calls(self, name='codex-calls'):
+        path = self.base / name
+        return path.read_text().count('call') if path.exists() else 0
+
+    def test_format_retry_code_review_once_then_publish_or_stop(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        cases = [  # MOCK_CODEX, exit code, Codex calls, run-log outcome (None: no retry)
+            ('malformed,success', 0, 2, 'published'),
+            ('empty,success', 0, 2, 'published'),
+            ('counts-lie,success', 0, 2, 'published'),
+            ('success', 0, 1, None),
+            ('malformed', 1, 2, 'stopped again, prior review preserved'),
+            ('empty', 1, 2, 'stopped again, prior review preserved'),
+            ('mutates', 1, 1, None),
+            ('error', 1, 1, None),
+            ('malformed,mutates', 1, 2, 'stopped again, prior review preserved'),
+            ('malformed,error', 1, 2, 'stopped again, prior review preserved'),
+        ]
+        for mode, code, calls, outcome in cases:
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                result = self.tool('ai-review', '--base', 'main', expected=code, MOCK_CODEX=mode, AI_SUPERVISE='1')
+                self.assertEqual(self.codex_calls(), calls)
+                lines = self.format_retry_lines()
+                if outcome is None:
+                    self.assertEqual(lines, [])
+                    self.assertNotIn('Review format retry', self.notifications())
+                else:
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn(f'review format retry (code): {outcome}', lines[0])
+                    first = re.search(r'first report (\.ai/local/review-\w+\.md)', lines[0]).group(1)
+                    self.assertTrue((self.project / first).exists())  # the first report is kept
+                    self.assertIn('🔁 Review format retry (code): ', self.notifications())
+                    prompts = (self.base / 'codex-prompts.log').read_text().split('=== PROMPT ===')
+                    self.assertNotIn('FORMAT ERROR', prompts[1])
+                    self.assertIn('FORMAT ERROR: ', prompts[2])
+                    self.assertIn('Return the full report again in the required structure.', prompts[2])
+                if code:
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                else:
+                    self.helper('review-info')
+        # The second call mutating the checkout is still an integrity stop.
+        self.reset_review_fixture()
+        result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='malformed,mutates', AI_SUPERVISE='1')
+        self.assertIn('Checkout changed during review', result.stderr)
+        self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+        self.assertIn('Review is missing Overall verdict:', self.format_retry_lines()[0])
+        # The counts-lie is a format error: its message reaches the reviewer.
+        self.reset_review_fixture()
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='counts-lie,success', AI_SUPERVISE='1')
+        self.assertIn('FORMAT ERROR: Review lists MAJOR findings but counts MAJOR=0',
+                      (self.base / 'codex-prompts.log').read_text())
+
+    def test_format_retry_off_without_supervision(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        for mode, message in (('malformed,success', 'Review is missing Overall verdict:'),
+                              ('empty,success', 'The reviewer produced no review')):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX=mode, AI_SUPERVISE='0')
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.codex_calls(), 1)
+                self.assertEqual(self.format_retry_lines(), [])
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+        self.reset_review_fixture()
+        self.tool('ai-review', '--plan', expected=1, MOCK_CODEX_PLAN_FORMAT='malformed,ok', AI_SUPERVISE='0')
+        self.assertEqual(self.codex_calls('codex-plan-calls'), 1)
+        self.reset_review_fixture()
+        self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='empty,success',
+                  AI_SUPERVISE='0')
+        self.assertEqual(len(self.claude_review_args()), 1)
+
+    def test_format_retry_claude_fallback_reviewer(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        for mode, code in (('malformed,success', 0), ('empty,success', 0), ('empty', 1), ('malformed', 1)):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                self.tool('ai-review', '--base', 'main', expected=code, MOCK_CODEX_LIMIT='1',
+                          MOCK_CLAUDE_REVIEW=mode, AI_SUPERVISE='1')
+                self.assertEqual(len(self.claude_review_args()), 2)
+                prompts = (self.base / 'claude-review-prompts.log').read_text().split('\n=====\n')
+                self.assertIn('FORMAT ERROR: ', prompts[1])
+                self.assertEqual(len(self.format_retry_lines()), 1)
+                if code:
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                else:
+                    review = (self.project / '.ai/reviews/current.md').read_text()
+                    self.assertIn('> **Reviewer: Claude fallback (claude-opus-5-5', review)
+                    self.helper('review-info')
+        # A plan review on the Claude fallback, too.
+        self.reset_review_fixture()
+        self.tool('ai-review', '--plan', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='empty,success', AI_SUPERVISE='1')
+        self.assertEqual(len(self.claude_review_args()), 2)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_format_retry_after_claude_fallback_attributes_the_codex_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back.
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', MOCK_CLAUDE_REVIEW='malformed', AI_SUPERVISE='1')
+        self.assertEqual(len(self.claude_review_args()), 1)
+        self.assertEqual(self.codex_calls(), 2)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertNotIn('Reviewer:', review)
+        self.assertFalse((self.project / '.ai/reviews/fallback-log.md').exists())
+        outcome = json.loads((self.base / 'host-state/outcomes.jsonl').read_text().splitlines()[-1])
+        self.assertEqual((outcome['reviewer'], outcome['mode']), ('codex', 'code'))
+        self.helper('review-info')
+
+    def test_format_retry_plan_review_by_hand(self):
+        self.ready()
+        plan = self.project / '.ai/reviews/plan.md'
+        cases = [  # MOCK_CODEX_PLAN_FORMAT, exit code, Codex plan calls, run-log outcome
+            ('malformed,ok', 0, 2, 'published'),
+            ('empty,ok', 0, 2, 'published'),
+            ('counts-lie,ok', 0, 2, 'published'),
+            ('ok', 0, 1, None),
+            ('malformed', 1, 2, 'stopped again, prior review preserved'),
+            ('mutates', 1, 1, None),
+            ('error', 1, 1, None),
+            ('malformed,mutates', 1, 2, 'stopped again, prior review preserved'),
+        ]
+        for number, (mode, code, calls, outcome) in enumerate(cases):
+            with self.subTest(mode=mode):
+                self.reset_review_fixture()
+                (self.project / 'src.txt').write_text(f'source {number}\n')  # a new plan digest each time
+                self.commit(f'source {number}')
+                before = plan.read_bytes() if plan.exists() else None
+                logged = len(self.format_retry_lines())  # earlier lines are committed
+                self.tool('ai-review', '--plan', expected=code, MOCK_CODEX_PLAN_FORMAT=mode, AI_SUPERVISE='1')
+                self.assertEqual(self.codex_calls('codex-plan-calls'), calls)
+                # The checkout was clean for both reviewer calls (no run-log line in between).
+                self.assertEqual(set((self.base / 'codex-plan-status').read_text().split('\n')[-calls - 1:-1]),
+                                 {'clean'})
+                lines = self.format_retry_lines()[logged:]
+                if outcome:
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn(f'review format retry (plan): {outcome}', lines[0])
+                    self.assertIn('🔁 Review format retry (plan): ', self.notifications())
+                else:
+                    self.assertEqual(lines, [])
+                if code:
+                    self.assertEqual(plan.read_bytes() if plan.exists() else None, before)
+                    (self.base / 'codex-plan-status').unlink()
+                    continue
+                # Published and recorded by hand: the run-log line is in the record commit.
+                self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+                self.assertEqual(self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout.strip(),
+                                 'chore(ai): record plan review')
+                if outcome:
+                    self.assertIn('.ai/run-log.md', self.run_cmd(['git', 'show', '--name-only', '--format=']).stdout)
+                self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+                (self.base / 'codex-plan-status').unlink()
+
+    def test_format_retry_pipeline_commits_the_run_log_line_with_each_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_SUPERVISE='1',
+                  MOCK_CODEX_PLAN_FORMAT='malformed,ok', MOCK_CODEX='empty,success')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.assertEqual((self.codex_calls('codex-plan-calls'), self.codex_calls()), (2, 2))
+        for subject, mode in (('chore(ai): record plan review', 'plan'),
+                              ('chore(ai): record independent review', 'code')):
+            sha = self.run_cmd(['git', 'log', '-1', '--format=%H', '--fixed-strings', f'--grep={subject}']).stdout.strip()
+            shown = self.run_cmd(['git', 'show', sha, '--', '.ai/run-log.md']).stdout
+            self.assertIn(f'review format retry ({mode}): published', shown)
+            self.assertIn(f'🔁 Review format retry ({mode}): ', self.notifications())
+
+    def test_format_retry_stops_when_the_checkout_changes_between_the_calls(self):
+        # Review M2: the notification between the calls commits (or leaves) a change; the
+        # retry must not adopt it as a new baseline.
+        self.ready()
+        self.tool('ai-run', '--approved')
+        notify = self.base / 'notify-mutate'
+        notify.write_text(f'printf "%s\\n" "$1" >> "{self.notify_log}"\n'
+                          'case "$1" in *"Review format retry"*)\n'
+                          '  printf "x\\n" >> unexpected.txt\n'
+                          '  [ "$MUTATE" = commit ] && { git add -- unexpected.txt; git commit -qm moved; }\n'
+                          'esac\n'
+                          'exit 0\n')
+        hook = dict(AI_NOTIFY_CMD=f'bash "{notify}" "$1"', AI_SUPERVISE='1')
+        plan = self.project / '.ai/reviews/plan.md'
+        # Code reviews first (dirty before commit): a committed source change voids the validation stamp.
+        for mutate in ('dirty', 'commit'):
+            with self.subTest(review='code', mutate=mutate):
+                self.reset_review_fixture()
+                original = (self.project / '.ai/reviews/current.md').read_bytes()
+                logged = len(self.format_retry_lines())
+                result = self.tool('ai-review', '--base', 'main', expected=1, MOCK_CODEX='malformed,success',
+                                   MUTATE=mutate, **hook)
+                self.assertIn('Checkout changed between the review and its format retry', result.stderr)
+                self.assertEqual(self.codex_calls(), 1)  # no second reviewer call
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+                lines = self.format_retry_lines()[logged:]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn('review format retry (code): stopped, checkout changed between the calls', lines[0])
+        for number, mutate in enumerate(('dirty', 'commit')):
+            with self.subTest(review='plan', mutate=mutate):
+                self.reset_review_fixture()
+                (self.project / 'src.txt').write_text(f'moved source {number}\n')  # a new plan digest
+                self.commit(f'moved source {number}')
+                before = plan.read_bytes() if plan.exists() else None
+                logged = len(self.format_retry_lines())
+                result = self.tool('ai-review', '--plan', expected=1, MOCK_CODEX_PLAN_FORMAT='malformed,ok',
+                                   MUTATE=mutate, **hook)
+                self.assertIn('Checkout changed between the review and its format retry', result.stderr)
+                self.assertEqual(self.codex_calls('codex-plan-calls'), 1)
+                self.assertEqual(plan.read_bytes() if plan.exists() else None, before)
+                lines = self.format_retry_lines()[logged:]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn('review format retry (plan): stopped, checkout changed between the calls', lines[0])
+
+    def test_format_retry_never_for_a_malformed_recheck(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | out of scope | none |\n'])
+        self.tool('ai-review', '--recheck', MOCK_RECHECK='M1 withdrawn', AI_SUPERVISE='1')
+        self.assertEqual((self.base / 'codex-recheck-calls').read_text().count('reviewed HEAD='), 1)
+        answers = self.helper('recheck-verify').stdout
+        self.assertEqual(answers.count('\tupheld\t'), 2)
+        self.assertEqual(self.format_retry_lines(), [])
+
+    def test_review_format_check_helper_matches_publish(self):
+        report = self.base / 'report.md'
+        good = ('Overall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+                '## BLOCKER findings\nNone.\n## MAJOR findings\nNone.\n## MINOR findings\nNone.\n')
+        report.write_text(good)
+        self.helper('review-format-check', 'code', str(report))
+        self.helper('review-format-check', 'plan', str(report))
+        report.write_text(good.replace('Overall verdict: ok\n', ''))
+        self.helper('review-format-check', 'plan', str(report))
+        result = self.helper('review-format-check', 'code', str(report), expected=2)
+        self.assertEqual(result.stdout.strip(), 'Review is missing Overall verdict:')
+        report.write_text('\n')
+        self.assertIn('empty report', self.helper('review-format-check', 'plan', str(report), expected=2).stdout)
+        self.helper('review-format-check', 'code', str(self.base / 'missing.md'), expected=1)
+        self.helper('review-format-check', 'recheck', str(report), expected=1)
+
+    def publish_report(self, text, plan=False, expected=0):
+        report = self.base / 'format-report.md'
+        report.write_text(text)
+        if plan:
+            digest = self.helper('plan-digest').stdout.strip()
+            return self.helper('publish-plan-review', str(report), digest, expected=expected)
+        return self.helper('publish-review', str(report), 'a' * 40, 'b' * 40, expected=expected)
+
+    def test_review_format_missing_zero_count_sections_are_accepted(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.assertEqual(self.helper('review-info').stdout.split(), ['a' * 40, '0', '1', '0'])
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## BLOCKER findings\nNone.\n## MAJOR findings\n- P1: T001 has no test.\n', plan=True)
+        self.assertEqual(self.helper('plan-review-info').stdout.split(), ['current', '0', '1', '0'])
+
+    def test_review_format_count_mismatches_are_still_rejected(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n', plan=True)
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        plan = (self.project / '.ai/reviews/plan.md').read_bytes()
+        counts = 'Finding counts: BLOCKER=0 MAJOR={} MINOR={}\n'
+        cases = {
+            'minor section missing': counts.format(0, 1),
+            'minor section only none': counts.format(0, 1) + '## MINOR findings\nNone.\n',
+            'major listed but counted 0': counts.format(0, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'major count above ids': counts.format(2, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'no counts line': '## MAJOR findings\nNone.\n',
+            'two counts lines': counts.format(0, 0) + counts.format(0, 0),
+        }
+        for name, body in cases.items():
+            for is_plan in (False, True):
+                with self.subTest(case=name, plan=is_plan):
+                    self.publish_report('# Review\nOverall verdict: ok\n' + body, plan=is_plan, expected=1)
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+                    self.assertEqual((self.project / '.ai/reviews/plan.md').read_bytes(), plan)
+
+    def test_review_format_verdict_heading_is_accepted(self):
+        self.setup_project()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for heading in ('## Overall verdict', '## Overall verdict:', '### Overall verdict'):
+            with self.subTest(heading=heading):
+                self.publish_report(f'# Review\n{heading}\n\n<!-- note -->\nApprove with two minor notes\n\n'
+                                    '## Findings\n' + tail)
+                self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+                body = self.helper('pr-body', '1', '0').stdout
+                self.assertIn('Verdict: Approve with two minor notes.', body)
+
+    def test_review_format_missing_or_empty_verdict_is_rejected(self):
+        self.setup_project()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for name, text in (('no verdict', '# Review\n' + tail),
+                           ('empty heading', '# Review\n## Overall verdict\n\n<!-- x -->\n## Counts\n' + tail),
+                           ('empty heading at end', '# Review\n' + tail + '## Overall verdict\n\n'),
+                           ('empty line', '# Review\nOverall verdict:\n' + tail)):
+            with self.subTest(case=name):
+                result = self.publish_report(text, expected=1)
+                self.assertIn('missing Overall verdict', result.stderr)
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+
+    def test_review_format_verdict_heading_through_ai_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='verdict-heading')
+        report = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('Approve with two minor notes', report)
+        self.assertNotIn('## MINOR findings', report)
+        self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+
     def test_no_claude_session_may_rewrite_the_codex_review(self):
         self.ready()
         self.add_origin()
@@ -2949,6 +4605,238 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0]
         self.assertEqual(create[create.index('--base') + 1], 'develop')
         self.assertTrue(origin.exists())
+
+    # ---------------------------------------------------------------- review base (FL-15)
+    def git_out(self, *args):
+        return self.run_cmd(['git', *args]).stdout.strip()
+
+    def origin_with_main(self):
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return origin
+
+    def commit_on(self, parent, message):
+        return self.git_out('commit-tree', f'{parent}^{{tree}}', '-p', parent, '-m', message)
+
+    def advance_origin_main(self):
+        """Moves origin's main one commit ahead without touching the local main branch."""
+        sha = self.commit_on('origin/main', 'merged elsewhere')
+        self.run_cmd(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return sha
+
+    def advance_local_main(self):
+        sha = self.commit_on('main', 'local only')
+        self.run_cmd(['git', 'branch', '-f', 'main', sha])
+        return sha
+
+    def assert_reviewed_against(self, result, ref, sha, behind=False):
+        short = self.git_out('rev-parse', '--short', sha)
+        line = f'Review base: {ref} at {short}' + (' (local main is behind)' if behind else '')
+        self.assertIn(line + '\n', result.stdout)
+        header = re.search(r'merge-base ([0-9a-f]{40})', (self.project / '.ai/reviews/current.md').read_text())
+        self.assertEqual(header.group(1), sha)
+        prompts = (self.base / 'codex-prompts.log').read_text()
+        self.assertIn(f'supplied base={sha}; merge-base={sha}.', prompts)
+
+    def test_review_base_origin_ahead_of_local(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        local = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        self.assertNotIn(f'merge-base={local}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_origin_ahead_pr_still_targets_main(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0]
+        self.assertEqual(create[create.index('--base') + 1], 'main')
+
+    def test_review_base_equal_to_origin(self):
+        self.origin_with_main()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+        self.assertNotIn('diverged', result.stdout)
+
+    def test_review_base_without_origin_ref(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+
+    def test_review_base_local_ahead_of_origin(self):
+        self.origin_with_main()
+        remote = self.git_out('rev-parse', 'origin/main')
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', sha)
+        self.assertNotIn('is behind', result.stdout)
+        self.assertNotIn(f'merge-base={remote}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_diverged_uses_local(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Local main and origin/main have diverged; reviewing against local main.', result.stdout)
+        self.assert_reviewed_against(result, 'main', sha)
+
+    def test_review_base_explicit_sha(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', sha, '--no-pr')
+        self.assert_reviewed_against(result, sha, sha)
+
+    # ---------------------------------------------------------------- base moved past the branch (FL-17)
+    def base_moved_message(self, ref, sha):
+        short = self.git_out('rev-parse', '--short', sha)
+        return f'Review base {ref} ({short}) moved past the branch; merge it into feature/test and rerun ai-pipeline'
+
+    def test_base_moved_stops_before_any_agent(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        for base in ('main', 'origin/main'):
+            with self.subTest(base=base):
+                result = self.tool('ai-pipeline', '--approved', '--base', base, '--no-pr', expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertIn('Pipeline stopped during start', result.stderr)
+                self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+                self.assertFalse((self.base / 'codex-prompts.log').exists())
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn('moved past the branch; merge it', notes)
+        # Merging the base is the fix: the rerun proceeds normally.
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+
+    def test_base_moved_recovery_escalates_without_claude(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn(message, result.stderr)
+        self.assertIn('escalated to the human: the review base moved past the branch.', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertEqual((self.project / '.ai/local/last-error').read_text().strip(), message)
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn(f'Review base origin/main ({self.git_out("rev-parse", "--short", sha)})', notes)
+
+    def open_triage_stage_with_origin(self, counted):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        head = self.git_out('rev-parse', 'HEAD')
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        if counted:
+            self.tool('ai-run', '--approved', '--triage', '--since', head)
+            self.assertEqual(self.triage_rounds(), 1)
+        return self.advance_origin_main()
+
+    def assert_triage_settled_then_merge(self, sha):
+        reviews = self.codex_calls()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX='major-once')
+        self.assertIn('Completing the interrupted review triage', result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertIn(self.base_moved_message('origin/main', sha), result.stderr)
+        self.assertEqual(self.codex_calls(), reviews)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertNotIn('Triage stage', result.stderr)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    def test_base_moved_with_pending_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=False))
+
+    def test_base_moved_with_counted_open_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=True))
+
+    def test_base_moved_with_pending_recheck(self):
+        self.origin_with_main()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CODEX='two-major-once',
+                  MOCK_CLAUDE='triage-mixed-reject', MOCK_RECHECK_FAIL='1')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+        reviews = self.subjects().count('chore(ai): record independent review')
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_RECHECK=self.UPHELD_M2)
+        calls = self.recheck_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('M2\tMAJOR\tthe second defect is handled by the gate', calls[1])
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertIn(message, result.stderr)
+        self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.subjects().count('chore(ai): record independent review'), reviews)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=self.UPHELD_M2)
+        self.assertNotIn('Re-check:', result.stderr)
+        self.assertEqual(len(self.recheck_calls()), 2)
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('--draft', self.created_prs()[0])
+
+    def rewrite_history_while_recording_review(self):
+        """main gains the plan commit; a hook then reparents HEAD onto main^ (same tree, clean
+        checkout, merge-base kept), so main is no longer an ancestor at the publish check."""
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'branch', '-f', 'main', 'HEAD'])
+        self.hook('post-commit', '[[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]] || exit 0\n'
+                                 'git reset -q --soft "$(git commit-tree "HEAD^{tree}" -p main^ -m \'hook: rewritten history\')"\n')
+        return origin
+
+    def assert_publish_names_the_base(self, origin, result):
+        prefix = 'Publish check failed at pull request preparation: Review base main ('
+        for text in (result.stderr, (self.project / '.ai/local/last-error').read_text()):
+            self.assertIn(prefix, text)
+            self.assertIn('moved past the branch; merge it into feature/test', text)
+            self.assertNotIn('reviewed content changed', text)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+        self.assertIn('⛔', self.notifications())
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_base_moved_publish_check_names_the_base(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='1')
+        self.assert_publish_names_the_base(origin, result)
+        self.assertIn('escalated to the human', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_base_moved_publish_check_without_recovery(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_publish_names_the_base(origin, result)
+        self.assertNotIn('escalated to the human', result.stderr)
 
     def test_failed_final_push_is_reported_not_hidden(self):
         self.ready()
@@ -3266,7 +5154,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('is unreadable', self.helper('run-manifest', 'stage', expected=1).stderr)
         self.helper('stage-verify', expected=1)
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
-        self.assertIn("Cannot read this branch's triage stage", result.stderr)
+        self.assertIn("Cannot read this branch's open stage", result.stderr)
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip(), head)
 
     def test_stage_per_branch_interrupted_triage_completes_after_another_branch_run(self):
@@ -3391,6 +5279,150 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.fix_rounds(), 1)
         self.run_cmd(['git', 'checkout', '-q', 'feature/test'])
         self.assertEqual(self.fix_rounds(), 1)
+
+    # ---------------------------------------------------------------- extra fix round (T008)
+    # Round 3+ triage needs a Convergence line; the extra round is round 3 here.
+    CONVERGENCE = 'Convergence: findings fall each round; the fix tasks address them'
+
+    def falling_run(self, majors, *args, expected=0, **env):
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '2', *args,
+                         expected=expected, **dict({'AI_SUPERVISE': '1', 'MOCK_CODEX': 'counts',
+                                                    'MOCK_CODEX_MAJORS': majors, 'MOCK_CONVERGENCE': self.CONVERGENCE},
+                                                   **env))
+
+    def pr_draft(self):
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']]
+        self.assertEqual(len(create), 1)
+        return '--draft' in create[0]
+
+    def fix_round_store(self):
+        return next((self.base / 'host-state').rglob('fix-rounds-*.json'))
+
+    def triage_commits(self):
+        return self.run_cmd(['git', 'log', '--reverse', '--format=%H', '--grep',
+                             '^chore(ai): record review triage$']).stdout.split()
+
+    def test_extra_fix_round_falling_counts_get_one_round_then_draft(self):
+        self.ready()
+        self.add_origin()
+        result = self.falling_run('4,3,2,1')
+        self.assertIn('Review triage, round 3 (Claude)', result.stdout)
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertEqual(self.fix_rounds(), 3)
+        notes = self.notifications()
+        self.assertEqual(notes.count('🔁 Extra fix round'), 1)
+        self.assertIn('🔁 Extra fix round: findings falling (4 → 3 → 2)', notes)
+        # Still falling (3 → 2 → 1) at the next limit, but the run's extra round is used: draft.
+        self.assertIn('Fix round limit (2) reached', result.stdout)
+        self.assertTrue(self.pr_draft())
+        # The third triage commit carries the run-log line; the records hold verified counts.
+        third = self.triage_commits()[2]
+        self.assertIn('extra fix round 3: findings falling (4 → 3 → 2)',
+                      self.run_cmd(['git', 'show', third, '--', '.ai/run-log.md']).stdout)
+        records = json.loads(self.fix_round_store().read_text())
+        self.assertEqual([r['majors'] for r in records], [4, 3, 2])
+        self.assertEqual([r['commit'] for r in records], self.triage_commits())
+
+    def test_extra_fix_round_clean_review_after_it_opens_a_ready_pr(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('3,2,1,0')
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertIn('🔁 Extra fix round: findings falling (3 → 2 → 1)', self.notifications())
+        self.assertFalse(self.pr_draft())
+
+    def assert_no_extra_round(self, majors, **env):
+        self.ready()
+        self.add_origin()
+        result = self.falling_run(majors, **env)
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.fix_rounds(), 2)
+        self.assertIn('Fix round limit (2) reached', result.stdout)
+        self.assertNotIn('Extra fix round', self.notifications())
+        self.assertTrue(self.pr_draft())
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+
+    def test_extra_fix_round_flat_counts_and_imitated_subjects_draft(self):
+        self.assert_no_extra_round('2,2,2', MOCK_TRIAGE_SUBJECT='chore(ai): record review triage')
+
+    def test_extra_fix_round_rising_counts_draft(self):
+        self.assert_no_extra_round('1,2,3')
+
+    def test_extra_fix_round_unsupervised_draft(self):
+        self.assert_no_extra_round('3,2,1', AI_SUPERVISE='0')
+
+    def test_extra_fix_round_trend_history_boundaries(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3',
+                  MOCK_CODEX='counts', MOCK_CODEX_MAJORS='4,3,2,1', MOCK_CONVERGENCE=self.CONVERGENCE)
+        self.assertEqual(self.helper('fix-rounds', 'trend', 'main').stdout.split(), ['3', '2', '1'])
+        store = self.fix_round_store()
+        counted = json.loads(store.read_text())
+        legacy = [r['commit'] for r in counted]
+
+        def trend(records, rounds=3):
+            store.write_text(json.dumps(records))
+            self.assertEqual(self.fix_rounds(), rounds)  # both shapes still count
+            result = self.helper('fix-rounds', 'trend', 'main', expected=None)
+            return result.stdout.split() if result.returncode == 0 else result.stderr.strip()
+        insufficient = 'Error: insufficient history'
+        # Round 1 triaged by the old toolkit, rounds 2-3 with counts: only 2-3 and the current review.
+        self.assertEqual(trend([legacy[0], counted[1], counted[2]]), ['3', '2', '1'])
+        # Only round 3 counted.
+        self.assertEqual(trend([legacy[0], legacy[1], counted[2]]), insufficient)
+        # A legacy record between counted ones, or as the most recent one.
+        self.assertEqual(trend([counted[0], legacy[1], counted[2]]), insufficient)
+        self.assertEqual(trend([counted[0], counted[1], legacy[2]]), insufficient)
+        # The current review must not be the one the last round already triaged.
+        head = self.helper('review-info').stdout.split()[0]
+        self.assertEqual(trend([counted[0], counted[1], dict(counted[2], review_head=head)]), insufficient)
+        # A record no longer reachable from HEAD is skipped: the last two reachable rounds count.
+        self.assertEqual(trend([counted[0], counted[1], dict(counted[2], commit='f' * 40)], rounds=2),
+                         ['4', '3', '1'])
+        self.assertEqual(trend([legacy[0], counted[1], dict(counted[2], commit='f' * 40)], rounds=2), insufficient)
+        store.write_text(json.dumps(counted))
+        # Another branch at the same commits has no host records: commit subjects alone (also
+        # agent-chosen ones) give legacy rounds without counts, never an extra round.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.assertEqual(self.fix_rounds(), 3)
+        self.assertEqual(self.helper('fix-rounds', 'trend', 'main', expected=1).stderr.strip(), insufficient)
+
+    def test_extra_fix_round_reservation_once_per_run(self):
+        self.ready()
+        self.start_run('feature/test')
+        first, second = 'a' * 64, 'b' * 64
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+        self.helper('run-manifest', 'extra-round-reserve', first)
+        self.helper('run-manifest', 'extra-round-reserve', first)  # a resume: same review, no error
+        self.assertIn('already used', self.helper('run-manifest', 'extra-round-reserve', second, expected=1).stderr)
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), first)
+        self.helper('run-manifest', 'extra-round-reserve', 'not-a-digest', expected=1)
+        self.start_run('feature/test')  # a human (re)start resets it
+        self.assertEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+
+    def test_extra_fix_round_crash_after_reservation_resumes_it_once(self):
+        self.ready()
+        notify = self.base / 'notify-crash'
+        notify.write_text(f'printf "%s\\n" "$1" >> "{self.notify_log}"\n'
+                          f'case "$1" in *"Extra fix round"*)\n'
+                          f'  [ -e "{self.base}/notify-crashed" ] || {{ touch "{self.base}/notify-crashed"; '
+                          'kill -9 "$(cat .ai/local/pipeline.active)"; }\n'
+                          'esac\n')
+        crash = dict(AI_AUTO_RECOVER='1', AI_NOTIFY_CMD=f'bash "{notify}" "$1"')
+        crashed = self.falling_run('3,2,1', '--no-pr', expected=None, **crash)
+        self.assertEqual(crashed.returncode, -9)
+        self.assertEqual(self.triage_calls(), 2)
+        self.assertEqual(self.open_stage(), '')  # reserved, the stage not opened yet
+        self.assertNotEqual(self.helper('run-manifest', 'extra-round').stdout.strip(), '')
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_CLAUDE='',
+                  MOCK_CODEX='counts', MOCK_CODEX_MAJORS='3,2,1', MOCK_CONVERGENCE=self.CONVERGENCE, **crash)
+        self.assertEqual(self.triage_calls(), 3)
+        self.assertEqual(self.fix_rounds(), 3)
+        self.assertEqual(self.notifications().count('🔁 Extra fix round'), 1)
+        self.assertIn('reserved before a restart',
+                      self.run_cmd(['git', 'show', self.triage_commits()[2], '--', '.ai/run-log.md']).stdout)
+        self.assertIn('🏁 FINISHED', self.notifications())
 
     def test_triage_completion_source_leftovers_escalate_and_commit_nothing(self):
         self.ready()
@@ -3535,6 +5567,35 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         path.write_text(json.dumps(rows[2]) + '\n')
         report = self.tool('ai-status', '--outcomes', str(path)).stdout
         self.assertIn('recheck HEAD abcdef012345', report.split('Codex catch-up pending')[1])
+
+    def test_triage_severity_suffix_satisfies_triage_check(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (MAJOR)', 'M1 (major)', 'M1(MAJOR)'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+        # Accepted rows still need an existing fix task.
+        dispositions.write_text(rows.replace('| M1 |', '| M1 (MAJOR) |').replace('T001', 'T099'))
+        self.helper('triage-check', '--fresh', expected=1)
+
+    def test_triage_severity_suffix_other_decorations_stay_unmatched(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (CRITICAL)', '**M1**', 'M1 (MAJOR) x'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            result = self.helper('triage-check', '--fresh', expected=1)
+            self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
+        self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 (MAJOR) | accepted | real defect | T002 |\n'], fix_task=True)
+        self.helper('triage-check', '--fresh')
+        self.tool('ai-review', '--recheck')
+        self.assertIn('M1\tMAJOR\tT001.txt is a fixture; the finding misreads it',
+                      (self.base / 'codex-recheck-calls').read_text())
+        self.helper('recheck-verify')
+        wf = self.recheck_module()
+        rows = [m.group(2).lower() for m in wf.DISPOSITION_ROW.finditer(
+            (self.project / '.ai/reviews/dispositions.md').read_text())]
+        self.assertEqual(rows, ['rejected', 'accepted'])
 
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
@@ -4868,6 +6929,7 @@ class DocsConsistencyTest(unittest.TestCase):
         'stops on reported permission denials',
         'denied permissions, timeouts',
         'permission denial, or crash',
+        'only reachable with `--max-fix-rounds`',
     )
 
     REQUIRED = (

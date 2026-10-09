@@ -34,7 +34,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -42,6 +42,23 @@ ai_config() {
   done < "$file"
 }
 ai_config
+
+# Supervisor settings: defaults, validation, and export of the validated values so child
+# scripts never see a raw or unset value. Call before any agent runs.
+ai_supervise_settings() {
+  AI_SUPERVISE=${AI_SUPERVISE-1}
+  AI_SUPERVISE_PLAN_ROUNDS=${AI_SUPERVISE_PLAN_ROUNDS-3}
+  AI_SUPERVISE_ESCALATE_ROUND=${AI_SUPERVISE_ESCALATE_ROUND-3}
+  AI_SUPERVISE_ESCALATE_MODEL=${AI_SUPERVISE_ESCALATE_MODEL-claude-fable-5-1}
+  [[ "$AI_SUPERVISE" =~ ^[01]$ ]] || ai_die "Invalid AI_SUPERVISE: $AI_SUPERVISE (0 or 1)"
+  [[ "$AI_SUPERVISE_PLAN_ROUNDS" =~ ^[0-9]$ ]] || \
+    ai_die "Invalid AI_SUPERVISE_PLAN_ROUNDS: $AI_SUPERVISE_PLAN_ROUNDS (0-9)"
+  [[ "$AI_SUPERVISE_ESCALATE_ROUND" =~ ^[1-9]$ ]] || \
+    ai_die "Invalid AI_SUPERVISE_ESCALATE_ROUND: $AI_SUPERVISE_ESCALATE_ROUND (1-9)"
+  [[ "$AI_SUPERVISE_ESCALATE_MODEL" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || \
+    ai_die "Invalid AI_SUPERVISE_ESCALATE_MODEL: $AI_SUPERVISE_ESCALATE_MODEL"
+  export AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+}
 
 # Codex review model/effort: reviews are where a stronger model pays off most.
 # AI_REVIEW_MODEL (default: Codex's own default) and AI_REVIEW_EFFORT (default high).

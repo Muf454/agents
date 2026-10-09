@@ -10,7 +10,7 @@ of scope), or deferred (real but out of scope; explain the risk). Do not blindly
 obey Codex, and do not dismiss findings without evidence. Handle MINOR findings
 the same way when they are cheap and in scope; otherwise defer them.
 
-Record each decision as a row in `.ai/reviews/dispositions.md` (finding ID,
+Record each decision as a row in `.ai/reviews/dispositions.md` (the bare finding ID, e.g. `M1`,
 disposition, evidence/reason, fix task). The runner created that file for this
 review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
 Codex's evidence, and the runner stops if any session changes it. Every BLOCKER and

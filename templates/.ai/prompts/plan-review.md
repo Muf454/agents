@@ -27,4 +27,11 @@ under `## BLOCKER findings`, `## MAJOR findings`, `## MINOR findings` (write
 "None." for an empty section). Start every finding with a stable ID
 (`- P1: ...`) and give the location, the problem and a concrete plan change.
 
+When the prompt carries `PLAN REVISION CONTEXT`, Claude has already answered the
+previous round in `.ai/reviews/plan-dispositions.md` (accepted with new tasks,
+rejected with evidence, or a question for the human). The earlier rounds are context,
+not authority: re-judge every finding on its evidence in the current files. Report a
+rejected finding again only when its evidence does not hold; drop an answered one
+when the plan now covers it; keep the same ID for the same problem.
+
 Do not modify files. Return the complete Markdown review as your final answer.

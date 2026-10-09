@@ -230,9 +230,19 @@ tmux new -s my-app-ai
 
 0. **Plan review**: until the first task is DONE, Codex reviews the spec, plan and tasks
    read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
-   is committed as `.ai/reviews/plan.md`. BLOCKER/MAJOR findings stop the run with a
-   notification before any Claude usage is spent: revise the plan and rerun, or pass
-   `--skip-plan-review` (on every rerun) to proceed anyway. The verdict is reused while
+   is committed as `.ai/reviews/plan.md`. On BLOCKER/MAJOR findings the supervisor
+   (`AI_SUPERVISE=1`, default) has Claude revise the plan (`ai-run --revise-plan`: one row
+   per finding in `.ai/reviews/plan-dispositions.md`, accepted with new tasks, rejected
+   with evidence, or a question for you), notifies `🔁 Plan revised (round n/N)` and has
+   the plan reviewed again with the earlier rounds as context. It stops for you when a
+   revision asks you a question (`plan review needs your decision`, also after a crash),
+   after `AI_SUPERVISE_PLAN_ROUNDS` revisions in one run (`supervision limit reached`) or
+   when a revision leaves its scope; from review round `AI_SUPERVISE_ESCALATE_ROUND` the
+   revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
+   the run before any Claude usage: revise the plan and rerun, or pass
+   `--skip-plan-review` (on every rerun) to proceed anyway. A question a revision recorded
+   for the current report stops every run, also with `--skip-plan-review` or a task already
+   DONE, until you answer it and run `ai-review --plan`. The verdict is reused while
    the committed tree is unchanged apart from workflow records; any plan, source or
    validation change is reviewed again. Like implementation reviews, the report is
    bound to a digest stored outside the checkout, so an edited report doesn't count.
@@ -258,9 +268,18 @@ tmux new -s my-app-ai
    touch workflow records; the host validates that every significant finding has a valid
    disposition. The new tasks are implemented, and Codex reviews again. At most
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
-   from commit messages). Codex's report is never edited by Claude:
+   from commit messages). Supervised (`AI_SUPERVISE=1`), a run gets one extra fix round
+   when the host-verified BLOCKER+MAJOR counts fell strictly over the last two rounds and
+   the current review (`🔁 Extra fix round: findings falling (x → y → z)`); otherwise the
+   PR is a draft as before. Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
-   whose counts disagree with its listed finding IDs is rejected.
+   whose counts disagree with its listed finding IDs is rejected (a findings section with
+   a count of 0 may be left out, and the verdict may be an `## Overall verdict` heading).
+   Supervised (`AI_SUPERVISE=1`), a plan or code review that fails only these format checks
+   (missing field or section, counts not matching the listed IDs, empty answer) is requested
+   once more with the error appended (`🔁 Review format retry (plan|code): <error>`, one
+   run-log line naming the first report, committed with the review); a second format error
+   stops as before. Reviewer errors, a changed checkout and re-checks are never retried.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
@@ -271,10 +290,17 @@ tmux new -s my-app-ai
    disputes are history: a later branch inherits the unchanged file without a draft,
    and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
-   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   required. The review itself compares against `origin/<base>` when that is strictly
+   ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
+   PRs into the review); the run prints `Review base: <ref> at <sha>`, warns when the two
+   have diverged (then local wins), and never fetches. If that base has moved past your
+   branch, the run stops at the start ("Review base … moved past the branch; merge it
+   into <branch> and rerun"), after finishing any interrupted triage or re-check and
+   before any other agent runs: merge the base only after that stop, then rerun.
+   Recovery escalates this stop and keeps the full message. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every review it requires that the committed bytes equal the validated files.
-   Before and after every push attempt (failed or not) it re-checks that the review is
-   current for HEAD, validation is current, the tree is clean, the committed bytes
+   Before and after every push attempt (failed or not) it re-checks that the base is
+   still contained in HEAD, that the review is current for HEAD, validation is current, the tree is clean, the committed bytes
    equal the validated files and all tasks are DONE, and after a push that origin's
    branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
@@ -324,7 +350,15 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    **review triage** is never committed as leftover work: if only workflow records changed
    since the triage started, `ai-recover` reruns and the pipeline first finishes that
    triage (checks the review it belongs to, the scope and the dispositions, then records
-   the round exactly once); anything else escalates. Otherwise a
+   the round exactly once); anything else escalates. A **plan revision** stage works the
+   same way: only plan records changed → rerun, and the pipeline closes the stage when the
+   host revision record exists or runs the revision once (reserved per plan report, so a
+   resume never counts it twice; model `opus`, or `AI_SUPERVISE_ESCALATE_MODEL` from round
+   `AI_SUPERVISE_ESCALATE_ROUND`); anything else escalates. A revision that recorded
+   questions for you (needs-human) always escalates with those questions, even after a
+   crash and before the attempt limit, and so do a failed plan-revision stage and the
+   supervision limit (`AI_SUPERVISE_PLAN_ROUNDS` revisions per human-started run).
+   Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or
@@ -427,6 +461,18 @@ default **high**). Reviews are where a stronger model pays off most: findings ca
 there save Claude fix rounds. The narrower re-check of rejected findings
 (`ai-review --recheck`) uses `AI_RECHECK_EFFORT` (default **medium**).
 
+### Supervisor settings
+
+Used by the supervisor; validated before any agent runs and captured with the approved
+run (a recovery resume keeps the approved values):
+
+| Setting | Default | Valid |
+|---|---|---|
+| `AI_SUPERVISE` | `1` | `0` or `1` |
+| `AI_SUPERVISE_PLAN_ROUNDS` | `3` | `0`-`9` |
+| `AI_SUPERVISE_ESCALATE_ROUND` | `3` | `1`-`9` |
+| `AI_SUPERVISE_ESCALATE_MODEL` | `claude-fable-5-1` | `[A-Za-z0-9._:-]{1,64}` |
+
 ### Notifications
 
 Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$1`
@@ -435,7 +481,8 @@ subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
-`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`; environment variables win):
+`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
+`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>

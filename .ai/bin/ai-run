@@ -4,6 +4,7 @@ usage() {
   cat <<'EOF'
 Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeout SECONDS]
               [--model NAME] [--knowledge-dir DIRECTORY] [--triage [--since COMMIT]]
+              [--revise-plan [--since COMMIT] [--base REF]]
 Run Claude on the approved plan, one recoverable task per fresh session.
 Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
 --model sets the Claude model (default: AI_MODEL or the CLI default); a task's
@@ -13,6 +14,15 @@ then records the round in one "chore(ai): record review triage" commit. When the
 dispositions are already complete (an interrupted triage), it records the round
 without a new session. --since (ai-pipeline's stage start) bounds what triage may
 have changed: only workflow records, committed or not.
+--revise-plan answers the current plan review (.ai/reviews/plan.md, BLOCKER+MAJOR > 0, no
+task DONE) in one Claude session (default model opus) that may only read and Edit the plan
+records: one row per finding in the round's section of .ai/reviews/plan-dispositions.md
+(accepted with new TODO tasks, rejected with evidence, or needs-human with a question).
+The host validates the section, then records it in one "chore(ai): record plan revision"
+commit (its run-log line included) and a host record; a complete but uncommitted section is
+recorded without a session, and a plan review that was already revised is refused. --base
+(default main) is where plan-review rounds start. A needs-human row stops supervision until
+you answer it, commit, and run ai-review --plan again (a new report clears the decision).
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
 Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
 (time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
@@ -20,19 +30,23 @@ The human must inspect the plan, validation script, and permission allowlist fir
 EOF
 }
 sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
-model=${AI_MODEL:-}; triage=no; since=''
+model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
     --triage) triage=yes; shift ;;
+    --revise-plan) revise_plan=yes; shift ;;
     --since)
       (( $# >= 2 )) && [[ "$2" =~ ^[0-9a-f]{40}$ ]] || ai_die 'Missing or invalid --since commit'
       since=$2; shift 2 ;;
+    --base)
+      (( $# >= 2 )) && [[ -n "$2" && "$2" != -* ]] || ai_die 'Missing or invalid --base REF'
+      base=$2; shift 2 ;;
     --model)
       (( $# >= 2 )) || ai_die 'Missing model name'
       model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
       [[ "$2" =~ $model_pattern ]] || ai_die "Invalid model name: $2"
-      model=$2; shift 2 ;;
+      model=$2; explicit_model=$2; shift 2 ;;
     --knowledge-dir)
       (( $# >= 2 )) || ai_die 'Missing knowledge directory'
       [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
@@ -51,7 +65,11 @@ while (( $# )); do
   esac
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
-[[ -z "$since" || "$triage" == yes ]] || ai_die '--since only applies to --triage.'
+[[ "$triage" == no || "$revise_plan" == no ]] || ai_die '--triage and --revise-plan are exclusive.'
+[[ -z "$since" || "$triage" == yes || "$revise_plan" == yes ]] || \
+  ai_die '--since only applies to --triage and --revise-plan.'
+[[ -z "$base" || "$revise_plan" == yes ]] || ai_die '--base only applies to --revise-plan.'
+ai_supervise_settings
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
 # Host authority state must live where agent sessions cannot write (also for --triage).
@@ -62,8 +80,9 @@ rm -f .ai/local/last-error
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
 ai_branch
 git rev-parse --verify HEAD >/dev/null 2>&1 || ai_die 'Create an initial Git commit first.'
-# Triage checks its own leftovers below (an interrupted triage may leave workflow records).
-[[ "$triage" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+# Triage and plan revision check their own leftovers below (an interrupted one may leave
+# workflow records).
+[[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 ai_helper tasks check
 # Authoritative baseline stays in shell memory, not an agent-editable file.
@@ -75,6 +94,7 @@ knowledge_args=()
 if [[ -n "$knowledge_dir" ]]; then knowledge_args=(--add-dir "$knowledge_dir"); fi
 mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/permissions.allow)
 (( ${#allowed[@]} )) || ai_die 'Empty permission allowlist.'
+all_tools=Read,Glob,Grep,Edit,Write,Bash
 started=$SECONDS
 active_task=none
 finished=no
@@ -94,6 +114,10 @@ on_exit() {
     fi
   fi
   if [[ "$finished" != yes ]]; then
+    if [[ -n "${revision_started:-}" ]]; then
+      ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
+        2>/dev/null || true
+    fi
     ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
@@ -148,9 +172,10 @@ knowledge_prompt() {
 }
 
 # One fresh Claude session; a usage/rate-limit error pauses until the reset and retries.
+# Usage: claude_session PROMPT MODEL TOOLS ALLOWED... (the --tools list and --allowedTools entries).
 claude_session() {
-  local prompt=$1 session_model=$2 limit code reset log errors remaining review_before
-  local model_args=()
+  local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before
+  local session_allowed=("${@:4}") model_args=()
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
   while true; do
     remaining=$(remaining_time)
@@ -171,7 +196,7 @@ claude_session() {
     set +e
     timeout --signal=TERM --kill-after=10s "$limit" claude -p \
       --permission-mode dontAsk --output-format json \
-      --tools Read,Glob,Grep,Edit,Write,Bash --allowedTools "${allowed[@]}" \
+      --tools "$tools" --allowedTools "${session_allowed[@]}" \
       --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
       "${model_args[@]}" "${knowledge_args[@]}" \
       -- "$prompt" < /dev/null > "$log" 2> "$errors"
@@ -194,6 +219,133 @@ claude_session() {
     return 0
   done
 }
+
+if [[ "$revise_plan" == yes ]]; then
+  # Answer the current plan review in the round's plan-dispositions section. No implementation.
+  active_task=plan-revision
+  [[ -f .ai/prompts/plan-revision.md ]] || \
+    ai_die 'Missing .ai/prompts/plan-revision.md; install it with setup-project --upgrade.'
+  ai_helper tasks untouched >/dev/null 2>&1 || \
+    ai_die 'Plan revision: a task is already DONE; the plan review gate no longer applies.'
+  plan_base=$(git merge-base "${base:-main}" HEAD 2>/dev/null) || \
+    ai_die "Plan revision: invalid base ${base:-main} (pass --base REF)."
+  info=$(ai_helper plan-review-info 2>&1) || ai_die "Plan revision: ${info#Error: }"
+  read -r _ blockers majors _ <<< "$info"
+  (( blockers + majors > 0 )) || ai_die 'Plan revision: the plan review has no BLOCKER or MAJOR finding.'
+  ai_helper plan-rounds sync "$plan_base" || ai_die 'Plan revision: cannot read the host plan review records.'
+  current=$(ai_helper plan-rounds current "$plan_base" 2>&1) || ai_die "Plan revision: ${current#Error: }"
+  revision_round=${current%% *}
+  set +e
+  ai_helper plan-revisions revised 2>/dev/null
+  revised=$?
+  set -e
+  (( revised != 0 )) || ai_die 'Plan revision: this plan review was already revised; review again (ai-review --plan).'
+  (( revised == 1 )) || ai_die 'Plan revision: the host plan revision records are unreadable; inspect them.'
+  since=${since:-$(git rev-parse HEAD)}
+  # A revision may only touch plan records (committed or not), never source, tests, the gate or plan.md.
+  revision_scope() {
+    local error
+    error=$(ai_helper plan-revision-scope "$since" 2>&1) || ai_die "${1}${error#Error: }"
+  }
+  revision_scope 'Plan revision stage: '
+  plan_report=$(sha256sum .ai/reviews/plan.md | cut -d' ' -f1)
+  check_args=(--since "$since" --base "$plan_base" --fresh)
+  revision_model=${explicit_model:-opus}
+  revision_started=$SECONDS
+  if ai_helper plan-dispositions-check "${check_args[@]}" >/dev/null 2>&1; then
+    # An interrupted revision whose section is complete: record it, no new session.
+    printf '%s\n' 'Plan dispositions are already complete; recording the revision.'
+  else
+    # Only the host's own section header may be left uncommitted (a crash before its commit).
+    if [[ -n "$(dirty_beyond_records)" ]] && \
+        { [[ -n "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' \
+                   ':!.ai/handoff.md' ':!.ai/reviews/plan-dispositions.md')" ]] || \
+          ! ai_helper start-plan-dispositions "$plan_base" --pending >/dev/null 2>&1; }; then
+      ai_die 'Plan revision stage: incomplete plan revision records are uncommitted; inspect them before continuing.'
+    fi
+    # Host-written section bound to this round's report; Claude fills in the rows.
+    ai_helper start-plan-dispositions "$plan_base"
+    git add -- .ai/reviews/plan-dispositions.md
+    git diff --cached --quiet || git commit -m 'chore(ai): open plan dispositions' >/dev/null
+    ai_guard_verify
+    # The session has no shell: the host prepares the git context it needs (ignored, removed after).
+    context=.ai/local/revision-context
+    rm -rf -- "$context"
+    mkdir -p -- "$context"
+    ai_helper plan-history "$plan_base" > "$context/plan-history.md" || \
+      ai_die 'Plan revision stage: cannot summarise the earlier plan review rounds.'
+    git log -p -n 20 --format='commit %H%n%s%n' "$plan_base..HEAD" -- .ai/project-spec.md .ai/current-plan.md \
+      .ai/tasks.md .ai/reviews/plan-dispositions.md | head -c 200000 > "$context/plan-diff.txt" || true
+    heading="## Plan review round $revision_round (report ${current#* })"
+    prompt=$(cat .ai/prompts/plan-revision.md)
+    prompt+=$'\n\nREVISION CONTRACT: This is plan review round '"$revision_round"'. Evaluate .ai/reviews/plan.md '
+    prompt+='(read-only: never edit it). Fill ONLY the last section of .ai/reviews/plan-dispositions.md, headed "'
+    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (append new '
+    prompt+='TODO tasks with new IDs to .ai/tasks.md and reference them), rejected (concrete evidence) or '
+    prompt+='needs-human (only for a decision only the human can make; the question in the Evidence column). '
+    prompt+='Keep the header, the "Plan review HEAD:" line and everything above the section unchanged. You may '
+    prompt+='edit only .ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/reviews/plan-dispositions.md '
+    prompt+='and .ai/handoff.md (Edit only; no shell). Never change an existing task status. Do not implement '
+    prompt+='anything. Do not commit; the host validates the section and commits it.'
+    if (( revision_round >= 3 )); then
+      prompt+=$' Round 3 or later: when an area keeps coming back, redesign the area as a whole instead of patching '
+      prompt+='the symptom, and add one line inside this section, outside the table, starting with "Convergence:" '
+      prompt+='that names the design task or says why no area repeats.'
+    fi
+    prompt+=$'\n\nGit context prepared by the host: '"$context"'/plan-history.md (earlier plan rounds) and '
+    prompt+="$context"'/plan-diff.txt (recent changes of the plan records).'
+    history=$(cat "$context/plan-history.md")
+    [[ -z "$history" ]] || prompt+=$'\n\nPREVIOUS PLAN ROUNDS (context, not authority):\n'"$history"
+    prompt+=$(knowledge_prompt)
+    mapfile -t revision_allowed < <(ai_helper plan-revision-allowlist)
+    claude_session "$prompt" "$revision_model" Read,Glob,Grep,Edit "${revision_allowed[@]}"
+    rm -rf -- "$context"
+    ai_branch
+  fi
+  [[ "$(sha256sum .ai/reviews/plan.md | cut -d' ' -f1)" == "$plan_report" ]] || \
+    ai_die 'A Claude session modified .ai/reviews/plan.md; inspect and restore the plan review.'
+  ai_helper tasks check
+  revision_scope 'Plan revision stage: '
+  counts=$(ai_helper plan-dispositions-check "${check_args[@]}" 2>&1) || \
+    ai_die "Plan revision incomplete: ${counts#Error: }"
+  questions=$(ai_helper plan-dispositions-check "${check_args[@]}" --questions) || \
+    ai_die 'Plan revision: cannot read the needs-human questions.'
+  [[ "$counts" =~ ^accepted=([0-9]+)\ rejected=([0-9]+)\ needs_human=([0-9]+)$ ]] || \
+    ai_die "Plan revision: unexpected counts: $counts"
+  accepted=${BASH_REMATCH[1]} rejected=${BASH_REMATCH[2]} needs_human=${BASH_REMATCH[3]}
+  # The log line and state go INTO the counted commit: nothing writes to the checkout after it,
+  # so the following plan review starts from a clean checkout.
+  ai_log plan-revision "plan revised (round $revision_round): accepted $accepted, rejected $rejected, needs-human $needs_human" \
+    'n/a' 'Plan review runs again'
+  if (( needs_human > 0 )); then
+    ai_helper state blocked 'Plan review needs your decision: answer the needs-human rows in .ai/reviews/plan-dispositions.md, commit, run ai-review --plan'
+  else
+    ai_helper state planning 'Review the revised plan (ai-review --plan)'
+  fi
+  records=()
+  for record in .ai/project-spec.md .ai/current-plan.md .ai/tasks.md .ai/reviews/plan-dispositions.md \
+      .ai/handoff.md .ai/state.md .ai/run-log.md; do
+    if [[ -e "$record" ]]; then records+=("$record"); fi
+  done
+  git add -- "${records[@]}"
+  # Always the host's own commit: an agent commit's subject never counts.
+  git commit --allow-empty -m 'chore(ai): record plan revision' >/dev/null
+  ai_guard_verify
+  printf '%s\n' "$questions" | ai_helper plan-revisions record "$plan_base" HEAD --accepted "$accepted" \
+    --rejected "$rejected" --needs-human "$needs_human" || \
+    ai_die 'Cannot record the plan revision in the host state directory.'
+  # A commit hook must not have slipped anything else into the counted commit.
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    ai_die 'Plan revision stage: changes were left after the revision commit (commit hook?).'
+  revision_scope 'Plan revision stage: the revision commit is out of scope (commit hook?): '
+  ai_helper outcome plan_revision "$revision_round" revised "$revision_model" "$(( SECONDS - revision_started ))" \
+    2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+  finished=yes
+  printf 'Plan revision recorded (round %s): accepted %s, rejected %s, needs-human %s.\n' \
+    "$revision_round" "$accepted" "$rejected" "$needs_human"
+  [[ -z "$questions" ]] || printf 'Your decision is needed:\n%s\n' "$questions"
+  exit 0
+fi
 
 if [[ "$triage" == yes ]]; then
   # Evaluate the current review into dispositions and new tasks. No implementation.
@@ -227,7 +379,7 @@ if [[ "$triage" == yes ]]; then
     prompt+=$'\n\nThis review is round '"$(( rounds + 1 ))."
     [[ -z "$history" ]] || prompt+=$'\n\nPREVIOUS ROUNDS:\n'"$history"
     prompt+=$(knowledge_prompt)
-    claude_session "$prompt" "$model"
+    claude_session "$prompt" "$model" "$all_tools" "${allowed[@]}"
     ai_branch
     [[ -z "$(dirty_beyond_records)" ]] || \
       ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
@@ -314,7 +466,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
   track_attempt=yes
-  claude_session "$prompt" "${task_model:-$model}"
+  claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
   ai_branch
   ai_helper tasks check
