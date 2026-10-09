@@ -133,3 +133,4 @@
 | 2026-10-09T05:30Z | claude (sonnet) | T001 | DONE: parallel runner sets PYTHON_COLORS=0 and parses summaries ANSI-safe; 3 regression tests, docs | parallel_runner 10 OK; ai-check 290 OK; both mutation checks fail as expected | (this commit) | Python 3.14.7 |
 | 2026-10-09T05:15:11Z | runner | T001 | completed | PASS | 4877b7e | Claude checkpointed; continuing queue |
 | 2026-10-09T05:45Z | claude (sonnet) | T002 | DONE: per-attempt "Attempts by model" tables in outcomes_report, 3 new tests, docs | outcome tests 12 OK; ai-check 293 OK | (this commit) | category table unchanged |
+| 2026-10-09T05:22:21Z | runner | T002 | completed | PASS | 75c3f1c | Claude checkpointed; continuing queue |
