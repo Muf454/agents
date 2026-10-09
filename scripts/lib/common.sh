@@ -77,10 +77,13 @@ ai_review_args() {
 # Notification hook: AI_NOTIFY_CMD runs via bash with the message as $1
 # (e.g. curl -s -d "$1" ntfy.sh/<topic>). Failures never affect the workflow.
 ai_notify() {
-  [[ -n "${AI_NOTIFY_CMD:-}" ]] || return 0
   local project
   project=$(basename -- "${AI_ROOT:-$PWD}")
-  timeout 20 bash -c "$AI_NOTIFY_CMD" ai-notify "[$project] $*" </dev/null >/dev/null 2>&1 || true
+  if [[ -n "${AI_NOTIFY_CMD:-}" ]]; then
+    timeout 20 bash -c "$AI_NOTIFY_CMD" ai-notify "[$project] $*" </dev/null >/dev/null 2>&1 || true
+  fi
+  # Kept locally as well (read by ai-dashboard), also when nothing is sent.
+  ai_notify_log "[$project] $*"
 }
 
 # Usage-limit pause: wait until the provider's reset (or AI_LIMIT_RETRY seconds when
@@ -99,7 +102,9 @@ ai_limit_pause() {
   [[ -d .ai/local ]] && printf '%s paused %ss: %s usage limit (resume ~%s)\n' \
     "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
   ai_notify "⏸ PAUSED: $agent usage limit reached. Resumes by itself around $until."
+  ai_observe pause "$agent until $until"
   ${AI_SLEEP:-sleep} "$wait"
+  ai_observe resume
   AI_WAITED=$(( AI_WAITED + wait ))
 }
 ai_root() {

@@ -13,6 +13,9 @@ helpers `ai_observe` and `ai_notify_log` skip themselves once it is set; no call
 T002). ai-run `on_exit`, ai-pipeline `stop()` and its approval/resume gate stops, and every
 ai-recover comparison set it; ai-run's EXIT handler also no longer writes the plan-revision
 outcome line after a gate change. Messages and exit codes unchanged.
+T002 (2026-10-09): `ai_notify` also writes every message to `.ai/local/notifications.log` (via
+`ai_notify_log`, also without `AI_NOTIFY_CMD`; what is sent is unchanged); `ai_limit_pause`
+records `observe pause`/`resume`. Covers the watchdog, ai-review and pipeline notifications.
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -51,10 +54,10 @@ renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See al
   same `AI_STATE_DIR`/XDG settings as the pipelines.
 
 ## Flow chart
-Flow chart updated: PENDING (T002/T003 will add a note under "Phone notifications" in the
-vault `agents-flow.md`: notifications mirrored to `.ai/local/notifications.log`, stages
-recorded in `.ai/local/observation.json`, for `ai-dashboard`; the flow itself is unchanged).
-Not done yet.
+Flow chart updated: vault `agents-flow.md` has a note under "Phone notifications" (T002):
+notifications are mirrored to `.ai/local/notifications.log` for `ai-dashboard`; stage records
+in `.ai/local/observation.json` follow with T003–T005 (the note is extended then). The flow
+itself is unchanged.
 
 ## Manual testing for the human
 
@@ -81,6 +84,12 @@ Not done yet.
   `test_observation_writer_pipeline_register_keeps_replaced_entry`,
   `test_observation_writer_pipeline_register_unusable_directory`.
 - `tasks counts`: `test_observation_writer_tasks_counts`.
+- Notification mirror and pause overlay: `test_observation_notify_log_mirrors_what_was_sent`,
+  `test_observation_notify_watchdog_notification_is_logged_and_symlink_safe`,
+  `test_observation_notify_fifo_log_and_held_lock_do_not_block_the_run`,
+  `test_observation_notify_usage_limit_pause_marks_the_stage_paused`,
+  `test_observation_notify_codex_pause_marks_the_stage_paused`,
+  `test_observation_notify_gate_changed_stop_notifies_but_logs_nothing`.
 - No project helper after a changed gate: `test_observation_gate_flag_skips_record_helpers`,
   `test_observation_gate_check_sets_flag_on_changed_or_unreadable_gate`,
   `test_observation_gate_ok_form_sets_flag_in_calling_shell`,
@@ -93,4 +102,4 @@ Not done yet.
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001 and T010 done; next T002 (notification mirror and pause overlay).
+T001, T010 and T002 done; next T003 (ai-pipeline stage records).

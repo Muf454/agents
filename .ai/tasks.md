@@ -341,7 +341,7 @@ Note: ai-recover's later comparisons now discard the verifier's stderr detail (o
 escalate message prints), as `ai_deps` and the pipeline already did.
 
 ## T002 — Notification mirror and pause overlay (common.sh)
-Status: TODO
+Status: DONE
 Dependencies: T001, T010
 Model: sonnet
 
@@ -390,6 +390,12 @@ Targeted: `python3 -m unittest discover -s tests -k observation_notify` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude sonnet): done. `scripts/lib/common.sh`: `ai_notify` sends exactly as before
+(only when `AI_NOTIFY_CMD` is set) and then always calls `ai_notify_log "[$project] $*"`;
+`ai_limit_pause` calls `ai_observe pause "<agent> until <time>"` before the sleep and
+`ai_observe resume` after. Tests: 6 `test_observation_notify_*` in `tests/test_workflow.py`
+(`-k observation_notify`: Ran 6, OK); full gate `.ai/bin/ai-check`: 446 tests OK. Vault
+`agents-flow.md` note added, `updated:` 2026-10-09; handoff "Flow chart" wording completed.
 
 ## T003 — Pipeline stage records and registration (ai-pipeline)
 Status: TODO

@@ -1485,6 +1485,97 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
         self.assertEqual(self.notifications().count('⛔ STOPPED, needs you: runner stopped at T001'), 1)
 
+    def logged_notifications(self):
+        path = self.project / '.ai/local/notifications.log'
+        return [json.loads(line)['message'] for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_observation_notify_log_mirrors_what_was_sent(self):
+        self.ready()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once')
+        sent = self.notifications().splitlines()
+        self.assertTrue(any('⏸ PAUSED: Claude usage limit' in line for line in sent), sent)
+        self.assertEqual(self.logged_notifications(), sent)
+        # without a notification command the lines are still kept
+        (self.project / '.ai/local/notifications.log').unlink()
+        self.notify_log.unlink()
+        env = dict(self.env)
+        env.pop('AI_NOTIFY_CMD')
+        self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; AI_ROOT=$PWD; ai_notify "hello there"'], env=env)
+        self.assertEqual(self.logged_notifications(), ['[project with spaces] hello there'])
+        self.assertFalse(self.notify_log.exists())
+
+    def test_observation_notify_watchdog_notification_is_logged_and_symlink_safe(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        other = self.base / 'other'
+        other.mkdir()
+        self.watchdog_runner(other)
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep\n')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        (self.project / '.ai/local/notifications.log').symlink_to(sentinel)
+        self.watchdog(expected=1)
+        self.assertEqual(sentinel.read_text(), 'keep\n')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        (self.project / '.ai/local/notifications.log').unlink()
+        self.watchdog_phase('ready_for_review')
+        self.watchdog()
+        self.watchdog_phase('fixing_review')
+        self.watchdog(expected=1)
+        self.assertEqual(self.logged_notifications(), self.notifications().splitlines()[1:])
+
+    def test_observation_notify_fifo_log_and_held_lock_do_not_block_the_run(self):
+        import fcntl
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        os.mkfifo(local / 'notifications.log')
+        with open(local / 'notifications.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once')
+        self.helper('tasks', 'complete')
+        self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
+
+    def pause_probe(self):
+        probe = self.mock_bin / 'probe-sleep'
+        probe.write_text('#!/usr/bin/env bash\n'
+                         f'cp .ai/local/observation.json "{self.base}/during.json"\n')
+        probe.chmod(0o755)
+        return probe
+
+    def test_observation_notify_usage_limit_pause_marks_the_stage_paused(self):
+        self.ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'build', 'T001')
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once', AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'build'))
+        self.assertIn('Claude until', during['note'])
+        after = json.loads((self.project / '.ai/local/observation.json').read_text())
+        self.assertEqual((after['state'], after['stage'], after['note']), ('active', 'build', ''))
+
+    def test_observation_notify_codex_pause_marks_the_stage_paused(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'review')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', AI_REVIEWER='codex',
+                  AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'review'))
+        self.assertIn('Codex until', during['note'])
+        after = json.loads((self.project / '.ai/local/observation.json').read_text())
+        self.assertEqual((after['state'], after['stage']), ('active', 'review'))
+
+    def test_observation_notify_gate_changed_stop_notifies_but_logs_nothing(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertIn('Approved workflow gate changed during this run', result.stderr)
+        self.assertEqual(self.notifications().count('⛔ STOPPED, needs you: runner stopped at T001'), 1)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertFalse((self.project / '.ai/local/notifications.log').exists())
+
     def test_integrity_verifier_cannot_import_project_modules(self):
         self.ready()
         # An unrelated project module must not replace the verifier's hashlib.
