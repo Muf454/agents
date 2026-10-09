@@ -260,7 +260,8 @@ tmux new -s my-app-ai
    `--max-fix-rounds` rounds (default 2), counted from host state per branch (never
    from commit messages). Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
-   whose counts disagree with its listed finding IDs is rejected.
+   whose counts disagree with its listed finding IDs is rejected (a findings section with
+   a count of 0 may be left out, and the verdict may be an `## Overall verdict` heading).
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
@@ -271,10 +272,17 @@ tmux new -s my-app-ai
    disputes are history: a later branch inherits the unchanged file without a draft,
    and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
-   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   required. The review itself compares against `origin/<base>` when that is strictly
+   ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
+   PRs into the review); the run prints `Review base: <ref> at <sha>`, warns when the two
+   have diverged (then local wins), and never fetches. If that base has moved past your
+   branch, the run stops at the start ("Review base … moved past the branch; merge it
+   into <branch> and rerun"), after finishing any interrupted triage or re-check and
+   before any other agent runs: merge the base only after that stop, then rerun.
+   Recovery escalates this stop and keeps the full message. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every review it requires that the committed bytes equal the validated files.
-   Before and after every push attempt (failed or not) it re-checks that the review is
-   current for HEAD, validation is current, the tree is clean, the committed bytes
+   Before and after every push attempt (failed or not) it re-checks that the base is
+   still contained in HEAD, that the review is current for HEAD, validation is current, the tree is clean, the committed bytes
    equal the validated files and all tasks are DONE, and after a push that origin's
    branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).

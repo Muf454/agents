@@ -1,13 +1,11 @@
-<!-- Plan review of plan digest 1c1857fb8a0c6b2e486c01a427d03429e9115b220676c7e79322da88b4c35594; saved 2026-10-08T05:11:23Z. -->
+<!-- Plan review of plan digest 5e1d2bcd13f79d67f692381a0b50bacce6efd3e6df823d7a3569533bd62ff1c9; saved 2026-10-08T20:39:58Z. -->
 
 # Plan review
 
-Overall verdict: READY FOR IMPLEMENTATION. No new findings in the inspected scope. Revision 7 addresses the earlier plan gaps and explicitly defers crash-durable telemetry.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Overall verdict: APPROVE WITH MINOR PLAN CORRECTIONS.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `7b407f824c1561ceda1e23eea2deebe2bd2dc941`
-
-Inspected repository instructions, spec, plan, tasks, state, handoff, prior reviews/dispositions, relevant scripts and prompts, test harness, validation entry points, Git history, and relevant vault flow-chart/backlog entries. Changes since `ba330ef` contain planning and workflow records; implementation has not started.
+Reviewed HEAD: `96c50686eef1ce214cdd46cb241cb223a61800f5` — plan revision 3.
 
 ## BLOCKER findings
 
@@ -19,50 +17,45 @@ None.
 
 ## MINOR findings
 
-None.
+- P9: The advanced-base recovery test expects the wrong resolved ref.
 
-## Requirements and task assessment
+  **Location:** `.ai/tasks.md:105`; base selection and diagnostic construction at `.ai/tasks.md:57–61,99`.
 
-T001 replaces the unsafe reviewer Bash policy with Read/Glob/Grep only. Its context preparation accounts for code, plan and re-check modes, preserves Codex prompts, checks mandatory preparation failures explicitly, and specifies meaningful content and cleanup assertions. The proposed `review-range` helper obtains the re-check base from a verified review.
+  This fixture advances origin/main beyond local main. T002 therefore selects `origin/main`, and T003 builds its message from that resolved ref. The prescribed assertion instead requires `Review base main (`. A correct implementation would fail that assertion.
 
-T002 accounts for stopped implementation attempts without opening attempts for triage or exhausted preflight budgets. It addresses malformed queues, duplicate terminal outcomes, usage-limit retries, and bounded signal tests. The SIGKILL/OOM/power-loss limitation is explicit and recorded separately as CU-5.
+  **Concrete plan change:** require `Review base origin/main (` for the advanced-origin startup tests, including automatic recovery. Keep the `main` expectation in the separate publish-hook fixture, which does not advance origin/main.
 
-Both tasks specify models appropriate to their remaining scope. Their order is valid. Documentation and flow-chart updates accompany each workflow change; installed-copy upgrades remain under human control.
+- P10: Specify and test saved-review reuse when the resolved base advances.
 
-## Missing coverage
+  **Location:** `.ai/tasks.md:60–65`; `.ai/project-spec.md:37–38,68`; `scripts/ai-pipeline:155–160,326–337`.
 
-The planned regression tests are not yet implemented. No additional significant coverage gap was identified in the inspected paths.
+  The existing `review_current` predicate checks that the resolved base is an ancestor of the reviewed commit and that reviewable content is unchanged. It does not require the saved review’s merge-base to equal the newly resolved base. Consequently, a resumed run can select newer origin/main and reuse a review covering the older, broader range without invoking `ai-review`.
 
-The mocked CLI tests establish invocation arguments and host behavior; the planned live Claude check remains necessary to verify actual tool enforcement.
+  This is existing behavior, and preserving that predicate is an explicit non-goal. However, the “same commit” requirement is ambiguous for this case, and T002’s fresh fixtures do not cover it.
 
-## Security concerns
+  **Concrete plan change:** document that the same-base guarantee applies to newly requested reviews and that a valid broader saved review remains reusable. Add a rerun regression with a saved review and an advanced origin/main already contained in the reviewed HEAD; assert the intended reuse, resolved-base diagnostic and unchanged review binding.
 
-Removing Bash, Edit and Write closes the demonstrated reviewer command-writing routes. The invocation retains disabled MCP configuration and the checkout-unchanged check.
+## Scope and risk assessment
 
-Read access is not confined by an OS sandbox. The plan acknowledges this and adds checkout-only instructions; live testing must not describe those instructions as filesystem isolation.
+The inspected source supports T001’s reliance on `review_counts`: missing zero-count sections pass, while the prescribed positive-count and count/ID mismatches fail. T004’s proposed non-capturing suffix preserves the groups consumed by triage, history, re-check preparation and PR summaries.
 
-## Architecture concerns
+T003’s placement preserves interrupted-stage scope checks before advising a merge. Its recovery diagnostics and mandatory publish-hook fixtures address the earlier findings. FL-12 is explicitly deferred and its parser remains unchanged.
 
-The plan reuses existing review publication, binding and outcome machinery without adding dependencies. It preserves frozen installed gate files and keeps the deferred durability work outside this implementation.
+All tasks specify suitable models. No task’s own failed implementation attempt is recorded. T003’s dependency on T002 is appropriate. No dependency addition or schema migration is proposed. Planned flow-note updates respect the repository’s maintenance rule.
 
 ## Validation observed
 
-- Python syntax parsing passed for four source/test files.
-- Bash syntax checks passed individually for 13 script/template/validation files.
-- Test discovery collected 272 existing cases.
-- `git diff --check ba330ef..HEAD` passed.
-- HEAD and the clean checkout remained unchanged.
+- Confirmed the requested HEAD and clean checkout; inspected guidance, workflow records, relevant source, tests, documentation, validation entry points and the vault flow note.
+- Shell syntax passed for 13 files; Python AST parsing passed for three files.
+- Read-only discovery collected 287 tests.
+- Three existing documentation consistency tests passed.
+- In-memory checks confirmed the specified count-parser rejection cases and proposed suffix capture groups.
+- `git diff --check c7d4dee..HEAD` passed.
 
-Test bodies, `./scripts/ai-check`, and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current implementation-validation evidence was present. No files were modified and no network/MCP integrations were invoked.
+Integration test bodies, `./scripts/ai-check` and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current validation stamp exists. Planned regression results remain unobserved.
+
+No files were modified and no network/MCP integrations were invoked.
 
 ## Manual testing recommendations
 
-### Needs you
-
-Perform the planned live Claude tool-enforcement check in a disposable fixture. Approve installed-copy upgrades separately.
-
-### Covered by automated tests
-
-Implement the specified context, preparation-failure, outcome, retry and signal regressions, then run targeted checks and the full gate.
-
-This review is not human acceptance.
+After implementation and the full offline gate, check resolved-base messages and notifications with recovery enabled and disabled, then verify merge-and-rerun after interrupted triage and re-check stages. Inspect the flow-note changes alongside T002/T003. Installed-copy upgrades and human acceptance remain separate actions.

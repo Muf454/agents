@@ -307,6 +307,11 @@ if mode == 'counts-lie':
                     '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
                     '## Manual testing recommendations\nx\n')
     sys.exit(0)
+if mode == 'verdict-heading':
+    path.write_text('# Independent review\n## Overall verdict\n\nApprove with two minor notes\n\n'
+                    'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n## BLOCKER findings\nNone found.\n'
+                    '## MAJOR findings\nNone found.\n## Missing test coverage\nx\n')
+    sys.exit(0)
 major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
 two = mode == 'two-major-once' and count == 1
 path.write_text("""# Independent review
@@ -2833,6 +2838,79 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('counts MAJOR=0', result.stderr)
         self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
 
+    def publish_report(self, text, plan=False, expected=0):
+        report = self.base / 'format-report.md'
+        report.write_text(text)
+        if plan:
+            digest = self.helper('plan-digest').stdout.strip()
+            return self.helper('publish-plan-review', str(report), digest, expected=expected)
+        return self.helper('publish-review', str(report), 'a' * 40, 'b' * 40, expected=expected)
+
+    def test_review_format_missing_zero_count_sections_are_accepted(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.assertEqual(self.helper('review-info').stdout.split(), ['a' * 40, '0', '1', '0'])
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## BLOCKER findings\nNone.\n## MAJOR findings\n- P1: T001 has no test.\n', plan=True)
+        self.assertEqual(self.helper('plan-review-info').stdout.split(), ['current', '0', '1', '0'])
+
+    def test_review_format_count_mismatches_are_still_rejected(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        self.publish_report('# Plan review\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n', plan=True)
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        plan = (self.project / '.ai/reviews/plan.md').read_bytes()
+        counts = 'Finding counts: BLOCKER=0 MAJOR={} MINOR={}\n'
+        cases = {
+            'minor section missing': counts.format(0, 1),
+            'minor section only none': counts.format(0, 1) + '## MINOR findings\nNone.\n',
+            'major listed but counted 0': counts.format(0, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'major count above ids': counts.format(2, 0) + '## MAJOR findings\n- M1: a defect.\n',
+            'no counts line': '## MAJOR findings\nNone.\n',
+            'two counts lines': counts.format(0, 0) + counts.format(0, 0),
+        }
+        for name, body in cases.items():
+            for is_plan in (False, True):
+                with self.subTest(case=name, plan=is_plan):
+                    self.publish_report('# Review\nOverall verdict: ok\n' + body, plan=is_plan, expected=1)
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+                    self.assertEqual((self.project / '.ai/reviews/plan.md').read_bytes(), plan)
+
+    def test_review_format_verdict_heading_is_accepted(self):
+        self.setup_project()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for heading in ('## Overall verdict', '## Overall verdict:', '### Overall verdict'):
+            with self.subTest(heading=heading):
+                self.publish_report(f'# Review\n{heading}\n\n<!-- note -->\nApprove with two minor notes\n\n'
+                                    '## Findings\n' + tail)
+                self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+                body = self.helper('pr-body', '1', '0').stdout
+                self.assertIn('Verdict: Approve with two minor notes.', body)
+
+    def test_review_format_missing_or_empty_verdict_is_rejected(self):
+        self.setup_project()
+        self.publish_report('# Review\nOverall verdict: ok\nFinding counts: BLOCKER=0 MAJOR=0 MINOR=0\n')
+        current = (self.project / '.ai/reviews/current.md').read_bytes()
+        tail = 'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n'
+        for name, text in (('no verdict', '# Review\n' + tail),
+                           ('empty heading', '# Review\n## Overall verdict\n\n<!-- x -->\n## Counts\n' + tail),
+                           ('empty heading at end', '# Review\n' + tail + '## Overall verdict\n\n'),
+                           ('empty line', '# Review\nOverall verdict:\n' + tail)):
+            with self.subTest(case=name):
+                result = self.publish_report(text, expected=1)
+                self.assertIn('missing Overall verdict', result.stderr)
+                self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), current)
+
+    def test_review_format_verdict_heading_through_ai_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='verdict-heading')
+        report = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('Approve with two minor notes', report)
+        self.assertNotIn('## MINOR findings', report)
+        self.assertEqual(self.helper('review-info').stdout.split()[1:], ['0', '0', '0'])
+
     def test_no_claude_session_may_rewrite_the_codex_review(self):
         self.ready()
         self.add_origin()
@@ -2918,6 +2996,242 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0]
         self.assertEqual(create[create.index('--base') + 1], 'develop')
         self.assertTrue(origin.exists())
+
+    # ---------------------------------------------------------------- review base (FL-15)
+    def git_out(self, *args):
+        return self.run_cmd(['git', *args]).stdout.strip()
+
+    def origin_with_main(self):
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return origin
+
+    def commit_on(self, parent, message):
+        return self.git_out('commit-tree', f'{parent}^{{tree}}', '-p', parent, '-m', message)
+
+    def advance_origin_main(self):
+        """Moves origin's main one commit ahead without touching the local main branch."""
+        sha = self.commit_on('origin/main', 'merged elsewhere')
+        self.run_cmd(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        return sha
+
+    def advance_local_main(self):
+        sha = self.commit_on('main', 'local only')
+        self.run_cmd(['git', 'branch', '-f', 'main', sha])
+        return sha
+
+    def assert_reviewed_against(self, result, ref, sha, behind=False):
+        short = self.git_out('rev-parse', '--short', sha)
+        line = f'Review base: {ref} at {short}' + (' (local main is behind)' if behind else '')
+        self.assertIn(line + '\n', result.stdout)
+        header = re.search(r'merge-base ([0-9a-f]{40})', (self.project / '.ai/reviews/current.md').read_text())
+        self.assertEqual(header.group(1), sha)
+        prompts = (self.base / 'codex-prompts.log').read_text()
+        self.assertIn(f'supplied base={sha}; merge-base={sha}.', prompts)
+
+    def test_review_base_origin_ahead_of_local(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        local = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        self.assertNotIn(f'merge-base={local}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_origin_ahead_pr_still_targets_main(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assert_reviewed_against(result, 'origin/main', sha, behind=True)
+        create = [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0]
+        self.assertEqual(create[create.index('--base') + 1], 'main')
+
+    def test_review_base_equal_to_origin(self):
+        self.origin_with_main()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+        self.assertNotIn('diverged', result.stdout)
+
+    def test_review_base_without_origin_ref(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', self.git_out('rev-parse', 'main'))
+
+    def test_review_base_local_ahead_of_origin(self):
+        self.origin_with_main()
+        remote = self.git_out('rev-parse', 'origin/main')
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assert_reviewed_against(result, 'main', sha)
+        self.assertNotIn('is behind', result.stdout)
+        self.assertNotIn(f'merge-base={remote}', (self.base / 'codex-prompts.log').read_text())
+
+    def test_review_base_diverged_uses_local(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.advance_local_main()
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', sha])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Local main and origin/main have diverged; reviewing against local main.', result.stdout)
+        self.assert_reviewed_against(result, 'main', sha)
+
+    def test_review_base_explicit_sha(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        sha = self.git_out('rev-parse', 'main')
+        result = self.tool('ai-pipeline', '--approved', '--base', sha, '--no-pr')
+        self.assert_reviewed_against(result, sha, sha)
+
+    # ---------------------------------------------------------------- base moved past the branch (FL-17)
+    def base_moved_message(self, ref, sha):
+        short = self.git_out('rev-parse', '--short', sha)
+        return f'Review base {ref} ({short}) moved past the branch; merge it into feature/test and rerun ai-pipeline'
+
+    def codex_calls(self):
+        calls = self.base / 'codex-calls'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def test_base_moved_stops_before_any_agent(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        for base in ('main', 'origin/main'):
+            with self.subTest(base=base):
+                result = self.tool('ai-pipeline', '--approved', '--base', base, '--no-pr', expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertIn('Pipeline stopped during start', result.stderr)
+                self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+                self.assertFalse((self.base / 'codex-prompts.log').exists())
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn('moved past the branch; merge it', notes)
+        # Merging the base is the fix: the rerun proceeds normally.
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+
+    def test_base_moved_recovery_escalates_without_claude(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn(message, result.stderr)
+        self.assertIn('escalated to the human: the review base moved past the branch.', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertEqual((self.project / '.ai/local/last-error').read_text().strip(), message)
+        notes = self.notifications()
+        self.assertIn('⛔ STOPPED, needs you', notes)
+        self.assertIn(f'Review base origin/main ({self.git_out("rev-parse", "--short", sha)})', notes)
+
+    def open_triage_stage_with_origin(self, counted):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        self.add_origin()
+        self.run_cmd(['git', 'push', '-q', 'origin', 'main'])
+        self.run_cmd(['git', 'fetch', '-q', 'origin'])
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        head = self.git_out('rev-parse', 'HEAD')
+        self.helper('run-manifest', 'stage-set', 'triage', head)
+        if counted:
+            self.tool('ai-run', '--approved', '--triage', '--since', head)
+            self.assertEqual(self.triage_rounds(), 1)
+        return self.advance_origin_main()
+
+    def assert_triage_settled_then_merge(self, sha):
+        reviews = self.codex_calls()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX='major-once')
+        self.assertIn('Completing the interrupted review triage', result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.triage_calls(), 1)
+        self.assertEqual(self.open_stage(), '')
+        self.assertIn(self.base_moved_message('origin/main', sha), result.stderr)
+        self.assertEqual(self.codex_calls(), reviews)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        self.assertNotIn('Triage stage', result.stderr)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    def test_base_moved_with_pending_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=False))
+
+    def test_base_moved_with_counted_open_triage_stage(self):
+        self.assert_triage_settled_then_merge(self.open_triage_stage_with_origin(counted=True))
+
+    def test_base_moved_with_pending_recheck(self):
+        self.origin_with_main()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_CODEX='two-major-once',
+                  MOCK_CLAUDE='triage-mixed-reject', MOCK_RECHECK_FAIL='1')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+        reviews = self.subjects().count('chore(ai): record independent review')
+        sha = self.advance_origin_main()
+        message = self.base_moved_message('origin/main', sha)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, MOCK_RECHECK=self.UPHELD_M2)
+        calls = self.recheck_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('M2\tMAJOR\tthe second defect is handled by the gate', calls[1])
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertIn(message, result.stderr)
+        self.assertIn(message, (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.subjects().count('chore(ai): record independent review'), reviews)
+        self.assertEqual(self.triage_rounds(), 1)
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'origin/main'])
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_RECHECK=self.UPHELD_M2)
+        self.assertNotIn('Re-check:', result.stderr)
+        self.assertEqual(len(self.recheck_calls()), 2)
+        self.assertEqual(self.subjects().count('chore(ai): record review re-check'), 1)
+        self.assertEqual(self.disputes(), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('--draft', self.created_prs()[0])
+
+    def rewrite_history_while_recording_review(self):
+        """main gains the plan commit; a hook then reparents HEAD onto main^ (same tree, clean
+        checkout, merge-base kept), so main is no longer an ancestor at the publish check."""
+        self.ready()
+        origin = self.add_origin()
+        self.run_cmd(['git', 'branch', '-f', 'main', 'HEAD'])
+        self.hook('post-commit', '[[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]] || exit 0\n'
+                                 'git reset -q --soft "$(git commit-tree "HEAD^{tree}" -p main^ -m \'hook: rewritten history\')"\n')
+        return origin
+
+    def assert_publish_names_the_base(self, origin, result):
+        prefix = 'Publish check failed at pull request preparation: Review base main ('
+        for text in (result.stderr, (self.project / '.ai/local/last-error').read_text()):
+            self.assertIn(prefix, text)
+            self.assertIn('moved past the branch; merge it into feature/test', text)
+            self.assertNotIn('reviewed content changed', text)
+        self.assertEqual(self.remote_head(origin), '')
+        self.assertEqual([c for c in self.gh_calls() if c[:2] == ['pr', 'create']], [])
+        self.assertIn('⛔', self.notifications())
+        self.assertNotIn('FINISHED', self.notifications())
+
+    def test_base_moved_publish_check_names_the_base(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='1')
+        self.assert_publish_names_the_base(origin, result)
+        self.assertIn('escalated to the human', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_base_moved_publish_check_without_recovery(self):
+        origin = self.rewrite_history_while_recording_review()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
+        self.assert_publish_names_the_base(origin, result)
+        self.assertNotIn('escalated to the human', result.stderr)
 
     def test_failed_final_push_is_reported_not_hidden(self):
         self.ready()
@@ -3447,6 +3761,35 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-review', '--recheck', AI_RECHECK_EFFORT='low', AI_REVIEW_EFFORT='xhigh')
         self.assertIn('model_reasoning_effort="low"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
         self.tool('ai-review', '--recheck', expected=1, AI_RECHECK_EFFORT='huge')
+
+    def test_triage_severity_suffix_satisfies_triage_check(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (MAJOR)', 'M1 (major)', 'M1(MAJOR)'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+        # Accepted rows still need an existing fix task.
+        dispositions.write_text(rows.replace('| M1 |', '| M1 (MAJOR) |').replace('T001', 'T099'))
+        self.helper('triage-check', '--fresh', expected=1)
+
+    def test_triage_severity_suffix_other_decorations_stay_unmatched(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (CRITICAL)', '**M1**', 'M1 (MAJOR) x'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            result = self.helper('triage-check', '--fresh', expected=1)
+            self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
+        self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 (MAJOR) | accepted | real defect | T002 |\n'], fix_task=True)
+        self.helper('triage-check', '--fresh')
+        self.tool('ai-review', '--recheck')
+        self.assertIn('M1\tMAJOR\tT001.txt is a fixture; the finding misreads it',
+                      (self.base / 'codex-recheck-calls').read_text())
+        self.helper('recheck-verify')
+        wf = self.recheck_module()
+        rows = [m.group(2).lower() for m in wf.DISPOSITION_ROW.finditer(
+            (self.project / '.ai/reviews/dispositions.md').read_text())]
+        self.assertEqual(rows, ['rejected', 'accepted'])
 
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
