@@ -68,6 +68,10 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
    (`.ai/bin/ai-watchdog --install-timer --diagnose --recover`) with `Phase: implementing`
    and no pipeline, then start a pipeline within 2 minutes. Expected: no ⛔ notification;
    `systemctl --user list-timers` shows the next run about 2 minutes after install.
+4. Relaunch during recovery: start `ai-pipeline` while an in-pipeline recovery is deciding.
+   Expected: the message names `ai-recover` with a PID that `kill` would stop, and
+   `.ai/local/last-error` still holds the original stop reason afterwards. (A recovery
+   started by the watchdog timer gets the plain message without a hint: documented limit.)
 
 ### Covered by automated tests
 Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_budget_*`,
