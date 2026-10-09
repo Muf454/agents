@@ -1,35 +1,194 @@
 # Handoff
 
 ## What has been implemented?
-Branch `fix/robustness-batch` (from origin/master c7d4dee): a robustness batch from the
-2026-10-07 stop analysis. Queue (see `.ai/tasks.md`):
-- T001 FL-14 (opus): review reports may leave out a 0-count severity section, and the verdict may be a `## Overall verdict` heading (`review_verdict` in `scripts/lib/workflow.py`, also used by the PR body; a bold `**Overall verdict:**` line is accepted too). DONE.
-- T002 FL-15 (opus): `--base B` prefers `origin/B` when it is ahead, prints the resolved base, and passes the SHA to `ai-review` (diverged: warning, local wins; the PR still targets `B`). DONE.
-- T003 FL-17 (opus): the pipeline stops early when the base moved past the branch, after settling an interrupted triage stage or pending re-check. The publish check names the case, and recovery escalates it without Claude, keeping the full message on stderr. DONE.
-- T004 FL-16 (sonnet): triage accepts `| M1 (MAJOR) |` (also `(major)` and `M1(MAJOR)`); other decorations still count as no disposition. DONE.
+T001 done (supervision settings: config, validation, manifest, recovery restore; no behaviour yet).
+T002 done (host plan-review round records `plan-rounds record|sync|count|current`, `plan-history`;
+`ai-review --plan --base`; pipeline and hand runs record once per review).
+T003 done (`start-plan-dispositions BASE`, `plan-dispositions-check --since START --base BASE
+[--fresh] [--questions]`, `plan-revision-scope START`; T004 passes `--base`).
+T004 done (`ai-run --revise-plan [--since] [--base]`: Read/Glob/Grep/Edit-only session on the new
+`plan-revision.md` prompt, host commit `chore(ai): record plan revision` with its run-log line,
+host record `plan-revisions record`, `plan-revisions revised|decision`; no pipeline caller yet).
+T005 done (host `plan-revision` stage bound to the plan report, `run-manifest revision-reserve|revision-count`,
+`complete_plan_stage` in `ai-pipeline` with the round's model, recovery: stored needs-human decision
+escalates before the attempt limit and any resume, new always-escalate reasons, plan-revision
+leftovers checked with `plan-revision-scope`).
+T006 done (supervised plan-review loop in `ai-pipeline`: decision check at every pass, revision
+reserved then staged, `🔁 Plan revised (round n/N)` notification, re-review with `PLAN REVISION
+CONTEXT:` and `plan-history --include-current`; limit/needs-human/out-of-scope stops; plan report
+header now names HEAD; `plan-revisions outcome`).
+T007 done (crash/resume scenarios for every plan-revision crash point, by human rerun and by
+watchdog recovery; fixes: `ai-run` resumes a host section left uncommitted by a crash
+(`start-plan-dispositions --pending`), `ai-recover` closes a committed plan-revision stage when it
+escalates a stored decision, the notification after a restart closed the previous run's revision
+reads "(in the previous run)").
+T008 done (extra fix round: `fix-rounds record` stores the triaged review's head, digest and
+BLOCKER/MAJOR counts, legacy bare hashes still read; `fix-rounds trend BASE`; `run-manifest
+extra-round-reserve|extra-round`; `ai-pipeline` gives one extra round per supervised run at the
+limit when x > y > z, notifies `🔁 Extra fix round: findings falling (x → y → z)`).
+T009 done (review format retry: `review-format-check plan|code REPORT` shares the publish
+checks; supervised `ai-review --plan`/code reviews ask the reviewer once more on a format error
+or empty answer, `🔁 Review format retry (<mode>): <error>`, run-log line committed with the
+review; integrity failures and re-checks never retried; per-call reviewer metadata reset).
+T011 done (review M1: `ai-pipeline` checks a stored needs-human plan decision on every start,
+after the startup stage dispatch and `reconcile_disputes`, in each plan-review pass and before the
+implementation loop; `--skip-plan-review` or a DONE task no longer bypasses it).
+T012 done (review M2: `ai-review` pins one HEAD (`review_head`) for both calls of a format retry
+and the publish; a HEAD change or dirty tree between the calls stops before the retry, prior
+review kept, run log `stopped, checkout changed between the calls, prior review preserved`).
 
-FL-12 (recovery decision after prose) is deferred, not part of this batch: the lenient `recover-decision` parser drew MAJOR plan-review findings in both rounds, so parsing stays exactly as on master. A later batch should use the CLI's structured output (`--json-schema`) instead of a lenient parser.
-
-Plan revision 2 (2026-10-08) addressed Codex plan review round 1 (P1–P4, all accepted). Plan revision 3 (2026-10-08) addresses round 2: P6–P8 accepted, P1 and P5 deferred with FL-12 (see `.ai/reviews/dispositions.md`).
-
-## Flow chart
-Flow chart updated (T002, T003; T001 and T004 leave the flow unchanged)
+Branch `feature/supervisor`: FL-04 bounded supervisor (see `.ai/project-spec.md`).
+Plan revision 2 answers plan review round 1 (HEAD cc8c464; 10 MAJOR + 1 MINOR accepted, see
+`.ai/reviews/dispositions.md` → "Plan review round 1"). Plan revision 3 answers plan review
+round 2 (HEAD dfc03c8; 1 MAJOR + 7 MINOR accepted, see "Plan review round 2"). Plan revision 4
+answers plan review round 3 (HEAD dbe85f5; 1 BLOCKER + 4 MAJOR + 2 MINOR, see "Plan review
+round 3"): the shared run budget is removed from this batch (mission control's convergence
+decision; OR-09 keeps Zack's 16 h + 12 h cumulative budget), supervision is bounded by counts plus
+the per-call timeouts; the revision's run-log entry is committed in its host commit (clean
+re-review); the needs-human outcome is stored in the host revision record before the stage
+closes and checked by the pipeline and `ai-recover`. 10 tasks T001–T010.
 
 ## Manual testing for the human
 ### Needs you
-1. Behaviour change to know about: with T002 and T003, `--base main` in a checkout whose local `main` is behind origin/main reviews against origin/main. If origin/main has moved past your branch, the run now stops at the start with "Review base … moved past the branch; merge it into <branch> and rerun". Before, it reviewed and then failed at the publish check. Merge origin/main into the branch and rerun. If a review triage or re-check was interrupted, the run completes it first against the review it started on and stops only afterwards. Merge only after that stop, never while a triage stage is open, because the triage scope check would reject the merged source.
-2. After merge, approve `setup-project --upgrade --apply` for agents, raid-planner and family-planner so their installed copies get the fixes. That includes the template triage prompt line from T004.
-3. If `feature/supervisor` (PR #21) merges first, expect small textual conflicts in `scripts/lib/workflow.py`, `scripts/ai-pipeline`, `scripts/ai-recover` and `tests/test_workflow.py` (see `.ai/current-plan.md`).
-4. FL-12 stays open: a recovery session that writes prose before its decision still escalates as "gave no valid decision". Keep it in the backlog for a later batch based on `--json-schema` structured output.
+1. One real supervised run with live Claude and Codex on a throwaway project (not this repo).
+   Steps: install the toolkit there with `setup-project`, configure `.ai/validate`, write a small
+   plan with one deliberately vague task, commit it on a feature branch, then run
+   `.ai/bin/ai-pipeline --approved --base main` in tmux.
+   Expected: a BLOCKER/MAJOR plan finding gives `🔁 Plan revised (round 1/3)` on the phone and a
+   new Codex plan review on a clean checkout; the run continues to implementation once a review is
+   clean. If Claude asks you a question, the run stops with `⛔ plan review needs your decision`
+   and the question text; nothing is implemented.
+   Then: (a) run `ai-recover` (or `ai-watchdog --recover` after a kill) on that stop; expected: no
+   Claude session, the stop stays and names the question; (b) answer the question in
+   `.ai/reviews/plan-dispositions.md`, commit, run `ai-review --plan --base main` by hand, then
+   rerun `ai-pipeline`; expected: the plan review is clean and the run goes on to the first task.
+   Set `AI_SUPERVISE=0` in the environment for one rerun; expected: the old stop, no revision.
+2. This repo's frozen `.ai/prompts` has no `plan-revision.md` yet: run `setup-project --upgrade`
+   on this checkout before using `ai-run --revise-plan` here (it stops naming that command).
+   Mission control: a live `ai-run --revise-plan` with real Claude in a disposable fixture, checking
+   that the session can Edit the plan records and nothing else (T004 notes).
 
 ### Covered by automated tests
-- Missing 0-count section (code and plan review), heading verdict and PR body verdict, empty/missing verdict and count mismatches still rejected with the prior review kept, `ai-review` with a heading-verdict report: `test_review_format_missing_zero_count_sections_are_accepted`, `test_review_format_count_mismatches_are_still_rejected`, `test_review_format_verdict_heading_is_accepted`, `test_review_format_missing_or_empty_verdict_is_rejected`, `test_review_format_verdict_heading_through_ai_review`, `test_review_counts_must_match_listed_findings`, `test_failed_or_malformed_reviews_preserve_report`
-- Base resolution (origin ahead with and without a PR, equal, absent, local ahead, diverged, explicit SHA run; explicit `origin/` ref): `test_review_base_origin_ahead_of_local`, `test_review_base_origin_ahead_pr_still_targets_main`, `test_review_base_equal_to_origin`, `test_review_base_without_origin_ref`, `test_review_base_local_ahead_of_origin`, `test_review_base_diverged_uses_local`, `test_review_base_explicit_sha`, `test_pr_base_follows_the_review_base_or_must_be_explicit`
-- Base moved past the branch: stop before any agent, recovery escalates without Claude and keeps the full message on stderr, rerun after merge, pending and counted-but-open triage stages and a pending re-check settled before the stop, publish wording via a history-rewriting hook with recovery enabled and disabled: `test_base_moved_stops_before_any_agent`, `test_base_moved_recovery_escalates_without_claude`, `test_base_moved_with_pending_triage_stage`, `test_base_moved_with_counted_open_triage_stage`, `test_base_moved_with_pending_recheck`, `test_base_moved_publish_check_names_the_base`, `test_base_moved_publish_check_without_recovery`
-- Severity suffix in disposition rows: `test_triage_severity_suffix_satisfies_triage_check`, `test_triage_severity_suffix_other_decorations_stay_unmatched`, `test_triage_severity_suffix_rejected_row_is_rechecked_and_counted`
+- T001 settings: invalid values stop before any agent `test_supervise_settings_invalid_values_stop_before_any_agent`,
+  `test_supervise_settings_invalid_supervise_stops_hand_run_tools`; manifest capture and resume
+  `test_supervise_settings_are_captured_and_survive_a_config_change`; key lists
+  `test_supervise_settings_key_lists_are_identical`.
+- T002 plan rounds: history pairing `test_plan_rounds_history_pairs_findings_with_dispositions`,
+  `test_plan_history_marks_rounds_without_a_revision`; forged/agent commits
+  `test_plan_rounds_ignore_agent_commits_and_tampered_reports`; pipeline + hand run
+  `test_plan_rounds_pipeline_and_hand_run_record_once_per_review`; recreated branch
+  `test_plan_rounds_restart_when_a_branch_name_is_recreated`; crash sync
+  `test_plan_rounds_sync_records_a_crashed_review_once`, `test_plan_rounds_sync_ignores_a_forged_report`.
+- T003 plan-dispositions section: complete section, resume and START-with-header
+  `test_plan_dispositions_complete_section_passes_and_counts`; MINOR optional, round 2 without
+  Convergence `test_plan_dispositions_minor_rows_optional_and_round_two_needs_no_convergence`;
+  adversarial rows/tasks/preamble/headers `test_plan_dispositions_reject_adversarial_sections`;
+  older sections never count `test_plan_dispositions_check_only_the_current_round`,
+  `test_plan_dispositions_round_three_needs_its_own_convergence_line`; bounded questions
+  `test_plan_dispositions_questions_are_bounded`; scope `test_plan_dispositions_revision_scope`.
+- T004 `ai-run --revise-plan`: one host commit + record, clean checkout, run-log line in the
+  commit, session tools/allowlist, "already revised" refusal, hand re-review starts
+  `test_revise_plan_accept_commits_once_and_leaves_a_clean_checkout`; reject-only scope
+  `test_revise_plan_reject_only_changes_only_the_dispositions`; needs-human record, bounded
+  questions, decision 0/1/2 and clearing by a new report `test_revise_plan_needs_human_record_and_decision`;
+  initial state `test_revise_plan_forged_report_without_a_decision_takes_the_normal_path`; out of
+  bounds `test_revise_plan_touching_source_stops_with_nothing_counted`,
+  `test_revise_plan_editing_the_plan_review_stops_with_nothing_counted`,
+  `test_revise_plan_touching_a_gate_file_stops_with_nothing_counted`; resume without a session
+  `test_revise_plan_resumes_an_uncommitted_complete_section_without_a_session`; exclusivity,
+  missing prompt, round 3 Convergence `test_revise_plan_preconditions_and_round_three_contract`.
+- T005 plan-revision stage: pending/committed/dirty/foreign report/out of scope/agent commit
+  `test_plan_revision_stage_set_and_verify`; reservation idempotent, limit, reset by start, kept
+  on resume `test_plan_revision_stage_reservation_per_run`; committed stage only cleared
+  `test_plan_revision_stage_committed_record_only_clears_the_stage`; model by round (opus, then
+  the escalation model; not the run's `--model`) `test_plan_revision_stage_pending_runs_the_round_model`;
+  limit stop without a session `test_plan_revision_stage_limit_stops_before_the_session`; new
+  reasons escalate without Claude `test_plan_revision_stage_recovery_reasons_always_escalate`;
+  source leftovers escalate, nothing committed
+  `test_plan_revision_stage_source_leftovers_escalate_without_a_commit`; stored needs-human
+  decision after a crash escalates with its questions, also with the allowance used up
+  `test_plan_revision_stage_stored_decision_escalates_before_any_resume`.
+- T006 supervised loop: MAJOR → revision → clean re-review → implementation → PR, notification and
+  run-log line in the revision commit `test_supervised_plan_major_once_revises_reviews_again_and_opens_the_pr`;
+  reject-only revision re-reviewed before implementation with `PLAN REVISION CONTEXT:`
+  `test_supervised_plan_reject_only_reviews_again_on_a_clean_checkout`; needs-human stop with the
+  bounded question, no re-review/implementation, rerun with auto-recovery runs no session
+  `test_supervised_plan_needs_human_stops_with_the_bounded_question`; limit
+  `test_supervised_plan_limit_stops_without_recovery`; `AI_SUPERVISE=0`
+  `test_supervised_plan_off_keeps_todays_stop`; revision touching source
+  `test_supervised_plan_revision_touching_source_stops_without_recovery`; opus, opus, escalation
+  model and round 3 Convergence `test_supervised_plan_escalation_model_and_round_three_convergence`.
+- T007 crash and resume (each by a human rerun and by `ai-recover` after a crash: one revision
+  record, one session, one clean re-review, then implementation): during the session's edits
+  `test_supervised_plan_resume_session_crash_human_rerun`/`_watchdog`; before/after the host's
+  preamble commit `test_supervised_plan_resume_before_the_preamble_commit_*`,
+  `test_supervised_plan_resume_after_the_preamble_commit_*`; before/after the revision commit
+  `test_supervised_plan_resume_before_the_revision_commit_*`,
+  `test_supervised_plan_resume_after_the_revision_commit_*`; after the record and after
+  stage-clear `test_supervised_plan_resume_after_the_record_*`,
+  `test_supervised_plan_resume_after_stage_clear_*`; reservation without stage (limit 1)
+  `test_supervised_plan_resume_reserved_without_a_stage_*`; stage without reservation
+  `test_supervised_plan_resume_stage_without_a_reservation_*`; plan review committed without its
+  round record `test_supervised_plan_resume_plan_review_without_its_round_record_*`; round-3 crash
+  resumes on the escalation model with Convergence
+  `test_supervised_plan_resume_round_three_crash_runs_on_the_escalation_model`; approved settings
+  after a config change `test_supervised_plan_resume_keeps_the_approved_settings_after_a_config_change`;
+  needs-human decision survives (no reviewer, revision, implementation or recovery session; the
+  answer + hand `ai-review --plan` continues) `test_supervised_plan_resume_decision_after_*`;
+  restart after the limit reviews first `test_supervised_plan_resume_human_restart_after_the_limit_reviews_first`;
+  host header pending check `test_plan_dispositions_pending_accepts_only_the_host_header`;
+  simulated crashes never kill a process outside the test fixture (the host runner)
+  `test_supervised_plan_resume_crash_kill_stays_inside_the_fixture`.
+- T008 extra fix round: falling 4 → 3 → 2 with `--max-fix-rounds 2` gets one extra round,
+  notification, run-log line in the triage commit, then draft at the next limit although still
+  falling `test_extra_fix_round_falling_counts_get_one_round_then_draft`; clean review after it →
+  ready PR `test_extra_fix_round_clean_review_after_it_opens_a_ready_pr`; flat counts with agent
+  commits imitating the triage subject `test_extra_fix_round_flat_counts_and_imitated_subjects_draft`;
+  rising `test_extra_fix_round_rising_counts_draft`; `AI_SUPERVISE=0`
+  `test_extra_fix_round_unsupervised_draft`; legacy round 1 + counted 2–3 boundary, only round 3
+  counted, legacy record between/last, same review as the last round, unreachable record,
+  another branch `test_extra_fix_round_trend_history_boundaries`; reservation once per run, reset
+  by a restart `test_extra_fix_round_reservation_once_per_run`; crash right after the
+  reservation resumes into that round once `test_extra_fix_round_crash_after_reservation_resumes_it_once`.
+- T009 format retry: Codex code review malformed/empty/counts-lie then valid → published with 2
+  calls, notification, `FORMAT ERROR:` prompt, first report kept and named in the run log;
+  malformed or empty twice → stop, prior review kept; valid → 1 call; `mutates` and Codex error →
+  no retry; malformed then a mutating or failing retry → stop, logged
+  `test_format_retry_code_review_once_then_publish_or_stop`; the same for a hand-run plan review
+  (clean checkout for both calls, run-log line in the record commit)
+  `test_format_retry_plan_review_by_hand`; Claude fallback malformed/empty then valid, empty or
+  malformed twice, plan on the fallback `test_format_retry_claude_fallback_reviewer`; malformed
+  Claude fallback then Codex retry saved, logged and attributed as Codex
+  `test_format_retry_after_claude_fallback_attributes_the_codex_review`; pipeline commits each
+  retry's run-log line with the plan and code review records, checkout clean
+  `test_format_retry_pipeline_commits_the_run_log_line_with_each_review`; malformed re-check →
+  one call, upheld `test_format_retry_never_for_a_malformed_recheck`; `AI_SUPERVISE=0` → no retry
+  `test_format_retry_off_without_supervision`; helper = publish checks
+  `test_review_format_check_helper_matches_publish`.
+- T012 one checkout per format retry: code and plan review, malformed first report, the
+  notification commits a change or leaves an uncommitted file → stop, one reviewer call, prior
+  review kept, run log says stopped
+  `test_format_retry_stops_when_the_checkout_changes_between_the_calls`.
+- T011 decision gate: stored needs-human decision + `--skip-plan-review` stops (also with
+  auto-recovery: no plan review, revision, implementation or recovery session)
+  `test_needs_human_decision_gate_holds_with_skip_plan_review`; with one task DONE and one TODO
+  `test_needs_human_decision_gate_holds_with_tasks_partly_done`; unreadable store on the skip
+  path fails closed `test_needs_human_decision_gate_unreadable_store_fails_closed_with_skip`; no
+  decision + `--skip-plan-review` implements `test_needs_human_decision_gate_absent_skip_plan_review_implements`.
+- T010 docs: README and `docs/workflow.md` wording guarded by `test_docs_consistency_no_wrong_sentences`,
+  `test_docs_consistency_required_sentences`, `test_docs_consistency_modes_table`; this handoff's flow
+  line and PR body by `test_pr_body_flow_this_repo_declares_the_flow_chart`.
 
 ## Human todos
-None yet (see "Needs you").
+None beyond "Needs you" above.
+
+## Flow chart
+Flow chart updated (T011: plan-decision check before the pipeline plan review, also on the
+`--skip-plan-review` / task-DONE path; T012: format retry note says both calls review one checkout;
+T013: round-three Convergence reached also by the supervised extra fix round at the default limit)
 
 ## Next action
-All tasks DONE; ready for review.
+Codex review of HEAD 5b8d86b (MAJOR 2, MINOR 1) triaged: all accepted (`.ai/reviews/dispositions.md`).
+T011, T012 and T013 done. Next: a new
+independent review and the live supervised trial in "Needs you" above. No run budget in this
+batch (OR-09).

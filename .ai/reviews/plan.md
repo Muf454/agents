@@ -1,11 +1,13 @@
-<!-- Plan review of plan digest 5e1d2bcd13f79d67f692381a0b50bacce6efd3e6df823d7a3569533bd62ff1c9; saved 2026-10-08T20:39:58Z. -->
+<!-- Plan review of plan digest a8dc7ad5a5e9422612a4930e79e20b620bf475917845a9bae171705e9d93ce07; saved 2026-10-08T05:33:45Z. -->
 
-# Plan review
+# Plan review — FL-04 bounded supervisor
 
-Overall verdict: APPROVE WITH MINOR PLAN CORRECTIONS.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Overall verdict: REQUEST CHANGES — correct the trend calculation and incomplete format-retry path before implementation.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
 
-Reviewed HEAD: `96c50686eef1ce214cdd46cb241cb223a61800f5` — plan revision 3.
+Reviewed HEAD: `15fa38f371167ceb9a39db6d1347a55e7caa34d8`.
+
+Inspected repository instructions, spec, plan, tasks, state, handoff, prior review/dispositions, affected scripts and tests, validation entry points, documentation, flow chart, Git history, and locally available prerequisite source.
 
 ## BLOCKER findings
 
@@ -13,49 +15,55 @@ None.
 
 ## MAJOR findings
 
-None.
+- P1: The trend calculation can skip a recent round whose counts are unknown.
+
+  **Location:** `.ai/tasks.md:243`; `.ai/project-spec.md:33`.
+
+  T008 selects the last two reachable records **that carry counts**. R3 instead requires findings to fall across the last two rounds. These differ when a legacy record follows or separates counted records.
+
+  For example, recorded counts `3, 2, legacy-unknown`, followed by a current count of `1`, produce the proposed trend `3 → 2 → 1`. That grants an extra round despite lacking evidence for the most recent transition. Supporting legacy records must not turn unknown counts into permission for another unattended round.
+
+  **Concrete plan change:** Select the last two reachable round records first, then require both to contain verified counts. Otherwise return `insufficient history`. Add tests with a legacy record most recently and between counted records. Retain the existing boundary test where legacy round 1 precedes fully counted rounds 2–3.
+
+- P2: Successful empty reviewer responses never reach the proposed format retry.
+
+  **Location:** `.ai/tasks.md:272`; `scripts/ai-review:167`; `scripts/lib/workflow.py:670`.
+
+  T009 runs its format check only after `run_review` returns. Currently, `run_review` terminates on a zero-byte report, even when Codex exits successfully and the checkout is unchanged. Claude’s successful envelope with empty final text also terminates in `claude-text`. The locally available catch-up prerequisite retains these guards.
+
+  Consequently, empty content—missing every required field—gets no retry under the proposed implementation. Existing malformed-then-valid acceptance criteria do not explicitly exercise this path.
+
+  **Concrete plan change:** Route empty text from an otherwise successful reviewer invocation through Markdown format validation. Preserve immediate failure for unsuccessful invocations, invalid result envelopes, missing/unreadable report storage, and checkout mutation. Add empty-then-valid and empty-twice tests for Codex plan/code reviews and Claude fallback, plus supervision-disabled coverage. Verify checkout integrity before permitting the retry.
 
 ## MINOR findings
 
-- P9: The advanced-base recovery test expects the wrong resolved ref.
+- P3: Recovery’s decision-check placement contradicts its direct-escalation acceptance criterion.
 
-  **Location:** `.ai/tasks.md:105`; base selection and diagnostic construction at `.ai/tasks.md:57–61,99`.
+  **Location:** `.ai/tasks.md:150`; `.ai/tasks.md:160`; `scripts/ai-recover:108`; `scripts/ai-recover:115`.
 
-  This fixture advances origin/main beyond local main. T002 therefore selects `origin/main`, and T003 builds its message from that resolved ref. The prescribed assertion instead requires `Review base main (`. A correct implementation would fail that assertion.
+  T005 places `plan-revisions decision` after the open-stage block. That block calls `resume`, which execs the pipeline; the new check is therefore unreachable while a stage remains open. A crash after storing a needs-human outcome but before clearing its stage resumes the pipeline instead of directly escalating as T005 requires. An exhausted recovery-attempt allowance can also escalate before reading the stored questions.
 
-  **Concrete plan change:** require `Review base origin/main (` for the advanced-origin startup tests, including automatic recovery. Keep the `main` expectation in the separate publish-hook fixture, which does not advance origin/main.
+  T006 should still stop the resumed pipeline, so this does not demonstrate an implementation bypass. It leaves the recovery contract and its tests inconsistent.
 
-- P10: Specify and test saved-review reuse when the resolved base advances.
+  **Concrete plan change:** Check stored needs-human decisions after validating host authority, but before the attempt-limit and open-stage resume paths. Add an open-stage crash test asserting direct escalation with stored questions and no pipeline resume, including an exhausted recovery allowance.
 
-  **Location:** `.ai/tasks.md:60–65`; `.ai/project-spec.md:37–38,68`; `scripts/ai-pipeline:155–160,326–337`.
+## Ordering, models, and scope
 
-  The existing `review_current` predicate checks that the resolved base is an ancestor of the reviewed commit and that reviewable content is unchanged. It does not require the saved review’s merge-base to equal the newly resolved base. Consequently, a resumed run can select newer origin/main and reuse a review covering the older, broader range without invoking `ai-review`.
+All ten tasks specify models. No additional model-selection finding was identified. No failed implementation attempt is recorded.
 
-  This is existing behavior, and preserving that predicate is an explicit non-goal. However, the “same commit” requirement is ambiguous for this case, and T002’s fresh fixtures do not cover it.
-
-  **Concrete plan change:** document that the same-base guarantee applies to newly requested reviews and that a valid broader saved review remains reusable. Add a rerun regression with a saved review and an advanced origin/main already contained in the reviewed HEAD; assert the intended reuse, resolved-base diagnostic and unchanged review binding.
-
-## Scope and risk assessment
-
-The inspected source supports T001’s reliance on `review_counts`: missing zero-count sections pass, while the prescribed positive-count and count/ID mismatches fail. T004’s proposed non-capturing suffix preserves the groups consumed by triage, history, re-check preparation and PR summaries.
-
-T003’s placement preserves interrupted-stage scope checks before advising a merge. Its recovery diagnostics and mandatory publish-hook fixtures address the earlier findings. FL-12 is explicitly deferred and its parser remains unchanged.
-
-All tasks specify suitable models. No task’s own failed implementation attempt is recorded. T003’s dependency on T002 is appropriate. No dependency addition or schema migration is proposed. Planned flow-note updates respect the repository’s maintenance rule.
+Preserve the prerequisite: merge `fix/catchup-review`, rebuild this branch, and review the resulting baseline before T001. The cumulative budget’s removal is an explicit scope decision.
 
 ## Validation observed
 
-- Confirmed the requested HEAD and clean checkout; inspected guidance, workflow records, relevant source, tests, documentation, validation entry points and the vault flow note.
-- Shell syntax passed for 13 files; Python AST parsing passed for three files.
-- Read-only discovery collected 287 tests.
-- Three existing documentation consistency tests passed.
-- In-memory checks confirmed the specified count-parser rejection cases and proposed suffix capture groups.
-- `git diff --check c7d4dee..HEAD` passed.
+- Requested HEAD confirmed; checkout remained clean.
+- `tasks check` and `tasks untouched` passed.
+- Bash syntax checks passed for 13 files.
+- Python AST parsing passed for four files.
+- Discovery collected 272 tests; these tests were not executed.
+- No local validation stamp was present.
 
-Integration test bodies, `./scripts/ai-check` and `.ai/bin/ai-check` were not run because they require filesystem writes unavailable in this review. No current validation stamp exists. Planned regression results remain unobserved.
+Not run: integration tests, `./scripts/ai-check`, `.ai/bin/ai-check`, or the full suite, because they create fixtures, locks, logs, or validation artifacts. No files were modified and no network/MCP integrations were invoked.
 
-No files were modified and no network/MCP integrations were invoked.
+After revision, run the targeted checks and full gate in a writable checkout. Retain the planned live permission check and supervised needs-human/crash-recovery trial.
 
-## Manual testing recommendations
-
-After implementation and the full offline gate, check resolved-base messages and notifications with recovery enabled and disabled, then verify merge-and-rerun after interrupted triage and re-check stages. Inspect the flow-note changes alongside T002/T003. Installed-copy upgrades and human acceptance remain separate actions.
+This review is not human acceptance.
