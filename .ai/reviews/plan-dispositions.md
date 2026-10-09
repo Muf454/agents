@@ -37,3 +37,10 @@ Plan review HEAD: 6a49e2b8124d3bb15e2a3e62340904d1bc397c29
 | P45 | accepted | Verified: workflow.py:480–488: `tasks count` prints the total only and `tasks progress ID` prints `<id> <title> (<done>/<total> done)`; `next`/`status`/`model` print no counts, so T004's "counts from the existing `tasks` helpers" named no mechanism. Fix: T001 adds `tasks counts` (prints `<done> <total>`, same counting as `progress`, fails like `count` on an unparsable queue) with unit tests; T004 reads it with `read -r done total < <(ai_helper tasks counts)` once per loop iteration after the `ai_guard_verify` at ai-run:430; T007's `inspect` applies the same rule to `task_blocks` in-process. Chosen over a bash regex on `progress`: a bare-count action is one line and unit-testable, a regex on a title-bearing sentence is not. | T001, T004, T007 |
 
 Convergence: no new design task; the gate-integrity area (P32 in round 9, P39–P42 now) got its whole-area design in round 9 (T010, the `AI_GATE_BROKEN` flag) and this round's review traced that design on every stop path and found it holding ("Security concerns": the guard holds on every traced path), so P39 is an impossible acceptance test in T005 and P40–P42 are wording and precision of T010, fixed inside T010/T005 rather than redesigned again; P43–P45 are first findings in their areas (finish record, renderer rule for `last-error`, task counts).
+
+## Plan review round 1 (report ebfe2456528ce753c89ec1ed35c65f51c03826ef1d05b5fa7bde6f7bbc3603be)
+
+Plan review HEAD: f1f575dd8e19f04b6d962c85730e23479fd9af04
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
