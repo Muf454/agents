@@ -20,6 +20,9 @@ T003 (2026-10-09): `ai-pipeline` stage records, stops, finish note and checkout 
 T004 (2026-10-09): `ai_deps` records Setup; `ai-run` records Build (with task id, model, count),
 Checks (post-task and final), the checkpointed Build detail and standalone triage/revise-plan;
 `ai-review` records the `format retry` detail.
+T005 (2026-10-09): `ai-recover` records `recovering` (attempt/max, stopped stage kept), `plan_revision`
+for a stored decision, `checks` during leftover validation; `escalate` and the unexpected-exit
+handler record a stop that keeps the substage (gate escalations record nothing, T010).
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -112,8 +115,12 @@ itself is unchanged.
   kept, standalone triage/revise-plan, format retry on both review boxes and a by-hand retry leaving
   another stage alone.
 
+- Recovery records (`test_observation_recovery_*`): kept stage and resumed-pipeline replacement,
+  validation on checks and its failure, later-stop labels, TERM and failing-command exits (one ⛔),
+  recovery install on setup, stored decision, base moved, changed gate (no stop record, no log line).
+
 ## Human todos
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001, T010, T002, T003 and T004 done; next T005 (ai-recover records).
+T001, T010, T002, T003, T004 and T005 done; next T006 (discovery and liveness).

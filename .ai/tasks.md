@@ -586,7 +586,7 @@ final gate; standalone `--triage` / `--revise-plan` record `triage` / `plan_revi
 on `checks`. Full gate `.ai/bin/ai-check`: 472 tests OK.
 
 ## T005 — Recovery records (ai-recover)
-Status: TODO
+Status: DONE
 Dependencies: T004
 Model: sonnet
 
@@ -663,6 +663,14 @@ Targeted: `python3 -m unittest discover -s tests -k observation_recovery` (must 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-09. `scripts/ai-recover`: `AI_OBSERVE_RECOVERY="$attempt/$max"` plus `ai_observe recovering` after `max`
+is set; `plan_revision` before the stored-decision escalate; `checks` before the leftover `ai-check`; `escalate` and
+`on_exit` record `ai_observe stop ''` (substage kept; note `<reason> (stopped during $stage)` /
+`auto-recovery failed unexpectedly (exit N)`). Gate escalations are skipped by `AI_GATE_BROKEN` (T010).
+Tests: 10 `test_observation_recovery_*` (kept stage + resumed pipeline replaces it, validation on checks and its
+failure, later-stop labels review/re-check/pull request, TERM exit 143, failing `git add` exit 128, failed and
+changing recovery install on setup, stored decision, base moved, changed gate). Mocks now snapshot the record
+(`obs-recover`, `deps-obs`; `MOCK_RECOVER_KILL`). Targeted: Ran 10 tests OK; `.ai/bin/ai-check`: 482 tests OK.
 
 ## T006 — Discovery and liveness (marker + process identity)
 Status: TODO

@@ -71,6 +71,11 @@ if 'RECOVERY CONTRACT' in prompt:
     assert args[args.index('--tools')+1] == 'Read,Glob,Grep'
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
     with open(state / 'recover-calls', 'a') as f: f.write(prompt.split('RECOVERY CONTRACT')[1][:400].replace('\n', ' ') + '\n')
+    if os.path.exists('.ai/local/observation.json'):
+        with open(state / 'obs-recover', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    if os.environ.get('MOCK_RECOVER_KILL'):
+        # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
+        os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
     decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
@@ -480,6 +485,7 @@ DEPS_SETUP = r'''#!/usr/bin/env bash
 # ai-deps-outputs: vendor-deps
 set -euo pipefail
 printf 'call\n' >> "$MOCK_STATE_DIR/deps-calls"
+cat .ai/local/observation.json >> "$MOCK_STATE_DIR/deps-obs" 2>/dev/null || true
 first=no
 [[ -e "$MOCK_STATE_DIR/deps-once" ]] || { first=yes; touch "$MOCK_STATE_DIR/deps-once"; }
 case "${MOCK_DEPS:-ok}" in
@@ -7150,6 +7156,135 @@ PY
         self.tool('ai-review', '--plan', AI_SUPERVISE='1', MOCK_CODEX_PLAN_FORMAT='malformed,ok')
         self.assertEqual(self.plan_calls(), 2)
         self.assertEqual((self.project / '.ai/local/observation.json').read_bytes(), before)
+
+    # ---------------------------------------------------------------- recovery records (T005)
+    def recorded(self, path):
+        """Every JSON record appended to PATH (a mock agent's snapshots of observation.json)."""
+        decoder, text, records = json.JSONDecoder(), path.read_text() if path.exists() else '', []
+        while text.strip():
+            record, end = decoder.raw_decode(text.lstrip())
+            records.append(record)
+            text = text.lstrip()[end:]
+        return records
+
+    def stopped_notifications(self):
+        return self.notifications().count('⛔ STOPPED')
+
+    def test_observation_recovery_keeps_the_stage_then_the_resumed_pipeline_replaces_it(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        during = self.recorded(self.base / 'obs-recover')
+        self.assertEqual([(r['stage'], r['state'], r['note']) for r in during], [('build', 'recovering', '1/2')])
+        # the resumed pipeline's first step replaced the recovering record
+        self.assertEqual(self.seen()[-1]['state'], 'active')
+        self.assertEqual(self.observation()['state'], 'done')
+
+    def test_observation_recovery_validation_shows_checks_and_its_failure_stops_there(self):
+        queue = task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n')
+        self.runner_ready(queue)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun', MOCK_VALIDATE_FAIL='all')
+        self.assertEqual(self.stopped_notifications(), 1)
+        recovering = [r for r in self.validated() if r['state'] == 'recovering']
+        self.assertEqual([(r['stage'], r['note']) for r in recovering], [('checks', '1/2')])
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+        self.assertIn('leftover work fails validation', self.notifications())
+        self.assertIn('(stopped during implementation)', stopped['note'])
+
+    def test_observation_recovery_validation_failure_after_later_stops_ends_on_checks(self):
+        queue = task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n')
+        self.runner_ready(queue)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        for label in ('review', 're-check', 'pull request'):
+            with self.subTest(label):
+                self.plant_observation(stage={'review': 'review', 're-check': 'recheck', 'pull request': 'pr'}[label],
+                                       state='stopped', note=label)
+                (self.project / 'partial.txt').write_text('leftover\n')
+                self.tool('ai-recover', '--stage', label, expected=1, MOCK_RECOVER='commit_and_rerun',
+                          MOCK_VALIDATE_FAIL='all')
+                stopped = self.observation()
+                self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+                self.assertIn(f'(stopped during {label})', stopped['note'])
+
+    def test_observation_recovery_unexpected_term_stops_once_and_keeps_the_substage(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        notified = self.stopped_notifications()
+        self.tool('ai-recover', '--stage', 'implementation', expected=143, AI_AUTO_RECOVER='1',
+                  MOCK_RECOVER_KILL='1')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.assertIn('auto-recovery failed unexpectedly (exit 143)', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def test_observation_recovery_unexpected_failing_command_stops_once(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        notified = self.stopped_notifications()
+        with open(self.project / '.ai/run-log.md', 'a') as log:  # new bookkeeping only: recovery records it
+            log.write('- a later bookkeeping line\n')
+        (self.project / '.git/index.lock').write_text('')  # the bookkeeping `git add` fails under set -e
+        result = self.tool('ai-recover', '--stage', 'implementation', expected=128, AI_AUTO_RECOVER='1')
+        self.assertIn('index.lock', result.stderr)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.assertIn('auto-recovery failed unexpectedly (exit 128)', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def assert_recovery_install_records(self, mode):
+        self.deps_recovery_run(mode, 1)
+        during = self.recorded(self.base / 'deps-obs')[-1]
+        self.assertEqual((during['stage'], during['state'], during['note']), ('setup', 'recovering', '1/2'))
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('setup', 'stopped'))
+        self.assertIn('(stopped during implementation)', stopped['note'])
+
+    def test_observation_recovery_failed_install_shows_setup_then_stops_there(self):
+        self.assert_recovery_install_records('fail-later')
+
+    def test_observation_recovery_changing_install_shows_setup_then_stops_there(self):
+        self.assert_recovery_install_records('change-later')
+
+    def test_observation_recovery_stored_decision_stops_on_plan_revision(self):
+        self.revision_written(findings='P1|Rollback choice;P2|Gap in tests',
+                              MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        self.plant_observation(stage='plan_review', state='active')
+        notified = self.stopped_notifications()
+        self.resume('watchdog', expected=1, MOCK_CODEX_PLAN='major')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_revision', 'stopped'))
+        self.assertIn('Keep option A or switch to B?', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def test_observation_recovery_base_moved_ends_on_none(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertEqual(self.recovery_calls(), [])
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn('moved past the branch', stopped['note'])
+
+    def test_observation_recovery_changed_gate_leaves_the_recovering_record_and_no_log_line(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        calls = len(self.recovery_calls())
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
+        self.commit('weaken the gate')
+        log = self.project / '.ai/local/notifications.log'
+        before = log.read_text() if log.exists() else ''
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('gate files changed since you approved the run', self.notifications())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('build', 'recovering'))
+        self.assertEqual(log.read_text() if log.exists() else '', before)
+        self.assertEqual(len(self.recovery_calls()), calls)
 
 
 class ReviewHistoryTest(unittest.TestCase):

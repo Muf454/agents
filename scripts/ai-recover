@@ -36,6 +36,7 @@ reason=${reason:-unknown (no last-error recorded)}
 
 escalate() {
   AI_STOP_NOTIFIED=1
+  ai_observe stop '' "${reason% } (stopped during $stage)"
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}"
   printf '%s\n' "$reason" > .ai/local/last-error
   touch .ai/local/last-error.notified 2>/dev/null || true
@@ -79,6 +80,7 @@ done < <(ai_helper run-manifest env)
 on_exit() {
   local code=$?
   if (( code != 0 )) && [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
+    ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"
     ai_notify "⛔ STOPPED, needs you: auto-recovery failed unexpectedly (exit $code) during $stage. Inspect the checkout, then rerun ai-pipeline."
     touch .ai/local/last-error.notified 2>/dev/null || true
     ai_drop_marker
@@ -93,6 +95,9 @@ AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 max=${AI_RECOVER_MAX:-2}
 [[ "$max" =~ ^[0-9]$ ]] || max=2
+# Shell variable only: resume execs ai-pipeline with explicit variables, so it never reaches it.
+AI_OBSERVE_RECOVERY="$attempt/$max"
+ai_observe recovering "$AI_OBSERVE_RECOVERY"
 [[ "${AI_AUTO_RECOVER:-1}" != 0 ]] || escalate 'auto-recovery is off (AI_AUTO_RECOVER=0).' 'fix the cause, then rerun ai-pipeline.'
 ai_guard_digest >/dev/null || { AI_GATE_BROKEN=1
   escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'; }
@@ -114,6 +119,7 @@ case "$decision_rc" in
            "$(ai_helper stage-verify 2>/dev/null)" == committed ]]; then
        ai_helper run-manifest stage-clear 2>/dev/null || true
      fi
+     ai_observe recovering "$AI_OBSERVE_RECOVERY" plan_revision
      escalate 'a plan revision recorded questions only you can answer.' \
        'answer them in .ai/reviews/plan-dispositions.md and the plan, commit, run ai-review --plan, then rerun ai-pipeline.' ;;
   1) ;;
@@ -195,6 +201,7 @@ case "$action" in
     ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}" || \
       escalate "$why; but dependency setup failed: $AI_DEPS_ERROR." \
         'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
+    ai_observe recovering "$AI_OBSERVE_RECOVERY" checks
     "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
     ai_gate_check "$approved_gate" || escalate 'gate files changed during validation.' 'inspect the diff.'
     git add --all -- .
