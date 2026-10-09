@@ -7,15 +7,21 @@ included). This run is started with `--knowledge-dir "$HOME/zWiki/zWiki/20 Proje
 of 2026-10-07 (pipeline dashboard, high priority; backlog OR-19 + minimal OR-12). Every task
 leaves `.ai/bin/ai-check` passing. Flow-chart rule (AGENTS.md, CLAUDE.md): a task that
 changes workflow behaviour updates the vault `agents-flow.md` (and its `updated:` date) in
-the SAME task; T008 is only the final docs audit.
-Gate note: the serial gate takes about 611 s. When `.ai/bin/ai-check` times out in the
-session, run the task's targeted tests, record the timeout in the result, and leave the full
-gate to the host's post-task `ai-check` (1800 s limit).
+the SAME task; T009 is only the final docs audit.
+Gate note: `.ai/validate` runs the shell syntax checks and then `tests/run_parallel.py`
+(parallel shards, about 4 min), inside the 600 s Bash tool limit. Should `.ai/bin/ai-check`
+still time out in the session, run the task's targeted tests, record the timeout in the
+result, and leave the full gate to the host's post-task `ai-check` (1800 s limit). New tests
+with time bounds run inside parallel shards: assert "returns within N s" with the generous
+bounds below, never a tight duration.
 Read-only rule for this batch: nothing the dashboard does may write a file, take a lock or
 change a run. Observation writers are best effort and never change a run's outcome.
-Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
-into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
-watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
+Revision 9 (2026-10-09, rebase on master e9354d9 after FL-04 #21, FL-14–17 #22, #23, #24;
+see `.ai/current-plan.md`): new Plan revision box and stop labels (`plan revision`, `start`,
+`push`), stored needs-human decision, extra fix round and format retry details, `start` and
+`detail` observe actions, 8 boxes with the box layout from 120 columns, line references
+re-verified; old T004 split into T004 (ai-run, `ai_deps`, ai-review) and T005 (ai-recover);
+old T005–T008 are now T006–T009. The review notes below keep the IDs of their time.
 Revised after plan review 7 (`.ai/reviews/plan.md`, P30–P31, all accepted): the notification
 log is always rewritten via temp + rename (hard-link safe); T005 also runs its sanitize tests.
 Revised after plan review 6 (P28–P29, all accepted): registration
@@ -34,6 +40,9 @@ Revised after plan review 2 (P11–P18, all accepted): substage wins
 over an outer stop label; nonblocking opens and bounded locks; directory-descriptor-relative
 I/O; one bounded safe reader (T001) used by the dashboard; handoff flow declaration restored
 (P15); unknown-stage rendering; Re-check in Codex colour.
+Revised after Codex plan review 1 (P1–P10, all accepted): T001 split
+into safe writers (opus) and stage hooks (sonnet); overlay schema; checks inside ai-run;
+watchdog liveness semantics; locking and no-follow writes; crashed runs never hidden.
 
 ## T001 — Safe record I/O: observation, notification log, host registry, bounded readers
 Status: TODO
@@ -42,12 +51,12 @@ Model: opus
 
 ### Goal
 The three host-written records the dashboard reads, written safely under concurrency and
-never through an agent-planted symlink. Helpers only; callers come in T002–T005.
+never through an agent-planted symlink. Helpers only; callers come in T002–T006.
 
 ### Implementation notes
 scripts/lib/workflow.py (new subcommands; every one exits 0 and prints `Warning: …` to stderr
 on any failure or deadline, so callers are never blocked or failed):
-- Shared safe I/O (P12–P14), used by every writer here and by the dashboard (T005, T006):
+- Shared safe I/O (P12–P14), used by every writer here and by the dashboard (T006, T007):
   - `local_dir_fd(root)`: open ROOT, then `.ai`, then `local` each with
     `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor (`dir_fd=`); a
     symlink or non-directory anywhere → refuse. All later opens, temp creation, `rename`,
@@ -72,17 +81,25 @@ on any failure or deadline, so callers are never blocked or failed):
   - Writes: open/create with `O_NOFOLLOW|O_NONBLOCK` (+ `O_EXCL` for temp files), `fstat`
     regular before writing; `flock` with `LOCK_EX|LOCK_NB` retried every 50 ms up to a 2 s
     deadline, then warn and skip the write.
-- `observe ACTION [ARGS]` on `observation.json` (schema in the spec):
-  `step STAGE [DETAIL]` (state active, new `since`), `pause NOTE` (keep stage/detail/since,
-  state paused), `resume` (state active, note cleared), `stop LABEL REASON`,
-  `recovering NOTE [STAGE]`, `done NOTE`. Unknown stage keys are refused (warning).
-  Stop precedence (P11): each outer label has a group of box keys — `implementation` →
-  {setup, build, checks}; `validation` → {checks}; `plan review` → {plan_review}; `review` →
-  {review}; `triage` → {triage}; `re-check` → {recheck}; `pull request`, `pull request
-  preparation`, `final push` → {pr}; empty label → any. If the recorded stage is in the
-  label's group (or the label is empty/unknown), keep it; otherwise use the label's first
-  key. `recovering NOTE [STAGE]` (P19): STAGE, when given, must be a valid box key and is
-  set directly (no label normalisation); without it the current stage is kept.
+- `observe ACTION [ARGS]` on `observation.json` (schema in the spec). Box keys:
+  `plan_review plan_revision setup build checks review triage recheck pr`.
+  `start` (stage `none`, state active, detail and note cleared, new `since`; a human
+  (re)start), `step STAGE [DETAIL]` (state active, new `since`), `detail STAGE TEXT` (only
+  `detail` changes, and only when STAGE is the recorded stage and the state is active or
+  paused; otherwise no change, exit 0), `pause NOTE` (keep stage/detail/since, state paused),
+  `resume` (state active, note cleared), `stop LABEL REASON`, `recovering NOTE [STAGE]`,
+  `done NOTE`. Unknown stage keys are refused (warning).
+  Stop precedence (P11; label list verified against ai-pipeline at master e9354d9): each
+  outer label has a group of box keys and a target — `start` → {} / `none` (always none: the
+  "base moved past the branch" stop happens before the flow); `plan review` →
+  {plan_review, plan_revision} / plan_review; `plan revision` → {plan_revision};
+  `implementation` → {setup, build, checks} / build; `validation` → {checks}; `review` →
+  {review}; `triage` → {triage}; `re-check` → {recheck}; `pull request preparation`, `push`,
+  `pull request`, `final push` → {pr}; empty label → any. If the recorded stage is in the
+  label's group (or the label is empty/unknown), keep it; otherwise use the label's target.
+  ai-recover's `--stage` text (e.g. the watchdog's `crash (pipeline killed or restarted)`) is
+  never passed as a label. `recovering NOTE [STAGE]` (P19): STAGE, when given, must be a valid
+  box key and is set directly (no label normalisation); without it the current stage is kept.
   Temp file + `os.replace(…, src_dir_fd=fd, dst_dir_fd=fd)` (replaces a symlink at the
   destination instead of following it); the previous record is read with `read_record`.
 - `notify-log ROOT MESSAGE`: `flock` on `notifications.lock` (bounded as above; opened
@@ -91,10 +108,11 @@ on any failure or deadline, so callers are never blocked or failed):
   `read_record` (bounded), append the new JSON line `{"ts","message"}` in memory, keep the
   last 200 lines, write them to an exclusively created temp file and `os.replace` it onto
   `notifications.log` (pinned directory descriptor), all under the lock.
-- `pipeline-register CHECKOUT BRANCH`: `root = check_state_root(checkout)`; under a bounded
-  `flock` on `root/pipelines/.lock` write `<sha256(checkout)[:16]>.json` atomically, then
-  prune: for each other entry, re-read it under the lock and delete it only when its JSON is
-  invalid or its `checkout` is not an existing directory.
+- `pipeline-register CHECKOUT BRANCH`: `root = check_state_root(checkout)` (workflow.py
+  ~1038); under a bounded `flock` on `root/pipelines/.lock` write
+  `<sha256(checkout)[:16]>.json` atomically, then prune: for each other entry, re-read it
+  under the lock and delete it only when its JSON is invalid or its `checkout` is not an
+  existing directory.
 No flow-chart change (no behaviour yet).
 
 ### Likely affected modules
@@ -103,12 +121,18 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
 ### Acceptance criteria
 - Tests named `observation_writer_*`:
   - each action produces the schema; a pause keeps stage/detail/since and `resume` restores
-    `active`; every existing stop label (`implementation`, `validation`, `plan review`,
-    `review`, `triage`, `re-check`, `pull request`, `pull request preparation`, `final push`)
-    maps to its box key when the recorded stage is outside its group; `stop implementation`
-    after `step checks` or `step setup` keeps checks/setup (P11); an unknown label keeps the
-    stage; `recovering 1/2 checks` after `step build` gives `stage=checks,
-    state=recovering`, `recovering 1/2` keeps the stage, an invalid STAGE is refused (P19);
+    `active`; `start` after a `stopped` or `done` record gives `stage=none, state=active`
+    with detail and note cleared; `detail review "format retry"` after `step review` changes
+    only the detail (`since` kept), after `step build` changes nothing;
+  - every stop label in ai-pipeline (`start`, `plan review`, `plan revision`,
+    `implementation`, `validation`, `review`, `triage`, `re-check`, `pull request
+    preparation`, `push`, `pull request`, `final push`) maps to its target when the recorded
+    stage is outside its group; `stop start` after `step triage` gives `stage=none`;
+    `stop 'plan review'` after `step plan_revision` keeps plan_revision and after
+    `step build` gives plan_review; `stop implementation` after `step checks` or
+    `step setup` keeps checks/setup (P11); an unknown label keeps the stage;
+    `recovering 1/2 checks` after `step build` gives `stage=checks, state=recovering`,
+    `recovering 1/2` keeps the stage, an invalid STAGE is refused (P19);
   - `.ai` or `.ai/local` as a symlink, `observation.json` as a symlink to a sentinel, the
     temp name pre-planted as a symlink, and `.ai/local` replaced by a symlink AFTER
     validation (in-process test that swaps the directory between `local_dir_fd` and the
@@ -150,11 +174,14 @@ Every notification is also kept locally, and usage-limit pauses show on the curr
 No change to what is sent or printed.
 
 ### Implementation notes
-scripts/lib/common.sh: `ai_observe ACTION ARGS…` → `ai_helper observe "$@" || true`;
-`ai_notify` → after sending (or when `AI_NOTIFY_CMD` is unset) `python3 -B
-"$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "[$project] $*" 2>/dev/null || true`
-(the watchdog's `bash -c 'source common.sh; ai_notify …'` path then logs too).
-`ai_limit_pause`: `ai_observe pause "<agent> until <time>"` before sleeping, `ai_observe
+scripts/lib/common.sh: `ai_observe ACTION ARGS…` → `ai_helper observe "$@" || true`.
+`ai_notify` (~79) currently returns early when `AI_NOTIFY_CMD` is unset: restructure it so
+`python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "[$project] $*"
+2>/dev/null || true` runs in both cases (after sending when it is set); what is sent stays
+byte-identical. The watchdog's `bash -c 'source common.sh; AI_ROOT=…; ai_notify …'` path
+(watchdog.py ~478) then logs too, as do ai-review's ↪ fallback and 🔁 format retry and
+ai-pipeline's 🔁 plan revised / extra fix round notifications.
+`ai_limit_pause` (~89): `ai_observe pause "<agent> until <time>"` before sleeping, `ai_observe
 resume` after.
 Vault `agents-flow.md`: a note under "Phone notifications": every notification is also kept
 in `.ai/local/notifications.log` (read by `ai-dashboard`; advisory; flow unchanged); update
@@ -190,32 +217,66 @@ Dependencies: T002
 Model: sonnet
 
 ### Goal
-`ai-pipeline` records each flow stage, its stop and its finish, and registers the checkout.
+`ai-pipeline` records each flow stage (plan revision included), its stops (stored decision
+and the base-moved early stop included), its finish, and registers the checkout.
 
 ### Implementation notes
-scripts/ai-pipeline: `step KEY TITLE` (prints exactly as today, then `ai_observe step KEY`):
-plan review → `plan_review`; implementation → `build`; validation → `checks`; independent
-review → `review`; review triage and "Completing the interrupted review triage" → `triage`
-(detail `round <n>`); re-check → `recheck`; pull request → `pr`. `stop STAGE` →
-`ai_observe stop "$STAGE" "$reason"` before notifying or exec'ing ai-recover; the
-pipeline-shell `ai_die` path (marker set) → `ai_observe stop '' "$*"` (keeps the stage);
-`finish` → `ai_observe done "<url or 'no PR'>"`. Registration (P28): one call placed after
-the manifest start/resume block and after `branch=$AI_START_BRANCH` (both initial start and
-recovery resume pass through it): `ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH"
-|| printf 'Warning: …\n' >&2` (no unset variable can reach it under `set -u`).
+scripts/ai-pipeline (line numbers at master e9354d9):
+- `step KEY TITLE [DETAIL]` (~158; prints `== TITLE ==` exactly as today, then
+  `ai_observe step KEY [DETAIL]`): "Completing the interrupted plan revision" (~364) →
+  `plan_revision` `resumed`; "Completing the interrupted review triage" (~372) → `triage`;
+  "Re-check of rejected findings" (~324) → `recheck`; "Plan review" (~436) → `plan_review`;
+  "Plan revision r/max, review round n" (~461) → `plan_revision` with detail
+  `<reserved>/<AI_SUPERVISE_PLAN_ROUNDS> · round <n>`; "Implementation" (~476) → `build`;
+  "Validation" (`ensure_validated` ~231) → `checks`; "Independent review" (~490) → `review`;
+  "Review triage, round n" (~533) → `triage` with detail `round <n>`, plus
+  ` · extra (<x> → <y> → <z>)` when `$extra` holds the trend and ` · extra` when it is
+  `resumed` (the supervised extra fix round); "Pull request" (~563) → `pr`.
+- Start: right after the marker is written (~84), `[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] ||
+  ai_observe start` (a recovery resume keeps the recovering record until its first step).
+- `stop()` (~143): `ai_observe stop "$stage" "$reason"` right after `reason` is computed,
+  before both the exec into ai-recover and the notification. `stop start` (base moved, ~382)
+  thereby records `stage=none` (T001).
+- `plan_decision_check` (~388), case 0: `ai_observe step plan_revision 'needs your decision'`
+  before its `stop 'plan review'`, so the stored needs-human decision always shows on the
+  Plan revision box with the questions as the stop note (also on a restart and with
+  `--skip-plan-review`).
+- common.sh `ai_die`, pipeline-shell path (marker set): `ai_observe stop '' "$*" 2>/dev/null
+  || true` (keeps the stage; silent so existing stderr assertions hold).
+- `finish()` (~85) takes an optional note: `ai_observe done "${1:-no PR}"`; the final call
+  passes `$url`, the no-origin and no-gh calls pass `no PR (local only)` / `pushed, no PR (gh
+  missing)`.
+- Registration (P28): one call after `branch=$AI_START_BRANCH` (~139; after the manifest
+  start/resume block, so initial start and recovery resume both pass it): `ai_helper
+  pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || printf 'Warning: …\n' >&2` (no unset
+  variable can reach it under `set -u`).
 Vault `agents-flow.md`: extend the T002 note: the scripts also record the current stage in
 `.ai/local/observation.json` and each pipeline registers its checkout in the host state
 directory (`pipelines/`); `updated:`.
 
 ### Likely affected modules
-scripts/ai-pipeline, tests/test_workflow.py, vault agents-flow.md
+scripts/ai-pipeline, scripts/lib/common.sh, tests/test_workflow.py, vault agents-flow.md
 
 ### Acceptance criteria
-- Tests named `observation_pipeline_*` (existing fixture pipeline with mock claude/codex/gh,
+- Tests named `observation_pipeline_*` (existing fixture pipelines with mock claude/codex/gh,
   like `test_deps_runner_pipeline_end_to_end`, capturing `observation.json` inside the mocks):
   - a normal run records `plan_review`, `build`, `review`, `pr`, then `done` with the PR URL;
   - a review failure → `stage=review, state=stopped` with the reason; a plan-review stop →
     `plan_review`;
+  - supervised plan revision (fixture as in `test_revise_plan_accept_*`/the supervised plan
+    tests): `stage=plan_revision`, detail `1/3 · round 1` during the revision session, then
+    `plan_review` again for the re-review;
+  - stored needs-human decision (fixture as in
+    `test_supervised_plan_needs_human_stops_with_the_bounded_question` and
+    `test_needs_human_decision_gate_holds_with_skip_plan_review`): ends
+    `stage=plan_revision, state=stopped`, the note contains the question;
+  - extra fix round (fixture as in `test_extra_fix_round_falling_counts_get_one_round_then_draft`):
+    triage detail `round 3 · extra (…)` during that triage;
+  - base moved (fixture as in `test_base_moved_stops_before_any_agent`, with a previous
+    run's `done` record planted): ends `stage=none, state=stopped`, note names the base;
+  - a human start that dies at the clean-checkpoint check with a planted `stage=pr,
+    state=done` record ends `stage=none, state=stopped`; a resume (`AI_RECOVERY_ATTEMPT`
+    set) that dies at its gate check keeps the planted stage;
   - the registry entry exists after an initial start and after a recovery resume (P28);
     `pipelines` replaced by a regular file in the state root: warning, run outcome unchanged
     on both start and resume, run manifest still written;
@@ -227,37 +288,35 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T004 — Runner and recovery stage records (ai-run, ai-recover)
+## T004 — Runner, setup and review records (ai-run, ai_deps, ai-review)
 Status: TODO
 Dependencies: T003
 Model: sonnet
 
 ### Goal
-Setup, build, checks and recovery inside `ai-run`/`ai-recover` show on the right box,
-including after failures.
+Setup, build and checks inside `ai-run`, standalone triage/revision, and the review format
+retry show on the right box, including after failures.
 
 ### Implementation notes
-scripts/lib/common.sh `ai_deps` (P27): at the real stale-install boundary (after
-`deps-status` says stale, before running `.ai/ci-setup`) record Setup: when
-`AI_OBSERVE_RECOVERY` is set → `ai_observe recovering "$AI_OBSERVE_RECOVERY" setup`
-(state stays recovering), else `ai_observe step setup`. Nothing is recorded when
-dependencies are current.
-scripts/ai-run: `ai_observe step build "<id> · <model or default> · <done+1>/<total>"` when a
-task starts; `ai_observe step checks "<id>"` before its post-task `ai-check` (~line 292) and
-`ai_observe step checks final` before the final one (~257); `--triage` → `step triage`.
-scripts/ai-recover: set `AI_OBSERVE_RECOVERY="<attempt>/<max>"` (not exported to the resumed
-pipeline: unset it before the `exec` into ai-pipeline) and `ai_observe recovering
-"$AI_OBSERVE_RECOVERY"` when recovery starts (keeps the stage the pipeline stop recorded);
-`ai_observe recovering "$AI_OBSERVE_RECOVERY" checks` before its leftover validation
-(explicit stage key, P19). `escalate` → `ai_observe stop '' "<reason> (stopped during
-$stage)"` (P26): the empty label keeps the substage recovery last recorded (the original
-stop stage, setup or checks); the original label is only text. In `on_exit`'s existing
-failure branch (P23) → `ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"`
-before the notification (keeps the substage; best effort).
+- scripts/lib/common.sh `ai_deps` (~167, P27): at the real stale-install boundary (after the
+  `stale*` check ~173, before running `.ai/ci-setup`) record Setup: when
+  `AI_OBSERVE_RECOVERY` is set → `ai_observe recovering "$AI_OBSERVE_RECOVERY" setup`
+  (state stays recovering), else `ai_observe step setup`. Nothing is recorded when
+  dependencies are current. (T005 sets `AI_OBSERVE_RECOVERY` in ai-recover.)
+- scripts/ai-run: `ai_observe step build "<id> · <model or default> · <done+1>/<total>"`
+  when a task starts (after `task_model` ~461; counts from the existing `tasks` helpers);
+  `ai_observe step checks "<id>"` before its post-task `ai-check` (~478) and `ai_observe step
+  checks final` before the final one (~441). `--triage` (~350) → `step triage` and
+  `--revise-plan` (~223) → `step plan_revision "round <n> · <model>"`, both only when
+  `AI_PIPELINE` is empty (inside a pipeline the pipeline's own record with its round/extra
+  detail stays).
+- scripts/ai-review: right after the 🔁 format retry notification (~235) → `ai_observe
+  detail <plan_review|review> 'format retry'` (plan mode → plan_review, code mode → review;
+  re-checks never retry).
 No new flow-chart change (T003's note covers stage records).
 
 ### Likely affected modules
-scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.py
+scripts/lib/common.sh, scripts/ai-run, scripts/ai-review, tests/test_workflow.py
 
 ### Acceptance criteria
 - Tests named `observation_runner_*` (fixture pipeline, observations captured inside the mock
@@ -266,10 +325,67 @@ scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.p
     ai-run's own post-task and final validation;
   - substage precedence end to end (P11): a failing post-task validation and a failing final
     validation end with `stage=checks, state=stopped`; a failing dependency install ends
-    with `stage=setup, state=stopped`; the same after ai-recover escalation;
+    with `stage=setup, state=stopped`; a run with current dependencies records no Setup;
+  - `ai_deps` with `AI_OBSERVE_RECOVERY=1/2` set records `stage=setup, state=recovering`;
+  - inside a pipeline the triage session sees the pipeline's `triage` record with detail
+    `round 1` unchanged; standalone `ai-run --approved --triage` records `triage`, standalone
+    `--revise-plan` records `plan_revision` with detail `round 1 · opus`;
+  - format retry in a pipeline (fixture as in
+    `test_format_retry_pipeline_commits_the_run_log_line_with_each_review`): the second
+    reviewer call sees `stage=review`, detail `format retry`; a plan review retry inside the
+    pipeline shows `stage=plan_review`, detail `format retry`; a by-hand plan review retry
+    with a recorded `build` stage leaves the record unchanged.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k observation_runner` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T005 — Recovery records (ai-recover)
+Status: TODO
+Dependencies: T004
+Model: sonnet
+
+### Goal
+Recovery, its validation and install, the stored decision, escalation and unexpected exits
+show on the right box with the right state.
+
+### Implementation notes
+scripts/ai-recover (line numbers at master e9354d9):
+- After `max` is set (~95), before the first rule that can escalate on it: set the shell
+  variable `AI_OBSERVE_RECOVERY="$attempt/$max"` (never exported; `resume` (~49) execs
+  ai-pipeline through `env` with explicit variables, so it does not reach the resumed
+  pipeline) and `ai_observe recovering "$AI_OBSERVE_RECOVERY"` (keeps the stage the pipeline
+  stop recorded).
+- Decision branch (~105–116, a stored needs-human plan decision, also after a crash):
+  `ai_observe recovering "$AI_OBSERVE_RECOVERY" plan_revision` before its `escalate`, so the
+  stop shows on the Plan revision box with the questions in the note.
+- `commit_and_rerun`: `ai_observe recovering "$AI_OBSERVE_RECOVERY" checks` before its
+  leftover validation `ai-check` (~196) (explicit stage key, P19); its `ai_deps` (~193)
+  records Setup through T004.
+- `escalate` (~37) → `ai_observe stop '' "<reason> (stopped during $stage)"` (P26): the empty
+  label keeps the substage recovery last recorded (the original stop stage, plan_revision,
+  setup or checks; `none` after the base-moved stop); the original label is only text.
+  Escalations before the recovering record (state root, manifest, attempt) keep the
+  pipeline's stopped stage.
+- `on_exit` (~79), existing failure branch (P23) → `ai_observe stop '' "auto-recovery failed
+  unexpectedly (exit $code)"` before the notification (keeps the substage; best effort).
+- The stage-resume path (~139–153) records nothing more: the resumed pipeline's first step
+  replaces the recovering record.
+No new flow-chart change.
+
+### Likely affected modules
+scripts/ai-recover, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `observation_recovery_*` (existing recovery fixtures, observations captured
+  inside the mock agent and the mock validator):
   - recovery: `state=recovering` with the stopped stage kept; recovery validation of a
     stopped build shows `stage=checks, state=recovering`; its failure and escalation end
-    with `state=stopped` (P19);
+    with `state=stopped` (P19); after a `rerun` decision the resumed pipeline's first step
+    shows `state=active`;
   - unexpected recovery exits (P23): TERM and an injected failing command during recovery
     end with `state=stopped`, the substage kept, the same exit code as today and exactly one
     STOPPED notification;
@@ -279,19 +395,23 @@ scripts/lib/common.sh, scripts/ai-run, scripts/ai-recover, tests/test_workflow.p
   - the existing recovery-install fixtures (`fail-later`, `change-later`, see
     `test_deps_recovery_*`) additionally assert `stage=setup, state=recovering` during the
     install and `stage=setup, state=stopped` after the failure (P27); their existing exit,
-    notification and checkpoint assertions are unchanged; a run with current dependencies
-    records no Setup.
+    notification and checkpoint assertions are unchanged;
+  - a stored needs-human decision found by ai-recover (`--stage 'crash (pipeline killed or
+    restarted)'`, planted `stage=plan_review, state=active`) ends `stage=plan_revision,
+    state=stopped` with the questions in the note and exactly one ⛔ notification;
+  - base moved (fixture as in `test_base_moved_recovery_escalates_without_claude`) ends
+    `stage=none, state=stopped`.
 - All existing tests pass unchanged.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k observation_runner` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k observation_recovery` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
 
-## T005 — Discovery and liveness (marker + process identity)
+## T006 — Discovery and liveness (marker + process identity)
 Status: TODO
-Dependencies: T004
+Dependencies: T005
 Model: opus
 
 ### Goal
@@ -301,9 +421,9 @@ is alive, crashed or gone, with the watchdog's semantics on bounded descriptor r
 ### Implementation notes
 New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BEFORE the
 `sys.path` insert of its own directory, then import `state_root` and T001's
-`checkout_fds`/`read_record` from workflow.py and `process`, `is_runner`, `start_ns` from
-watchdog.py). Do not call watchdog.py's `marker_snapshot`/`pipeline_died` (they open by path
-and read unbounded); reimplement their semantics:
+`checkout_fds`/`read_record` from workflow.py and `process` (~74), `is_runner` (~85),
+`start_ns` (~65) from watchdog.py). Do not call watchdog.py's `marker_snapshot` (~90) /
+`pipeline_died` (~99) (they open by path and read unbounded); reimplement their semantics:
 - `discover()` → list of `(checkout, runners)`: checkouts from `<state root>/pipelines/*.json`
   (read with `read_record` on a no-follow descriptor of that directory; `checkout` must be an
   absolute existing directory with a real `.ai/`), plus the cwd of every live runner process
@@ -320,7 +440,7 @@ and read unbounded); reimplement their semantics:
   remove ESC-introduced sequences (CSI, OSC, DCS, APC/PM/SOS, single-char escapes) including
   their parameters, every remaining C0/C1 control and DEL, bidi override/isolate characters
   (U+202A–U+202E, U+2066–U+2069); collapse whitespace; cap by length with `…`. Applied to
-  every checkout-derived string before it leaves the snapshot layer (T006 must call it for
+  every checkout-derived string before it leaves the snapshot layer (T007 must call it for
   project, branch, observation detail/note, checkout path, notifications, last error, task
   titles).
 
@@ -340,10 +460,10 @@ scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_work
     (not alive, not crashed), no exception;
   - discovery: registry entries with a relative path, a missing directory, a symlinked `.ai`
     or invalid JSON are skipped; duplicates from the registry and `/proc` merge into one.
-  - Tests named `dashboard_sanitize_*`: CSI colour/cursor moves, OSC 8 hyperlinks and OSC 52
-    clipboard writes (BEL- and ST-terminated), DCS, 8-bit C1 CSI (U+009B), a bare ESC at the
-    end, CR/backspace overwrite tricks, DEL and bidi overrides are all removed; plain UTF-8
-    (emoji, accents) is kept; the length cap holds.
+- Tests named `dashboard_sanitize_*`: CSI colour/cursor moves, OSC 8 hyperlinks and OSC 52
+  clipboard writes (BEL- and ST-terminated), DCS, 8-bit C1 CSI (U+009B), a bare ESC at the
+  end, CR/backspace overwrite tricks, DEL and bidi overrides are all removed; plain UTF-8
+  (emoji, accents) is kept; the length cap holds.
 - No file is written (directory listing with mtimes unchanged; no `__pycache__`).
 
 ### Validation
@@ -353,58 +473,63 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T006 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
+## T007 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
 Status: TODO
-Dependencies: T005
+Dependencies: T006
 Model: sonnet
 
 ### Goal
 A pure, read-only snapshot of all pipelines on this machine, printable as text or JSON.
 
 ### Implementation notes
-Extend `scripts/lib/dashboard.py` (T005). Every checkout file is read only through T001's
+Extend `scripts/lib/dashboard.py` (T006). Every checkout file is read only through T001's
 `checkout_fds`/`read_record`/`git_branch` (bounded, nonblocking, regular files only, pinned
 descriptors; P14, P20), including `.ai/tasks.md` and Git metadata; a checkout whose records
 cannot be read safely shows as `unknown` while the others render:
 - `inspect(checkout, runners, now)` → dict: `project`, `branch` (`git_branch`; fall back to
-  `unknown`), `liveness` (T005), `observation` (validated fields, else none), `events` (last
-  20 parsed notification lines, malformed lines skipped), `last_error`, `tasks` (done/total
-  via workflow `task_blocks` on `.ai/tasks.md` text; on error none), `status`, `stage`,
+  `unknown`), `liveness` (T006), `observation` (validated fields: known stage keys incl.
+  `plan_revision` and `none`, known states; else none), `events` (last 20 parsed
+  notification lines, malformed lines skipped), `last_error`, `tasks` (done/total via
+  workflow `task_blocks` (~388) on `.ai/tasks.md` text; on error none), `status`, `stage`,
   `since`, `updated` (newest mtime of the files read).
 - Status rules (first match): liveness crashed → `crashed`; alive and state `paused`/`recovering` →
-  that; alive → `running`; state `stopped`, or a `last-error` newer than the observation,
-  with nothing alive → `needs_you`; state `done` → `finished`; else `idle`. Legacy (no
-  observation): stage `unknown`; alive → `running`.
+  that; alive → `running`; state `stopped` (any stage, including `none` after a stop at
+  start), or a `last-error` newer than the observation, with nothing alive → `needs_you`;
+  state `done` → `finished`; else `idle`. Legacy (no observation): stage `unknown`; alive →
+  `running`.
 - Pass every checkout-derived string (project, branch, observation detail/note, checkout
-  path, notifications, last error, task titles) through T005's `sanitize()` before it enters
+  path, notifications, last error, task titles) through T006's `sanitize()` before it enters
   the snapshot (P29).
 - `snapshot(all_runs=False)`: list sorted needs_you → crashed → running/paused/recovering →
   finished → idle, then by `updated`; hides only `finished`, `needs_you` and `idle` entries
   whose `updated` is older than 24 h unless `all_runs` (crashed and live runs always show).
 - CLI: `--once` (plain text: per run one title line, one compact stage line, last event;
-  T007 replaces this with the shared renderer), `--json`, `--all`. Without `--once`/`--json`
-  this task prints the text once too (T007 adds the TUI).
+  T008 replaces this with the shared renderer), `--json`, `--all`. Without `--once`/`--json`
+  this task prints the text once too (T008 adds the TUI).
 New `scripts/ai-dashboard` (bash; must work outside a checkout and through a symlink): resolve
 its real location with `readlink -f -- "${BASH_SOURCE[0]}"`, then
 `exec python3 -B "$dir/lib/dashboard.py" "$@"`. Do not source common.sh (it reads user
 config and needs nothing here).
-setup: add `ai-dashboard` to the installed script list and `lib/dashboard.py` to the lib
-files in workflow.py `setup` (~line 303), with tests that a fresh setup installs both.
+setup: add `ai-dashboard` and `lib/dashboard.py` to the installed list in workflow.py `setup`
+(~303; the same `copies` drive `--upgrade`, ~306), with tests that a fresh setup and an
+upgrade of an older install both install them.
 
 ### Likely affected modules
-scripts/lib/dashboard.py (new), scripts/ai-dashboard (new), scripts/lib/workflow.py,
-tests/test_dashboard.py (new) or tests/test_workflow.py
+scripts/lib/dashboard.py, scripts/ai-dashboard (new), scripts/lib/workflow.py,
+tests/test_dashboard.py or tests/test_workflow.py
 
 ### Acceptance criteria
 - Tests named `dashboard_snapshot_*` with fixture checkouts in a temp dir and
   `AI_STATE_DIR` pointing to a temp state root:
   - one fixture per status (running via a live process named `ai-pipeline` through a
     symlinked script, paused, recovering, needs_you, crashed, finished, idle) gives the
-    expected status and stage;
+    expected status and stage; a stopped `plan_revision` record whose note holds a decision
+    question → `needs_you`, stage `plan_revision`, the question in the snapshot; a stop at
+    start (`stage=none, state=stopped`) → `needs_you`, stage `none`;
   - a legacy checkout with no marker and no observation, found only via `/proc` → running,
-    stage unknown (process identity cases are T005's tests);
-  - malformed `observation.json`, malformed log lines and an unreadable tasks file → no
-    exception, fields unknown;
+    stage unknown (process identity cases are T006's tests);
+  - malformed `observation.json` (incl. an unknown stage key), malformed log lines and an
+    unreadable tasks file → no exception, fields unknown;
   - an ESC/OSC sequence planted in each checkout-derived field (branch name via a crafted
     HEAD ref, observation detail and note, a notification, `last-error`, a task title,
     checkout path via a registry entry) is absent from `--once` and `--json` output (P29);
@@ -418,7 +543,8 @@ tests/test_dashboard.py (new) or tests/test_workflow.py
     `__pycache__` appears);
   - `ai-dashboard --once` through a symlink in a temp `bin/` directory outside any checkout
     works;
-  - `setup-project` installs `.ai/bin/ai-dashboard` and `.ai/bin/lib/dashboard.py`;
+  - `setup-project` installs `.ai/bin/ai-dashboard` and `.ai/bin/lib/dashboard.py`, and
+    `setup-project --upgrade --apply` adds them to an install that lacks them;
     `ai-dashboard --once` works from a directory that is not a Git checkout.
 
 ### Validation
@@ -427,9 +553,9 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T007 — Curses TUI with the flow as boxes
+## T008 — Curses TUI with the flow as boxes
 Status: TODO
-Dependencies: T006
+Dependencies: T007
 Model: sonnet
 
 ### Goal
@@ -442,20 +568,30 @@ scripts/lib/dashboard.py:
   list of `(text, style)` segments; styles are names (`title`, `active_claude`,
   `active_codex`, `active_script`, `done`, `pending`, `stopped`, `dim`, `event`). Used by
   `--once` (styles dropped) and by curses (styles → colour pairs / attributes).
-- Stages and roles: Plan check (codex), Setup (script), Build n/N (claude), Checks (script),
-  Review (codex), Triage (claude; `recheck` shows in this box as "Re-check" with style
+- Stages and roles, eight boxes in flow order: Plan check (codex), Plan revision (claude;
+  Zack 2026-10-09: its own box), Setup (script), Build n/N (claude), Checks (script), Review
+  (codex), Triage (claude; `recheck` shows in this box as "Re-check" with style
   `active_codex`, P18), PR (script).
   The box is always the observation's `stage`; `state` only decorates it: `stopped` → that box
-  in style `stopped`, `paused` ⏸ / `recovering` 🔧 inside it, `done` → all passed. No parsing
-  of free text. Stage `none`, `unknown`, or no/malformed observation (P17): no box is
-  highlighted or ticked, the marker line says `stage unknown` (legacy runs: `stage unknown
-  (older toolkit)`), and the title/status and last event still render.
-- Width ≥ 100: three box lines (`┌─┐ │ │ └─┘`; active `╔═╗ ║ ║ ╚═╝`) joined by `──`, a
-  marker line (✓ under passed boxes, the detail `T003 · sonnet · 12m` under the active box),
-  then the latest event (`✅ Done …` with `HH:MM`). Overlays inside the active box: ⏸ paused,
-  🔧 recovering, ⚠ crashed. Width < 100: title line, one compact line
-  `✓Plan ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`, latest event. Lines never exceed
-  `width` (truncate with `…`; account for wide emoji via `unicodedata.east_asian_width`).
+  in style `stopped` and the note (stop reason, e.g. a decision's questions) on the marker
+  line, `paused` ⏸ / `recovering` 🔧 inside it, `done` → all passed. No parsing of free text.
+  Stage `none` with state `stopped` (stop at start, e.g. base moved): no box highlighted, the
+  marker line says `⛔ stopped before Plan check` and the note follows. Stage `none` otherwise,
+  `unknown`, or no/malformed observation (P17): no box is highlighted or ticked, the marker
+  line says `stage unknown` (legacy runs: `stage unknown (older toolkit)`), and the
+  title/status and last event still render.
+- Width ≥ 120: three box lines (`┌─┐ │ │ └─┘`; active `╔═╗ ║ ║ ╚═╝`) joined by `──`, a
+  marker line (✓ under passed boxes, the detail under the active box: `T003 · sonnet · 12m`,
+  `1/3 · round 2`, `round 3 · extra (5 → 3 → 1)`, `format retry`), then the latest event
+  (`✅ Done …`, `🔁 …` with `HH:MM`). Overlays inside the active box: ⏸ paused, 🔧 recovering,
+  ⚠ crashed. A Build label longer than 11 columns (e.g. `Build 100/120`) is truncated with
+  `…`. Worst case at the threshold: labels 10 + 13 + 5 + 11
+  + 6 + 6 + 8 + 2 = 61, plus 4 per box (`│ ` … ` │`) = 93, an overlay in the active box (+3)
+  = 96, seven `──` joiners = 110, card indent 2 = 112 ≤ 120 (100 no longer fits eight boxes).
+  Width < 120: title line, one compact line
+  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`, latest event. Lines never
+  exceed `width` (truncate with `…`; account for wide emoji via
+  `unicodedata.east_asian_width`).
 - Header: `AI pipelines  <n> running · <n> needs you · <n> finished  HH:MM  ↑↓ ⏎ a r q`.
   Empty state: "No pipelines found. Start one with .ai/bin/ai-pipeline --approved (in tmux)."
 - Expanded run (Enter): checkout path, last error, last 8 events with times.
@@ -471,12 +607,21 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
 
 ### Acceptance criteria
 - Tests named `dashboard_render_*`:
-  - golden text (styles dropped) for a running build at width 140 and 100 (double border
-    around Build 3/7, ✓ under Plan check and Setup), and at width 60 (compact line);
+  - golden text (styles dropped) for a running build at width 140 and 120 (double border
+    around Build 3/7, ✓ under Plan check, Plan revision and Setup), and at widths 119 and 60
+    (compact line, truncated with `…` at 60);
+  - the worst case (Plan revision active and paused, `Build 99/99`, Re-check label) at width
+    120 renders the box row without truncation;
   - a stopped review: the Review box carries style `stopped`; finished: all ✓ and the 🏁 line;
+  - a running plan revision: the Plan revision box active in `active_claude` with detail
+    `1/3 · round 2`; a stored decision: Plan revision box `stopped`, the question on the
+    marker line; an extra fix round: detail `round 3 · extra (…)` under Triage; a format
+    retry: `format retry` under Review;
+  - a stop at start: no box highlighted, `⛔ stopped before Plan check`;
   - writer-to-renderer: observations produced by the T001 `observe` helper (not hand-written
-    fixtures) for a paused build, a paused review, a recovery and a stop from each real
-    stop label render the overlay in the right box;
+    fixtures) for a paused build, a paused review, a paused plan revision, a recovery and a
+    stop from each real stop label (the twelve labels of T001) render the overlay in the
+    right box (`start` in none);
   - `recheck` renders the Triage box as "Re-check" in `active_codex`;
   - legacy and malformed-observation snapshots render with no active box and `stage
     unknown`, through `render()` and through `ai-dashboard --once`;
@@ -487,9 +632,9 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
   `TERM=xterm-256color`, `AI_STATE_DIR` fixture, send `q`; exits 0 within 10 s and the output
   ends with the terminal restored (contains the rmcup/normal-screen sequence or `stty -a`
   on the pty shows `icanon echo` after exit).
-- Test `dashboard_render_curses_interaction` (P25): under a pty sized 24×100 with 8 fixture
+- Test `dashboard_render_curses_interaction` (P25): under a pty sized 30×140 with 10 fixture
   runs (more than fit): ↓ past the viewport keeps the selected card visible (its title in
-  the screen dump), Enter shows its details, a resize to 20×70 (`TIOCSWINSZ` + SIGWINCH)
+  the screen dump), Enter shows its details, a resize to 20×100 (`TIOCSWINSZ` + SIGWINCH)
   switches to compact lines, then `q` exits 0; with an injected exception in `render`
   (test-only monkeypatch via a small importable entry point) the process exits nonzero and
   the terminal is restored. Each test bounded to 15 s.
@@ -500,9 +645,9 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T008 — Docs and final audit for the dashboard
+## T009 — Docs and final audit for the dashboard
 Status: TODO
-Dependencies: T007
+Dependencies: T008
 Model: haiku
 
 ### Goal
@@ -510,17 +655,19 @@ Users find and understand the dashboard; records match the code.
 
 ### Implementation notes
 - README: section "Watch all pipelines" after "Leave it running": `ai-dashboard` (from any
-  project's `.ai/bin` or `~/Projects/agents/scripts/`), what the boxes and colours mean,
-  keys, `--once`/`--json`/`--all`, tmux tip `tmux new -s dash ai-dashboard`, read-only and
-  advisory (records in `.ai/local/` are agent-writable; never used to authorize); a row in the
-  scripts table.
+  project's `.ai/bin` or `~/Projects/agents/scripts/`), what the eight boxes and colours mean
+  (incl. Plan revision, the extra fix round and format retry details, a stop before Plan
+  check), keys, `--once`/`--json`/`--all`, the 120-column box layout, tmux tip `tmux new -s
+  dash ai-dashboard`, read-only and advisory (records in `.ai/local/` are agent-writable;
+  never used to authorize); a row in the scripts table.
 - docs/workflow.md: the observation records and the host registry (one paragraph).
 - Vault (`--knowledge-dir`): `agents-flow.md` note checked against the code (T002/T003 wrote it);
-  hub `agents.md`: a dated Decision line ("2026-10-07 (Zack): pipeline dashboard, boxes
-  layout, built ahead of OR-11/14/18") and a Log line; `agents-backlog.md`: OR-12 partially
-  and OR-19 done-by-this-branch note (no checkbox ticking); `agents-human-todo.md`: optional
-  `ln -s ~/Projects/agents/scripts/ai-dashboard ~/.local/bin/` and upgrading projects'
-  `.ai/bin` so their runs record stages.
+  hub `agents.md`: dated Decision lines ("2026-10-07 (Zack): pipeline dashboard, boxes
+  layout, built ahead of OR-11/14/18" and "2026-10-09 (Zack): plan revision as its own
+  dashboard box") and a Log line; `agents-backlog.md`: OR-12 partially and OR-19
+  done-by-this-branch note, DB-01 now T001–T009 (no checkbox ticking);
+  `agents-human-todo.md`: optional `ln -s ~/Projects/agents/scripts/ai-dashboard
+  ~/.local/bin/` and upgrading projects' `.ai/bin` so their runs record stages.
 - `.ai/handoff.md`: "## Flow chart" still starts with `Flow chart updated` and matches the
   vault note; "Manual testing for the human" (`### Needs you` / `### Covered by
   automated tests`, naming the tests).
@@ -530,7 +677,8 @@ README.md, docs/workflow.md, vault notes, .ai/handoff.md
 
 ### Acceptance criteria
 - `DocsConsistencyTest` passes; README mentions `ai-dashboard`, `--once`, `--json`, `--all`.
-- Handoff lists the manual checks (live TUI in tmux with two runs, resize, `q`).
+- Handoff lists the manual checks (live TUI in tmux with two runs, resize across 120
+  columns, `q`).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
