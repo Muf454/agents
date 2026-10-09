@@ -63,3 +63,10 @@ Plan review HEAD: 13be9926c2303bff4a3c20677e2ff71a5f35d58e
 | P9 | accepted | Verified: `task_blocks` (scripts/lib/workflow.py:390-415) appends every line up to the next `## ` heading, blank lines included, and raises `Malformed task heading` (:409-410). T011 now compares blocks with trailing empty lines stripped, calls `plan-keeps-done HEAD` right after `plan-scope HEAD` before the session, and adds a trailing-blank helper test and a malformed-START-queue ai-run test. | T011 |
 | P10 | accepted | Verified: `sessions=16` (scripts/ai-run:32) is overwritten by `--sessions` (:59), so without T002 a value check cannot tell `--sessions 16` from the default, and T007 depends only on T001/T006. T007 now refuses options by parser-set "given" flags (`sessions_given=yes`), adds a `--plan p --sessions 16` refusal case; T002 reuses the same flag for its `(--sessions)` wording. No dependency added, so a blocked T002 never blocks DB-04. | T007, T002 |
 | P11 | accepted | Verified: ai-recover sets `AI_PIPELINE_MARKER` (scripts/ai-recover:94) but never writes `$$` to `.ai/local/pipeline.active`, so a watchdog-started recovery leaves the dead pipeline's PID there. Chosen the reviewer's documentation option: T003 states the limit in README/docs/workflow.md (the FL-19 night case was in-pipeline recovery, which keeps the PID via exec), because rewriting the marker would change the watchdog's `pipeline_died` input (watchdog.py:99-111) for a cosmetic hint. Also from "Missing coverage": T003's lock-holder processes are stopped via `self.addCleanup`. Handoff "Needs you" gains the reviewer's manual relaunch check. | T003 |
+
+## Plan review round 3 (report c849f6f8010c7bee88fedc12df0c3958c8d89f06f47f309dbe2cac797a727acf)
+
+Plan review HEAD: c497b45fc76289b60061b7f233b4013016de40ca
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
