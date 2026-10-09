@@ -4284,7 +4284,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         f'exec {real} "$@"\n')
         slow.chmod(0o755)
         result = self.tool('ai-run', '--approved', '--run-timeout', '1', expected=1)
-        self.assertIn('Run time limit', result.stderr)
+        # The limit can be reached in dependency setup ("... not run: run time limit reached.") or later.
+        self.assertIn('run time limit', result.stderr.lower())
         self.assertEqual(self.outcome_rows(), [])
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
 

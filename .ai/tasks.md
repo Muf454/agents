@@ -1123,7 +1123,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 ## T014 — Make the time-limit outcome test deterministic (pre-existing flake)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: sonnet
 
