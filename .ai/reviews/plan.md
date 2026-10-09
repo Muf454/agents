@@ -1,11 +1,15 @@
-<!-- Plan review of plan digest f7c282817a10bfba66942ee6238c06d62c58bbc47285e8ff9401e2a502e24cc7; saved 2026-10-07T12:20:39Z. -->
+<!-- Plan review of plan digest c8b24120ecb2026756e5844f87c43edb95cb0a5c57117b4baad7d6f3ff44abcf; HEAD 8c20495a62585da48a26d4195bbebcebce53496c; saved 2026-10-09T09:03:42Z. -->
+
+> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+
+I've finished tracing the plan against ai-pipeline, ai-recover, common.sh, ai-run, ai-review, workflow.py, watchdog.py and the test harness. Writing the review now.
 
 # Plan review
 
-Overall verdict: APPROVE PLAN, subject to the recorded efficiency-batch merge prerequisite.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Overall verdict: REVISE PLAN (three MAJOR gaps; no blocker).
+Finding counts: BLOCKER=0 MAJOR=3 MINOR=4
 
-Reviewed HEAD: `92f860a50613b6cbb6b3c01eabd5ff18dfa2045e`.
+Reviewed HEAD: `8c20495a62585da48a26d4195bbebcebce53496c` (plan revision 9; files in scope: `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`). Earlier rounds P1–P31 were re-checked against the current plan text; all are covered, none is re-reported.
 
 ## BLOCKER findings
 
@@ -13,42 +17,40 @@ None.
 
 ## MAJOR findings
 
-None.
+- P32: **The integrity-stop path will execute the project helper after the gate is known to be tampered (T002, T003; security).** Location: `.ai/tasks.md` T002 (`ai_notify` restructure, lines 177–183) and T003 (`ai_die` → `ai_observe stop ''`, lines 244–245). Problem (demonstrated): `ai_guard_verify` (`scripts/lib/common.sh:156-161`) calls `ai_die` exactly when the digest of `.ai/bin` (part of the gate, `common.sh:123`) differs from `AI_APPROVED_GATE`. `ai_die` (`common.sh:11-25`) calls `ai_notify`, which under T002 runs `python3 -B "$AI_BIN/lib/workflow.py" notify-log`, and under T003 additionally `ai_observe stop ''` → `ai_helper` → `python3 "$AI_BIN/lib/workflow.py"`. `AI_BIN` is the checkout's `.ai/bin` (`common.sh:4`). So a session that rewrites `.ai/bin/lib/workflow.py` gets it executed by the host shell (holding the lock, `AI_STATE_DIR` in env, host state writable) at the very stop meant to contain that. The toolkit's own rule forbids this: `scripts/ai-run:109-110` ("Never run a project helper after the approved gate changed") and `common.sh:114-115` ("Never ask a potentially modified project helper to verify its own integrity"); ai-run's `on_exit` honours it today but would violate it through `ai_notify` after T002. The watchdog path (`watchdog.py:478-480`) adds no new exposure (it already runs checkout `.ai/bin` code) but inherits the same hook. Plan change: in T002 specify that `ai_observe` and the notify-log call skip the helper when the gate is not intact: either a shell flag `AI_GATE_BROKEN=1` set by `ai_guard_verify` and by the explicit `!= "$AI_APPROVED_GATE"` comparisons (`ai-run:110`, `ai-recover:187,197,207`, `common.sh:187`), or an inline `ai_guard_digest` comparison (inline Python, not project code) before each helper call when `AI_APPROVED_GATE` is set; have `ai-recover` set `AI_APPROVED_GATE=$approved_gate` so the guard applies there too. Add a test to T002/T003: a mock session replaces `.ai/bin/lib/workflow.py` with a script that writes a sentinel; the ⛔ notification is still sent via `AI_NOTIFY_CMD`, the sentinel is never created, exit code unchanged. Because T002 now edits the integrity-stop path, set its `Model:` to `opus` (or keep sonnet only if the guard is written out line by line as above).
+
+- P33: **`/proc` discovery makes the T006–T008 tests nondeterministic in the parallel gate and on a machine with live pipelines.** Location: T006 `discover()` (tasks.md lines 427–431: "plus the cwd of every live runner process"), T007 acceptance (status fixtures, 24 h hiding, `--once`/`--json` goldens), T008 header counts and pty tests. Problem (demonstrated): `.ai/validate` runs `tests/run_parallel.py`, which runs the shards concurrently (`run_parallel.py:101-104`); other shards run real `ai-pipeline`/`ai-run` processes with cwd in their own temp checkouts that have a real `.ai/` (`test_workflow.py:558-559`, `tool()` with `cwd=self.project`). `is_runner` (`watchdog.py:85-87`) matches those, so every dashboard snapshot taken in a test also lists foreign fixture runs (and on Zack's machine his real pipelines). Any assertion on the set of runs, the header counts, hidden/shown runs, or a golden `--once` output is then flaky; "no marker and no runner → gone" cannot even be set up reliably. Plan change: give `discover()` an injectable process source and a root filter: `discover(proc_root=Path(os.environ.get('AI_DASHBOARD_PROC', '/proc')), only_under=os.environ.get('AI_DASHBOARD_ROOT'))`, where tests point `AI_DASHBOARD_PROC` at a fixture tree of fake `<pid>/{stat,cmdline,cwd}` entries (cwd as a symlink) and/or `AI_DASHBOARD_ROOT` at the temp base so checkouts outside it are ignored; the pty tests and the read-only tree-comparison test must run with the same variables. Add to T006 acceptance: "a live runner whose cwd is outside `AI_DASHBOARD_ROOT` is not discovered". Document both variables as test-only in T009.
+
+- P34: **A stop between a passed post-task gate and the next task is attributed to the Checks box.** Location: T001 stop precedence (`implementation` keeps `checks`), T004 (`step checks "<id>"` before the post-task `ai-check`, nothing after it). Problem (demonstrated): in `scripts/ai-run`, the post-task gate runs at line 478; on success the loop continues to line 430–459 of the next iteration, where `ai_guard_verify`, `ai_branch`, `tasks check` and the very common `Session limit reached; inspect ai-status and rerun --approved` (`ai-run:459`) all exit via `ai_die` with the recorded stage still `checks`. The pipeline then calls `stop implementation` (`ai-pipeline:477`), the T001 rule keeps `checks`, and the dashboard shows a red Checks box for a run whose checks passed and that merely used up its sessions. T004 has no test for this path. Plan change: in T004, record `ai_observe step build "<id> · checkpointed · <done>/<total>"` right after a passing post-task `ai-check` (before the bookkeeping commit), and add the acceptance test "`--sessions 1` with two tasks: the session-limit stop ends `stage=build, state=stopped`, note contains `Session limit reached`"; a failing post-task gate still ends on `checks` (existing criterion).
 
 ## MINOR findings
 
-None.
+- P35: **`ai_die` after `stop()` records the stop twice with different notes.** Location: T003 (`stop()` records `ai_observe stop "$stage" "$reason"`; `ai_die` records `ai_observe stop '' "$*"`). With `AI_AUTO_RECOVER=0` or a changed gate, `stop()` falls through to `ai_die "Pipeline stopped during $stage: $reason"` (`ai-pipeline:154-156`), so the second record overwrites the note with the longer text. Plan change: in `ai_die`, call `ai_observe` only when `AI_STOP_NOTIFIED` is empty, exactly as the notification is gated (`common.sh:17`).
+
+- P36: **The notification read is specified as a 256 KiB "tail" but `read_record` reads the head.** Location: T001 (`read_record` "read at most `limit` bytes"; the limits list says "notifications 256 KiB tail"). A forged or legacy log larger than the limit would yield the oldest lines and a cut last line while the dashboard wants the newest 20. Plan change: state that `read_record` takes an optional `tail=True` that seeks to `max(0, size - limit)` on the same descriptor (size from the same `fstat`) and drops the first partial line, and that T007 uses it for `notifications.log`; add the 10 MiB-log case to the T001 `read_record` tests with an assertion on which lines come back.
+
+- P37: **The dashboard only sees pipelines registered under the same state root.** Location: T006 (`<state root>/pipelines/*.json`), T009 docs. `state_root()` (`workflow.py:1016-1025`) depends on `AI_STATE_DIR`/`XDG_STATE_HOME`; the watchdog timer passes its own `--setenv=AI_STATE_DIR=` (test at `test_workflow.py:797`), so a dashboard started from a shell without that variable lists only `/proc`-found runs and shows stopped runs as missing. Plan change: T007 prints the state root in `--json` (field `state_root`) and in the empty-state line; T009 README says the dashboard must run with the same `AI_STATE_DIR`/XDG settings as the pipelines (and the timer).
+
+- P38: **`observe` cannot fill `pid` and `branch` as the spec schema describes without saying how.** Location: spec schema (`{"stage","state","detail","since","note","pid","branch","updated"}`) versus T001 (`observe ACTION [ARGS]`, no root, pid or branch argument). The helper is a subprocess, so `os.getpid()` would record the helper's own PID, and the plan forbids a git subprocess for the branch. Plan change: specify `observe` resolves the root from `AI_ROOT` (else cwd), records `pid` as `os.getppid()` (the calling script) and `branch` via T001's `git_branch(root_fd)`; add one assertion to `observation_writer_*` that `pid` equals the caller's PID.
 
 ## Assessment
 
-No additional findings in the inspected areas. The plan covers stage transitions, pause and recovery overlays, process identity, malformed records, bounded I/O, concurrent notification writes, terminal sanitising, installation, and TUI interaction.
+The plan's model assignments fit: T001 and T006 (concurrency, descriptor-relative I/O, terminal sanitising) are `opus`; T002 should move to `opus` only because of P32. Dependencies are linear and ordered; every task has a `Model:` line; no task has a failed attempt. Code references in revision 9 were spot-checked and hold: `step()` at `ai-pipeline:158` with all ten call sites (231, 324, 364, 372, 436, 461, 476, 490, 533, 563), `stop start` at 382, `plan_decision_check` at 388–401, extra round at 509–532, the ai-review format retry at 225–245, `ai_deps` boundary at `common.sh:173`, ai-recover decision branch 105–119 and `commit_and_rerun` 190–211, `state_root`/`check_state_root` at `workflow.py:1016/1038`, the setup list at 303–305 and `upgrade()` creating missing files (`workflow.py:223-224`), `task_blocks` at 388. `tests/run_parallel.py` discovers a new `tests/test_dashboard.py` automatically (`collect()` uses `discover`), so the gate will run the new tests. Fixtures already isolate `AI_STATE_DIR` (`test_workflow.py:554`), so `pipeline-register` in T003 cannot touch the real registry during tests.
 
-P30 is addressed by reading notifications into memory and replacing the log atomically under the lock, with hard-link regression fixtures. P31 is addressed by explicitly running the sanitizer tests.
+Missing coverage (checklist items checked): 1 lock order: the notification lock and the registry lock are separate and never nested per task; the observation writer takes no lock; fine. 4 stale results: the double marker read for `crashed` is specified; the 2 s refresh reads whole files via one descriptor; fine. 5 refresh wiring: every stop/finish/pause path in the pipeline shell is hooked; the gap in the runner between gate and next task is P34. 8 data hidden from views: `needs_you`/`crashed` never hidden (spec and T007) and the stop-at-start renders; fine. 10 irreversible operations: none (ignored files and a prunable registry; no migration). Not applicable: 2, 6, 7, 9 (no accounts, tenants, roles or identities).
 
-All eight tasks specify models appropriate to their stated responsibilities. Dependencies are ordered, and no failed implementation retry is recorded. The advisory dashboard and standard-library implementation fit the spec.
-
-Implementation must still wait for the efficiency-batch merge and branch reconciliation described in `.ai/current-plan.md:40`. Reassess affected assumptions and validation after that reconciliation.
+Security concerns: 3 attribution: `.ai/local` records are agent-writable by design (AD-5, accepted and sanitised in T006); the new exposure is P32, where agent-written *code* rather than data gets executed by the host shell on the integrity-stop path. The `/proc` scan and registry reads are read-only and bounded as planned.
 
 ## Validation observed
 
-- Requested HEAD confirmed; working tree clean.
-- Task format and dependency validation passed.
-- Planning diff whitespace check passed.
-- 13 Bash syntax checks passed.
-- 3 in-memory Python syntax checks passed.
-- 3 documentation consistency tests passed.
-- Validation-stamp verification reported **no validation evidence**.
-
-The full `./scripts/ai-check`, `.ai/bin/ai-check`, and integration suite were not run because they create filesystem artifacts. Dashboard implementation tests do not exist yet.
+Read-only review: no commands were run. `.ai/validate` runs the shell syntax checks and `tests/run_parallel.py`; the plan's per-task `-k` patterns match method-name substrings and would report `Ran N tests`. No validation evidence file exists for this plan-only HEAD. The nondeterminism in P33 would surface only in the parallel gate, not in a targeted `-k` run.
 
 ## Scope and limitations
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, relevant documentation and vault flow chart, Git history/diffs, affected scripts and helpers, existing test fixtures, and `.ai/validate`.
-
-The planned security and concurrency safeguards have not yet been implemented or demonstrated. This verdict assesses plan readiness, not implementation correctness or human acceptance.
+Inspected `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/reviews/plan.md`, `.ai/handoff.md`, `.ai/validate`, `scripts/ai-pipeline`, `scripts/ai-recover`, `scripts/ai-run` (lines 60–520), `scripts/ai-review` (180–280), `scripts/lib/common.sh`, `scripts/lib/workflow.py` (205–265, 280–340, 1000–1090), `scripts/lib/watchdog.py` (1–125, 320–360, 455–488), `tests/run_parallel.py` and the referenced fixtures in `tests/test_workflow.py`. Tools were Read, Glob and Grep inside the checkout only. This verdict assesses plan readiness, not implementation correctness or human acceptance.
 
 ## Manual testing recommendations
 
-After implementation, observe two simultaneous tmux pipelines through pause, recovery, stop, and finish. Verify stage highlighting, scrolling, details, resizing, and terminal restoration.
+After implementation, run two pipelines in tmux worktrees with the dashboard open, trigger a session-limit stop (`--sessions 1`) and confirm the Build box, not Checks, turns red (P34); start the dashboard from a shell without `AI_STATE_DIR` and confirm the printed state root explains any missing run (P37).
 
 No files were modified; no network or MCP integrations were invoked.
