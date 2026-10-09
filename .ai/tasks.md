@@ -4,7 +4,7 @@ Branch `fix/outcome-followups`: outcome telemetry and parallel runner follow-ups
 Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts` or other gate files. Telemetry only: no change to what the pipeline does.
 
 ## T001 — Parallel runner ignores every colour setting (CU-4)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -31,6 +31,7 @@ tests/run_parallel.py, tests/test_workflow.py, README.md, docs/workflow.md
 `python3 -m unittest tests.test_workflow -k parallel_runner`; `.ai/bin/ai-check`
 
 ### Result / notes
+`run_shard` now also sets `PYTHON_COLORS=0`; new `summary()` strips ANSI before parsing. Tests: `test_parallel_runner_passes_with_caller_colour_settings`, `..._failing_shard_output_has_no_escapes`, `..._summary_parses_coloured_and_plain`. Mutation checks on Python 3.14.7: removing `PYTHON_COLORS=0` failed the no-escape test; removing ANSI stripping failed the `summary()` test (both restored). `-k parallel_runner`: 10 OK; `.ai/bin/ai-check`: 290 tests OK. README and docs/workflow.md updated.
 
 ## T002 — Per-attempt model statistics in the outcome report (CU-1)
 Status: TODO

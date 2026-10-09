@@ -49,7 +49,9 @@ Gate speed (FL-11): test suites can run in parallel shards. A stdlib-only runner
 `tests/run_parallel.py` discovers every test ID, splits them round-robin into
 `AI_TEST_WORKERS` shards (default `min(8, cpu count)`), and runs each shard with
 `python3 -m unittest`. It exits non-zero when a shard fails, crashes, collects zero
-tests, or when the shards ran a different number of tests than it collected.
+tests, or when the shards ran a different number of tests than it collected. Shards run
+without colour whatever the caller's `FORCE_COLOR`/`NO_COLOR`/`PYTHON_COLORS`, and the
+summary parser strips ANSI escapes.
 Switching `.ai/validate` to the parallel runner is a gate change that a human approves.
 
 Evidence in ignored `.ai/local/validation.json` includes outcome, timestamp, exit

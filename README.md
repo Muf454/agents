@@ -683,7 +683,8 @@ python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
 runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
 crashes, when it collects no tests, or when the shards ran a different number of tests than
-it collected. Switching `.ai/validate` to the parallel runner is a gate change that a human
+it collected. Shards always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
+`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
 approves.
 
 ## Deliberately manual for now

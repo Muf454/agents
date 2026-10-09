@@ -53,19 +53,31 @@ def collect(start_dir):
     return sorted(test.id() for test in tests)
 
 
+ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def summary(output):
+    """Return (tests run, OK/FAILED) from a shard's output, colored or plain."""
+    plain = ANSI.sub('', output)
+    ran = re.findall(r'^Ran (\d+) tests? in ', plain, re.M)
+    status = re.findall(r'^(OK|FAILED)\b.*$', plain, re.M)
+    return int(ran[-1]) if ran else None, status[-1] if status else None
+
+
 def run_shard(ids, start_dir):
     env = dict(os.environ)
-    # Colored output (FORCE_COLOR) would hide the summary lines parsed below.
+    # Colored output would hide the summary lines parsed below. PYTHON_COLORS=1 beats
+    # NO_COLOR on Python 3.14+, so switch colors off explicitly.
     env.pop('FORCE_COLOR', None)
     env['NO_COLOR'] = '1'
+    env['PYTHON_COLORS'] = '0'
     # Discovery IDs (test_workflow.X.test_y) only import with the start directory on the path.
     env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(start_dir), env.get('PYTHONPATH'))))
     result = subprocess.run([sys.executable, '-m', 'unittest', *ids], cwd=ROOT, env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, errors='replace')
-    ran = re.findall(r'^Ran (\d+) tests? in ', result.stdout, re.M)
-    status = re.findall(r'^(OK|FAILED)\b.*$', result.stdout, re.M)
-    return result.returncode, int(ran[-1]) if ran else None, status[-1] if status else None, result.stdout
+    ran, status = summary(result.stdout)
+    return result.returncode, ran, status, result.stdout
 
 
 def main():

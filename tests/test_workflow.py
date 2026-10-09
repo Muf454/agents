@@ -4702,6 +4702,39 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertIn('FAILED (failing shards:', result.stdout)
         self.assertNotIn('count mismatch', result.stdout)
 
+    def colour_env(self, **colours):
+        for name in ('NO_COLOR', 'FORCE_COLOR', 'PYTHON_COLORS'):
+            self.env.pop(name, None)
+        self.env.update(colours)
+
+    def test_parallel_runner_passes_with_caller_colour_settings(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n')
+        for colours in ({'FORCE_COLOR': '3'}, {'PYTHON_COLORS': '1'},
+                        {'FORCE_COLOR': '3', 'PYTHON_COLORS': '1'}):
+            self.colour_env(**colours)
+            result = self.runner('--start-dir', str(self.suite))
+            self.assertIn('Ran 2 tests', result.stdout, colours)
+            self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+
+    def test_parallel_runner_failing_shard_output_has_no_escapes(self):
+        self.write('test_one.py', '    def test_a(self): pass\n'
+                   '    def test_b(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        self.colour_env(PYTHON_COLORS='1')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertNotIn('\x1b', result.stdout)
+
+    def test_parallel_runner_summary_parses_coloured_and_plain(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        plain = 'Ran 3 tests in 0.001s\n\nOK\n'
+        coloured = '\x1b[1mRan 3 tests in 0.001s\x1b[0m\n\n\x1b[32mOK\x1b[0m\n'
+        self.assertEqual(run_parallel.summary(plain), (3, 'OK'))
+        self.assertEqual(run_parallel.summary(coloured), (3, 'OK'))
+        self.assertEqual(run_parallel.summary('\x1b[31mFAILED (failures=1)\x1b[0m\n'), (None, 'FAILED'))
+        self.assertEqual(run_parallel.summary('boom\n'), (None, None))
+
     def test_parallel_runner_zero_tests_fail(self):
         result = self.runner('--start-dir', str(self.suite), expected=1)
         self.assertIn('no tests collected', result.stdout)
