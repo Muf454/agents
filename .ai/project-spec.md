@@ -47,7 +47,10 @@ providers, gate files are never edited by a pipeline session.
   `ai_deps` in common.sh (`setup` at an actual install, as a recovering overlay during
   recovery), `ai-run` (`build` per task with detail
   `<id> · <model> · <n>/<N>`; `checks` around its post-task and final `ai-check` calls,
-  then `build` again when the next task starts; `triage`/`plan_revision` for `--triage` and
+  then `build` with detail `<id> · checkpointed · <n>/<N>` as soon as the post-task gate
+  passed, so a stop between two tasks, the session limit included, lands on Build and not on
+  a passed Checks (plan review 9, P34); after a passing final gate the Checks detail is
+  `final · passed`; `triage`/`plan_revision` for `--triage` and
   `--revise-plan` only outside a pipeline, whose own record they would overwrite),
   `ai-review` (`detail <stage> format retry` after its 🔁 format retry notification),
   `ai_limit_pause` (pause overlay), `ai-recover` (`recovering`; its recovery validation
@@ -57,13 +60,25 @@ providers, gate files are never edited by a pipeline session.
   All writes go through one Python helper (`workflow.py observe`), which refuses a missing,
   symlinked or non-directory `.ai/local`, writes via a temp file in `.ai/local` + `rename`
   (never following a symlink at the destination) and never fails the caller (exit 0, warning
-  on stderr).
+  on stderr). It records `pid` as the calling script's PID (its parent) and `branch` from the
+  checkout's Git metadata without a git subprocess (P38). The pipeline-shell `ai_die` records
+  a stop only when `stop()` has not already done so (`AI_STOP_NOTIFIED`, P35).
+- **Gate-broken guard (plan review 9, P32; security).** The helpers above are project code
+  (`.ai/bin/lib/workflow.py` is part of the approved gate). On a stop caused by a changed or
+  unreadable gate (`ai_guard_verify`, `ai_deps`, ai-run's exit handler, ai-pipeline's `stop()`,
+  ai-recover's gate escalations) no observation or notification-log helper runs: those paths
+  set the shell flag `AI_GATE_BROKEN` and `ai_observe`/`ai_notify_log` return without
+  calling the helper. The ⛔ notification itself (the user's `AI_NOTIFY_CMD`) is still sent;
+  exit codes and messages are unchanged. The existing gate tests (sentinel
+  `UNTRUSTED_HELPER_RAN`) keep passing. The watchdog's notification path, which has no
+  approved gate and already runs checkout code today, is unchanged.
 - **Safety and bounds (plan review 2, P11–P14).** A recorded substage wins over an outer stop
   label from the same group (`implementation` covers setup/build/checks), so a failed
   validation or install stays on Checks/Setup. All record I/O (writers and the dashboard's
   reads) goes through one helper set in workflow.py: directories opened with
   `O_DIRECTORY|O_NOFOLLOW` and used as pinned descriptors; files opened `O_NOFOLLOW|O_NONBLOCK`,
-  regular files only, reads size-capped; locks `LOCK_NB` with a 2 s deadline. Unsafe input or
+  regular files only, reads size-capped (head by default; the notification log is read as a
+  tail of the newest lines, P36); locks `LOCK_NB` with a 2 s deadline. Unsafe input or
   a deadline → warning and skip, never a blocked or failed run, never a frozen dashboard.
 - **Notification mirror.** `ai_notify` also records each message through
   `workflow.py notify-log` into `${AI_ROOT:-$PWD}/.ai/local/notifications.log` (JSON lines
@@ -81,9 +96,14 @@ providers, gate files are never edited by a pipeline session.
   helper writes there. A failure (e.g. `pipelines` is not a directory) prints a warning and
   never stops the run; the run manifest stays mandatory as today.
 - **Snapshot model** (`scripts/lib/dashboard.py`, Python stdlib only). Discovers checkouts
-  from the registry and from a `/proc` scan for live runner processes (`process()`,
-  `is_runner()` from `scripts/lib/watchdog.py`; cwd → checkout root containing `.ai/`), so
-  runs on an older toolkit copy also appear. Per checkout: project, branch, liveness
+  from the registry and from a `/proc` scan for live runner processes (`is_runner()` from
+  `scripts/lib/watchdog.py`; cwd → checkout root containing `.ai/`), so runs on an older
+  toolkit copy also appear. The process source and a root filter are injectable
+  (`AI_DASHBOARD_PROC`: a fixture tree instead of `/proc`; `AI_DASHBOARD_ROOT`: ignore
+  checkouts outside it) so the tests are deterministic next to other shards' and Zack's live
+  pipelines (plan review 9, P33); both are test-only and documented as such. The snapshot
+  names its `state_root` (`--json` field, empty-state line): only pipelines registered under
+  the same `AI_STATE_DIR`/XDG state root are listed (P37). Per checkout: project, branch, liveness
   (as the watchdog decides it: `marker_snapshot`/`pipeline_died` semantics in watchdog.py,
   i.e. PID, process start time not after the marker, `ai-pipeline`/`ai-recover` only, marker
   re-read; with no marker, live runner processes found in that checkout count, so legacy

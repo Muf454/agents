@@ -1,5 +1,36 @@
 # Plan: Pipeline dashboard (`ai-dashboard`)
 
+## Revision 10 (plan review 9 by the Claude fallback reviewer, 2026-10-09)
+P32–P38 all accepted (`.ai/reviews/plan-dispositions.md`, round 9). Design, scope, AD-4 and
+AD-5 unchanged; changes:
+1. **Gate-broken guard (P32, security; new opus task T010 between T001 and T002).** The
+   toolkit rule "never run a project helper after the approved gate changed" (ai-run ~109,
+   common.sh ~114) would be broken by T002/T003: `ai_guard_verify` → `ai_die` → `ai_notify` →
+   `workflow.py notify-log` and `ai_observe stop` would execute the checkout's
+   `.ai/bin/lib/workflow.py`, the very file the tampering changed; three existing gate tests
+   (`UNTRUSTED_HELPER_RAN` sentinel) already assert this never happens. Design: one shell flag
+   `AI_GATE_BROKEN` set by `ai_gate_check GATE` (common.sh), by `ai_guard_verify`, by
+   `ai_deps`, by ai-run's `on_exit`, by ai-pipeline's `stop()` and by ai-recover's gate
+   escalations; `ai_observe` and `ai_notify_log` skip the helper while it is set. The ⛔
+   notification (`AI_NOTIFY_CMD`, user code) is still sent. The flag approach matches the
+   existing design (every helper call after a session already follows an `ai_guard_verify`)
+   and costs no extra digest per record. T002 stays sonnet: the guard is written out in T010.
+2. **Deterministic discovery (P33).** `/proc` discovery gets an injectable process source
+   (`ProcSource(root)`, `AI_DASHBOARD_PROC` → fixture tree of fake `<pid>/{stat,cmdline,cwd}`)
+   and a root filter (`AI_DASHBOARD_ROOT`); the parallel gate runs real fixture pipelines in
+   other temp checkouts (`tests/run_parallel.py` shards), and Zack's machine runs real ones,
+   so every dashboard test sets both. Test-only variables, documented as such (T009).
+3. **Build after the post-task gate (P34).** ai-run records `step build "<id> · checkpointed
+   · <done>/<total>"` right after a passing post-task `ai-check`, so a stop between two tasks
+   (the common `Session limit reached`, the loop-head gate/branch/queue checks, checkpoint
+   stops) shows on Build, not on a Checks box whose gate passed; after the passing final gate
+   the Checks detail becomes `final · passed`. T004 carries a stop-site table for the loop.
+4. MINOR, all taken: `ai_die` records a stop only when `AI_STOP_NOTIFIED` is empty (P35, one
+   record per stop); `read_record(…, tail=True)` for the notification log (P36); `--json`
+   field `state_root` and the empty state name the state root, README says to run the
+   dashboard with the pipelines' `AI_STATE_DIR`/XDG settings (P37); `observe` records `pid` as
+   the caller's PID (`os.getppid()`) and `branch` via `git_branch` (P38).
+
 ## Revision 9 (rebase on master e9354d9, 2026-10-09)
 Zack reviewed revision 9 with the mockups (2026-10-09) and decided: keep the 120-column box
 layout; compact line shows a stopped stage as `✗<label>` (red) and paused/recovering/crashed as
@@ -74,32 +105,38 @@ Master gained the efficiency batch (#18), FL-04 bounded supervisor (#21), the ro
   Installed scripts: `setup` list (~303), shared with `--upgrade` (~306).
 - Gate: `.ai/validate` runs shell syntax checks, then `tests/run_parallel.py` (~4 min).
 
-## Approach (revised after Codex plan reviews 1–8, P1–P31; all accepted; revision 9 above)
+## Approach (revised after plan reviews 1–9, P1–P38; all accepted; revisions 9 and 10 above)
 1. T001 (opus) safe record writers in workflow.py: `observe` (schema, overlays, `start`,
-   `detail`, stop-label normalisation, path safety), `notify-log` (flock + O_NOFOLLOW + trim),
-   `pipeline-register` (flock, race-safe prune), plus the shared safe I/O (pinned directory
-   descriptors, nonblocking regular-file opens, bounded reads returning stat, Git metadata
-   incl. worktrees, bounded locks) the dashboard reuses. Concurrency and path safety → opus.
+   `detail`, stop-label normalisation, path safety, caller pid/branch), `notify-log` (flock +
+   O_NOFOLLOW + trim), `pipeline-register` (flock, race-safe prune), plus the shared safe I/O
+   (pinned directory descriptors, nonblocking regular-file opens, bounded head/tail reads
+   returning stat, Git metadata incl. worktrees, bounded locks) the dashboard reuses.
+   Concurrency and path safety → opus.
+1b. T010 (opus) gate-broken guard: `ai_gate_check`, `AI_GATE_BROKEN`, guarded `ai_observe` and
+   `ai_notify_log`; ai-run/ai-pipeline/ai-recover gate comparisons set the flag (P32).
 2. T002 (sonnet) notification mirror + pause overlay (common.sh); vault note.
 3. T003 (sonnet) ai-pipeline stage records incl. plan revision, decision, extra round, start
    and base-moved stop, finish, registration; vault note extended.
-4. T004 (sonnet) ai-run (build, checks, standalone triage/revision), Setup in `ai_deps`,
-   ai-review format retry detail.
+4. T004 (sonnet) ai-run (build, checks, build again after the post-task gate, standalone
+   triage/revision), Setup in `ai_deps`, ai-review format retry detail.
 5. T005 (sonnet) ai-recover records (recovering, recovery checks, decision, escalation,
    unexpected exit).
-6. T006 (opus) discovery and liveness (registry + `/proc`, marker/process identity on bounded
-   descriptor reads) and terminal sanitising.
-7. T007 (sonnet) snapshot model, status rules, `--once`/`--json`, wrapper, setup/upgrade install.
+6. T006 (opus) discovery and liveness (registry + injectable process source with root filter,
+   marker/process identity on bounded descriptor reads) and terminal sanitising.
+7. T007 (sonnet) snapshot model, status rules, `--once`/`--json` (with `state_root`), wrapper,
+   setup/upgrade install.
 8. T008 (sonnet) curses TUI and the shared renderer (8 boxes, 120-column threshold).
 9. T009 (haiku) docs and final audit.
 
-Dependencies: linear, T001 → T009.
+Dependencies: linear, T001 → T010 → T002 → T003 → T004 → T005 → T006 → T007 → T008 → T009.
 
 ## API / data changes
 - New files (ignored, host-written): `.ai/local/observation.json`,
   `.ai/local/notifications.log`; host `<state root>/pipelines/<key>.json`.
 - New helper: `workflow.py observe|notify-log|pipeline-register`. New scripts: `ai-dashboard`,
-  `lib/dashboard.py`.
+  `lib/dashboard.py`. New common.sh functions: `ai_gate_check`, `ai_observe`, `ai_notify_log`;
+  shell flag `AI_GATE_BROKEN` (never exported). Test-only environment: `AI_DASHBOARD_PROC`,
+  `AI_DASHBOARD_ROOT`.
 
 ## Risks
 - `.ai/local/` is agent-writable: a session can forge an observation or a notification
@@ -108,6 +145,12 @@ Dependencies: linear, T001 → T009.
 - Concurrent writers (pipeline and watchdog have separate locks): the notification log and
   the registry serialise their own writes with dedicated flock files; readers stay lock-free.
 - `/proc` scan sees only this user's processes in practice; fine for a single-user machine.
+  In tests it would also see other shards' fixture pipelines and Zack's live runs, so every
+  dashboard test pins the process source and the root filter (P33).
+- A stop caused by a changed gate records nothing (the helpers are project code): the
+  dashboard then shows `needs_you` from the newer `last-error` with the last recorded stage
+  still marked active in the record; accepted, and the watchdog's notification path keeps
+  running checkout code as it does today (P32).
 - The pipeline running this batch uses the frozen `.ai/bin`; the new records appear in a
   project after its `.ai/bin` is upgraded. Older runs still show via `/proc` (stage unknown).
 - New timing-bounded tests (5–15 s) run inside parallel shards: bounds stay generous and

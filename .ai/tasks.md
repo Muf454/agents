@@ -22,6 +22,14 @@ see `.ai/current-plan.md`): new Plan revision box and stop labels (`plan revisio
 `detail` observe actions, 8 boxes with the box layout from 120 columns, line references
 re-verified; old T004 split into T004 (ai-run, `ai_deps`, ai-review) and T005 (ai-recover);
 old T005–T008 are now T006–T009. The review notes below keep the IDs of their time.
+Revised after plan review 9 (Claude fallback reviewer, P32–P38, all accepted; revision 10 in
+`.ai/current-plan.md`): new opus task T010 (gate-broken guard: no project helper runs after the
+approved gate changed; runs between T001 and T002, so T002 stays sonnet); `/proc` discovery gets
+an injectable process source and root filter (`AI_DASHBOARD_PROC`, `AI_DASHBOARD_ROOT`) so the
+dashboard tests are deterministic in the parallel gate; ai-run records Build again as soon as
+the post-task gate passed (a session-limit stop lands on Build, not Checks); `ai_die` records
+a stop only once; `read_record` tail mode; `--json` prints the state root; `observe` fills
+`pid`/`branch`.
 Revised after plan review 7 (`.ai/reviews/plan.md`, P30–P31, all accepted): the notification
 log is always rewritten via temp + rename (hard-link safe); T005 also runs its sanitize tests.
 Revised after plan review 6 (P28–P29, all accepted): registration
@@ -71,17 +79,24 @@ on any failure or deadline, so callers are never blocked or failed):
     `open_dir` from `/` (every component no-follow except that the toolkit accepts it only
     when the path is absolute and has no `..`), then `HEAD`; `ref: refs/heads/<name>` →
     name, a sha → `detached`, anything else → None. No git subprocess.
-  - `read_record(dir_fd, name, limit)` → `(text, stat)` or None: open with
+  - `read_record(dir_fd, name, limit, tail=False)` → `(text, stat)` or None: open with
     `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, `fstat` must be a regular file, read at most `limit`
-    bytes (observation 64 KiB, notifications 256 KiB tail, marker/last-error 4 KiB, tasks
-    1 MiB, git HEAD/.git 4 KiB) from that descriptor, decode UTF-8 with `errors='replace'`,
-    and return the descriptor's `fstat` (mtime, size) with the text so callers such as the
-    marker check get content and metadata from the same open file (P20). Never blocks on a
-    FIFO or device.
+    bytes (observation 64 KiB, notifications 256 KiB with `tail=True`, marker/last-error
+    4 KiB, tasks 1 MiB, git HEAD/.git 4 KiB) from that descriptor, decode UTF-8 with
+    `errors='replace'`, and return the descriptor's `fstat` (mtime, size) with the text so
+    callers such as the marker check get content and metadata from the same open file (P20).
+    `tail=True` (P36): when `size > limit` (size from that same `fstat`), `lseek` the same
+    descriptor to `size - limit`, read `limit` bytes and drop everything up to and including
+    the first newline (a cut partial line), so the newest lines come back; `tail=False` reads
+    the head as before. Never blocks on a FIFO or device.
   - Writes: open/create with `O_NOFOLLOW|O_NONBLOCK` (+ `O_EXCL` for temp files), `fstat`
     regular before writing; `flock` with `LOCK_EX|LOCK_NB` retried every 50 ms up to a 2 s
     deadline, then warn and skip the write.
-- `observe ACTION [ARGS]` on `observation.json` (schema in the spec). Box keys:
+- `observe ACTION [ARGS]` on `observation.json` (schema in the spec). The checkout root is
+  `AI_ROOT` when set, else the current directory (`ai_helper` runs after `ai_root` changed
+  into the checkout); `pid` is `os.getppid()` (the calling script; the helper is its direct
+  child, `cmd || true` forks no subshell) and `branch` is `git_branch(root_fd)` (None →
+  `null`) (P38); `updated` is the write time. Box keys:
   `plan_review plan_revision setup build checks review triage recheck pr`.
   `start` (stage `none`, state active, detail and note cleared, new `since`; a human
   (re)start), `step STAGE [DETAIL]` (state active, new `since`), `detail STAGE TEXT` (only
@@ -123,7 +138,9 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
   - each action produces the schema; a pause keeps stage/detail/since and `resume` restores
     `active`; `start` after a `stopped` or `done` record gives `stage=none, state=active`
     with detail and note cleared; `detail review "format retry"` after `step review` changes
-    only the detail (`since` kept), after `step build` changes nothing;
+    only the detail (`since` kept), after `step build` changes nothing; called through
+    `bash -c 'python3 … observe step build; echo $$'` the record's `pid` equals that bash's
+    `$$` and `branch` the fixture branch (P38);
   - every stop label in ai-pipeline (`start`, `plan review`, `plan revision`,
     `implementation`, `validation`, `review`, `triage`, `re-check`, `pull request
     preparation`, `push`, `pull request`, `final push`) maps to its target when the recorded
@@ -141,6 +158,9 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
     another process: the helper returns within 5 s (test timeout), exit 0, warning;
   - `read_record`: FIFO, symlink to `/dev/zero`, a 10 MiB file and invalid UTF-8 return
     within 5 s with None or a bounded, decoded result; its stat matches the opened file;
+    a 10 MiB log of numbered lines read with `limit=256 KiB, tail=True` returns exactly the
+    last complete lines (its first line is complete, its last line is the file's last line,
+    the head is absent), and with `tail=False` the first lines (P36);
   - `git_branch`: a normal repository and a `git worktree add` checkout give the branch; a
     detached HEAD gives `detached`; `.git` as a FIFO, a symlinked `.git`, a `gitdir:` with
     `..` or a relative path, and a symlink inside the gitdir path give None within 5 s;
@@ -164,9 +184,84 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T002 — Notification mirror and pause overlay (common.sh)
+## T010 — Gate-broken guard: no project helper runs after the approved gate changed
 Status: TODO
 Dependencies: T001
+Model: opus
+
+### Goal
+The observation and notification-log helpers (`.ai/bin/lib/workflow.py`, part of the approved
+gate) are never executed on a stop whose cause is a changed or unreadable gate, in ai-run,
+ai-pipeline, `ai_deps` and ai-recover (P32, security). The ⛔ notification itself (the user's
+`AI_NOTIFY_CMD`, not project code) is still sent. Helpers only; T002–T005 call them.
+
+### Implementation notes
+Rule being enforced: `scripts/ai-run` ~109 ("Never run a project helper after the approved gate
+changed") and `common.sh` ~114. Today `ai_die` (~11) runs no project code; T002/T003 would
+make it run `notify-log` and `observe` after `ai_guard_verify` (~156) found the gate changed.
+The existing gate tests `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`
+(tamper target `.ai/bin/lib/workflow.py`, sentinel `UNTRUSTED_HELPER_RAN`),
+`test_pipeline_*` with the post-commit hook (~4585) and the pre-push hook (~4933) already
+assert the sentinel is never created on that stop, so without this task T002 breaks the gate.
+scripts/lib/common.sh:
+- `ai_gate_check GATE`: `actual=$(ai_guard_digest 2>/dev/null) && [[ "$actual" == "$GATE" ]]`
+  → return 0; otherwise set the shell variable `AI_GATE_BROKEN=1` (never exported; every
+  script sources common.sh itself) and return 1. An unreadable digest counts as broken.
+- `ai_guard_verify` (~156): set `AI_GATE_BROKEN=1` before each of its two `ai_die` calls
+  (digest unreadable; digest differs).
+- `ai_deps` (~187): `if ! ai_gate_check "$gate"; then AI_DEPS_ERROR=…` (same message).
+- `ai_observe ACTION ARGS…`: `[[ -z "${AI_GATE_BROKEN:-}" ]] || return 0`, then
+  `ai_helper observe "$@" || true`. Defined here; T002 adds the first callers.
+- `ai_notify_log MESSAGE`: same guard, then `python3 -B "$AI_BIN/lib/workflow.py" notify-log
+  "${AI_ROOT:-$PWD}" "$MESSAGE" 2>/dev/null || true`. Defined here; T002 calls it from
+  `ai_notify` (which stays byte-identical in what it sends).
+scripts/ai-run `on_exit` (~110): compute `gate_ok` once with `ai_gate_check "$AI_APPROVED_GATE"`
+(sets the flag on mismatch, so the ⛔ notification of a standalone run skips the log helper)
+and use it in the existing `attempt_open` condition; behaviour otherwise unchanged.
+scripts/ai-pipeline `stop()` (~148): hoist the digest comparison to the top of the function as
+`ai_gate_check "$AI_APPROVED_GATE"` into a local `gate_ok`; the recovery `if` tests
+`$gate_ok` instead of the inline digest. T003 places its `ai_observe stop` AFTER that line.
+scripts/ai-recover: the comparisons at ~97–99, ~160, ~187, ~197, ~207 set the flag:
+~97 (`current_gate=$(ai_guard_digest) || …`) sets `AI_GATE_BROKEN=1` before its `escalate`,
+~98 and the others become `ai_gate_check "$approved_gate" || escalate …` (messages
+unchanged). T005's `ai_observe stop` in `escalate` and `on_exit` is then skipped on exactly
+those paths.
+Known limit (record in docs/workflow.md with T009): the watchdog's notification path
+(`bash -c 'source common.sh; …'`, watchdog.py ~478) has no approved gate to compare with
+and already runs checkout `.ai/bin` code today (`start_recovery` execs `.ai/bin/ai-recover`);
+no new exposure, unchanged.
+No flow-chart change.
+
+### Likely affected modules
+scripts/lib/common.sh, scripts/ai-run, scripts/ai-pipeline, scripts/ai-recover,
+tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `observation_gate_*`:
+  - sourcing common.sh in a fixture whose `.ai/bin/lib/workflow.py` is replaced by a script
+    that creates a sentinel: `AI_GATE_BROKEN=1 ai_observe step build` and `AI_GATE_BROKEN=1
+    ai_notify_log m` return 0 and create no sentinel; without the flag both run the helper;
+  - `ai_gate_check "$digest"` returns 0 and leaves `AI_GATE_BROKEN` unset on an intact gate;
+    after a byte changes under `.ai/bin` it returns 1 and sets the flag; with `.ai/bin`
+    replaced by a symlink (digest unreadable) it returns 1 and sets the flag;
+  - `ai_deps` whose `.ai/ci-setup` rewrites `.ai/bin/lib/workflow.py` leaves
+    `AI_GATE_BROKEN=1` set and its existing error message unchanged;
+  - ai-run `on_exit` after a tampering session (fixture as in
+    `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`): exit code
+    and stderr unchanged, `UNTRUSTED_HELPER_RAN` absent; the three existing gate tests named
+    above pass unchanged (they are the end-to-end check once T002/T003 add the callers).
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k observation_gate` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_changes` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T002 — Notification mirror and pause overlay (common.sh)
+Status: TODO
+Dependencies: T001, T010
 Model: sonnet
 
 ### Goal
@@ -174,12 +269,12 @@ Every notification is also kept locally, and usage-limit pauses show on the curr
 No change to what is sent or printed.
 
 ### Implementation notes
-scripts/lib/common.sh: `ai_observe ACTION ARGS…` → `ai_helper observe "$@" || true`.
+scripts/lib/common.sh: `ai_observe` and `ai_notify_log` exist since T010 (both skip the
+helper when `AI_GATE_BROKEN` is set; never bypass them with a direct `workflow.py` call).
 `ai_notify` (~79) currently returns early when `AI_NOTIFY_CMD` is unset: restructure it so
-`python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "[$project] $*"
-2>/dev/null || true` runs in both cases (after sending when it is set); what is sent stays
-byte-identical. The watchdog's `bash -c 'source common.sh; AI_ROOT=…; ai_notify …'` path
-(watchdog.py ~478) then logs too, as do ai-review's ↪ fallback and 🔁 format retry and
+`ai_notify_log "[$project] $*"` runs in both cases (after sending when it is set); what is
+sent stays byte-identical. The watchdog's `bash -c 'source common.sh; AI_ROOT=…; ai_notify …'`
+path (watchdog.py ~478) then logs too, as do ai-review's ↪ fallback and 🔁 format retry and
 ai-pipeline's 🔁 plan revised / extra fix round notifications.
 `ai_limit_pause` (~89): `ai_observe pause "<agent> until <time>"` before sleeping, `ai_observe
 resume` after.
@@ -202,8 +297,12 @@ scripts/lib/common.sh, tests/test_workflow.py, vault agents-flow.md, .ai/handoff
     whole run: the run completes with its normal outcome (P12);
   - a Claude usage-limit pause (existing limit fixture with `AI_SLEEP`) after `observe step
     build …`: `state=paused` with the stage kept during the sleep (captured by the `AI_SLEEP`
-    mock), `state=active` afterwards; same for a Codex pause during a review.
-- All existing tests pass unchanged.
+    mock), `state=active` afterwards; same for a Codex pause during a review;
+  - gate-changed stop (P32; fixture as in
+    `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers` with tamper
+    target `.ai/bin/lib/workflow.py`): the ⛔ notification reaches the mock `AI_NOTIFY_CMD`,
+    `UNTRUSTED_HELPER_RAN` is absent, `notifications.log` gains no line, exit code unchanged.
+- All existing tests pass unchanged (the three gate tests named in T010 included).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k observation_notify` (must say `Ran N tests`, N ≥ 1).
@@ -234,15 +333,19 @@ scripts/ai-pipeline (line numbers at master e9354d9):
   `resumed` (the supervised extra fix round); "Pull request" (~563) → `pr`.
 - Start: right after the marker is written (~84), `[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] ||
   ai_observe start` (a recovery resume keeps the recovering record until its first step).
-- `stop()` (~143): `ai_observe stop "$stage" "$reason"` right after `reason` is computed,
+- `stop()` (~143): `ai_observe stop "$stage" "$reason"` after `reason` is computed AND after
+  T010's `ai_gate_check` line at the top of the function (so a changed gate skips the helper),
   before both the exec into ai-recover and the notification. `stop start` (base moved, ~382)
   thereby records `stage=none` (T001).
 - `plan_decision_check` (~388), case 0: `ai_observe step plan_revision 'needs your decision'`
   before its `stop 'plan review'`, so the stored needs-human decision always shows on the
   Plan revision box with the questions as the stop note (also on a restart and with
   `--skip-plan-review`).
-- common.sh `ai_die`, pipeline-shell path (marker set): `ai_observe stop '' "$*" 2>/dev/null
-  || true` (keeps the stage; silent so existing stderr assertions hold).
+- common.sh `ai_die`, pipeline-shell path (marker set): `[[ -n "${AI_STOP_NOTIFIED:-}" ]] ||
+  ai_observe stop '' "$*" 2>/dev/null || true`, gated exactly like its notification (~17), so
+  the `stop()` fall-through (`AI_AUTO_RECOVER=0` or a changed gate, ~154–156) does not record
+  a second stop with the longer "Pipeline stopped during …" note (P35). Keeps the stage;
+  silent so existing stderr assertions hold; T010's flag already skips it on a gate stop.
 - `finish()` (~85) takes an optional note: `ai_observe done "${1:-no PR}"`; the final call
   passes `$url`, the no-origin and no-gh calls pass `no PR (local only)` / `pushed, no PR (gh
   missing)`.
@@ -277,6 +380,13 @@ scripts/ai-pipeline, scripts/lib/common.sh, tests/test_workflow.py, vault agents
   - a human start that dies at the clean-checkpoint check with a planted `stage=pr,
     state=done` record ends `stage=none, state=stopped`; a resume (`AI_RECOVERY_ATTEMPT`
     set) that dies at its gate check keeps the planted stage;
+  - a review failure with `AI_AUTO_RECOVER=0` (the `stop()` → `ai_die` fall-through) leaves
+    exactly one stop record whose note is the last-error reason, not "Pipeline stopped
+    during …" (P35; count the helper's `observe stop` calls through a logging wrapper or
+    compare the record before and after `ai_die`);
+  - gate changed by a post-commit hook (fixture as the existing pipeline hook test ~4585,
+    sentinel in `.ai/bin/lib/workflow.py`): exit and stderr unchanged, `UNTRUSTED_HELPER_RAN`
+    absent, `observation.json` unchanged since the last step (P32);
   - the registry entry exists after an initial start and after a recovery resume (P28);
     `pipelines` replaced by a regular file in the state root: warning, run outcome unchanged
     on both start and resume, run manifest still written;
@@ -306,7 +416,19 @@ retry show on the right box, including after failures.
 - scripts/ai-run: `ai_observe step build "<id> · <model or default> · <done+1>/<total>"`
   when a task starts (after `task_model` ~461; counts from the existing `tasks` helpers);
   `ai_observe step checks "<id>"` before its post-task `ai-check` (~478) and `ai_observe step
-  checks final` before the final one (~441). `--triage` (~350) → `step triage` and
+  checks final` before the final one (~441). After a PASSING post-task gate, right after the
+  `ai_guard_verify` at ~485 and before the dirty-tree bookkeeping: `ai_observe step build
+  "<id> · checkpointed · <done>/<total>"` (P34), so every stop between two tasks lands on
+  Build: the loop head of the next iteration (~430–459: `ai_guard_verify`, `ai_branch`,
+  `tasks check`, `tasks complete` with no runnable task, and the common `Session limit
+  reached` at ~459), the secret-file and commit-hook checkpoint stops (~494, ~501) and
+  `verify_checkpoint` (~522). After a passing FINAL gate (after ~446): `ai_observe detail
+  checks 'final · passed'`, so the rare handoff-checkpoint stop (~453) reads as a passed
+  gate with its note. Stop-site table for the task loop (test the starred ones): run time
+  limit before the post-task gate (~477) → build; a failing post-task gate (~483) → checks*;
+  session limit (~459) → build* (`note` contains `Session limit reached`); no runnable task
+  (~437) → build; failing final gate (~444) → checks*; `No completed/blocked checkpoint`
+  (~513) → build. `--triage` (~350) → `step triage` and
   `--revise-plan` (~223) → `step plan_revision "round <n> · <model>"`, both only when
   `AI_PIPELINE` is empty (inside a pipeline the pipeline's own record with its round/extra
   detail stays).
@@ -326,6 +448,11 @@ scripts/lib/common.sh, scripts/ai-run, scripts/ai-review, tests/test_workflow.py
   - substage precedence end to end (P11): a failing post-task validation and a failing final
     validation end with `stage=checks, state=stopped`; a failing dependency install ends
     with `stage=setup, state=stopped`; a run with current dependencies records no Setup;
+  - between tasks (P34): `ai-run --approved --sessions 1` with two TODO tasks, run inside
+    the fixture pipeline, ends `stage=build, state=stopped`, detail `T001 · checkpointed ·
+    1/2`, note contains `Session limit reached`; a failing post-task gate still ends on
+    `checks`; after the final gate passes the record reads `stage=checks`, detail `final ·
+    passed` until the pipeline's next step;
   - `ai_deps` with `AI_OBSERVE_RECOVERY=1/2` set records `stage=setup, state=recovering`;
   - inside a pipeline the triage session sees the pipeline's `triage` record with detail
     `round 1` unchanged; standalone `ai-run --approved --triage` records `triage`, standalone
@@ -369,7 +496,9 @@ scripts/ai-recover (line numbers at master e9354d9):
   label keeps the substage recovery last recorded (the original stop stage, plan_revision,
   setup or checks; `none` after the base-moved stop); the original label is only text.
   Escalations before the recovering record (state root, manifest, attempt) keep the
-  pipeline's stopped stage.
+  pipeline's stopped stage. The gate escalations (~97–99, ~160, ~187, ~197, ~207) run with
+  `AI_GATE_BROKEN` set by T010, so `ai_observe` skips the helper there (P32): the record
+  stays at `recovering` and the dashboard shows `needs_you` from the newer `last-error`.
 - `on_exit` (~79), existing failure branch (P23) → `ai_observe stop '' "auto-recovery failed
   unexpectedly (exit $code)"` before the notification (keeps the substage; best effort).
 - The stage-resume path (~139–153) records nothing more: the resumed pipeline's first step
@@ -400,7 +529,11 @@ scripts/ai-recover, tests/test_workflow.py
     restarted)'`, planted `stage=plan_review, state=active`) ends `stage=plan_revision,
     state=stopped` with the questions in the note and exactly one ⛔ notification;
   - base moved (fixture as in `test_base_moved_recovery_escalates_without_claude`) ends
-    `stage=none, state=stopped`.
+    `stage=none, state=stopped`;
+  - gate changed before recovery (fixture as in
+    `test_recovery_never_passes_a_changed_gate_or_hard_stop`, with `.ai/bin/lib/workflow.py`
+    replaced by the sentinel script instead of `.ai/validate`): the ⛔ notification is sent,
+    `UNTRUSTED_HELPER_RAN` absent, exit code unchanged (P32).
 - All existing tests pass unchanged.
 
 ### Validation
@@ -421,21 +554,33 @@ is alive, crashed or gone, with the watchdog's semantics on bounded descriptor r
 ### Implementation notes
 New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BEFORE the
 `sys.path` insert of its own directory, then import `state_root` and T001's
-`checkout_fds`/`read_record` from workflow.py and `process` (~74), `is_runner` (~85),
-`start_ns` (~65) from watchdog.py). Do not call watchdog.py's `marker_snapshot` (~90) /
-`pipeline_died` (~99) (they open by path and read unbounded); reimplement their semantics:
-- `discover()` → list of `(checkout, runners)`: checkouts from `<state root>/pipelines/*.json`
-  (read with `read_record` on a no-follow descriptor of that directory; `checkout` must be an
-  absolute existing directory with a real `.ai/`), plus the cwd of every live runner process
-  (`/proc/<pid>/cwd`, `is_runner`) whose cwd has a real `.ai/`; dedupe by realpath; keep the
-  runner processes found per checkout as `(pid, start ticks)`.
-- `liveness(local_fd, runners)` → `alive` / `crashed` / `gone`: marker read with
+`checkout_fds`/`read_record` from workflow.py and `is_runner` (~85) from watchdog.py). Do
+not call watchdog.py's `marker_snapshot` (~90) / `pipeline_died` (~99) (they open by path
+and read unbounded) nor its `process` (~74) / `start_ns` (~65) (they hard-code `/proc`);
+reimplement their semantics on an injectable process source (P33):
+- `ProcSource(root)`: `root` defaults to `Path(os.environ.get('AI_DASHBOARD_PROC', '/proc'))`.
+  `process(pid)` reads `<root>/<pid>/stat` and `cmdline` exactly like watchdog.py ~74–82
+  (None for absent or zombie); `cwd(pid)` is `os.readlink(<root>/<pid>/cwd)` (a fixture tree
+  uses a plain symlink); `start_ns(ticks)` takes `btime` from `<root>/stat` (cached per
+  source); `pids()` lists the numeric entries of `root`. Only `/proc` and the fixture tree
+  are ever read; nothing is written.
+- `discover(source=ProcSource(), only_under=os.environ.get('AI_DASHBOARD_ROOT'))` → list of
+  `(checkout, runners)`: checkouts from `<state root>/pipelines/*.json` (read with
+  `read_record` on a no-follow descriptor of that directory; `checkout` must be an absolute
+  existing directory with a real `.ai/`), plus the cwd of every live runner process
+  (`source.cwd(pid)` for every pid whose `process()` passes `is_runner`) whose cwd has a
+  real `.ai/`; when `only_under` is set (absolute path), a checkout from either source whose
+  realpath is not inside it is ignored; dedupe by realpath; keep the runner processes found
+  per checkout as `(pid, start ticks)`. Both variables exist for the tests (the parallel
+  gate runs real fixture pipelines in other temp checkouts, and Zack's machine runs real
+  ones); T009 documents them as test-only.
+- `liveness(local_fd, runners, source)` → `alive` / `crashed` / `gone`: marker read with
   `read_record(local_fd, 'pipeline.active', 4096)` (PID and mtime from the same open).
-  Marker present: alive iff its PID is a live `ai-pipeline`/`ai-recover` whose start time is
-  not after the marker mtime + 1 s; otherwise crashed iff a second `read_record` returns the
-  same (pid, mtime) (a run finishing during the snapshot is not a crash; an orphaned child
-  runner does not make a dead pipeline alive). No marker: alive iff `runners` is not empty
-  (legacy versions without `pipeline.active`), else gone.
+  Marker present: alive iff `source.process(pid)` is a live `ai-pipeline`/`ai-recover` whose
+  `source.start_ns` is not after the marker mtime + 1 s; otherwise crashed iff a second
+  `read_record` returns the same (pid, mtime) (a run finishing during the snapshot is not a
+  crash; an orphaned child runner does not make a dead pipeline alive). No marker: alive iff
+  `runners` is not empty (legacy versions without `pipeline.active`), else gone.
 - `sanitize(text, limit=200)` (P29, security: agent-writable text reaches the terminal):
   remove ESC-introduced sequences (CSI, OSC, DCS, APC/PM/SOS, single-char escapes) including
   their parameters, every remaining C0/C1 control and DEL, bidi override/isolate characters
@@ -448,18 +593,26 @@ New `scripts/lib/dashboard.py` (stdlib only; `sys.dont_write_bytecode = True` BE
 scripts/lib/dashboard.py (new), tests/test_dashboard.py (new) or tests/test_workflow.py
 
 ### Acceptance criteria
-- Tests named `dashboard_liveness_*` (fixture checkouts in a temp dir, `AI_STATE_DIR` temp):
+- Tests named `dashboard_liveness_*` (fixture checkouts in a temp dir, `AI_STATE_DIR` temp;
+  every test sets `AI_DASHBOARD_ROOT` to its temp base and, unless it needs a real process,
+  `AI_DASHBOARD_PROC` to a fixture tree of fake `<pid>/{stat,cmdline,cwd}` entries plus a
+  `stat` with `btime`, built by a shared helper; P33):
   - a live process named `ai-pipeline` (symlinked script) holding the marker → alive;
-    `ai-recover` likewise;
-  - a marker whose PID is reused by a newer process → crashed, not alive;
+    `ai-recover` likewise (real `/proc`, filtered by `AI_DASHBOARD_ROOT`);
+  - a marker whose PID is reused by a newer process (fake entry with start ticks after the
+    marker mtime) → crashed, not alive;
   - a marker removed between the two reads (hook/monkeypatch) → gone, not crashed;
   - a dead pipeline with an orphaned live `ai-run` child in the checkout → crashed;
-  - a legacy checkout with no marker found only via `/proc` → alive; no marker and no runner
-    → gone;
+  - a legacy checkout with no marker found only via the process source → alive; no marker
+    and no runner (empty fixture tree) → gone;
+  - a live runner whose cwd is outside `AI_DASHBOARD_ROOT` is not discovered; a registry
+    entry outside it is not listed; without the variable both are;
   - a FIFO marker and a symlinked `.ai/local` → returns within 5 s, treated as unreadable
     (not alive, not crashed), no exception;
   - discovery: registry entries with a relative path, a missing directory, a symlinked `.ai`
-    or invalid JSON are skipped; duplicates from the registry and `/proc` merge into one.
+    or invalid JSON are skipped; duplicates from the registry and the process source merge
+    into one; a fixture `<pid>` entry with a missing `stat`, a zombie state or a non-numeric
+    name is skipped.
 - Tests named `dashboard_sanitize_*`: CSI colour/cursor moves, OSC 8 hyperlinks and OSC 52
   clipboard writes (BEL- and ST-terminated), DCS, 8-bit C1 CSI (U+009B), a bare ESC at the
   end, CR/backspace overwrite tricks, DEL and bidi overrides are all removed; plain UTF-8
@@ -489,9 +642,13 @@ cannot be read safely shows as `unknown` while the others render:
 - `inspect(checkout, runners, now)` → dict: `project`, `branch` (`git_branch`; fall back to
   `unknown`), `liveness` (T006), `observation` (validated fields: known stage keys incl.
   `plan_revision` and `none`, known states; else none), `events` (last 20 parsed
-  notification lines, malformed lines skipped), `last_error`, `tasks` (done/total via
+  notification lines from `read_record(local_fd, 'notifications.log', 256 KiB, tail=True)`,
+  P36; malformed lines skipped), `last_error`, `tasks` (done/total via
   workflow `task_blocks` (~388) on `.ai/tasks.md` text; on error none), `status`, `stage`,
   `since`, `updated` (newest mtime of the files read).
+- `snapshot()` also returns `state_root` (the `state_root()` path as a string); `--json`
+  prints it as a top-level field next to `runs`, and the empty-state text names it (P37:
+  the dashboard only sees pipelines registered under the same `AI_STATE_DIR`/XDG root).
 - Status rules (first match): liveness crashed → `crashed`; alive and state `paused`/`recovering` →
   that; alive → `running`; state `stopped` (any stage, including `none` after a stop at
   start), or a `last-error` newer than the observation, with nothing alive → `needs_you`;
@@ -521,7 +678,11 @@ tests/test_dashboard.py or tests/test_workflow.py
 
 ### Acceptance criteria
 - Tests named `dashboard_snapshot_*` with fixture checkouts in a temp dir and
-  `AI_STATE_DIR` pointing to a temp state root:
+  `AI_STATE_DIR` pointing to a temp state root, `AI_DASHBOARD_ROOT` set to the temp base
+  and `AI_DASHBOARD_PROC` to a fixture tree except where a real process is needed (P33; the
+  read-only tree comparison and the wrapper/symlink runs use the same variables):
+  - `--json` has `state_root` equal to the temp state root; the empty state (no registry
+    entry, empty fixture process tree) prints the text with that path (P37);
   - one fixture per status (running via a live process named `ai-pipeline` through a
     symlinked script, paused, recovering, needs_you, crashed, finished, idle) gives the
     expected status and stage; a stopped `plan_revision` record whose note holds a decision
@@ -597,7 +758,9 @@ scripts/lib/dashboard.py:
   exceed `width` (truncate with `…`; account for wide emoji via
   `unicodedata.east_asian_width`).
 - Header: `AI pipelines  <n> running · <n> needs you · <n> finished  HH:MM  ↑↓ ⏎ a r q`.
-  Empty state: "No pipelines found. Start one with .ai/bin/ai-pipeline --approved (in tmux)."
+  Empty state: "No pipelines found (state root <path>). Start one with .ai/bin/ai-pipeline
+  --approved (in tmux)." (P37: a dashboard started without the pipelines' `AI_STATE_DIR`
+  shows why runs are missing).
 - Expanded run (Enter): checkout path, last error, last 8 events with times.
 - Curses loop (`curses.wrapper`): `halfdelay`/`timeout(2000)` refresh, `KEY_RESIZE`
   handling, keys q/↑/↓/Enter/a/r, `curses.use_default_colors()`; colour pairs matching the
@@ -633,7 +796,9 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
     counted as 2) at widths 40–200;
   - empty state text; expanded view shows at most 8 events.
 - Test `dashboard_render_curses_smoke`: run `ai-dashboard` under `pty.fork()` with
-  `TERM=xterm-256color`, `AI_STATE_DIR` fixture, send `q`; exits 0 within 10 s and the output
+  `TERM=xterm-256color`, `AI_STATE_DIR` fixture, `AI_DASHBOARD_ROOT`/`AI_DASHBOARD_PROC`
+  fixtures (P33; the interaction test too, so the header counts and the 10 cards are
+  exactly the fixture's), send `q`; exits 0 within 10 s and the output
   ends with the terminal restored (contains the rmcup/normal-screen sequence or `stty -a`
   on the pty shows `icanon echo` after exit).
 - Test `dashboard_render_curses_interaction` (P25): under a pty sized 30×140 with 10 fixture
@@ -663,8 +828,14 @@ Users find and understand the dashboard; records match the code.
   (incl. Plan revision, the extra fix round and format retry details, a stop before Plan
   check), keys, `--once`/`--json`/`--all`, the 120-column box layout, tmux tip `tmux new -s
   dash ai-dashboard`, read-only and advisory (records in `.ai/local/` are agent-writable;
-  never used to authorize); a row in the scripts table.
-- docs/workflow.md: the observation records and the host registry (one paragraph).
+  never used to authorize); run it with the same `AI_STATE_DIR`/`XDG_STATE_HOME` as the
+  pipelines and the watchdog timer (it lists the registry of that state root only; `--json`
+  prints `state_root`, P37); a row in the scripts table.
+- docs/workflow.md: the observation records and the host registry (one paragraph); the
+  gate-broken guard (T010: no project helper runs after the approved gate changed, the
+  watchdog's notification path excepted as today); `AI_DASHBOARD_PROC` and
+  `AI_DASHBOARD_ROOT` as test-only variables (process source and root filter of the
+  dashboard's discovery, P33), not user settings.
 - Vault (`--knowledge-dir`): `agents-flow.md` note checked against the code (T002/T003 wrote it);
   hub `agents.md`: dated Decision lines ("2026-10-07 (Zack): pipeline dashboard, boxes
   layout, built ahead of OR-11/14/18" and "2026-10-09 (Zack): plan revision as its own
@@ -680,7 +851,9 @@ Users find and understand the dashboard; records match the code.
 README.md, docs/workflow.md, vault notes, .ai/handoff.md
 
 ### Acceptance criteria
-- `DocsConsistencyTest` passes; README mentions `ai-dashboard`, `--once`, `--json`, `--all`.
+- `DocsConsistencyTest` passes; README mentions `ai-dashboard`, `--once`, `--json`, `--all`
+  and the state-root note; docs/workflow.md mentions `AI_GATE_BROKEN`, `AI_DASHBOARD_PROC`
+  and `AI_DASHBOARD_ROOT`.
 - Handoff lists the manual checks (live TUI in tmux with two runs, resize across 120
   columns, `q`).
 
