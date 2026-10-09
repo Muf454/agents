@@ -655,8 +655,10 @@ def claude_result(path, check_only=False):
 
 
 def claude_text(arguments):
-    """Write the final text of a successful `claude -p --output-format json` run to OUT."""
-    source, target = arguments
+    """Write the final text of a successful `claude -p --output-format json` run to OUT
+    (--allow-empty: blank text writes an empty OUT, for the review format check to judge)."""
+    allow_empty = '--allow-empty' in arguments
+    source, target = [argument for argument in arguments if argument != '--allow-empty']
     claude_result(source, check_only=True)
     data = json.loads(Path(source).read_text())
     denials = data.get('permission_denials') or []
@@ -668,9 +670,9 @@ def claude_text(arguments):
         print(f'Note: {len(denials)} denied reviewer tool call(s) logged in .ai/local/review-denials.log',
               file=sys.stderr)
     text = data.get('result')
-    if not isinstance(text, str) or not text.strip():
+    if not isinstance(text, str) or not (text.strip() or allow_empty):
         fail('Claude returned no text.')
-    Path(target).write_text(text.strip() + '\n')
+    Path(target).write_text(text.strip() + '\n' if text.strip() else '')
 
 
 def review_allowlist(arguments):
@@ -704,14 +706,9 @@ def checkpoint_guard(arguments):
 def publish_review(arguments):
     source, head, base = arguments
     content = Path(source).read_text()
-    # Only what the pipeline relies on is mandatory; the other sections are requested by the
-    # prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
-    required = ('Overall verdict:', 'Finding counts:', '## BLOCKER findings', '## MAJOR findings',
-                '## MINOR findings')
-    for field in required:
-        if field not in content:
-            fail(f'Review is missing {field}; prior review preserved. Inspect local report.')
-    review_counts(content)
+    error = review_format_error('code', content)
+    if error:
+        fail(f'{error.rstrip(".")}; prior review preserved. Inspect local report.')
     header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
     bind_review(head, header + content)
@@ -729,6 +726,23 @@ def reviewer_label():
     and AI_REVIEW_LABEL); empty for Codex reviews, so their files are unchanged."""
     label = ' '.join(os.environ.get('AI_REVIEW_LABEL', '').split())
     return f'> **Reviewer: {label}**\n\n' if label else ''
+
+
+VERDICT_LINE = re.compile(r'^(?:\*\*)?Overall verdict:(?:\*\*)?[ \t]*(.*)$', re.M)
+VERDICT_HEADING = re.compile(r'^#{1,6}[ \t]+Overall verdict:?[ \t]*$(.*?)(?=^#{1,6}\s|\Z)', re.M | re.S)
+
+
+def review_verdict(content):
+    """Verdict text from the first 'Overall verdict: <text>' line, else the first non-empty line
+    under an '## Overall verdict' heading; None when the report has neither."""
+    line = VERDICT_LINE.search(content)
+    if line:
+        return line.group(1).strip()
+    heading = VERDICT_HEADING.search(content)
+    if not heading:
+        return None
+    body = re.sub(r'<!--.*?-->', '', heading.group(1), flags=re.S)
+    return next((text.strip() for text in body.splitlines() if text.strip()), None)
 
 
 def finding_ids(content, level):
@@ -755,7 +769,42 @@ def review_counts(content):
     return counts
 
 
-DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|deferred)\s*\|'
+# Only what the pipeline relies on is mandatory; the other sections are requested by the
+# prompt but a renamed one ("Missing coverage and limitations") must not discard a review.
+# A section whose count is 0 may be left out: review_counts rejects a missing one above 0.
+REVIEW_FIELDS = {'code': ('Finding counts:',), 'plan': ('Finding counts:',)}
+
+
+def review_format_error(mode, content):
+    """The content checks of publish-review (code) and publish-plan-review (plan): the format
+    error, or None. An empty report is a format error too (ai-review retries it once)."""
+    if not content.strip():
+        return 'The reviewer returned an empty report.'
+    # A code review's verdict: an 'Overall verdict:' line or an '## Overall verdict' heading.
+    if mode == 'code' and not review_verdict(content):
+        return 'Review is missing Overall verdict:'
+    for field in REVIEW_FIELDS[mode]:
+        if field not in content:
+            return f"{'Plan review' if mode == 'plan' else 'Review'} is missing {field}"
+    try:
+        review_counts(content)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def review_format_check(arguments):
+    """`review-format-check plan|code REPORT`, no writes: exit 0 when publishable, exit 2 with
+    the format error on stdout; any other failure (unreadable report) exits 1."""
+    if len(arguments) != 2 or arguments[0] not in REVIEW_FIELDS:
+        fail('Usage: review-format-check plan|code REPORT')
+    error = review_format_error(arguments[0], Path(arguments[1]).read_text())
+    if error:
+        print(' '.join(error.split()))
+        sys.exit(2)
+
+
+DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)(?:\s*\((?:BLOCKER|MAJOR|MINOR)\))?\s*\|\s*(accepted|rejected|deferred)\s*\|'
                              r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
@@ -900,11 +949,11 @@ def review_range(arguments):
     print(*header)
 
 
-def render_round(number, entry):
+def render_round(number, entry, missing='no triage recorded'):
     lines = [f'### Round {number} (HEAD {entry["head"][:7]})']
     for finding, level, title in entry['findings']:
         if entry['rows'] is None:
-            outcome = 'no triage recorded'
+            outcome = missing
         elif finding not in entry['rows']:
             outcome = 'no disposition'
         else:
@@ -917,19 +966,19 @@ def render_round(number, entry):
     return '\n'.join(lines)
 
 
-def render_rounds(rounds, cap=HISTORY_CAP):
-    """'## Previous review rounds' with the oldest rounds dropped until it fits the cap."""
+def render_rounds(rounds, cap=HISTORY_CAP, title='## Previous review rounds', missing='no triage recorded'):
+    """`title` section with the oldest rounds dropped until it fits the cap."""
     if not rounds:
         return ''
-    blocks = [render_round(number, entry) for number, entry in enumerate(rounds, 1)]
+    blocks = [render_round(number, entry, missing) for number, entry in enumerate(rounds, 1)]
     for omitted in range(len(blocks)):
-        parts = ['## Previous review rounds']
+        parts = [title]
         if omitted:
             parts.append(f'({omitted} earlier rounds omitted)')
         text = '\n\n'.join(parts + blocks[omitted:])
         if len(text) <= cap:
             return text
-    return '\n\n'.join(['## Previous review rounds', f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
+    return '\n\n'.join([title, f'({len(blocks) - 1} earlier rounds omitted)', blocks[-1]])[:cap]
 
 
 def review_history(arguments):
@@ -1077,16 +1126,54 @@ def run_manifest(arguments):
         data['attempts'] = 0
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
-        # Recorded before the stage starts, bound to the verified review it works on.
+        # Recorded before the stage starts, bound to the verified review it works on: the
+        # current implementation review (triage) or the current plan review (plan-revision).
         name, start = arguments[1], arguments[2]
-        if name != 'triage' or not re.fullmatch(r'[0-9a-f]{40}', start):
+        if name not in STAGE_DIGESTS or not re.fullmatch(r'[0-9a-f]{40}', start):
             fail('Invalid stage.')
-        review_info_values()
+        if name == 'triage':
+            review_info_values()
+            digest = review_digest()
+        else:
+            content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+            if not verified_plan_review(content):
+                fail('Plan revision stage: the plan review does not match the report ai-review published.')
+            digest = report_digest(content)
         branch = current_branch()
         if not branch:
             fail('Invalid stage: detached HEAD.')
-        stage = {'name': name, 'start_head': start, 'review_digest': review_digest()}
+        stage = {'name': name, 'start_head': start, STAGE_DIGESTS[name]: digest}
         atomic(stage_path(branch), json.dumps({'branch': branch, 'stage': stage}) + '\n')
+    elif action == 'revision-reserve':
+        # Plan revisions this run, reserved per plan-review report BEFORE the stage opens (and
+        # again, idempotently, when it is completed): a report counts once, a resume keeps the
+        # list, a human (re)start resets it.
+        if len(arguments) != 3 or not re.fullmatch(r'[0-9a-f]{64}', arguments[1]) \
+                or not re.fullmatch(r'\d', arguments[2]):
+            fail('Usage: run-manifest revision-reserve DIGEST LIMIT')
+        reserved = manifest_revisions(data)
+        if arguments[1] not in reserved:
+            if len(reserved) >= int(arguments[2]):
+                fail(f'plan review: supervision limit reached ({len(reserved)} revisions this run)')
+            reserved.append(arguments[1])
+            data['plan_revisions'] = reserved
+            atomic(path, json.dumps(data) + '\n')
+        print(len(reserved))
+    elif action == 'revision-count':
+        print(len(manifest_revisions(data)))
+    elif action == 'extra-round-reserve':
+        # The one extra fix round of this run, reserved for one implementation review BEFORE its
+        # triage starts: a resume keeps it (for that review only), a human (re)start resets it.
+        if len(arguments) != 2 or not re.fullmatch(r'[0-9a-f]{64}', arguments[1]):
+            fail('Usage: run-manifest extra-round-reserve DIGEST')
+        reserved = manifest_extra_round(data)
+        if reserved and reserved != arguments[1]:
+            fail('fix rounds: the extra fix round of this run is already used')
+        if not reserved:
+            data['extra_fix_round'] = arguments[1]
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'extra-round':
+        print(manifest_extra_round(data))
     elif action == 'stage-clear':
         branch = current_branch()
         if branch:
@@ -1143,12 +1230,38 @@ def review_digest():
     return hashlib.sha256(Path('.ai/reviews/current.md').read_bytes()).hexdigest()
 
 
+def manifest_revisions(data):
+    """The plan-review report digests reserved for revision in this run (run manifest)."""
+    reserved = data.get('plan_revisions', [])
+    if not isinstance(reserved, list) or not all(
+            isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) for digest in reserved):
+        fail('The run manifest plan revision reservations are unreadable; rerun ai-pipeline --approved by hand.')
+    return list(reserved)
+
+
+def manifest_extra_round(data):
+    """The review digest the extra fix round of this run is reserved for, or ''."""
+    reserved = data.get('extra_fix_round', '')
+    if not isinstance(reserved, str) or not re.fullmatch(r'(?:[0-9a-f]{64})?', reserved):
+        fail('The run manifest extra fix round reservation is unreadable; rerun ai-pipeline --approved by hand.')
+    return reserved
+
+
+# Stage name ->the digest it is bound to: the implementation review a triage answers, the
+# plan review a plan revision answers.
+STAGE_DIGESTS = {'triage': 'review_digest', 'plan-revision': 'report_digest'}
+STAGE_LABELS = {'triage': 'Triage stage', 'plan-revision': 'Plan revision stage'}
+
+
 def stage_fields(stage):
-    fields = [stage.get(key) if isinstance(stage, dict) else None
-              for key in ('name', 'start_head', 'review_digest')]
-    if fields[0] != 'triage' or not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
-            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
+    """'name start_head digest' of a stage record; anything else fails closed."""
+    name = stage.get('name') if isinstance(stage, dict) else None
+    if name not in STAGE_DIGESTS:
         fail('Triage stage: the stage record is invalid.')
+    fields = [name, stage.get('start_head'), stage.get(STAGE_DIGESTS[name])]
+    if not isinstance(fields[1], str) or not re.fullmatch(r'[0-9a-f]{40}', fields[1]) \
+            or not isinstance(fields[2], str) or not re.fullmatch(r'[0-9a-f]{64}', fields[2]):
+        fail(f'{STAGE_LABELS[name]}: the stage record is invalid.')
     return fields
 
 
@@ -1159,26 +1272,33 @@ def changed_since(start):
     return sorted({os.fsdecode(name) for name in names if name})
 
 
-def triage_scope(arguments):
-    """Since START, only triage records changed (committed or not)."""
-    start = arguments[0]
+def records_scope(start, records, label):
+    """Since START, only RECORDS changed (committed or not)."""
     if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
                       stderr=subprocess.DEVNULL).returncode != 0:
         fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
-    outside = [name for name in changed_since(start) if name not in TRIAGE_RECORDS]
+    outside = [name for name in changed_since(start) if name not in records]
     if outside:
-        fail('Triage changed files outside workflow records: ' + ' '.join(outside[:8])
+        fail(f'{label} changed files outside workflow records: ' + ' '.join(outside[:8])
              + (f' (+{len(outside) - 8} more)' if len(outside) > 8 else ''))
 
 
+def triage_scope(arguments):
+    """Since START, only triage records changed (committed or not)."""
+    records_scope(arguments[0], TRIAGE_RECORDS, 'Triage')
+
+
 def stage_verify(arguments):
-    """Verify an open triage stage before it is completed. Prints 'committed' when its counted
+    """Verify an open stage before it is completed. Prints 'committed' when its counted
     commit already exists after start_head (close it without a second count), else 'pending'.
     Any mismatch fails: the caller escalates without implementation or counting."""
     stage = load_stage(current_branch())
     if stage is None:
         fail('Triage stage: no open stage for this branch.')
-    _, start, digest = stage_fields(stage)
+    name, start, digest = stage_fields(stage)
+    if name == 'plan-revision':
+        plan_stage_verify(start, digest)
+        return
     try:
         review_info_values()
     except ValueError as error:
@@ -1191,7 +1311,7 @@ def stage_verify(arguments):
         fail(f'Triage stage: {error}')
     # Only a host-recorded triage commit closes the stage; a commit subject alone never does.
     commits = git('log', '--format=%H', f'{start}..HEAD').decode().split()
-    if not set(commits) & set(fix_round_records() or []):
+    if not set(commits) & set(fix_round_commits()):
         print('pending')
         return
     if git('status', '--porcelain', '--untracked-files=all').strip():
@@ -1436,6 +1556,23 @@ def fix_rounds_store():
     return binding_dir() / f'fix-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
 
 
+def fix_round_record_valid(record):
+    """A legacy bare commit hash, or {commit, review_head, review_digest, blockers, majors}."""
+    if isinstance(record, str):
+        return re.fullmatch(r'[0-9a-f]{40,64}', record) is not None
+    return (isinstance(record, dict)
+            and isinstance(record.get('commit'), str) and re.fullmatch(r'[0-9a-f]{40,64}', record['commit']) is not None
+            and isinstance(record.get('review_head'), str)
+            and re.fullmatch(r'[0-9a-f]{7,40}', record['review_head']) is not None
+            and isinstance(record.get('review_digest'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', record['review_digest']) is not None
+            and all(type(record.get(key)) is int and record[key] >= 0 for key in ('blockers', 'majors')))
+
+
+def fix_round_commit(record):
+    return record if isinstance(record, str) else record['commit']
+
+
 def fix_round_records():
     path = fix_rounds_store()
     if not path.exists():
@@ -1444,10 +1581,13 @@ def fix_round_records():
         records = json.loads(path.read_text())
     except ValueError:
         records = None
-    if not isinstance(records, list) or not all(
-            isinstance(r, str) and re.fullmatch(r'[0-9a-f]{40,64}', r) for r in records):
+    if not isinstance(records, list) or not all(fix_round_record_valid(r) for r in records):
         fail('The host fix round records are unreadable; inspect them before continuing.')
     return records
+
+
+def fix_round_commits():
+    return [fix_round_commit(record) for record in fix_round_records() or []]
 
 
 def write_fix_rounds(records):
@@ -1457,20 +1597,25 @@ def write_fix_rounds(records):
 
 
 def fix_rounds(arguments):
-    """record COMMIT: the host triage commit of one round. init BASE: a branch without a host
-    record (legacy) starts from its commits whose subject is exactly the host subject; later
-    commits, whatever their subject, never count. count BASE: recorded rounds in BASE..HEAD."""
+    """record COMMIT: the host triage commit of one round, with the verified review it triaged
+    (head, digest, BLOCKER/MAJOR counts). init BASE: a branch without a host record (legacy)
+    starts from its commits whose subject is exactly the host subject (bare hashes, no counts);
+    later commits, whatever their subject, never count. count BASE: recorded rounds in
+    BASE..HEAD. trend BASE: BLOCKER+MAJOR of the last two reachable rounds and of the current
+    review ('x y z'), or fails 'insufficient history'."""
     action = arguments[0]
     if action == 'record':
         commit = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
         if git('log', '-1', '--format=%s', commit).decode().strip() != TRIAGE_COMMIT:
             fail(f'{commit} is not a host triage commit.')
         records = fix_round_records() or []
-        if commit not in records:
-            write_fix_rounds(records + [commit])
+        if commit not in [fix_round_commit(record) for record in records]:
+            head, blockers, majors, _ = review_info_values()
+            write_fix_rounds(records + [{'commit': commit, 'review_head': head, 'review_digest': review_digest(),
+                                         'blockers': blockers, 'majors': majors}])
         return
-    if action not in ('init', 'count'):
-        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE')
+    if action not in ('init', 'count', 'trend'):
+        fail('Usage: fix-rounds record COMMIT | init BASE | count BASE | trend BASE')
     base = git('rev-parse', '--verify', f'{arguments[1]}^{{commit}}').decode().strip()
     history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
     records = fix_round_records()
@@ -1478,9 +1623,19 @@ def fix_rounds(arguments):
         records = [line.split(' ', 1)[0] for line in reversed(history)
                    if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
         write_fix_rounds(records)
+    reachable = {line.split(' ', 1)[0] for line in history}
+    rounds = [record for record in records if fix_round_commit(record) in reachable]
     if action == 'count':
-        reachable = {line.split(' ', 1)[0] for line in history}
-        print(sum(1 for record in records if record in reachable))
+        print(len(rounds))
+    elif action == 'trend':
+        # Only the last two rounds of this branch, both host-recorded with verified counts (a
+        # legacy round or one from an older toolkit never stands in), then the current review.
+        last = rounds[-2:]
+        head, blockers, majors, _ = review_info_values()
+        if len(last) < 2 or not all(isinstance(record, dict) for record in last) \
+                or last[-1]['review_head'] == head or last[-1]['review_digest'] == review_digest():
+            fail('insufficient history')
+        print(*(record['blockers'] + record['majors'] for record in last), blockers + majors)
 
 
 def dispute_records():
@@ -1612,7 +1767,9 @@ RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
                 'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
-                'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL')
+                'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
+                'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
+                'AI_SUPERVISE_ESCALATE_MODEL')
 
 
 def _no_duplicate_keys(pairs):
@@ -1890,6 +2047,7 @@ def finish_summary(arguments):
 
 PLAN_REVIEW = Path('.ai/reviews/plan.md')
 # Workflow records that change without changing what the plan review judged.
+PLAN_REVIEW_SUBJECT = 'chore(ai): record plan review'
 PLAN_BOOKKEEPING = ('.ai/reviews/', '.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')
 
 
@@ -1905,11 +2063,14 @@ def plan_digest():
 def publish_plan_review(arguments):
     """Save Codex's plan review, bound to the exact spec/plan/tasks it reviewed."""
     content = Path(arguments[0]).read_text()
-    for field in ('Finding counts:', '## BLOCKER findings', '## MAJOR findings', '## MINOR findings'):
-        if field not in content:
-            fail(f'Plan review is missing {field}; inspect the local report.')
-    review_counts(content)
-    content = f'<!-- Plan review of plan digest {arguments[1]}; saved {now()}. -->\n\n' + reviewer_label() + content
+    error = review_format_error('plan', content)
+    if error:
+        fail(f'{error.rstrip(".")}; inspect the local report.')
+    # HEAD in the header: a review after a revision commit is always a new report (own round),
+    # even when the plan digest and the reviewer's text repeat within the same second.
+    head = git('rev-parse', 'HEAD').decode().strip()
+    content = f'<!-- Plan review of plan digest {arguments[1]}; HEAD {head}; saved {now()}. -->\n\n' + \
+        reviewer_label() + content
     atomic(PLAN_REVIEW, content)
     # Host-side binding, like implementation reviews: an edited report is not a review.
     directory = binding_dir()
@@ -1928,6 +2089,516 @@ def plan_review_info(arguments):
             binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
         fail('Plan review does not match the report ai-review published; Codex must review again.')
     print('current' if reviewed.group(1) == plan_digest() else 'stale', *review_counts(content))
+
+
+def verified_plan_review(content):
+    """(plan digest, counts) when `content` is a plan review exactly as ai-review published it
+    (host binding of its plan digest), else None."""
+    reviewed = re.search(r'Plan review of plan digest ([0-9a-f]{64});', content)
+    binding = binding_dir() / f'plan-{reviewed.group(1)}.sha256' if reviewed else None
+    if not binding or not binding.exists() or \
+            binding.read_text().strip() != hashlib.sha256(content.encode()).hexdigest():
+        return None
+    return reviewed.group(1), review_counts(content)
+
+
+def report_digest(content):
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def plan_rounds_store():
+    """Host-side plan-review round records of the current branch (agents can't write here)."""
+    branch = current_branch()
+    if not branch:
+        fail('Plan review rounds need a branch (detached HEAD).')
+    return binding_dir() / f'plan-rounds-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def plan_round_records():
+    path = plan_rounds_store()
+    if not path.exists():
+        return None
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    keys = {'commit', 'report_digest', 'plan_digest', 'blockers', 'majors', 'minors'}
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and set(r) == keys and isinstance(r['commit'], str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['commit'])
+            and re.fullmatch(r'[0-9a-f]{64}', str(r['report_digest'])) for r in records):
+        fail('The host plan round records are unreadable; inspect them before continuing.')
+    return records
+
+
+def write_plan_rounds(records):
+    path = plan_rounds_store()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic(path, json.dumps(records, indent=2) + '\n')
+
+
+def plan_round_entry(commit):
+    """The record for a host plan-review commit, or None when its plan.md does not verify."""
+    content = committed_file(commit, str(PLAN_REVIEW))
+    verified = verified_plan_review(content)
+    if not verified:
+        return None
+    blockers, majors, minors = verified[1]
+    return {'commit': commit, 'report_digest': report_digest(content), 'plan_digest': verified[0],
+            'blockers': blockers, 'majors': majors, 'minors': minors}
+
+
+def reachable_plan_rounds(base):
+    """(base, commits in BASE..HEAD oldest first, all records, records in BASE..HEAD). A store
+    that does not exist yet is initialised once from the exact-subject commits in BASE..HEAD
+    that changed plan.md; that can only raise the round number (a stricter requirement)."""
+    base = git('rev-parse', '--verify', f'{base}^{{commit}}').decode().strip()
+    history = git('log', '--reverse', '--format=%H%x00%s', f'{base}..HEAD').decode().splitlines()
+    commits = [line.split('\0', 1) for line in history if '\0' in line]
+    records = plan_round_records()
+    if records is None:
+        records = []
+        for sha, subject in commits:
+            if subject == PLAN_REVIEW_SUBJECT and str(PLAN_REVIEW) in git(
+                    'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha).decode().split('\n'):
+                entry = plan_round_entry(sha)
+                if entry and all(r['report_digest'] != entry['report_digest'] for r in records):
+                    records.append(entry)
+        write_plan_rounds(records)
+    reachable = {sha for sha, _ in commits}
+    return base, commits, records, [r for r in records if r['commit'] in reachable]
+
+
+def plan_rounds_record(base, commit):
+    base, commits, records, reachable = reachable_plan_rounds(base)
+    commit = git('rev-parse', '--verify', f'{commit}^{{commit}}').decode().strip()
+    if dict(commits).get(commit) != PLAN_REVIEW_SUBJECT:
+        fail(f'{commit} is not a host plan review commit in the review range.')
+    entry = plan_round_entry(commit)
+    if not entry:
+        fail(f'The plan review in {commit} does not match the report ai-review published.')
+    if all(r['report_digest'] != entry['report_digest'] for r in reachable):
+        write_plan_rounds(records + [entry])
+
+
+def plan_rounds_sync(base):
+    """Crash window between the review's host commit and its record: record the newest host
+    commit holding the current verified plan.md, when that report has no record yet."""
+    base, commits, records, reachable = reachable_plan_rounds(base)
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not verified_plan_review(content) or any(
+            r['report_digest'] == report_digest(content) for r in reachable):
+        return
+    for sha, subject in reversed(commits):
+        if subject == PLAN_REVIEW_SUBJECT and committed_file(sha, str(PLAN_REVIEW)) == content:
+            plan_rounds_record(base, sha)
+            return
+
+
+def plan_round_current(base):
+    """(n, report digest) of the current plan review; it must be the last recorded round."""
+    reachable = reachable_plan_rounds(base)[3]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not reachable or reachable[-1]['report_digest'] != report_digest(content):
+        fail('The current plan review is not the last recorded round; run ai-review --plan.')
+    return len(reachable), reachable[-1]['report_digest']
+
+
+def plan_rounds(arguments):
+    """record BASE COMMIT | sync BASE | count BASE | current BASE: this branch's plan-review
+    rounds, counted only when their host commit is in BASE..HEAD."""
+    action = arguments[0] if arguments else ''
+    if action == 'record' and len(arguments) == 3:
+        plan_rounds_record(arguments[1], arguments[2])
+    elif action == 'sync' and len(arguments) == 2:
+        plan_rounds_sync(arguments[1])
+    elif action == 'count' and len(arguments) == 2:
+        print(len(reachable_plan_rounds(arguments[1])[3]))
+    elif action == 'current' and len(arguments) == 2:
+        print(*plan_round_current(arguments[1]))
+    else:
+        fail('Usage: plan-rounds record BASE COMMIT | sync BASE | count BASE | current BASE')
+
+
+PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
+PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
+PLAN_DISPOSITION_ROW = re.compile(
+    r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
+    r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+
+
+def plan_history(arguments):
+    """plan-history BASE [--count | --include-current]: the plan-review rounds before the current
+    one (--include-current: and the current one, for the review that follows its revision), each
+    with its BLOCKER/MAJOR findings (from the committed plan.md at the record) and the disposition
+    per finding from that round's plan-dispositions section at HEAD. Context only, never
+    authority: nothing here may approve, count or skip anything. Reads no implementation review."""
+    if not arguments or len(arguments) > 2 or \
+            (len(arguments) == 2 and arguments[1] not in ('--count', '--include-current')):
+        fail('Usage: plan-history BASE [--count | --include-current]')
+    reachable = reachable_plan_rounds(arguments[0])[3]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    earlier = reachable[:-1] if reachable and reachable[-1]['report_digest'] == report_digest(content) \
+        and arguments[1:] != ['--include-current'] else reachable
+    if arguments[1:] == ['--count']:
+        print(len(earlier))
+        return
+    text = committed_file('HEAD', PLAN_DISPOSITIONS)
+    marks = list(PLAN_SECTION.finditer(text))
+    sections = {m.group(2): text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
+                for i, m in reversed(list(enumerate(marks)))}
+    rounds = []
+    for record in earlier:
+        review = committed_file(record['commit'], str(PLAN_REVIEW))
+        findings = []
+        for level in ('BLOCKER', 'MAJOR'):
+            body = section(review, f'{level} findings')
+            seen = set()
+            for match in FINDING_ID.finditer(body):
+                if match.group(1) not in seen:
+                    seen.add(match.group(1))
+                    findings.append((match.group(1), level, finding_title(body, match)))
+        body = sections.get(record['report_digest'])
+        rows = None if body is None else {m.group(1): (m.group(2).lower(), m.group(4))
+                                          for m in PLAN_DISPOSITION_ROW.finditer(body)}
+        rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
+    if rounds:
+        print(render_rounds(rounds, title='## Previous plan review rounds', missing='no revision recorded'))
+
+
+# Files a plan revision may change (R1): the plan records and runner bookkeeping.
+PLAN_REVISION_RECORDS = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', PLAN_DISPOSITIONS,
+                         '.ai/handoff.md', '.ai/state.md', '.ai/run-log.md')
+PLAN_DISPOSITIONS_PREAMBLE = """# Plan review dispositions (Claude)
+
+<!-- The host appends one section per plan-review round; fill only the last one and never edit
+earlier sections or .ai/reviews/plan.md. One row per BLOCKER/MAJOR finding of that round's plan
+review (MINOR optional). Disposition: accepted (Task: the new TODO task IDs that answer it),
+rejected (concrete evidence) or needs-human (the question for the human in the Evidence column).
+From plan-review round 3 on, the section also needs a line starting with "Convergence:". -->
+"""
+PLAN_REVIEW_HEAD = re.compile(r'^Plan review HEAD: ([0-9a-f]{40})[ \t]*$', re.M)
+QUESTION_CAP = 300
+QUESTION_LIMIT = 3
+
+
+def plan_section_heading(number, digest):
+    return f'## Plan review round {number} (report {digest})'
+
+
+def plan_section_opened(text, number, digest):
+    """TEXT with the host-written section for this round appended, or None when its last
+    section already is that header."""
+    heading = plan_section_heading(number, digest)
+    marks = list(PLAN_SECTION.finditer(text))
+    if marks and marks[-1].group(0).rstrip() == heading:
+        return None
+    if any(mark.group(2) == digest for mark in marks):
+        fail(f'{PLAN_DISPOSITIONS} has a section for plan review round {number} that is not the last; '
+             'inspect it before revising.')
+    head = git('rev-parse', 'HEAD').decode().strip()
+    return text.rstrip('\n') + f'\n\n{heading}\n\nPlan review HEAD: {head}\n\n' \
+        '| Finding | Disposition | Evidence / reason | Task |\n| --- | --- | --- | --- |\n'
+
+
+def start_plan_dispositions(arguments):
+    """Append the host-written section for the current plan-review round (idempotent: a resume
+    whose last section already is that header adds nothing). --pending: exit 0 only when the
+    file differs from HEAD by exactly that host section (a crash between writing it and its
+    commit, before any session ran), so the resume may commit it."""
+    pending = arguments[1:] == ['--pending']
+    if len(arguments) != (2 if pending else 1):
+        fail('Usage: start-plan-dispositions BASE [--pending]')
+    number, digest = plan_round_current(arguments[0])
+    path = Path(PLAN_DISPOSITIONS)
+    if pending:
+        in_head = subprocess.run(['git', 'cat-file', '-e', f'HEAD:{PLAN_DISPOSITIONS}'],
+                                 stderr=subprocess.DEVNULL).returncode == 0
+        expected = plan_section_opened(committed_file('HEAD', PLAN_DISPOSITIONS) if in_head
+                                       else PLAN_DISPOSITIONS_PREAMBLE, number, digest)
+        if expected is None or not path.is_file() or path.read_text() != expected:
+            fail(f'{PLAN_DISPOSITIONS} is not just the uncommitted host section header.')
+        return
+    text = plan_section_opened(path.read_text() if path.exists() else PLAN_DISPOSITIONS_PREAMBLE, number, digest)
+    if text is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic(path, text)
+
+
+def plan_text_above(start, heading):
+    """What must stand above the round's section: START's text above the same header, else
+    START's whole file, else (no file at START) the host preamble."""
+    if subprocess.run(['git', 'cat-file', '-e', f'{start}:{PLAN_DISPOSITIONS}'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        return PLAN_DISPOSITIONS_PREAMBLE
+    old = committed_file(start, PLAN_DISPOSITIONS)
+    same = [mark for mark in PLAN_SECTION.finditer(old) if mark.group(0).rstrip() == heading]
+    return old[:same[0].start()] if same else old
+
+
+def task_statuses(text):
+    return {block['id']: next((line.split(':', 1)[1].strip() for line in block['lines']
+                               if line.startswith('Status:')), '') for block in task_blocks(text)}
+
+
+def bounded_questions(questions):
+    """At most three questions, each on one line of at most 300 characters, plus a pointer to the rest."""
+    lines = [' '.join(re.sub(r'<br\s*/?>', ' ', question, flags=re.I).split())[:QUESTION_CAP]
+             for question in questions[:QUESTION_LIMIT]]
+    if len(questions) > QUESTION_LIMIT:
+        lines.append(f'(+{len(questions) - QUESTION_LIMIT} more in {PLAN_DISPOSITIONS})')
+    return '\n'.join(lines)
+
+
+def plan_dispositions_check(arguments):
+    """plan-dispositions-check --since START --base BASE [--fresh] [--questions]: validate ONLY
+    the current plan-review round's section (contract in .ai/current-plan.md). Prints
+    'accepted=a rejected=r needs_human=h', or with --questions the bounded needs-human questions.
+    With --fresh (right after the revision), accepted findings must point to TODO tasks, every
+    task that existed at START keeps its status and every new task is TODO."""
+    options, flags, rest = {}, set(), list(arguments)
+    while rest:
+        name = rest.pop(0)
+        if name in ('--since', '--base') and rest:
+            options[name] = rest.pop(0)
+        elif name in ('--fresh', '--questions'):
+            flags.add(name)
+        else:
+            fail('Usage: plan-dispositions-check --since START --base BASE [--fresh] [--questions]')
+    if set(options) != {'--since', '--base'}:
+        fail('Usage: plan-dispositions-check --since START --base BASE [--fresh] [--questions]')
+    start = git('rev-parse', '--verify', f"{options['--since']}^{{commit}}").decode().strip()
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', start, 'HEAD'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'{start[:12]} is not an ancestor of HEAD (history rewritten?).')
+    number, digest = plan_round_current(options['--base'])
+    review = PLAN_REVIEW.read_text()
+    if not verified_plan_review(review):
+        fail('Plan review does not match the report ai-review published; Codex must review again.')
+    path = Path(PLAN_DISPOSITIONS)
+    if not path.exists():
+        fail(f'No {PLAN_DISPOSITIONS} for plan review round {number}.')
+    text = path.read_text()
+    heading = plan_section_heading(number, digest)
+    marks = list(PLAN_SECTION.finditer(text))
+    own = [mark for mark in marks if mark.group(2) == digest]
+    if not own:
+        fail(f'{PLAN_DISPOSITIONS} has no section for plan review round {number}.')
+    if len(own) > 1:
+        fail(f'{PLAN_DISPOSITIONS} has {len(own)} headers for plan review round {number}; keep only the host one.')
+    mark = own[0]
+    if mark.group(0).rstrip() != heading:
+        fail(f'The section header for plan review round {number} was changed; it must read: {heading}')
+    if mark is not marks[-1]:
+        fail(f'The section for plan review round {number} must be the last section.')
+    if text[:mark.start()].rstrip('\n') != plan_text_above(start, heading).rstrip('\n'):
+        fail(f'Text above the round {number} section changed: earlier sections and the preamble are read-only.')
+    body = re.sub(r'<!--.*?-->', '', text[mark.end():], flags=re.S)
+    heads = PLAN_REVIEW_HEAD.findall(body)
+    if len(heads) != 1 or subprocess.run(['git', 'merge-base', '--is-ancestor', heads[0], 'HEAD'],
+                                         stderr=subprocess.DEVNULL).returncode != 0:
+        fail(f'The round {number} section needs its host "Plan review HEAD:" line.')
+    required = finding_ids(review, 'BLOCKER') + finding_ids(review, 'MAJOR')
+    known = set(required + finding_ids(review, 'MINOR'))
+    rows = {}
+    for row in PLAN_DISPOSITION_ROW.finditer(body):
+        finding = row.group(1)
+        if finding not in known:
+            fail(f'Row for {finding}, which is not a finding of plan review round {number}.')
+        if finding in rows:
+            fail(f'Finding {finding} has more than one row in the round {number} section.')
+        rows[finding] = (row.group(2).lower(), row.group(3), row.group(4))
+    for finding in required:
+        if finding not in rows:
+            fail(f'Finding {finding} has no row in the round {number} section.')
+    queue = {task['id']: task['status'] for task in tasks()}
+    counts = {'accepted': 0, 'rejected': 0, 'needs-human': 0}
+    questions = []
+    for finding, (disposition, evidence, task_ref) in rows.items():
+        counts[disposition] += 1
+        if disposition == 'accepted':
+            refs = list(dict.fromkeys(re.findall(r'T\d{3,}', task_ref)))
+            if not refs:
+                fail(f'Accepted finding {finding} needs the task ID that answers it.')
+            unknown = [ref for ref in refs if ref not in queue]
+            if unknown:
+                fail(f'Accepted finding {finding} references unknown task {unknown[0]}.')
+            done = [ref for ref in refs if queue[ref] != 'TODO']
+            if '--fresh' in flags and done:
+                fail(f'Accepted finding {finding} must reference TODO tasks; {done[0]} is {queue[done[0]]}.')
+        elif disposition == 'rejected':
+            if len(evidence.strip()) < 15:
+                fail(f'Rejected finding {finding} needs concrete evidence.')
+        elif len(evidence.strip()) < 15:
+            fail(f'needs-human finding {finding} needs the question for the human.')
+        else:
+            questions.append(f'{finding}: {evidence.strip()}')
+    if number >= 3 and not CONVERGENCE_LINE.search(body):
+        fail(f'Plan review round {number} needs a Convergence: line in its section.')
+    if '--fresh' in flags:
+        before = task_statuses(committed_file(start, '.ai/tasks.md'))
+        for task_id, status in before.items():
+            if task_id not in queue:
+                fail(f'Task {task_id} was removed; a plan revision keeps existing tasks.')
+            if queue[task_id] != status:
+                fail(f'Task {task_id} changed status from {status} to {queue[task_id]}; '
+                     'a plan revision never changes task status.')
+        for task_id, status in queue.items():
+            if task_id not in before and status != 'TODO':
+                fail(f'New task {task_id} must be TODO, not {status}.')
+    if '--questions' in flags:
+        if questions:
+            print(bounded_questions(questions))
+        return
+    print(f"accepted={counts['accepted']} rejected={counts['rejected']} needs_human={counts['needs-human']}")
+
+
+def plan_revision_scope(arguments):
+    """Since START, only plan revision records changed (committed or not)."""
+    if len(arguments) != 1:
+        fail('Usage: plan-revision-scope START')
+    records_scope(arguments[0], PLAN_REVISION_RECORDS, 'Plan revision')
+
+
+# The records a revision session may edit (Edit only, no Write or Bash): the host owns state.md
+# and run-log.md and writes the section header itself.
+PLAN_REVISION_EDITABLE = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', PLAN_DISPOSITIONS,
+                          '.ai/handoff.md')
+PLAN_REVISION_SUBJECT = 'chore(ai): record plan revision'
+
+
+def plan_revision_allowlist(arguments):
+    """--allowedTools entries for the plan revision session, one per line: read tools and Edit
+    of the editable plan records. Nothing from .ai/permissions.allow, no Bash, no Write."""
+    print('\n'.join(['Read', 'Glob', 'Grep'] + [f'Edit(./{path})' for path in PLAN_REVISION_EDITABLE]))
+
+
+def plan_revisions_store():
+    """Host-side plan revision records of the current branch (agents can't write here)."""
+    branch = current_branch()
+    if not branch:
+        fail('Plan revisions need a branch (detached HEAD).')
+    return binding_dir() / f'plan-revisions-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def plan_revision_records():
+    """The stored revision records ([] when there is no store yet); unreadable data fails."""
+    path = plan_revisions_store()
+    if not path.exists():
+        return []
+    try:
+        records = json.loads(path.read_text())
+    except ValueError:
+        records = None
+    keys = {'commit', 'report_digest', 'round', 'accepted', 'rejected', 'needs_human', 'questions'}
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and set(r) == keys and isinstance(r['commit'], str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['commit'])
+            and isinstance(r['report_digest'], str) and re.fullmatch(r'[0-9a-f]{64}', r['report_digest'])
+            and all(isinstance(r[k], int) and not isinstance(r[k], bool) and r[k] >= 0
+                    for k in ('round', 'accepted', 'rejected', 'needs_human'))
+            and isinstance(r['questions'], str) for r in records):
+        fail('The host plan revision records are unreadable; inspect them before continuing.')
+    return records
+
+
+def is_ancestor(commit):
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def plan_revisions_record(arguments):
+    """record BASE COMMIT --accepted A --rejected R --needs-human H (questions on stdin): the
+    outcome of the host revision commit for the current plan review, in one write."""
+    usage = 'Usage: plan-revisions record BASE COMMIT --accepted A --rejected R --needs-human H'
+    if len(arguments) != 8 or arguments[2::2] != ['--accepted', '--rejected', '--needs-human'] or \
+            not all(re.fullmatch(r'\d{1,4}', value) for value in arguments[3::2]):
+        fail(usage)
+    base, commit = arguments[:2]
+    accepted, rejected, needs_human = (int(value) for value in arguments[3::2])
+    commit = git('rev-parse', '--verify', f'{commit}^{{commit}}').decode().strip()
+    if git('log', '-1', '--format=%s', commit).decode().strip() != PLAN_REVISION_SUBJECT or not is_ancestor(commit):
+        fail(f'{commit} is not a host plan revision commit.')
+    number, digest = plan_round_current(base)
+    if report_digest(committed_file(commit, str(PLAN_REVIEW))) != digest:
+        fail(f'{commit} does not hold the current plan review.')
+    # Re-bounded here too: only this short text ever reaches stop messages and notifications.
+    lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+    questions = '\n'.join(' '.join(line.split())[:QUESTION_CAP] for line in lines[:QUESTION_LIMIT + 1])
+    records = plan_revision_records()
+    if any(r['report_digest'] == digest and is_ancestor(r['commit']) for r in records):
+        return
+    plan_revisions_store().parent.mkdir(parents=True, exist_ok=True)
+    atomic(plan_revisions_store(), json.dumps(records + [{
+        'commit': commit, 'report_digest': digest, 'round': number, 'accepted': accepted,
+        'rejected': rejected, 'needs_human': needs_human, 'questions': questions}], indent=2) + '\n')
+
+
+def plan_revision_lookup():
+    """(record for the verified current plan.md or None, report verified?, last reachable
+    record or None). Raises on an unreadable store."""
+    reachable = [r for r in plan_revision_records() if is_ancestor(r['commit'])]
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else None
+    if content is None or not verified_plan_review(content):
+        return None, False, reachable[-1] if reachable else None
+    digest = report_digest(content)
+    return next((r for r in reversed(reachable) if r['report_digest'] == digest), None), True, \
+        reachable[-1] if reachable else None
+
+
+def plan_revisions(arguments):
+    """record ... | revised | outcome | decision. revised: exit 0 when the verified current plan
+    review already has a revision record, 1 when not. outcome: as revised, and print the record's
+    'round accepted rejected needs_human'. decision: exit 0 and print the stored questions
+    when that record holds needs-human rows (the human answers, commits and runs ai-review
+    --plan, which makes a new report and clears it), 1 when not. Both exit 2 on an unreadable
+    store, and when the report does not verify while the last revision asked the human."""
+    action = arguments[0] if arguments else ''
+    if action == 'record':
+        plan_revisions_record(arguments[1:])
+        return
+    if action not in ('revised', 'outcome', 'decision') or len(arguments) != 1:
+        fail('Usage: plan-revisions record BASE COMMIT ... | revised | outcome | decision')
+    try:
+        record, verified, last = plan_revision_lookup()
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f'Error: {error}', file=sys.stderr)
+        sys.exit(2)
+    if not verified:
+        if last and last['needs_human'] > 0:
+            print('Error: the plan review does not match the report ai-review published, and the last '
+                  'plan revision is waiting for your decision; inspect .ai/reviews/plan.md.', file=sys.stderr)
+            sys.exit(2)
+        sys.exit(1)
+    if record is None or (action == 'decision' and record['needs_human'] == 0):
+        sys.exit(1)
+    if action == 'decision':
+        print(record['questions'])
+    elif action == 'outcome':
+        print(record['round'], record['accepted'], record['rejected'], record['needs_human'])
+
+
+def plan_stage_verify(start, digest):
+    """stage-verify for an open plan-revision stage: 'committed' once a host revision record
+    for this plan review names a commit in START..HEAD (the record carries the outcome, so
+    the outcome is stored), else 'pending'. Never 'committed' from a commit subject alone."""
+    content = PLAN_REVIEW.read_text() if PLAN_REVIEW.exists() else ''
+    if not verified_plan_review(content):
+        fail('Plan revision stage: the plan review does not match the report ai-review published.')
+    if report_digest(content) != digest:
+        fail('Plan revision stage: the current plan review is not the one this revision started on.')
+    try:
+        records_scope(start, PLAN_REVISION_RECORDS, 'Plan revision')
+        records = plan_revision_records()
+    except ValueError as error:
+        fail(f'Plan revision stage: {error}')
+    commits = set(git('log', '--format=%H', f'{start}..HEAD').decode().split())
+    if not any(r['commit'] in commits and r['report_digest'] == digest for r in records):
+        print('pending')
+        return
+    if git('status', '--porcelain', '--untracked-files=all').strip():
+        fail('Plan revision stage: uncommitted changes after the counted revision commit.')
+    print('committed')
 
 
 RISK_TITLE = re.compile(
@@ -2041,7 +2712,8 @@ def outcome_title(task_id):
 
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
-    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]"""
+    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
+    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)"""
     kind, *rest = arguments
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
@@ -2069,6 +2741,9 @@ def outcome(arguments):
                 record.update(blocker=counts[0], major=counts[1], minor=counts[2])
             except (OSError, ValueError):
                 pass
+    elif kind == 'plan_revision':
+        round_number, result, model, seconds = rest
+        record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
     else:
         fail(f'Unknown outcome kind: {kind}')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2308,9 +2983,9 @@ def pr_body(arguments):
         lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
     if review:
-        verdict = re.search(r'^Overall verdict:\s*(.*)$', review, re.M)
+        verdict = review_verdict(review)
         counts = COUNTS.search(review)
-        verdict_text = verdict.group(1).strip().rstrip('.') if verdict else 'unknown'
+        verdict_text = verdict.rstrip('.') if verdict else 'unknown'
         lines.append(f"Rounds: {rounds}. Verdict: {verdict_text}.")
         if counts:
             lines.append(f"Findings in the last review: BLOCKER {counts.group(1)}, MAJOR {counts.group(2)}, "
@@ -2412,8 +3087,24 @@ def main():
         print(plan_digest())
     elif command == 'publish-plan-review':
         publish_plan_review(arguments)
+    elif command == 'review-format-check':
+        review_format_check(arguments)
     elif command == 'plan-review-info':
         plan_review_info(arguments)
+    elif command == 'plan-rounds':
+        plan_rounds(arguments)
+    elif command == 'plan-history':
+        plan_history(arguments)
+    elif command == 'start-plan-dispositions':
+        start_plan_dispositions(arguments)
+    elif command == 'plan-dispositions-check':
+        plan_dispositions_check(arguments)
+    elif command == 'plan-revision-scope':
+        plan_revision_scope(arguments)
+    elif command == 'plan-revision-allowlist':
+        plan_revision_allowlist(arguments)
+    elif command == 'plan-revisions':
+        plan_revisions(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':

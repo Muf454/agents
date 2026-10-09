@@ -7,13 +7,18 @@ Usage: ai-pipeline --approved [--base REF] [--pr-base BRANCH] [--max-fix-rounds 
                    [ai-run options: --sessions N --session-timeout S --run-timeout S
                     --model NAME --knowledge-dir DIR]
 Hands-off delivery of an approved plan on a feature branch:
-  Codex plan review (before any task starts; BLOCKER/MAJOR stops) -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
+  Codex plan review (before any task starts) -> on BLOCKER/MAJOR, supervised (AI_SUPERVISE=1,
+  default): Claude revises the plan (ai-run --revise-plan; at most AI_SUPERVISE_PLAN_ROUNDS per
+  run, AI_SUPERVISE_ESCALATE_MODEL from review round AI_SUPERVISE_ESCALATE_ROUND) and the plan
+  is reviewed again; the limit, a needs-human disposition or AI_SUPERVISE=0 stops for you
+  -> implement (ai-run) -> full gate -> independent Codex review (ai-review)
   -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
   Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
---base is the review base (default main); --pr-base is the PR target branch
-(default: --base when it is a local or origin/ branch).
+--base is the review base (default main); a local branch B is replaced by origin/B when
+origin/B is strictly ahead of it (never fetched), and the resolved base is printed.
+--pr-base is the PR target branch (default: --base when it is a local or origin/ branch).
 The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
 an interrupted review triage is verified and recorded once, and pending re-checks of
 rejected findings run, before anything else.
@@ -64,6 +69,7 @@ case "${AI_REVIEWER:-auto}" in
   auto) command -v codex >/dev/null || printf '%s\n' 'Codex CLI not found: reviews run on the Claude fallback reviewer.' ;;
   *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
 esac
+ai_supervise_settings
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.
 state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1) || \
@@ -83,7 +89,21 @@ finish() {
 }
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
-base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
+# A local base branch that is behind origin/<base> would make the review cover already
+# merged work: review against origin/<base> when it is strictly ahead. Never fetches.
+base_ref=$base base_note=''
+if git show-ref --verify --quiet "refs/heads/$base" && \
+   git show-ref --verify --quiet "refs/remotes/origin/$base" && \
+   [[ "$(git rev-parse "refs/heads/$base")" != "$(git rev-parse "refs/remotes/origin/$base")" ]]; then
+  if git merge-base --is-ancestor "refs/heads/$base" "refs/remotes/origin/$base"; then
+    base_ref=origin/$base base_note=" (local $base is behind)"
+  elif ! git merge-base --is-ancestor "refs/remotes/origin/$base" "refs/heads/$base"; then
+    printf 'Local %s and origin/%s have diverged; reviewing against local %s.\n' "$base" "$base" "$base"
+  fi
+fi
+base_sha=$(git rev-parse --verify --quiet "${base_ref}^{commit}") || ai_die "Invalid base: $base"
+base_label="$base_ref ($(git rev-parse --short "$base_sha"))"
+printf 'Review base: %s at %s%s\n' "$base_ref" "$(git rev-parse --short "$base_sha")" "$base_note"
 # A dispute file unchanged since the merge-base was merged by the human: historical, not active.
 export AI_DISPUTES_BASE=$base_sha
 if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
@@ -97,7 +117,7 @@ fi
 # neither drop nor inherit it) is completed below, before anything else; its leftovers are
 # checked there. An uncommitted re-check report (a stop before its host commit) is verified
 # and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint.
-open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's triage stage: ${open_stage#Error: }"
+open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's open stage: ${open_stage#Error: }"
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
@@ -144,11 +164,13 @@ host_commit() {
   git commit -m "$1" >/dev/null
   ai_guard_verify
 }
-# A Claude fallback review appends to the fallback log: commit it with the review record.
+# A Claude fallback review appends to the fallback log, a format retry to the run log:
+# commit them with the review record.
 review_record() {
   local paths=("$@")
   [[ -z "$(git status --porcelain --untracked-files=all -- .ai/reviews/fallback-log.md)" ]] || \
     paths+=(.ai/reviews/fallback-log.md)
+  [[ -z "$(git status --porcelain -- .ai/run-log.md)" ]] || paths+=(.ai/run-log.md)
   printf '%s\n' "${paths[@]}"
 }
 # Review is current if nothing but workflow records changed since the reviewed commit.
@@ -159,6 +181,9 @@ review_current() {
   git merge-base --is-ancestor "$base_sha" "$reviewed" 2>/dev/null || return 1
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
+# The base must be contained in the branch, or no review of it can ever be current.
+base_reached() { git merge-base --is-ancestor "$base_sha" HEAD 2>/dev/null; }
+base_moved="Review base $base_label moved past the branch; merge it into $branch and rerun ai-pipeline"
 # Publish invariants: what gets published is exactly what was reviewed and validated.
 # Checked after host commits on the publish path, before and after every push attempt
 # (commit and push hooks run project code); any failure stops. The committed bytes come
@@ -171,6 +196,7 @@ publish_ready() {
   elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
   elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"
   elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
+  elif ! base_reached; then why=$base_moved
   elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
   elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
   else return 0
@@ -234,6 +260,50 @@ complete_stage() {
   state=$(ai_helper triage-check --fresh 2>&1) || stage_fail "$state"
   ai_helper run-manifest stage-clear || stage_fail 'cannot clear the stage in the run manifest.'
 }
+# The revision gets its model from the round, never from --model: opus, or the escalation
+# model from AI_SUPERVISE_ESCALATE_ROUND on (settings restored from the manifest on resume).
+plan_revision_args=()
+for (( i=0; i<${#triage_args[@]}; i+=2 )); do
+  [[ "${triage_args[i]}" == --model ]] || plan_revision_args+=("${triage_args[i]}" "${triage_args[i+1]}")
+done
+plan_revision_model() {
+  local current round
+  current=$(ai_helper plan-rounds current "$base_sha") || return 1
+  read -r round _ <<< "$current"
+  if (( round >= AI_SUPERVISE_ESCALATE_ROUND )); then
+    printf '%s\n' "$AI_SUPERVISE_ESCALATE_MODEL"
+  else
+    printf '%s\n' opus
+  fi
+}
+# A failed plan revision stage check always needs the human (ai-recover escalates it).
+plan_stage_fail() {
+  printf 'Plan revision stage cannot be completed safely: %s\n' "${1#Error: }" > .ai/local/last-error
+  stop 'plan revision'
+}
+# Completes the open plan revision stage exactly once (fresh start and resume alike): close
+# it when its host revision record exists, else reserve the revision (idempotent per report)
+# and record it through ai-run --revise-plan. Writes nothing to the checkout itself.
+complete_plan_stage() {
+  local info state start digest model
+  info=$(ai_helper run-manifest stage 2>&1) || plan_stage_fail "$info"
+  [[ -n "$info" ]] || return 0
+  state=$(ai_helper stage-verify 2>&1) || plan_stage_fail "$state"
+  if [[ "$state" != committed ]]; then
+    read -r _ start digest <<< "$info"
+    if ! state=$(ai_helper run-manifest revision-reserve "$digest" "$AI_SUPERVISE_PLAN_ROUNDS" 2>&1); then
+      printf '%s\n' "${state#Error: }" > .ai/local/last-error
+      stop 'plan revision'
+    fi
+    model=$(plan_revision_model 2>&1) || plan_stage_fail "$model"
+    "$AI_BIN/ai-run" --approved --revise-plan --since "$start" --base "$base_sha" --model "$model" \
+      "${plan_revision_args[@]}" || stop 'plan revision'
+    ai_guard_verify
+    state=$(ai_helper stage-verify 2>&1) || plan_stage_fail "$state"
+    [[ "$state" == committed ]] || plan_stage_fail 'the plan revision was not recorded.'
+  fi
+  ai_helper run-manifest stage-clear || plan_stage_fail 'cannot clear the stage in the run manifest.'
+}
 recheck_fail() {
   printf 'Re-check of rejected findings: %s\n' "${1#Error: }" > .ai/local/last-error
   stop 're-check'
@@ -288,32 +358,116 @@ if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
 else
   ai_notify "▶ STARTED on $branch.$timer_note"
 fi
-if [[ -n "$open_stage" ]]; then
+# Did this process just complete a plan revision stage? (the "Plan revised" notification)
+plan_revised=no
+if [[ "$open_stage" == 'plan-revision '* ]]; then
+  step 'Completing the interrupted plan revision'
+  # The round (revision model) needs the record of a plan review whose host commit is made.
+  ai_helper plan-rounds sync "$base_sha" || plan_stage_fail 'cannot read the host plan review records.'
+  complete_plan_stage
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    plan_stage_fail 'the checkout is not clean after completing the plan revision.'
+  plan_revised=yes
+elif [[ -n "$open_stage" ]]; then
   step 'Completing the interrupted review triage'
   complete_stage
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     stage_fail 'the checkout is not clean after completing the triage.'
 fi
 reconcile_disputes
-# Plan review: cheapest place to catch gaps, before any Claude usage is spent.
-if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
-  if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
-    step 'Plan review (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --plan "${review_args[@]}" || stop 'plan review'
-    ai_guard_verify
-    mapfile -t records < <(review_record .ai/reviews/plan.md)
-    host_commit 'chore(ai): record plan review' "${records[@]}"
-    plan_info=$(ai_helper plan-review-info) || stop 'plan review'
-    # A commit hook that changed reviewed content would make the verdict stale.
-    [[ "$plan_info" == current* ]] || \
-      { printf '%s\n' 'reviewed content changed while recording the plan review (commit hook?)' > .ai/local/last-error; stop 'plan review'; }
-  fi
-  read -r _ plan_blockers plan_majors _ <<< "$plan_info"
-  if (( plan_blockers + plan_majors > 0 )); then
-    printf '%s\n' "plan review found BLOCKER $plan_blockers, MAJOR $plan_majors; revise the plan (see .ai/reviews/plan.md) or rerun with --skip-plan-review" > .ai/local/last-error
-    stop 'plan review'
-  fi
+# Settled above (they act on the published review only), so the human's merge never lands
+# in an open stage. The base is fixed for the run and HEAD only gains commits: check once.
+if ! base_reached; then
+  printf '%s\n' "$base_moved" > .ai/local/last-error
+  stop start
 fi
+# A recorded needs-human revision of the current plan review stops for the human (host record,
+# also after a crash); it clears only when a new plan review replaces the report. Checked on
+# every start whatever --skip-plan-review or the task queue say, in the plan review loop and
+# again before implementation: skipping the optional review never skips the decision.
+plan_decision_check() {
+  local questions rc=0 current
+  questions=$(ai_helper plan-revisions decision 2>&1) || rc=$?
+  case "$rc" in
+    0) # The round number only labels the stop, so a failed sync just leaves it unknown.
+       ai_helper plan-rounds sync "$base_sha" >/dev/null 2>&1 || true
+       current=$(ai_helper plan-rounds current "$base_sha" 2>/dev/null) || current='?'
+       printf 'plan review needs your decision (round %s): %s\n' "${current%% *}" "${questions//$'\n'/; }" \
+         > .ai/local/last-error
+       stop 'plan review' ;;
+    1) ;;
+    *) plan_stage_fail "the plan revision records are unreadable (${questions#Error: })." ;;
+  esac
+}
+plan_decision_check
+# Plan review: cheapest place to catch gaps, before any Claude usage is spent. Supervised
+# (AI_SUPERVISE=1), a BLOCKER/MAJOR verdict gets a bounded plan revision (at most
+# AI_SUPERVISE_PLAN_ROUNDS per run) and every revision a fresh review on a clean checkout.
+if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
+  while true; do
+    ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
+    plan_decision_check
+    if [[ "$plan_revised" == yes ]]; then
+      # Counts from the host record; its run-log line is already in the revision commit, so
+      # nothing is written to the checkout before the re-review.
+      outcome=$(ai_helper plan-revisions outcome 2>/dev/null) || plan_stage_fail 'the plan revision was not recorded.'
+      read -r _ revised_accepted revised_rejected _ <<< "$outcome"
+      revised_n=$(ai_helper run-manifest revision-count 2>/dev/null) || revised_n='?'
+      revised_round="round $revised_n/$AI_SUPERVISE_PLAN_ROUNDS"
+      # 0: a human restart closed the previous run's recorded revision (not counted again).
+      [[ "$revised_n" != 0 ]] || revised_round='in the previous run'
+      ai_notify "🔁 Plan revised ($revised_round): accepted $revised_accepted, rejected $revised_rejected"
+      plan_revised=no
+    fi
+    # Review needed: no current verified review, or the current one was already revised.
+    review_due=no
+    if ! plan_info=$(ai_helper plan-review-info 2>/dev/null) || [[ "$plan_info" != current* ]]; then
+      review_due=yes
+    else
+      revised_rc=0
+      ai_helper plan-revisions revised >/dev/null 2>&1 || revised_rc=$?
+      case "$revised_rc" in
+        0) review_due=yes ;;
+        1) ;;
+        *) plan_stage_fail 'the plan revision records are unreadable.' ;;
+      esac
+    fi
+    if [[ "$review_due" == yes ]]; then
+      step 'Plan review (Codex; Claude fallback)'
+      "$AI_BIN/ai-review" --plan --base "$base_sha" "${review_args[@]}" || stop 'plan review'
+      ai_guard_verify
+      mapfile -t records < <(review_record .ai/reviews/plan.md)
+      host_commit 'chore(ai): record plan review' "${records[@]}"
+      plan_info=$(ai_helper plan-review-info) || stop 'plan review'
+      # A commit hook that changed reviewed content would make the verdict stale.
+      [[ "$plan_info" == current* ]] || \
+        { printf '%s\n' 'reviewed content changed while recording the plan review (commit hook?)' > .ai/local/last-error; stop 'plan review'; }
+      # Records the host commit just made (the newest host-subject commit holding this report).
+      ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
+      ai_helper plan-rounds current "$base_sha" >/dev/null || stop 'plan review'
+    fi
+    read -r _ plan_blockers plan_majors _ <<< "$plan_info"
+    (( plan_blockers + plan_majors > 0 )) || break
+    if [[ "$AI_SUPERVISE" != 1 ]]; then
+      printf '%s\n' "plan review found BLOCKER $plan_blockers, MAJOR $plan_majors; revise the plan (see .ai/reviews/plan.md) or rerun with --skip-plan-review" > .ai/local/last-error
+      stop 'plan review'
+    fi
+    current=$(ai_helper plan-rounds current "$base_sha") || stop 'plan review'
+    # Reserved before the stage opens (a crash in between finds it reserved, never counted twice).
+    if ! reserved=$(ai_helper run-manifest revision-reserve "${current#* }" "$AI_SUPERVISE_PLAN_ROUNDS" 2>&1); then
+      printf '%s; BLOCKER %s, MAJOR %s remain\n' "${reserved#Error: }" "$plan_blockers" "$plan_majors" > .ai/local/last-error
+      stop 'plan review'
+    fi
+    step "Plan revision $reserved/$AI_SUPERVISE_PLAN_ROUNDS, review round ${current%% *} (Claude)"
+    ai_helper run-manifest stage-set plan-revision "$(git rev-parse HEAD)" || stop 'plan revision'
+    complete_plan_stage
+    ai_guard_verify
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
+      plan_stage_fail 'the checkout is not clean after completing the plan revision.'
+    plan_revised=yes
+  done
+fi
+plan_decision_check
 while true; do
   # Derived from the current review each round, so an earlier deferral doesn't stick.
   unresolved=0
@@ -334,7 +488,7 @@ while true; do
       stop review
     fi
     step 'Independent review (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
+    "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
     ai_guard_verify
     mapfile -t records < <(review_record .ai/reviews/current.md)
     host_commit 'chore(ai): record independent review' "${records[@]}"
@@ -352,14 +506,36 @@ while true; do
     break
   fi
   fixes=$(ai_helper fix-rounds count "$base_sha") || stop review
+  extra=''
   if (( fixes >= max_fix_rounds )); then
-    unresolved=1
-    printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
-    break
+    # Supervised, one extra round per run when the host-verified BLOCKER+MAJOR counts fall
+    # strictly over the last two rounds and this review; reserved before its triage starts.
+    extra_reserved=$(ai_helper run-manifest extra-round) || stop review
+    digest=$(sha256sum .ai/reviews/current.md | cut -d' ' -f1)
+    if [[ "$AI_SUPERVISE" == 1 && "$fixes" == "$max_fix_rounds" && "$extra_reserved" == "$digest" ]]; then
+      extra='resumed'
+    elif [[ "$AI_SUPERVISE" == 1 && "$fixes" == "$max_fix_rounds" && -z "$extra_reserved" ]] && \
+         trend=$(ai_helper fix-rounds trend "$base_sha" 2>/dev/null); then
+      read -r trend_x trend_y trend_z <<< "$trend"
+      if (( trend_x > trend_y && trend_y > trend_z )); then
+        ai_helper run-manifest extra-round-reserve "$digest" || stop review
+        extra="$trend_x → $trend_y → $trend_z"
+        # Before the stage opens: a crash here leaves a clean checkout and the reservation.
+        ai_notify "🔁 Extra fix round: findings falling ($extra)"
+      fi
+    fi
+    if [[ -z "$extra" ]]; then
+      unresolved=1
+      printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
+      break
+    fi
   fi
   step "Review triage, round $(( fixes + 1 )) (Claude)"
   # Recorded before triage starts, so a stop or crash anywhere in it resumes this stage.
   ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
+  # The triage commit carries this line (the run log is a triage record).
+  [[ -z "$extra" ]] || ai_log none "extra fix round $(( fixes + 1 )): findings falling (${extra/#resumed/reserved before a restart})" 'n/a' \
+    "beyond --max-fix-rounds $max_fix_rounds; once per run"
   complete_stage
   verdict=$(ai_helper triage-check --fresh) || stop triage
   reconcile_disputes
