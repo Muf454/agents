@@ -684,6 +684,34 @@ class RenderTest(DashboardTest):
         self.assertNotIn('╔', output)
         self.assertIn('bad · unknown · running', output)
 
+    def test_dashboard_render_legacy_checkout_with_last_error(self):
+        for name, content in (('legacy', None), ('malformed', '{"stage": "bogus", "state": "active"}')):
+            checkout = self.checkout(name)
+            if content is not None:
+                (checkout / '.ai/local/observation.json').write_text(content)
+            self.register(name + '.json', checkout)
+            error = checkout / '.ai/local/last-error'
+            error.write_text('gate broken\n')
+            future = time.time() + 5
+            os.utime(error, (future, future))
+        data = json.loads(self.run_cli('--json').stdout)
+        self.assertEqual({run['project']: run['status'] for run in data['runs']},
+                         {'legacy': 'needs_you', 'malformed': 'needs_you'})
+        saved = os.environ.get('COLUMNS')
+        try:
+            for width in ('140', '80'):
+                os.environ['COLUMNS'] = width
+                output = self.run_cli('--once').stdout
+                with self.subTest(width=width):
+                    self.assertIn('older toolkit', output)
+                    self.assertIn('gate broken', output)
+                    self.assertNotIn('before Plan check', output)
+        finally:
+            if saved is None:
+                os.environ.pop('COLUMNS', None)
+            else:
+                os.environ['COLUMNS'] = saved
+
     def test_dashboard_render_overlays_and_line_widths(self):
         runs = [fake_run(), fake_run('plan_revision', 'paused', 'paused', note='x' * 300),
                 fake_run('review', 'recovering', 'recovering'), fake_run('pr', 'active', 'crashed'),

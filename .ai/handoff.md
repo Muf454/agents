@@ -114,7 +114,9 @@ itself is unchanged.
   `test_dashboard_render_curses_interaction` (scroll, Enter, resize, quit) and
   `test_dashboard_render_curses_failure_restores_the_terminal`; the run list changing between
   empty and non-empty (review M1): `test_dashboard_render_curses_runs_appear_and_disappear`,
-  `test_dashboard_render_curses_all_toggle_with_only_old_runs`.
+  `test_dashboard_render_curses_all_toggle_with_only_old_runs`; a legacy or malformed-record
+  checkout with a `last-error` says "older toolkit" plus the error, not "before Plan check"
+  (review N1): `test_dashboard_render_legacy_checkout_with_last_error`.
 - Observation record actions, schema, pause/resume, `detail`, `done`, `pid`/`branch`:
   `test_observation_writer_actions_and_schema`, `test_observation_writer_detail_only_on_recorded_stage`,
   `test_observation_writer_done_records_pr`, `test_observation_writer_pid_and_branch`.

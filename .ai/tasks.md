@@ -1088,7 +1088,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 ## T012 — Legacy checkout with a last-error says "older toolkit", not "before Plan check" (review N1)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: sonnet
 

@@ -224,3 +224,4 @@
 | 2026-10-09T12:52:54Z | runner | triage | review triaged into dispositions/tasks | n/a | 8743976 | Fix tasks run next |
 | 2026-10-09T13:05Z | claude (sonnet) | T011 | DONE: `interface` keeps `selected` an int (clamped, 0 when empty) and passes None to layout/draw only when empty; two pty tests (runs appear/disappear, `a` toggle with only old runs); first fails on the old code (exit 1) | ai-check 543 OK | (this commit) | M1 fixed; T012, T013 remain |
 | 2026-10-09T13:05:17Z | runner | T011 | completed | PASS | 60c68d0 | Claude checkpointed; continuing queue |
+| 2026-10-09T13:20Z | claude (sonnet) | T012 | DONE: `position` returns unknown whenever there is no usable observation; unknown marker appends `⛔ <last_error>`; `test_dashboard_render_legacy_checkout_with_last_error` (legacy + malformed, 140/80 cols, `needs_you` in JSON) | ai-check 544 OK | (this commit) | N1 fixed; T013 remains |

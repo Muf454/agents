@@ -370,6 +370,8 @@ def position(run):
     index = BOX_OF.get(run['stage']) if observation else None
     if status == 'finished':
         return len(FLOW), 'done'
+    if not observation:
+        return None, 'unknown'
     if status == 'needs_you':
         return index, 'stopped'
     if index is None:
@@ -409,6 +411,8 @@ def marker_text(run, index, mode):
         return f"⛔ {note or 'stopped'}", 'stopped'
     if mode == 'unknown':
         text = 'stage unknown' if observation else 'stage unknown (older toolkit)'
+        if not observation and run['last_error']:
+            return f"{text} · ⛔ {run['last_error']}", 'stopped'
         return text, 'dim'
     if mode == 'crashed':
         return ' · '.join(part for part in ('⚠ pipeline process is gone', observation['detail']) if part), 'stopped'
