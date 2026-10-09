@@ -279,5 +279,223 @@ class DashboardSanitizeTest(unittest.TestCase):
         self.assertEqual(dash.sanitize(None), '')
 
 
+ESC = '\x1b'
+EVIL = f'{ESC}]52;c;ZXZpbA==\x07{ESC}[31mred{ESC}[0m'
+
+
+class SnapshotTest(DashboardTest):
+    """Snapshot model and the `--once`/`--json` CLI (T007)."""
+
+    def plant(self, name, stage=None, state='active', detail='', note='', age=0, branch='main',
+              tasks=('DONE', 'IN_PROGRESS', 'TODO'), title='Task'):
+        checkout = self.checkout(name)
+        (checkout / '.git').mkdir()
+        (checkout / '.git/HEAD').write_text(f'ref: refs/heads/{branch}\n')
+        blocks = ''.join(f'## T00{n} — {title} {n}\nStatus: {status}\n\n'
+                         for n, status in enumerate(tasks, 1))
+        (checkout / '.ai/tasks.md').write_text('# Tasks\n\n' + blocks)
+        if stage:
+            record = {'stage': stage, 'state': state, 'detail': detail, 'note': note,
+                      'since': '2026-10-09T10:00:00Z', 'pid': 1, 'branch': branch,
+                      'updated': '2026-10-09T10:00:00Z'}
+            (checkout / '.ai/local/observation.json').write_text(json.dumps(record))
+        self.register(name + '.json', checkout)
+        if age:
+            self.age(checkout, age)
+        return checkout
+
+    def age(self, checkout, seconds):
+        then = time.time() - seconds
+        for path in checkout.rglob('*'):
+            if path.is_file():
+                os.utime(path, (then, then))
+
+    def run_cli(self, *options, tool=None, cwd=None, expected=0):
+        command = [sys.executable, '-B', str(LIB / 'dashboard.py')] if tool is None else [str(tool)]
+        result = subprocess.run([*command, *options], cwd=cwd or self.base, capture_output=True,
+                                text=True, timeout=BOUND * 3)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def runs(self, *options):
+        data = json.loads(self.run_cli('--json', *options).stdout)
+        return {run['project']: run for run in data['runs']}
+
+    def test_dashboard_snapshot_empty_state_names_state_root(self):
+        data = json.loads(self.run_cli('--json').stdout)
+        self.assertEqual(data, {'state_root': str(self.state), 'runs': []})
+        self.assertIn(str(self.state), self.run_cli('--once').stdout)
+
+    def test_dashboard_snapshot_statuses(self):
+        live = self.plant('live', 'build', detail='T003')
+        self.proc.add(4001, ['bash', '/x/.ai/bin/ai-pipeline'], live)
+        self.mark(live, 4001)
+        paused = self.plant('paused', 'review', 'paused', note='limit')
+        self.proc.add(4002, ['bash', '/x/.ai/bin/ai-pipeline'], paused)
+        self.mark(paused, 4002)
+        recovering = self.plant('recovering', 'checks', 'recovering')
+        self.proc.add(4003, ['bash', '/x/.ai/bin/ai-pipeline'], recovering)
+        self.mark(recovering, 4003)
+        self.plant('question', 'plan_revision', 'stopped', note='Which database?')
+        self.plant('atstart', 'none', 'stopped', note='base moved')
+        crashed = self.plant('crashed', 'build')
+        self.mark(crashed, 4999)
+        self.plant('finished', 'pr', 'done', note='PR open')
+        self.plant('idle', None)
+        broken = self.plant('broken', 'build')
+        error = broken / '.ai/local/last-error'
+        error.write_text('gate is broken\nsecond line\n')
+        future = time.time() + 5
+        os.utime(error, (future, future))
+        runs = self.runs()
+        expected = {'live': ('running', 'build'), 'paused': ('paused', 'review'),
+                    'recovering': ('recovering', 'checks'), 'question': ('needs_you', 'plan_revision'),
+                    'atstart': ('needs_you', 'none'), 'crashed': ('crashed', 'build'),
+                    'finished': ('finished', 'pr'), 'idle': ('idle', 'unknown'),
+                    'broken': ('needs_you', 'build')}
+        self.assertEqual({name: (run['status'], run['stage']) for name, run in runs.items()}, expected)
+        self.assertEqual(runs['question']['observation']['note'], 'Which database?')
+        self.assertEqual(runs['broken']['last_error'], 'gate is broken')
+        self.assertEqual(runs['live']['branch'], 'main')
+        self.assertEqual(runs['live']['tasks'], {'done': 1, 'total': 3, 'current': 'Task 2'})
+        order = [run['status'] for run in json.loads(self.run_cli('--json').stdout)['runs']]
+        ranks = [dash.RANK[status] for status in order]
+        self.assertEqual(ranks, sorted(ranks))
+
+    def test_dashboard_snapshot_real_process_through_symlink(self):
+        checkout = self.plant('real', 'build')
+        process = self.spawn('ai-pipeline', checkout)
+        self.mark(checkout, process.pid)
+        with mock.patch.dict(os.environ, {'AI_DASHBOARD_PROC': '/proc'}):
+            self.assertEqual(self.runs()['real']['status'], 'running')
+
+    def test_dashboard_snapshot_legacy_checkout_found_by_process(self):
+        checkout = self.checkout('legacy')
+        self.proc.add(5000, ['bash', '/opt/x/.ai/bin/ai-run'], checkout)
+        run = self.runs()['legacy']
+        self.assertEqual((run['status'], run['stage'], run['observation']), ('running', 'unknown', None))
+
+    def test_dashboard_snapshot_malformed_records(self):
+        checkout = self.plant('bad', 'bogus_stage')
+        (checkout / '.ai/local/notifications.log').write_text(
+            'not json\n{"ts": "t1", "message": "ok"}\n[1]\n{"message": 5}\n')
+        (checkout / '.ai/tasks.md').write_text('## T001 oops no dash\n')
+        run = self.runs()['bad']
+        self.assertEqual((run['status'], run['stage'], run['observation'], run['tasks']),
+                         ('idle', 'unknown', None, None))
+        self.assertEqual(run['events'], [{'ts': 't1', 'message': 'ok'}])
+        (checkout / '.ai/local/observation.json').write_text('{')
+        self.assertIsNone(self.runs()['bad']['observation'])
+        (checkout / '.ai/tasks.md').unlink()
+        self.assertIsNone(self.runs()['bad']['tasks'])
+
+    def test_dashboard_snapshot_sanitises_every_field(self):
+        checkout = self.plant('evil' + EVIL, 'build', 'stopped', detail=EVIL, note=EVIL,
+                              branch='br' + EVIL, title=EVIL)
+        (checkout / '.ai/local/notifications.log').write_text(
+            json.dumps({'ts': EVIL, 'message': EVIL}) + '\n')
+        (checkout / '.ai/local/last-error').write_text(EVIL + '\n')
+        future = time.time() + 5
+        os.utime(checkout / '.ai/local/last-error', (future, future))
+        for options in (('--once',), ('--json',), ('--once', '--all')):
+            output = self.run_cli(*options).stdout
+            with self.subTest(options=options):
+                self.assertIn('red', output)
+                self.assertNotIn(ESC, output)
+                self.assertNotIn('\x07', output)
+                self.assertNotIn('ZXZpbA', output)
+
+    def test_dashboard_snapshot_unreadable_checkout_next_to_healthy_one(self):
+        healthy = self.plant('healthy', 'checks')
+        hostile = self.plant('hostile', 'build')
+        (hostile / '.ai/local/pipeline.active').unlink(missing_ok=True)
+        os.mkfifo(hostile / '.ai/local/pipeline.active')
+        (hostile / '.ai/local/observation.json').unlink()
+        os.mkfifo(hostile / '.ai/local/observation.json')
+        with (hostile / '.ai/local/notifications.log').open('w') as file:
+            for number in range(300_000):
+                file.write(json.dumps({'ts': 't', 'message': f'event {number}'}) + '\n')
+        self.assertGreater((hostile / '.ai/local/notifications.log').stat().st_size, 10 * 1024 * 1024)
+        start = time.monotonic()
+        result = self.run_cli('--once')
+        self.assertLess(time.monotonic() - start, BOUND)
+        self.assertIn('healthy · main', result.stdout)
+        self.assertIn('stage checks (active)', result.stdout)
+        runs = self.runs()
+        self.assertEqual(runs['healthy']['stage'], 'checks')
+        self.assertEqual(runs['hostile']['stage'], 'unknown')
+        self.assertEqual(runs['hostile']['events'][-1]['message'], 'event 299999')
+        self.assertEqual(len(runs['hostile']['events']), 20)
+        self.assertIsNotNone(healthy)
+
+    def test_dashboard_snapshot_hides_old_finished_and_idle(self):
+        day = 25 * 3600
+        self.plant('old-finished', 'pr', 'done', age=day)
+        self.plant('old-idle', None, age=day)
+        self.plant('old-needs', 'build', 'stopped', age=day)
+        old_crash = self.plant('old-crash', 'build', age=day)
+        self.mark(old_crash, 4999, time.time() - day)
+        self.plant('new-finished', 'pr', 'done')
+        self.assertEqual(sorted(self.runs()), ['new-finished', 'old-crash', 'old-needs'])
+        self.assertEqual(sorted(self.runs('--all')),
+                         ['new-finished', 'old-crash', 'old-finished', 'old-idle', 'old-needs'])
+
+    def tree(self, *paths):
+        listing = {}
+        for path in paths:
+            for entry in [Path(path), *Path(path).rglob('*')]:
+                info = entry.lstat()
+                listing[str(entry)] = (info.st_mtime_ns, info.st_size)
+        return listing
+
+    def install(self, name='installed'):
+        project = self.base / name
+        project.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=project, check=True)
+        result = subprocess.run([str(ROOT / 'scripts/setup-project'), str(project)], capture_output=True,
+                                text=True, timeout=BOUND * 6)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return project
+
+    def test_dashboard_snapshot_read_only_from_toolkit_and_install(self):
+        self.plant('a', 'build')
+        self.plant('b', 'pr', 'done')
+        project = self.install()
+        watched = (self.base / 'a', self.base / 'b', self.state, ROOT / 'scripts', project / '.ai/bin')
+        before = self.tree(*watched)
+        for command in ([sys.executable, '-B', str(LIB / 'dashboard.py')],
+                        [str(project / '.ai/bin/ai-dashboard')]):
+            for options in (['--once'], ['--json'], ['--once', '--all']):
+                subprocess.run([*command, *options], cwd=self.base, check=True, capture_output=True,
+                               timeout=BOUND * 3)
+        self.assertEqual(self.tree(*watched), before)
+        self.assertEqual(list((project / '.ai/bin').rglob('__pycache__')), [])
+
+    def test_dashboard_snapshot_wrapper_through_symlink_outside_a_checkout(self):
+        project = self.install()
+        bin_dir = self.base / 'elsewhere-bin'
+        bin_dir.mkdir()
+        (bin_dir / 'ai-dashboard').symlink_to(project / '.ai/bin/ai-dashboard')
+        outside = self.base / 'not-a-checkout'
+        outside.mkdir()
+        self.plant('seen', 'build')
+        result = self.run_cli('--once', tool=bin_dir / 'ai-dashboard', cwd=outside)
+        self.assertIn('seen · main', result.stdout)
+
+    def test_dashboard_snapshot_setup_and_upgrade_install_the_dashboard(self):
+        project = self.install()
+        installed = [project / '.ai/bin/ai-dashboard', project / '.ai/bin/lib/dashboard.py']
+        for path in installed:
+            self.assertTrue(path.is_file(), path)
+        self.assertTrue(os.access(installed[0], os.X_OK))
+        for path in installed:
+            path.unlink()
+        result = subprocess.run([str(ROOT / 'scripts/setup-project'), '--upgrade', '--apply', str(project)],
+                                capture_output=True, text=True, timeout=BOUND * 6)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path in installed:
+            self.assertTrue(path.is_file(), result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

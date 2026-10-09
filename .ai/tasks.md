@@ -768,7 +768,7 @@ fails `..._reused_pid_is_crashed`. No-write test runs the module from a copied l
 `runpy.run_path` and compares the temp tree's mtimes and checks for `__pycache__`.
 
 ## T007 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
-Status: TODO
+Status: BLOCKED
 Dependencies: T006
 Model: sonnet
 
@@ -860,6 +860,16 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_snapshot` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude sonnet): BLOCKED on one permission, implementation otherwise complete.
+`dashboard.py` gained `inspect`, `snapshot`, `render_text`, `main` (`--once/--json/--all`);
+`scripts/ai-dashboard` wrapper added; `setup` installs `ai-dashboard` and `lib/dashboard.py`;
+11 `dashboard_snapshot_*` tests in tests/test_dashboard.py pass. Full gate: 515 of 516 pass; the
+one failure is `test_script_modes_all_shebang_scripts_are_executable` (script='ai-dashboard'):
+the working-tree file is mode 644 because `chmod +x scripts/ai-dashboard` was denied by the
+session's permissions ("don't ask mode"). The git index already has mode 100755
+(`git add --chmod=+x`), so a human or a session allowed to chmod only needs to run
+`chmod +x scripts/ai-dashboard` (or `git checkout -- scripts/ai-dashboard`), rerun
+`.ai/bin/ai-check`, and set T007 DONE.
 
 ## T008 — Curses TUI with the flow as boxes
 Status: TODO

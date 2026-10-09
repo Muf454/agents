@@ -303,7 +303,7 @@ def setup(arguments):
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
     for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
-                 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
+                 'ai-dashboard', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     if args.upgrade:
         return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
