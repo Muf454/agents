@@ -1,10 +1,10 @@
 # Handoff
 
 ## What has been implemented?
-Branch `fix/outcome-followups` (from `origin/master` c7d4dee): outcome telemetry and parallel test runner follow-ups CU-1, CU-3 and CU-4 from the vault backlog. Planned (revision 4), nothing implemented yet.
+Branch `fix/outcome-followups` (from `origin/master` c7d4dee): outcome telemetry and parallel test runner follow-ups CU-1, CU-3 and CU-4 from the vault backlog. Planned (revision 5), nothing implemented yet.
 - T001 (CU-4, TODO): parallel runner shards ignore `PYTHON_COLORS`/`FORCE_COLOR`; ANSI-safe summary parsing. The `FORCE_COLOR` case itself was already fixed on `fix/catchup-review` (T006); this adds the `PYTHON_COLORS=1` case and regression tests.
 - T002 (CU-1, TODO): `ai-status --outcomes` model tables per attempt.
-- T003 (CU-3, TODO): re-check outcome lines carry upheld/withdrawn totals by severity and the reviewed HEAD; re-check table in the report.
+- T003 (CU-3, TODO): re-check outcome lines carry upheld/withdrawn totals by severity and the reviewed HEAD; re-check table in the report; Claude re-checks stay listed under "Codex catch-up pending".
 
 Telemetry only: `ai-review`, `ai-pipeline`, `ai-recover`, `ai-run` and the gates are unchanged.
 
@@ -21,8 +21,8 @@ Flow unchanged
 
 ### Covered by automated tests
 - Parallel runner with `FORCE_COLOR=3` / `PYTHON_COLORS=1`, ANSI-safe summary parsing, no escapes in a failing shard's output: `test_parallel_runner_*` (T001)
-- Per-attempt model statistics with a mixed-model retry and old attempt-less lines: `test_outcome_report_*` (T002)
-- Re-check upheld/withdrawn totals and `reviewed_head`, line still written when the report cannot be verified: `test_outcome_recheck_*` (T003)
+- Per-attempt model statistics with a mixed-model retry, old attempt-less lines and an old row followed by a new `attempt=2` row: `test_outcome_report_*` (T002)
+- Re-check upheld/withdrawn totals and `reviewed_head`, line still written when the report cannot be verified, Claude re-checks still under "Codex catch-up pending": `test_outcome_recheck_*` (T003)
 
 ## Human todos
 - Keep CU-2 open in the vault backlog (`agents-backlog.md`) with the deferral reason and the open design question above, plus the `fallback_record` row-placement defect; a later batch should be started with `ai-run --knowledge-dir ~/zWiki/zWiki` if it edits the flow note (round 3 P4).

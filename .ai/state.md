@@ -9,7 +9,7 @@ Tasks complete: 0
 Tasks remaining: 3
 Last validation: not run on this branch yet
 Blocked: no
-Next action: Implement T001 (parallel runner colour hardening, CU-4), then T002–T003 in order (plan revision 4; CU-2 deferred)
+Next action: Implement T001 (parallel runner colour hardening, CU-4), then T002–T003 in order (plan revision 5; CU-2 deferred)
 Last updated: 2026-10-09
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

@@ -2,14 +2,17 @@
 
 Branch `fix/outcome-followups` from `origin/master` c7d4dee, worktree `~/Projects/wt/agents-outcomes`.
 Spec: `.ai/project-spec.md` (each item verified against this branch first; CU-4 was mostly fixed).
-Revision: 4 (plan review round 3, Claude fallback: CU-2/T004 dropped by the convergence rule, P2
-accepted; rounds 1–3 dispositions in `.ai/reviews/dispositions.md`).
+Revision: 5 (plan review round 4, Claude fallback: P1 applied as written, the catch-up list
+stays built from all review lines incl. re-checks; P2 attempt-1 = a task's first row in file
+order; P3 T003 filter widened. Revision 4: CU-2/T004 dropped by the convergence rule after
+round 3. Rounds 1–4 dispositions in `.ai/reviews/dispositions.md`).
 
 1. T001 (sonnet, CU-4 residual): `tests/run_parallel.py` sets `PYTHON_COLORS=0` for shards and
    strips ANSI codes before parsing; regression tests with `FORCE_COLOR=3` / `PYTHON_COLORS=1`.
 2. T002 (sonnet, CU-1): per-attempt model tables in `outcomes_report`; mixed-model retry test.
 3. T003 (sonnet, CU-3): re-check outcome lines carry upheld/withdrawn totals by severity and
-   the reviewed HEAD; re-check table in the report.
+   the reviewed HEAD; re-check table in the report; "Codex catch-up pending" still lists
+   Claude re-checks.
 
 Order: T001 is independent; T002 → T003 are chained because both edit `outcomes_report`.
 

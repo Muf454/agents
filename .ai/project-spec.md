@@ -41,13 +41,15 @@ the line.
   ANSI escape sequences. Regression tests with `FORCE_COLOR=3` and `PYTHON_COLORS=1`.
 - **R2 (CU-1)** Per-model statistics count attempts on the model that ran them. The model
   tables are per attempt: attempts, done, not done, first-time pass (tasks whose attempt 1
-  ran on this model and passed, out of tasks whose attempt 1 ran on it), avg minutes per
+  ran on this model and passed, out of tasks whose attempt 1 ran on it; a task's attempt 1 is
+  its first logged row), avg minutes per
   attempt. The category table stays per task. A mixed-model retry (attempt 1 sonnet failed,
   attempt 2 opus done) shows one attempt and its time under each model.
 - **R3 (CU-3)** A re-check outcome line carries `upheld_blocker`, `upheld_major`,
   `withdrawn_blocker`, `withdrawn_major` (from the verified, published `.ai/reviews/recheck.md`
   and the level of each rejected finding) and `reviewed_head` (full SHA). The report shows
-  re-checks in their own table with these totals; plan/code reviews keep theirs.
+  re-checks in their own table with these totals; plan/code reviews keep theirs. Claude
+  re-checks stay listed under "Codex catch-up pending" (R4 below).
 - **R4 (CU-2): deferred.** Not in this batch; the report keeps listing every Claude review
   under "Codex catch-up pending" and the hand-written `## Codex catch-up` section of
   `.ai/reviews/fallback-log.md` stays the record. The `fallback_record` row-placement defect

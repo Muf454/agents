@@ -124,3 +124,13 @@ Claude fallback plan review (Codex usage limit), plan digest d85a5ce7, HEAD 55e5
 | P5 ambiguous "number of Claude reviews covered" | deferred | Only in T004's report section; deferred with CU-2. | — |
 
 Also taken from the round 3 notes: T001 sets the test env on `self.env` before `self.runner()` copies it.
+
+## Plan review round 4 (outcome follow-ups)
+
+Claude fallback plan review (Codex usage limit), plan digest 02a8c7d2, HEAD 828c4fe, 2026-10-09: BLOCKER 0, MAJOR 1, MINOR 2. All accepted (plan revision 5).
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 moving re-checks to their own table can silently drop Claude re-checks from "Codex catch-up pending" | accepted | Confirmed: `outcomes_report` builds `fallback` from the same `reviews` list inside `if reviews:` (`workflow.py:2116-2133`), and the only catch-up assertion counts `'code HEAD'` (`tests/test_workflow.py:2647-2648`). Applied as written: T003's notes say the catch-up list is built from all review lines (plan, code, recheck), independent of the table split and of whether any plan/code review exists; the JSONL report test gets a `claude-fallback` recheck line asserted under "Codex catch-up pending" and absent as `\| recheck \|` from "Reviews by reviewer", plus a re-check-only JSONL; new acceptance criterion "Claude re-checks remain listed under Codex catch-up pending". Spec R3 notes it. | T003 |
+| P2 attempt-1 rule undefined for an old attempt-less row followed by a new row | accepted | Confirmed: `outcome` numbers attempts by counting all earlier lines of the task (`workflow.py:2056-2058`), so such a task has no `attempt == 1` row. T002 now takes a task's first row in file order (files in argument order) as its attempt-1 row; the T009 old-line expectation is unchanged, and a mixed T010 fixture (old row, then `attempt` 2 on opus) expects `0/1 (0%)` under default. Spec R2 notes it. | T002 |
+| P3 T003 targeted filter skips the pipeline re-check paths | accepted (amended) | Confirmed, but the suggested `-k outcome -k recheck` still misses dispute tests that run a re-check without "recheck" in their names (`test_disputed_findings_all_withdrawn_open_a_normal_pr`, `..._one_upheld_makes_a_draft_...`, `tests/test_workflow.py:3590,3603`). T003 validation is `-k outcome -k recheck -k disput`. | T003 |
