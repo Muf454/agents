@@ -7,8 +7,10 @@ Bounded auto-recovery after ai-pipeline stopped (handed over by ai-pipeline itse
 started by ai-watchdog --recover after a crash). Hard rules first, then a read-only
 Claude session picks ONE action that this script carries out:
   rerun | commit_and_rerun (only if the full gate passes) | escalate (notify the human).
-An interrupted review triage (recorded in the run manifest) is never committed here: it
-reruns without a Claude session (the pipeline completes the stage) or escalates.
+An interrupted review triage or plan revision (a host stage record) is never committed
+here: it reruns without a Claude session (the pipeline completes the stage) or escalates.
+A plan revision waiting for the human's decision, the supervision limit and a failed plan
+revision stage always escalate.
 Authority comes from the host-side run manifest written when the human started the run
 (approved gate digest, branch, arguments, attempt budget), never from checkout files.
 At most AI_RECOVER_MAX (default 2) attempts per human-started run. Gate files are never
@@ -66,10 +68,10 @@ attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3
   escalate 'the run manifest is unreadable.' 'rerun ai-pipeline --approved by hand.'
 # Restore the approved run's settings (notifications, budgets, models); settings the run
 # didn't have fall back to their defaults instead of inheriting this environment's.
-unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT
+unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
 while IFS= read -r -d '' setting; do
   case "${setting%%=*}" in
-    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT)
+    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL)
       export "$setting" ;;
   esac
 done < <(ai_helper run-manifest env)
@@ -98,27 +100,56 @@ current_gate=$(ai_guard_digest) || escalate 'the workflow gate is missing or uns
 [[ "$branch" == "$(ai_helper run-manifest branch)" ]] || \
   escalate "the checkout is on $branch, not the approved run's branch." 'switch back or rerun ai-pipeline --approved yourself.'
 mapfile -d '' -t args < <(ai_helper run-manifest args)
+# A plan revision waiting for the human's answer (host record), whatever the recorded stop
+# reason (a crash leaves none): checked before the attempt limit and any stage resume.
+decision_rc=0
+questions=$(ai_helper plan-revisions decision 2>&1) || decision_rc=$?
+case "$decision_rc" in
+  0) reason="plan review needs your decision: $(printf '%s' "$questions" | tr '\n' ' ')"
+     # A crash before stage-clear: the stage is done (its record exists). Close it, so the run
+     # continues once the human's answer gets a new plan review (else the stage is foreign then).
+     if [[ "$(ai_helper run-manifest stage 2>/dev/null)" == 'plan-revision '* && \
+           "$(ai_helper stage-verify 2>/dev/null)" == committed ]]; then
+       ai_helper run-manifest stage-clear 2>/dev/null || true
+     fi
+     escalate 'a plan revision recorded questions only you can answer.' \
+       'answer them in .ai/reviews/plan-dispositions.md and the plan, commit, run ai-review --plan, then rerun ai-pipeline.' ;;
+  1) ;;
+  *) escalate "the plan revision records are unreadable (${questions#Error: })." 'inspect them, then rerun ai-pipeline --approved by hand.' ;;
+esac
 # Hard rules: never let an AI talk the workflow past its own gate, policy or integrity checks.
+case "$reason" in
+  *'moved past the branch'*)
+    # escalate prints only its summary: keep the base, SHA and merge advice on stderr too.
+    printf 'Error: %s\n' "${reason% }" >&2
+    escalate 'the review base moved past the branch.' 'merge the base into the branch, then rerun ai-pipeline.' ;;
+esac
 case "$reason" in
   *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
   *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
-  *'differs from the validated content'*|*'Triage stage'*|*'Dependency setup'*)
+  *'differs from the validated content'*|*'Triage stage'*|*'Dependency setup'*|*'Plan revision stage'*|\
+  *'supervision limit reached'*|*'needs your decision'*)
     escalate 'this kind of stop always needs a human.' 'inspect it, fix it, then rerun ai-pipeline.' ;;
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
 
-# An interrupted review triage (this branch's host-side stage record, also after a crash):
-# never commit its leftovers here. Rerun: the pipeline verifies the stage and records the
-# round exactly once, or escalates. Leftovers outside workflow records escalate right away.
+# An interrupted review triage or plan revision (this branch's host-side stage record, also
+# after a crash): never commit its leftovers here. Rerun: the pipeline verifies the stage and
+# records it exactly once, or escalates. Leftovers outside the stage's records escalate now.
 open_stage=$(ai_helper run-manifest stage 2>/dev/null) || \
-  escalate 'the triage stage record is unreadable or invalid.' 'rerun ai-pipeline --approved by hand.'
+  escalate 'the stage record is unreadable or invalid.' 'rerun ai-pipeline --approved by hand.'
 if [[ -n "$open_stage" ]]; then
-  read -r _ stage_start _ <<< "$open_stage"
-  scope=$(ai_helper triage-scope "$stage_start" 2>&1) || \
-    escalate "the interrupted triage left changes outside its scope (${scope#Error: }); nothing was committed." \
+  read -r stage_name stage_start _ <<< "$open_stage"
+  if [[ "$stage_name" == plan-revision ]]; then
+    scope_helper=plan-revision-scope; stage_label='plan revision'
+  else
+    scope_helper=triage-scope; stage_label='review triage'
+  fi
+  scope=$(ai_helper "$scope_helper" "$stage_start" 2>&1) || \
+    escalate "the interrupted $stage_label left changes outside its scope (${scope#Error: }); nothing was committed." \
       'inspect and discard them, then rerun ai-pipeline.'
-  ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage (review triage): $reason"
-  resume 'the resumed pipeline completes the interrupted review triage.'
+  ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage ($stage_label): $reason"
+  resume "the resumed pipeline completes the interrupted $stage_label."
 fi
 
 # A stop always leaves runner bookkeeping (run log, state, handoff) behind; record it.

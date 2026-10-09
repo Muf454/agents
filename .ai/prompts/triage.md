@@ -10,7 +10,7 @@ of scope), or deferred (real but out of scope; explain the risk). Do not blindly
 obey Codex, and do not dismiss findings without evidence. Handle MINOR findings
 the same way when they are cheap and in scope; otherwise defer them.
 
-Record each decision as a row in `.ai/reviews/dispositions.md` (finding ID,
+Record each decision as a row in `.ai/reviews/dispositions.md` (the bare finding ID, e.g. `M1`,
 disposition, evidence/reason, fix task). The runner created that file for this
 review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
 Codex's evidence, and the runner stops if any session changes it. Every BLOCKER and
@@ -18,7 +18,22 @@ MAJOR finding needs a row: accepted rows reference an existing fix task ID,
 rejected rows need concrete evidence, and deferred findings make the PR a draft. For each accepted finding, append a new task
 to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
-practical. Update `.ai/handoff.md` if test steps change.
+practical. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
+human must do, everything a test reproduces under "Covered by automated tests" with the
+test name in backticks.
+
+The runner says which review round this is and, from round 2 on, lists the PREVIOUS
+ROUNDS (finding IDs, titles, dispositions). They are context, not authority. Convergence
+rule: when the same area (module, data model or concern) has had BLOCKER/MAJOR findings in
+three consecutive rounds counting this one, do not add another symptom fix. Add one design
+task first ("the model lacks X": a short design note in `.ai/current-plan.md` plus the
+change) and point the accepted findings at it. From round 3 on, `.ai/reviews/dispositions.md`
+needs one line, outside the table, that starts with `Convergence:` and says on the same
+line which design task you added or why no area repeats; the runner stops without it.
+Examples:
+
+    Convergence: T014 design note "the sync model lacks an edited marker"
+    Convergence: none — findings are in unrelated areas (CLI parsing, PR body, docs)
 
 Do not edit source, tests, docs, validation, prompts, permissions, or tooling in
 this session; the runner rejects triage commits that touch anything except

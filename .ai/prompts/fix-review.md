@@ -14,4 +14,7 @@ state/handoff/run-log, and local checkpoints. Do not weaken validation to pass.
 
 When valid significant findings are resolved and validation passes, request a
 follow-up review where warranted. Record remaining risks and precise human test
-steps. Human alone accepts, merges, and deploys.
+steps in the handoff: "Needs you" only for what a human must do (look and feel,
+phone/real devices, live accounts, external services, decisions) or "None"; steps a
+test reproduces go under "Covered by automated tests" with the test name in backticks.
+Human alone accepts, merges, and deploys.
