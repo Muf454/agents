@@ -33,6 +33,11 @@ T008 (2026-10-09): shared pure renderer (eight flow boxes from 120 columns, comp
 active box double-bordered in its role style, ✓ under passed boxes, detail or stop note on the
 marker line, latest event), `--once` and pipes use it, and the curses TUI (`ai-dashboard` on a TTY:
 ↑↓ Enter a r q, resize, scrolling, 256-colour or basic/bold/reverse).
+T009 (2026-10-09): docs audit. README "Watch all pipelines" (keys, flags, box layout, state root,
+read-only), `ai-dashboard` rows in the Components and Modes tables; `docs/workflow.md` "Observation
+records and the dashboard" (records, host registry, read-only rule, test-only `AI_DASHBOARD_PROC` and
+`AI_DASHBOARD_ROOT`, watchdog needs no gate guard). Vault hub Decisions and Log, human todos and the
+backlog DB-01 status updated. No code change.
 
 Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
 dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
@@ -55,6 +60,8 @@ renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See al
 `.ai/project-spec.md`, `.ai/tasks.md`.
 
 ## Validation run
+2026-10-09 after T009: `-k Docs` Ran 3 OK; `.ai/bin/ai-check` OK (541 tests, 8 shards) on the second run. The first
+full run had one failure in shard 2 (the failing test was not captured in the output kept; the rerun passed).
 2026-10-09 after T008: `.ai/bin/ai-check` OK (541 tests, 8 shards); targeted `-k dashboard_render`: 15 OK.
 2026-10-09 after T006: `.ai/bin/ai-check` OK (495 tests, 8 shards); targeted
 `-k dashboard_liveness`: 10 OK, `-k dashboard_sanitize`: 3 OK.
@@ -82,12 +89,16 @@ itself is unchanged.
 ## Manual testing for the human
 
 ### Needs you
-1. Look and feel in a real terminal (T009 completes this list): in tmux run `scripts/ai-dashboard`
-   (or `.ai/bin/ai-dashboard`) while a pipeline is running. Expected: one card per pipeline, eight
-   boxes in flow order, the active box double-bordered in orange (Claude), blue (Codex) or grey
-   (script), ✓ under finished boxes, a stopped run's box red with the reason; ↑↓ moves, Enter
-   shows details, `a` toggles old runs, `q` restores the terminal. Narrow the window below 120
-   columns: the cards become one compact line.
+1. Look and feel in a real terminal, with two runs at once: start two pipelines (two checkouts,
+   each under `ai-pipeline --approved`, or one running and one stopped) in tmux, then in a
+   third tmux window run `scripts/ai-dashboard` (or `.ai/bin/ai-dashboard`). Expected: one card
+   per pipeline, eight boxes in flow order, the active box double-bordered in orange (Claude),
+   blue (Codex) or grey (script), ✓ under finished boxes, a stopped run's box red with the
+   reason; runs that need you sort above running ones.
+   Keys: ↑↓ moves between cards, Enter shows or hides a card's details, `a` toggles old runs,
+   `r` refreshes, `q` quits and the terminal is back to normal (cursor, scrollback).
+   Resize: widen the window to 120 columns or more for the boxes, then narrow it below 120: the
+   cards become one compact line. Expected: no garbled lines and no crash at either width.
 
 ### Covered by automated tests
 - Renderer and TUI (`test_dashboard_render_*`): golden boxes at 140/120/119/60, worst-case row,
@@ -152,7 +163,10 @@ itself is unchanged.
   bare ESC, CR/backspace, DEL, bidi overrides removed; UTF-8 kept; length cap.
 
 ## Human todos
-None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
+- Optional: `ln -s ~/Projects/agents/scripts/ai-dashboard ~/.local/bin/` so `ai-dashboard` runs
+  from any directory (it works through a symlink already).
+- Optional: upgrade each project's `.ai/bin` (`setup-project --upgrade --apply`) so its runs
+  record their stages. Runs on older copies show "stage unknown (older toolkit)".
 
 ## Next action
-T001–T008 and T010 done; next T009 (docs and final audit).
+Human: the live terminal check under "Needs you" and the PR review. T001–T010 are DONE.

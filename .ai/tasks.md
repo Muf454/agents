@@ -993,7 +993,7 @@ renderer for the 12 stop labels and overlays via `workflow.py observe`, legacy/m
 `.ai/bin/ai-check` OK (541 tests, 8 shards).
 
 ## T009 — Docs and final audit for the dashboard
-Status: TODO
+Status: DONE
 Dependencies: T008
 Model: haiku
 
@@ -1043,3 +1043,12 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-09 (claude haiku): done. README "Watch all pipelines" section (keys, `--once`/`--json`/`--all`,
+120-column layout, tmux tip, state root, read-only) plus `ai-dashboard` rows in the Components and Modes
+tables; `docs/workflow.md` "Observation records and the dashboard" (records, registry, read-only rule,
+`AI_DASHBOARD_PROC`/`AI_DASHBOARD_ROOT` as test-only, watchdog needs no guard; `AI_GATE_BROKEN` was already
+in the gate section). Vault: hub Decisions (2026-10-09 and 2026-10-07 lines) and Log, human-todo items (live
+TUI check, optional PATH symlink and `.ai/bin` upgrade), backlog DB-01 status. Handoff: Needs you (two runs,
+keys, resize, q), Human todos, Next action. Evidence: `python3 -m unittest discover -s tests -k Docs`: Ran 3
+tests, OK; `.ai/bin/ai-check`: Ran 541 tests, OK (8 shards) on the final run; an earlier run had one failure in shard 2 (name not captured, not reproduced in the next run; flaky under load, to check). Limitation: the live TUI check in a real
+terminal is not done here (human todo). Flow unchanged.

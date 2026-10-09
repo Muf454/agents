@@ -814,3 +814,34 @@ minutes) by category, and every attempt by the model that ran it ("Attempts by m
 whose first line ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
 
+## Observation records and the dashboard
+
+`ai-dashboard` (`scripts/lib/dashboard.py`) shows each pipeline's current flow stage. The
+inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agent-writable):
+`observation.json` holds the stage, state (`active`, `paused`, `recovering`, `stopped`,
+`done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
+`workflow.py observe` from `ai-pipeline`, `ai-run`, `ai-review`, `ai-recover` and the
+pause/resume helpers in `common.sh`. `notifications.log` keeps the last 200 notification
+lines (`notify-log`, also when no `AI_NOTIFY_CMD` is set). Every notification is mirrored
+there, but a stop caused by a changed gate writes no observation and no log line (see the
+gate section). The host registry is `<state root>/pipelines/<sha256(checkout)[:16]>.json`,
+written by `pipeline-register` on each start and resume; entries whose checkout is gone or
+whose JSON is invalid are pruned. All of these writers are best effort: they warn on
+failure and never change a run's outcome. Writes go through pinned no-follow directory
+descriptors, under a bounded `flock`, via temp file and rename; reads are bounded and never
+block on FIFOs or devices.
+
+The dashboard only reads these records, and the process table through `/proc` (`ProcSource`).
+It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
+semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
+dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+
+`AI_DASHBOARD_PROC` (process-table root) and `AI_DASHBOARD_ROOT` (only checkouts under this
+absolute path) are test-only variables that make the dashboard tests deterministic; they are
+not user settings. The dashboard must run with the same `AI_STATE_DIR`/`XDG_STATE_HOME` as the
+pipelines, because it lists only that state root's registry (`--json` prints `state_root`).
+
+The watchdog needs no gate guard: its timer uses its own installed copy of `common.sh` and
+`workflow.py`, and verifies the gate digest of that copy before it launches the checkout's
+`ai-recover`.
+

@@ -217,6 +217,7 @@ commands not yet authorized. The bounded runner is the no-prompt unattended path
 | ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
 | ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
 | ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
+| ai-dashboard | you, `ai-dashboard` | Reads the host registry and each checkout's `.ai/local/` records and shows every pipeline (read-only, advisory) | Write files, take locks, change a run, authorize anything |
 
 ## Hands-off delivery: `ai-pipeline`
 
@@ -562,6 +563,41 @@ Do not rely on this to survive machine shutdown or sleep as a live process. It
 survives those events through saved files/checkpoints and a new session. No daemon
 or automatic reboot startup is installed.
 
+## Watch all pipelines
+
+`ai-dashboard` shows every pipeline on this machine in one terminal. Run it from any
+checkout's `.ai/bin/` or from `scripts/ai-dashboard` in this toolkit (a symlink works
+too). It lists the pipelines registered in the host state directory and the runners
+alive now, one card per checkout:
+
+- The flow is eight boxes in order: Plan check (Codex), Plan revision (Claude), Setup
+  (script), Build (Claude), Checks (script), Review (Codex), Triage (Claude), PR (script).
+  The active box is double-bordered in its role colour (orange Claude, blue Codex, grey
+  script); a ✓ under each finished box. Re-check shares the Triage box and is drawn in
+  Codex's colour. The Build box is labelled with its task count (`Build 2/5`). The marker
+  line under the active box shows the recorded detail, such as the task and model during
+  Build, `round 3 · extra (…)` during an extra fix round, or `format retry` after a
+  review's format retry. A usage-limit pause shows ⏸ on the box with the wait time.
+- A stopped run shows its box in red with the stop reason (`⛔ …`). A stop before the
+  first box (for example, the base moved) is marked `stopped before Plan check`.
+- Keys in the terminal view: ↑↓ move, Enter shows or hides a card's details, `a` toggles
+  old finished and idle runs, `r` refreshes, `q` quits and restores the terminal.
+- The boxes need 120 columns; below that each card becomes one compact line.
+- `ai-dashboard --once` prints the same view once (also used when output is piped).
+  `--json` prints the snapshot (`state_root` and the runs) for other tools. `--all` shows
+  finished or idle runs older than 24 hours; by default they are hidden, while crashed and
+  needs-you runs are never hidden.
+- Run it with the same `AI_STATE_DIR` or `XDG_STATE_HOME` as the pipelines and the
+  watchdog timer: it only lists the registry of that state root. The default is
+  `~/.local/state/ai-toolkit`.
+- Keep it in tmux beside your runs: `tmux new -s dash ai-dashboard`.
+
+The dashboard is read-only and advisory. It writes no file, takes no lock and changes no
+run. Its inputs are the records under each checkout's `.ai/local/` (`observation.json`,
+`notifications.log`, `pipeline.active`), which agents can write, so they show status
+only; they never authorize anything. Text from those records is sanitised before it reaches
+the terminal.
+
 ## Resume after interruption
 
 ```bash
@@ -698,6 +734,7 @@ Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the f
 | `scripts/ai-run` | Bounded fresh-session implementation loop and checkpoint checks |
 | `scripts/ai-review` | Revision-bound, read-only Codex review (Claude fallback at its limit) and report preservation |
 | `scripts/ai-pipeline` | Hands-off implement → review → triage/fix → PR → notify, resumable |
+| `scripts/ai-dashboard` | Read-only view of every pipeline on the machine (TUI, `--once`, `--json`, `--all`); see [Watch all pipelines](#watch-all-pipelines) |
 | `scripts/lib/` | Small Bash helpers and standard-library Python Markdown/copy/evidence helpers |
 | `tests/` | Offline integration tests; mock CLI agents, no model calls |
 
