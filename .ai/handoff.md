@@ -166,7 +166,9 @@ itself is unchanged.
 - Discovery and liveness (`test_dashboard_liveness_*`): real `ai-pipeline`/`ai-recover` processes
   alive (`real_pipeline_and_recover`), reused PID crashed, marker removed mid-snapshot gone,
   orphaned `ai-run` crashed, legacy runner alive / nothing gone, root filter, FIFO marker and
-  symlinked `.ai/local` (bounded, gone), registry/process skips and merge, nothing written.
+  symlinked `.ai/local` (bounded, gone), registry/process skips and merge, nothing written;
+  an editor, pager or git naming a runner script is not a runner
+  (`test_dashboard_liveness_ignores_non_runner_processes`).
 - Terminal-safe text (`test_dashboard_sanitize_*`): CSI, OSC 8/52, DCS/APC/PM/SOS, 8-bit C1,
   bare ESC, CR/backspace, DEL, bidi overrides removed; UTF-8 kept; length cap.
 

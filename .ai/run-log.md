@@ -226,3 +226,4 @@
 | 2026-10-09T13:05:17Z | runner | T011 | completed | PASS | 60c68d0 | Claude checkpointed; continuing queue |
 | 2026-10-09T13:20Z | claude (sonnet) | T012 | DONE: `position` returns unknown whenever there is no usable observation; unknown marker appends `⛔ <last_error>`; `test_dashboard_render_legacy_checkout_with_last_error` (legacy + malformed, 140/80 cols, `needs_you` in JSON) | ai-check 544 OK | (this commit) | N1 fixed; T013 remains |
 | 2026-10-09T13:17:49Z | runner | T012 | completed | PASS | 8434f65 | Claude checkpointed; continuing queue |
+| 2026-10-09T13:45Z | claude (sonnet) | T013 | DONE: dashboard-only `is_runner` (argv[0] runner, or shell + script arg) in discover and liveness; `test_dashboard_liveness_ignores_non_runner_processes`; real-process test uses a bash script | dashboard_liveness 33 OK; ai-check 546/547, unrelated timing flake `test_outcome_no_time_left_logs_nothing` passes alone | (this commit) | N2 fixed; queue complete |

@@ -103,12 +103,13 @@ class DashboardTest(unittest.TestCase):
         """A real process named NAME (a symlink to a sleeping script) working in CHECKOUT."""
         bin_dir = self.base / 'bin'
         bin_dir.mkdir(exist_ok=True)
-        script = bin_dir / 'runner.py'
-        script.write_text(f'#!{sys.executable}\nimport time\ntime.sleep(120)\n')
+        script = bin_dir / 'runner.sh'
+        script.write_text('#!/usr/bin/env bash\nsleep 120\n:\n')  # argv is `bash <link>`, as for the real runners
         script.chmod(0o755)
         link = bin_dir / name
         link.symlink_to(script)
-        process = subprocess.Popen([str(link)], cwd=checkout, stdin=subprocess.DEVNULL)
+        process = subprocess.Popen([str(link)], cwd=checkout, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
         return process
@@ -125,6 +126,25 @@ class DashboardTest(unittest.TestCase):
                 self.assertTrue(all(dash.inside(os.path.realpath(path), str(self.base))
                                     for path in found))
                 self.assertEqual(self.live(checkout, real), 'alive')
+
+    def test_dashboard_liveness_ignores_non_runner_processes(self):
+        for args in (['vim', '/x/scripts/ai-run'], ['less', '.ai/bin/ai-pipeline'],
+                     ['git', 'diff', 'scripts/ai-recover']):
+            with self.subTest(args=args):
+                checkout = self.checkout('c')
+                self.proc.add(6000, args, checkout)
+                self.assertEqual(dash.discover(), [])
+                self.assertEqual(self.live(checkout), 'gone')
+                shutil.rmtree(checkout)
+                shutil.rmtree(self.proc.root / '6000')
+        for args in (['bash', '/x/.ai/bin/ai-run', '--approved'], ['/x/.ai/bin/ai-pipeline']):
+            with self.subTest(args=args):
+                checkout = self.checkout('c')
+                self.proc.add(6000, args, checkout)
+                self.assertEqual([pid for pid, _ in dict(dash.discover())[str(checkout)]], [6000])
+                self.assertEqual(self.live(checkout), 'alive')
+                shutil.rmtree(checkout)
+                shutil.rmtree(self.proc.root / '6000')
 
     def test_dashboard_liveness_fixture_pipeline_alive(self):
         checkout = self.checkout('c')

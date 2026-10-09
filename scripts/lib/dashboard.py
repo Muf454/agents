@@ -18,10 +18,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workflow import (BOX_KEYS, DIR_FLAGS, NOTIFICATIONS_LIMIT, OBSERVATION_LIMIT,  # noqa: E402
                       OBSERVATION_STATES, SMALL_LIMIT, TASKS_LIMIT, checkout_fds, close_fds,
                       git_branch, read_record, state_root, task_blocks)
-from watchdog import is_runner  # noqa: E402
 
+RUNNER_NAMES = ('ai-run', 'ai-pipeline', 'ai-recover')
 PIPELINE_NAMES = ('ai-pipeline', 'ai-recover')
+SHELLS = ('bash', 'sh')
 FROM_ENVIRONMENT = object()
+
+
+def is_runner(args, names=RUNNER_NAMES):
+    """True for a process that executes a runner script: argv[0] is the runner, or a shell whose
+    first non-option argument is. An editor, pager or git naming a runner script is not one."""
+    if not args or not args[0]:
+        return False
+    first = Path(os.fsdecode(args[0])).name
+    if first in names:
+        return True
+    if first not in SHELLS:
+        return False
+    script = next((arg for arg in args[1:] if arg and not os.fsdecode(arg).startswith('-')), None)
+    return script is not None and Path(os.fsdecode(script)).name in names
 
 
 class ProcSource:
