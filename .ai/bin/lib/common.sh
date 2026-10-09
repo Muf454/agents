@@ -14,7 +14,10 @@ ai_die() {
   [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
   if [[ -n "${AI_PIPELINE_MARKER:-}" ]]; then
     # The pipeline shell itself is stopping for good: say so unless stop() already did.
-    [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
+    if [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
+      ai_notify "⛔ STOPPED, needs you: $*"
+      ai_observe stop '' "$*" 2>/dev/null || true
+    fi
     AI_STOP_NOTIFIED=1
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker
@@ -77,10 +80,13 @@ ai_review_args() {
 # Notification hook: AI_NOTIFY_CMD runs via bash with the message as $1
 # (e.g. curl -s -d "$1" ntfy.sh/<topic>). Failures never affect the workflow.
 ai_notify() {
-  [[ -n "${AI_NOTIFY_CMD:-}" ]] || return 0
   local project
   project=$(basename -- "${AI_ROOT:-$PWD}")
-  timeout 20 bash -c "$AI_NOTIFY_CMD" ai-notify "[$project] $*" </dev/null >/dev/null 2>&1 || true
+  if [[ -n "${AI_NOTIFY_CMD:-}" ]]; then
+    timeout 20 bash -c "$AI_NOTIFY_CMD" ai-notify "[$project] $*" </dev/null >/dev/null 2>&1 || true
+  fi
+  # Kept locally as well (read by ai-dashboard), also when nothing is sent.
+  ai_notify_log "[$project] $*"
 }
 
 # Usage-limit pause: wait until the provider's reset (or AI_LIMIT_RETRY seconds when
@@ -99,7 +105,9 @@ ai_limit_pause() {
   [[ -d .ai/local ]] && printf '%s paused %ss: %s usage limit (resume ~%s)\n' \
     "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
   ai_notify "⏸ PAUSED: $agent usage limit reached. Resumes by itself around $until."
+  ai_observe pause "$agent until $until"
   ${AI_SLEEP:-sleep} "$wait"
+  ai_observe resume
   AI_WAITED=$(( AI_WAITED + wait ))
 }
 ai_root() {
@@ -153,11 +161,30 @@ except (OSError, ValueError) as error:
     sys.exit(1)
 PY
 }
+# Never run a project helper after the approved gate changed: AI_GATE_BROKEN (a plain shell
+# variable, never exported, never set inside a command substitution) makes the observation
+# and notification-log helpers below skip themselves for the rest of this shell.
+# Usage: ai_gate_check GATE. An unreadable digest counts as broken.
+ai_gate_check() {
+  local actual
+  if actual=$(ai_guard_digest 2>/dev/null) && [[ "$actual" == "$1" ]]; then return 0; fi
+  AI_GATE_BROKEN=1
+  return 1
+}
 ai_guard_verify() {
   local actual
-  actual=$(ai_guard_digest) || ai_die 'Approved workflow gate is missing or unsafe; inspect changes.'
-  [[ "$actual" == "$AI_APPROVED_GATE" ]] || \
-    ai_die 'Approved workflow gate changed during this run. Stop, inspect the diff, and explicitly reapprove before resuming.'
+  actual=$(ai_guard_digest) || { AI_GATE_BROKEN=1; ai_die 'Approved workflow gate is missing or unsafe; inspect changes.'; }
+  [[ "$actual" == "$AI_APPROVED_GATE" ]] || { AI_GATE_BROKEN=1
+    ai_die 'Approved workflow gate changed during this run. Stop, inspect the diff, and explicitly reapprove before resuming.'; }
+}
+# Dashboard records (best effort, never fatal); skipped once the gate is known bad.
+ai_observe() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  ai_helper observe "$@" || true
+}
+ai_notify_log() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true
 }
 # Host-side dependency install (FL-01): run .ai/ci-setup when deps-status says stale.
 # Usage: ai_deps EXPECTED_GATE LIMIT_SECONDS. Returns 1 with AI_DEPS_ERROR set (every
@@ -172,6 +199,11 @@ ai_deps() {
   fi
   [[ "$status" == stale* ]] || return 0
   printf 'Dependency setup (.ai/ci-setup): %s\n' "${status#stale }"
+  if [[ -n "${AI_OBSERVE_RECOVERY:-}" ]]; then
+    ai_observe recovering "$AI_OBSERVE_RECOVERY" setup
+  else
+    ai_observe step setup
+  fi
   if ! [[ "$limit" =~ ^-?[0-9]+$ ]] || (( limit <= 0 )); then
     AI_DEPS_ERROR='Dependency setup (.ai/ci-setup) not run: run time limit reached.'; return 1
   fi
@@ -184,7 +216,7 @@ ai_deps() {
   timeout --signal=TERM --kill-after=10s "$limit" bash .ai/ci-setup < /dev/null > "$log" 2>&1
   code=$?
   set -e
-  if [[ "$(ai_guard_digest 2>/dev/null)" != "$gate" ]]; then
+  if ! ai_gate_check "$gate"; then
     AI_DEPS_ERROR="Dependency setup (.ai/ci-setup) changed the approved workflow gate; see $log"
   elif ! after=$(ai_helper tree-snapshot 2>&1) || [[ "$after" != "$before" ]]; then
     AI_DEPS_ERROR="Dependency setup changed project files (.ai/ci-setup must only install ignored dependencies); see $log"

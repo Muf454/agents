@@ -4,11 +4,13 @@
 The shell scripts own the workflow. This module never invokes an AI agent.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -301,7 +303,7 @@ def setup(arguments):
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
     for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
-                 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py'):
+                 'ai-dashboard', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     if args.upgrade:
         return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
@@ -479,6 +481,9 @@ def task_command(arguments):
         print(task['model'])
     elif action == 'count':
         print(len(blocks))
+    elif action == 'counts':
+        # "<done> <total>": the same counting as `progress`, for the dashboard's Build detail.
+        print(sum(t['status'] == 'DONE' for t in blocks), len(blocks))
     elif action == 'progress':
         # One line for notifications: "<id> <title> (<done>/<total> done)".
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
@@ -2710,6 +2715,15 @@ def outcome_title(task_id):
     return ''
 
 
+def recheck_counts(answers, levels):
+    """(upheld BLOCKER, upheld MAJOR, withdrawn BLOCKER, withdrawn MAJOR) of a re-check's answers."""
+    def count(verdict, level):
+        return sum(1 for finding, (answer, _) in answers.items()
+                   if answer == verdict and levels.get(finding) == level)
+    return (count('upheld', 'BLOCKER'), count('upheld', 'MAJOR'),
+            count('withdrawn', 'BLOCKER'), count('withdrawn', 'MAJOR'))
+
+
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
@@ -2740,6 +2754,16 @@ def outcome(arguments):
                 counts = review_counts(Path(report[0]).read_text())
                 record.update(blocker=counts[0], major=counts[1], minor=counts[2])
             except (OSError, ValueError):
+                pass
+        elif mode == 'recheck':
+            try:
+                head, _, _, answers = recheck_values()
+                levels = {finding: level for finding, level, _ in rejected_rows()[1]}
+                counts = recheck_counts(answers, levels)
+                reviewed = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
+                record.update(upheld_blocker=counts[0], upheld_major=counts[1], withdrawn_blocker=counts[2],
+                              withdrawn_major=counts[3], reviewed_head=reviewed)
+            except (OSError, ValueError, subprocess.CalledProcessError):
                 pass
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
@@ -2782,16 +2806,41 @@ def outcomes_report(arguments):
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
 
+    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
+    for r in task_rows:
+        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
+
+    def attempts_table(title, key):
+        groups = {}
+        for r in task_rows:
+            task_key = (r.get('project'), r.get('branch'), r.get('task'))
+            groups.setdefault(key(r, final[task_key]), []).append((r, first_row[task_key] is r))
+        lines = [f'## Attempts by {title}', '',
+                 f'| {title} | attempts | done | not done | first-time pass | avg minutes |',
+                 '| --- | --- | --- | --- | --- | --- |']
+        for name in sorted(groups, key=str):
+            rows = groups[name]
+            done = sum(r.get('result') == 'done' for r, _ in rows)
+            starts = [r for r, is_first in rows if is_first]
+            first = sum(bool(r.get('first_pass')) for r in starts)
+            rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
+            minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
+            lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')
+        return lines + ['']
+
     lines = ['# Outcomes report', '', f'{len(final)} task(s), {len(task_rows)} attempt(s), '
              f"{sum(r.get('kind') == 'review' for r in records)} review(s).", '']
     if final:
-        lines += table('model', lambda r: r.get('model', 'default'))
+        lines += attempts_table('model', lambda r, last: r.get('model', 'default'))
         lines += table('category', lambda r: r.get('category', 'feature'))
-        lines += table('model and category', lambda r: f"{r.get('model', 'default')} / {r.get('category', 'feature')}")
+        lines += attempts_table('model and category',
+                                lambda r, last: f"{r.get('model', 'default')} / {last.get('category', 'feature')}")
     reviews = [r for r in records if r.get('kind') == 'review']
-    if reviews:
+    rechecks = [r for r in reviews if r.get('mode') == 'recheck']
+    plain = [r for r in reviews if r.get('mode') != 'recheck']
+    if plain:
         groups = {}
-        for r in reviews:
+        for r in plain:
             groups.setdefault((r.get('reviewer'), r.get('model'), r.get('mode')), []).append(r)
         lines += ['## Reviews by reviewer', '', '| reviewer | model | mode | reviews | BLOCKER | MAJOR | MINOR | avg minutes |',
                   '| --- | --- | --- | --- | --- | --- | --- | --- |']
@@ -2800,12 +2849,26 @@ def outcomes_report(arguments):
             lines.append(f'| {reviewer} | {model} | {mode} | {len(rows)} | {total("blocker")} | {total("major")} | '
                          f'{total("minor")} | {total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
-        fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-        if fallback:
-            lines += ['## Claude-only reviews (Codex catch-up pending)', '']
-            lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
-                      f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
-            lines.append('')
+    if rechecks:
+        groups = {}
+        for r in rechecks:
+            groups.setdefault((r.get('reviewer'), r.get('model') or 'default'), []).append(r)
+        lines += ['## Re-checks by reviewer', '',
+                  '| reviewer | model | re-checks | upheld BLOCKER | upheld MAJOR | withdrawn BLOCKER | '
+                  'withdrawn MAJOR | avg minutes |',
+                  '| --- | --- | --- | --- | --- | --- | --- | --- |']
+        for (reviewer, model), rows in sorted(groups.items(), key=str):
+            total = lambda field: sum(r.get(field, 0) or 0 for r in rows)
+            lines.append(f'| {reviewer} | {model} | {len(rows)} | {total("upheld_blocker")} | '
+                         f'{total("upheld_major")} | {total("withdrawn_blocker")} | {total("withdrawn_major")} | '
+                         f'{total("seconds") / len(rows) / 60:.1f} |')
+        lines.append('')
+    fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
+    if fallback:
+        lines += ['## Claude-only reviews (Codex catch-up pending)', '']
+        lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
+                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+        lines.append('')
     print('\n'.join(lines).rstrip('\n'))
 
 
@@ -3017,6 +3080,424 @@ def pr_body(arguments):
     print('\n'.join(lines))
 
 
+# Safe record I/O for the dashboard's host-written records (.ai/local/observation.json,
+# .ai/local/notifications.log, <state root>/pipelines/). Agent sessions can write the checkout,
+# so every directory is opened without following symlinks and then used as a pinned
+# descriptor; files are opened O_NOFOLLOW|O_NONBLOCK, regular files only, reads are capped and
+# locks are nonblocking with a deadline. The writers never fail their caller: any failure
+# prints a warning and skips the write.
+
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+LOCK_DEADLINE = 2.0
+LOCK_RETRY = 0.05
+OBSERVATION_LIMIT = 64 * 1024
+NOTIFICATIONS_LIMIT = 256 * 1024
+NOTIFICATIONS_KEEP = 200
+SMALL_LIMIT = 4 * 1024
+TASKS_LIMIT = 1024 * 1024
+BOX_KEYS = ('plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
+            'recheck', 'pr')
+OBSERVATION_STATES = ('active', 'paused', 'recovering', 'stopped', 'done')
+# ai-pipeline's stop labels: (box keys the label covers, stage when the recorded one is outside).
+STOP_LABELS = {
+    'start': ((), 'none'),
+    'plan review': (('plan_review', 'plan_revision'), 'plan_review'),
+    'plan revision': (('plan_revision',), 'plan_revision'),
+    'implementation': (('setup', 'build', 'checks'), 'build'),
+    'validation': (('checks',), 'checks'),
+    'review': (('review',), 'review'),
+    'triage': (('triage',), 'triage'),
+    're-check': (('recheck',), 'recheck'),
+    'pull request preparation': (('pr',), 'pr'),
+    'push': (('pr',), 'pr'),
+    'pull request': (('pr',), 'pr'),
+    'final push': (('pr',), 'pr'),
+}
+
+
+class RecordError(Exception):
+    """An unsafe or unavailable record; the writer warns and skips."""
+
+
+def warn(message):
+    print(f'Warning: {message}', file=sys.stderr)
+
+
+def close_fds(*fds):
+    for fd in fds:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def open_dir(base_fd, relative):
+    """Descriptor for RELATIVE below BASE_FD, every component opened without following a
+    symlink; None for a symlink, a non-directory, `..` or any error."""
+    current = os.dup(base_fd)
+    try:
+        for part in relative.split('/'):
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                return close_fds(current)
+            following = os.open(part, DIR_FLAGS, dir_fd=current)
+            os.close(current)
+            current = following
+        return current
+    except OSError:
+        return close_fds(current)
+
+
+def checkout_fds(root):
+    """(root, .ai, .ai/local) descriptors pinned without following symlinks below the root
+    (the human's checkout path); None when the root or `.ai` is unsafe or missing, local None
+    when only `.ai/local` is. The caller closes them."""
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except (OSError, ValueError):
+        return None
+    ai_fd = open_dir(root_fd, '.ai')
+    if ai_fd is None:
+        return close_fds(root_fd)
+    return root_fd, ai_fd, open_dir(ai_fd, 'local')
+
+
+def local_dir_fd(root):
+    """Pinned `.ai/local` descriptor of ROOT, or None when any component is unsafe."""
+    fds = checkout_fds(root)
+    if fds is None:
+        return None
+    close_fds(fds[0], fds[1])
+    return fds[2]
+
+
+def read_record(dir_fd, name, limit, tail=False):
+    """(text, stat) of the regular file NAME in DIR_FD, at most LIMIT bytes, or None. Never
+    follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines."""
+    if '/' in name or name in ('', '.', '..'):
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        cut = tail and info.st_size > limit
+        if cut:
+            # One byte more: when it is a newline the window starts on a complete line.
+            os.lseek(fd, info.st_size - limit - 1, os.SEEK_SET)
+        wanted = limit + 1 if cut else limit
+        chunks = []
+        while wanted > 0:
+            chunk = os.read(fd, min(wanted, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            wanted -= len(chunk)
+        data = b''.join(chunks)
+        if cut:
+            data = data.split(b'\n', 1)[1] if b'\n' in data else b''
+        return data.decode('utf-8', errors='replace'), info
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def lock_record(dir_fd, name):
+    """Exclusive flock on the regular file NAME (created, never truncated or written), retried
+    every 50 ms up to the 2 s deadline. Returns the descriptor that holds the lock."""
+    try:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     0o600, dir_fd=dir_fd)
+    except OSError as error:
+        raise RecordError(f'cannot open lock {name}: {error.strerror}')
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RecordError(f'lock {name} is not a regular file')
+        deadline = time.monotonic() + LOCK_DEADLINE
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RecordError(f'lock {name} still held after {LOCK_DEADLINE:g} s')
+                time.sleep(LOCK_RETRY)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def write_record(dir_fd, name, contents):
+    """Replace NAME in DIR_FD with CONTENTS through an exclusively created temp file and a
+    rename on the pinned descriptor (a symlink or hard link at NAME is replaced, never
+    written through)."""
+    data = contents.encode()
+    for attempt in range(3):
+        temp = f'.{name}.{os.getpid()}.tmp' if attempt == 0 else f'.{name}.{os.urandom(6).hex()}.tmp'
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
+            break
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise RecordError(f'cannot create a temp file for {name}: {error.strerror}')
+    else:
+        raise RecordError(f'cannot create a temp file for {name}')
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RecordError(f'temp file for {name} is not a regular file')
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        os.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(temp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+
+
+def git_branch(root_fd):
+    """Branch of the checkout at ROOT_FD from its Git metadata (no git subprocess): the name,
+    `detached`, or None for anything unexpected or unsafe."""
+    git_fd = open_dir(root_fd, '.git')
+    if git_fd is None:
+        pointer = read_record(root_fd, '.git', SMALL_LIMIT)
+        if pointer is None:
+            return None
+        match = re.fullmatch(r'gitdir: (.+?)\s*', pointer[0])
+        path = match.group(1) if match else ''
+        # A worktree points at an absolute gitdir; refuse relative paths and `..`.
+        if not os.path.isabs(path) or '..' in path.split('/'):
+            return None
+        try:
+            slash = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        git_fd = open_dir(slash, path)
+        os.close(slash)
+        if git_fd is None:
+            return None
+    try:
+        head = read_record(git_fd, 'HEAD', SMALL_LIMIT)
+    finally:
+        os.close(git_fd)
+    if head is None:
+        return None
+    text = head[0].strip()
+    match = re.fullmatch(r'ref: refs/heads/(\S+)', text)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', text):
+        return 'detached'
+    return None
+
+
+def observation_update(record, action, values):
+    """The new observation record for ACTION, or None when nothing changes."""
+    def box(key):
+        if key not in BOX_KEYS:
+            raise RecordError(f'unknown stage key: {key}')
+        return key
+
+    def needs(count, usage):
+        if not count[0] <= len(values) <= count[1]:
+            raise RecordError(f'usage: observe {usage}')
+
+    stamp = now()
+    if action == 'start':
+        needs((0, 0), 'start')
+        return {**record, 'stage': 'none', 'state': 'active', 'detail': '', 'note': '', 'since': stamp}
+    if action == 'step':
+        needs((1, 2), 'step STAGE [DETAIL]')
+        return {**record, 'stage': box(values[0]), 'state': 'active',
+                'detail': values[1] if len(values) > 1 else '', 'note': '', 'since': stamp}
+    if action == 'detail':
+        needs((2, 2), 'detail STAGE TEXT')
+        if record.get('stage') != box(values[0]) or record.get('state') not in ('active', 'paused'):
+            return None
+        return {**record, 'detail': values[1]}
+    if action == 'pause':
+        needs((1, 1), 'pause NOTE')
+        return {**record, 'state': 'paused', 'note': values[0]}
+    if action == 'resume':
+        needs((0, 0), 'resume')
+        # Only a pause is lifted: a stop or recovery recorded meanwhile stays visible.
+        if record.get('state') != 'paused':
+            return None
+        return {**record, 'state': 'active', 'note': ''}
+    if action == 'stop':
+        needs((2, 2), 'stop LABEL REASON')
+        stage = record.get('stage', 'none')
+        group, target = STOP_LABELS.get(values[0], (None, None))
+        if group is not None and stage not in group:
+            stage = target
+        return {**record, 'stage': stage, 'state': 'stopped', 'note': values[1], 'since': stamp}
+    if action == 'recovering':
+        needs((1, 2), 'recovering NOTE [STAGE]')
+        stage = box(values[1]) if len(values) > 1 else record.get('stage', 'none')
+        return {**record, 'stage': stage, 'state': 'recovering', 'note': values[0], 'since': stamp}
+    if action == 'done':
+        needs((1, 1), 'done NOTE')
+        return {**record, 'stage': 'pr', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
+    raise RecordError(f'unknown observe action: {action}')
+
+
+def replaced_record(dir_fd, name, limit, tail=False):
+    """read_record for a record the writer replaces next: warns when NAME exists but cannot
+    be read safely (a symlink, FIFO or device is replaced, never followed)."""
+    current = read_record(dir_fd, name, limit, tail)
+    if current is None:
+        try:
+            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            warn(f'{name} is not a regular file; replacing it')
+        except OSError:
+            pass
+    return current
+
+
+def previous_observation(local_fd):
+    previous = replaced_record(local_fd, 'observation.json', OBSERVATION_LIMIT)
+    try:
+        record = json.loads(previous[0]) if previous else {}
+    except ValueError:
+        record = {}
+    if not isinstance(record, dict):
+        record = {}
+    fields = {'stage': 'none', 'state': 'active', 'detail': '', 'since': '', 'note': ''}
+    for key, default in fields.items():
+        if not isinstance(record.get(key), str):
+            record[key] = default
+    if record['stage'] not in BOX_KEYS + ('none',):
+        record['stage'] = 'none'
+    if record['state'] not in OBSERVATION_STATES:
+        record['state'] = 'active'
+    return {key: record[key] for key in fields}
+
+
+def observe(arguments):
+    """observe ACTION [ARGS]: update .ai/local/observation.json of AI_ROOT (else the current
+    directory). Never fails the caller."""
+    if not arguments:
+        raise RecordError('usage: observe ACTION [ARGS]')
+    root = os.environ.get('AI_ROOT') or os.getcwd()
+    fds = checkout_fds(root)
+    if fds is None or fds[2] is None:
+        if fds:
+            close_fds(*fds)
+        raise RecordError(f'{root}/.ai/local is missing, a symlink or not a directory')
+    root_fd, ai_fd, local_fd = fds
+    lock = None
+    try:
+        lock = lock_record(local_fd, 'observation.lock')
+        record = observation_update(previous_observation(local_fd), arguments[0], arguments[1:])
+        if record is None:
+            return
+        record.update(pid=os.getppid(), branch=git_branch(root_fd), updated=now())
+        write_record(local_fd, 'observation.json', json.dumps(record, ensure_ascii=False) + '\n')
+    finally:
+        close_fds(lock, root_fd, ai_fd, local_fd)
+
+
+def log_entry(line):
+    """True for a notification log line worth keeping: a JSON object (a partial or planted
+    line is dropped on the next rewrite)."""
+    try:
+        return isinstance(json.loads(line), dict)
+    except ValueError:
+        return False
+
+
+def notify_log(arguments):
+    """notify-log ROOT MESSAGE: append {"ts","message"} to ROOT/.ai/local/notifications.log,
+    keeping the last 200 lines; the log is replaced, never written in place."""
+    if len(arguments) != 2:
+        raise RecordError('usage: notify-log ROOT MESSAGE')
+    root, message = arguments
+    local_fd = local_dir_fd(root)
+    if local_fd is None:
+        raise RecordError(f'{root}/.ai/local is missing, a symlink or not a directory')
+    lock = None
+    try:
+        lock = lock_record(local_fd, 'notifications.lock')
+        current = replaced_record(local_fd, 'notifications.log', NOTIFICATIONS_LIMIT, tail=True)
+        lines = [line for line in (current[0] if current else '').splitlines() if log_entry(line)]
+        lines.append(json.dumps({'ts': now(), 'message': message}, ensure_ascii=False))
+        write_record(local_fd, 'notifications.log', '\n'.join(lines[-NOTIFICATIONS_KEEP:]) + '\n')
+    finally:
+        close_fds(lock, local_fd)
+
+
+PRUNE_HOOK = None  # Tests only: runs between the prune's listing and its re-reads.
+
+
+def pipeline_register(arguments):
+    """pipeline-register CHECKOUT BRANCH: record the run in <state root>/pipelines and drop
+    entries whose checkout is gone or whose JSON is invalid."""
+    if len(arguments) != 2:
+        raise RecordError('usage: pipeline-register CHECKOUT BRANCH')
+    checkout, branch = os.path.abspath(arguments[0]), arguments[1]
+    root = check_state_root(checkout)
+    try:
+        os.makedirs(root / 'pipelines', mode=0o700, exist_ok=True)
+        directory = os.open(root / 'pipelines', DIR_FLAGS)
+    except OSError as error:
+        raise RecordError(f'{root}/pipelines is not a usable directory: {error.strerror}')
+    lock = None
+    try:
+        lock = lock_record(directory, '.lock')
+        own = hashlib.sha256(checkout.encode()).hexdigest()[:16] + '.json'
+        entry = {'checkout': checkout, 'project': os.path.basename(checkout), 'branch': branch,
+                 'started': now()}
+        write_record(directory, own, json.dumps(entry, ensure_ascii=False) + '\n')
+        names = sorted(name for name in os.listdir(directory)
+                       if name.endswith('.json') and not name.startswith('.') and name != own)
+        if PRUNE_HOOK:
+            PRUNE_HOOK(directory, names)
+        for name in names:
+            current = read_record(directory, name, OBSERVATION_LIMIT)
+            if current is None:
+                continue
+            try:
+                data = json.loads(current[0])
+                keep = isinstance(data, dict) and isinstance(data.get('checkout'), str) \
+                    and os.path.isdir(data['checkout'])
+            except ValueError:
+                keep = False
+            if not keep:
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except OSError:
+                    pass
+    finally:
+        close_fds(lock, directory)
+
+
+RECORD_COMMANDS = {'observe': observe, 'notify-log': notify_log,
+                   'pipeline-register': pipeline_register}
+
+
+def record_command(command, arguments):
+    """Run a record writer; exit 0 whatever happens (a warning on stderr instead)."""
+    try:
+        RECORD_COMMANDS[command](arguments)
+    except (RecordError, ValueError, OSError) as error:
+        warn(f'{command}: {error}')
+    except Exception as error:  # Never fail the caller over an observation.
+        warn(f'{command}: unexpected {type(error).__name__}: {error}')
+
+
 def main():
     if len(sys.argv) < 2:
         fail('Missing helper command.')
@@ -3123,6 +3604,8 @@ def main():
         pr_title(arguments)
     elif command == 'pr-body':
         pr_body(arguments)
+    elif command in RECORD_COMMANDS:
+        record_command(command, arguments)
     else:
         fail(f'Unknown helper command: {command}')
 
