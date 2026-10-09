@@ -401,10 +401,13 @@ branch) and note the result in the log.
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
 no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
-(codex, claude-fallback, claude), model, effort, finding counts, duration.
+(codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
+line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
+`reviewed_head` instead (omitted when the re-check report cannot be verified).
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
 category (per task) and per model and model/category (per attempt, each credited to the
-model that ran it), findings per reviewer and model, and the
+model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks
+per reviewer, and the
 Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
 move to haiku and which keep failing on sonnet.
 

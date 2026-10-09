@@ -3479,6 +3479,63 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('model_reasoning_effort="low"', (self.base / 'codex-args.log').read_text().splitlines()[-1])
         self.tool('ai-review', '--recheck', expected=1, AI_RECHECK_EFFORT='huge')
 
+    def recheck_outcomes(self):
+        return [r for r in self.outcome_rows() if r['kind'] == 'review' and r['mode'] == 'recheck']
+
+    def test_outcome_recheck_records_upheld_and_withdrawn_totals(self):
+        self.rejected_review(['| M1 | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
+                              '| M2 | rejected | the second defect is handled by the gate | none |\n'])
+        reviewed = self.helper('review-info').stdout.split()[0]
+        answer = json.dumps({'answers': [{'id': 'M1', 'verdict': 'withdrawn', 'reason': 'evidence holds'},
+                                         {'id': 'M2', 'verdict': 'upheld', 'reason': 'not covered'}]})
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=answer)
+        line = self.recheck_outcomes()[-1]
+        self.assertEqual((line['upheld_major'], line['withdrawn_major']), (1, 1))
+        self.assertEqual((line['upheld_blocker'], line['withdrawn_blocker']), (0, 0))
+        full = self.run_cmd(['git', 'rev-parse', reviewed]).stdout.strip()
+        self.assertEqual(line['reviewed_head'], full)
+        self.assertEqual(len(full), 40)
+        self.assertNotEqual(line['reviewed_head'], line['head'])  # the triage commit moved HEAD on
+        self.tool('ai-review', '--recheck', MOCK_RECHECK='not json')  # malformed: every finding upheld
+        line = self.recheck_outcomes()[-1]
+        self.assertEqual((line['upheld_major'], line['withdrawn_major']), (2, 0))
+
+    def test_outcome_recheck_counts_blockers(self):
+        wf = self.recheck_module()
+        answers = {'B1': ('upheld', 'x'), 'B2': ('withdrawn', 'x'), 'M1': ('upheld', 'x'), 'M2': ('withdrawn', 'x')}
+        levels = {'B1': 'BLOCKER', 'B2': 'BLOCKER', 'M1': 'MAJOR', 'M2': 'MAJOR'}
+        self.assertEqual(wf.recheck_counts(answers, levels), (1, 1, 1, 1))
+
+    def test_outcome_recheck_without_report_still_logs_a_line(self):
+        self.ready()
+        before = len(self.outcome_rows())
+        self.helper('outcome', 'review', 'recheck', 'codex', 'gpt', 'medium', '1')
+        rows = self.outcome_rows()
+        self.assertEqual(len(rows), before + 1)
+        self.assertEqual(rows[-1]['mode'], 'recheck')
+        for field in ('upheld_blocker', 'upheld_major', 'withdrawn_blocker', 'withdrawn_major', 'reviewed_head'):
+            self.assertNotIn(field, rows[-1])
+
+    def test_outcome_recheck_report_has_its_own_table(self):
+        self.setup_project()
+        path = self.base / 'recheck.jsonl'
+        review = {'kind': 'review', 'project': 'p', 'branch': 'b', 'mode': 'recheck'}
+        rows = [{**review, 'reviewer': 'codex', 'model': 'gpt', 'seconds': 60, 'upheld_blocker': 1,
+                 'upheld_major': 2, 'withdrawn_blocker': 0, 'withdrawn_major': 3},
+                {**review, 'reviewer': 'codex', 'model': 'gpt', 'seconds': 180, 'upheld_major': 1},
+                {**review, 'reviewer': 'claude-fallback', 'model': 'claude-opus-5-5', 'seconds': 60,
+                 'head': 'abcdef0123456789abcdef'}]
+        path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        report = self.tool('ai-status', '--outcomes', str(path)).stdout
+        self.assertIn('## Re-checks by reviewer', report)
+        self.assertIn('| codex | gpt | 2 | 1 | 3 | 0 | 3 | 2.0 |', report)
+        self.assertNotIn('| recheck |', report)
+        self.assertNotIn('## Reviews by reviewer', report)
+        self.assertIn('recheck HEAD abcdef012345', report.split('Codex catch-up pending')[1])
+        path.write_text(json.dumps(rows[2]) + '\n')
+        report = self.tool('ai-status', '--outcomes', str(path)).stdout
+        self.assertIn('recheck HEAD abcdef012345', report.split('Codex catch-up pending')[1])
+
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
         ids = ['M1', 'M2']

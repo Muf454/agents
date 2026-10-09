@@ -63,7 +63,7 @@ scripts/lib/workflow.py (outcomes_report only), tests/test_workflow.py, README.m
 Done. `outcomes_report` now prints per-attempt "Attempts by model" and "Attempts by model and category"; the category table is unchanged (per task). First-time pass counts each task's first file-order row once. New tests `test_outcome_report_*` (mixed model, old lines, old line then attempt=2) and the updated `test_runner_logs_task_outcomes_and_report` pass; `.ai/bin/ai-check` PASS (293 tests). README and docs/workflow.md updated.
 
 ## T003 — Re-check outcome lines carry upheld/withdrawn totals (CU-3)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: sonnet
 
@@ -91,3 +91,4 @@ scripts/lib/workflow.py (outcome, outcomes_report), tests/test_workflow.py, READ
 `python3 -m unittest tests.test_workflow -k outcome -k recheck -k disput` (covers the outcome tests, the re-check command tests, `test_pipeline_fallback_recheck_is_committed_with_the_log` and every disputed-findings test, several of which run a re-check without "recheck" in their names); `.ai/bin/ai-check`
 
 ### Result / notes
+DONE: `recheck_counts` helper and `outcome` re-check branch add upheld/withdrawn totals and `reviewed_head` (omitted if unverifiable); report gets "Re-checks by reviewer" and builds the catch-up list from all reviews. 4 new `test_outcome_recheck_*` tests, README and docs/workflow.md updated. Validation: targeted command 40 OK; `.ai/bin/ai-check` 297 OK.

@@ -134,3 +134,4 @@
 | 2026-10-09T05:15:11Z | runner | T001 | completed | PASS | 4877b7e | Claude checkpointed; continuing queue |
 | 2026-10-09T05:45Z | claude (sonnet) | T002 | DONE: per-attempt "Attempts by model" tables in outcomes_report, 3 new tests, docs | outcome tests 12 OK; ai-check 293 OK | (this commit) | category table unchanged |
 | 2026-10-09T05:22:21Z | runner | T002 | completed | PASS | 75c3f1c | Claude checkpointed; continuing queue |
+| 2026-10-09T06:00Z | claude (sonnet) | T003 | DONE: re-check outcome lines carry upheld/withdrawn totals and reviewed_head; "Re-checks by reviewer" table; 4 new tests, docs | targeted 40 OK; ai-check 297 OK | (this commit) | flow unchanged |
