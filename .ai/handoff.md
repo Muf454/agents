@@ -13,8 +13,13 @@ FL-14–17): Plan revision box, stored decision, extra fix round, format retry, 
 stop, box layout from 120 columns. Revision 10 (2026-10-09, plan review 9 by the Claude
 fallback reviewer, P32–P38 all accepted): no project helper runs after the approved gate
 changed (T010), deterministic `/proc` discovery in tests, Build recorded again after the
-post-task gate, plus four minor record details; see the top of `.ai/current-plan.md`. See
-also `.ai/project-spec.md`, `.ai/tasks.md`.
+post-task gate, plus four minor record details. Revision 11 (2026-10-09, plan review 10 by
+the Claude fallback reviewer, P39–P45 all accepted): T005's gate test made possible (no
+sentinel in `workflow.py`; ai-recover runs the checkout helper before it compares the gate),
+the flag also on the pipeline's pre-step gate stops and never in a command substitution,
+the watchdog note corrected, `done` → `stage=pr`, a `needs_you` run with an active record
+renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See also
+`.ai/project-spec.md`, `.ai/tasks.md`.
 
 ## Validation run
 Not run on this branch yet (master passed the gate for PR #15).
@@ -25,7 +30,9 @@ Not run on this branch yet (master passed the gate for PR #15).
 - Eight boxes need up to 112 columns, so the box layout starts at 120 columns (compact
   line below); the plan revision box label is "Plan revision" ("Revise" in the compact line).
 - A stop caused by a changed gate records no observation (the record helpers are project
-  code); the dashboard still shows `needs_you` from `last-error`.
+  code); the dashboard still shows `needs_you` from `last-error` and draws the last recorded
+  box as stopped with that line. The watchdog notifies through its own installed copy and
+  needs no guard.
 - `AI_DASHBOARD_PROC` and `AI_DASHBOARD_ROOT` are test-only; the dashboard must run with the
   same `AI_STATE_DIR`/XDG settings as the pipelines.
 
@@ -47,5 +54,5 @@ Not done yet.
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-Plan review round 9 answered (revision 10, all findings accepted, no needs-human question):
+Plan review round 10 answered (revision 11, all findings accepted, no needs-human question):
 the pipeline reviews the revised plan again; when it passes, implementation starts with T001.

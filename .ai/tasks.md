@@ -22,6 +22,14 @@ see `.ai/current-plan.md`): new Plan revision box and stop labels (`plan revisio
 `detail` observe actions, 8 boxes with the box layout from 120 columns, line references
 re-verified; old T004 split into T004 (ai-run, `ai_deps`, ai-review) and T005 (ai-recover);
 old T005–T008 are now T006–T009. The review notes below keep the IDs of their time.
+Revised after plan review 10 (Claude fallback reviewer, P39–P45, all accepted; revision 11 in
+`.ai/current-plan.md`): T005's gate test keeps `workflow.py` intact (ai-recover runs the
+checkout helper from `ai_root` on, before it compares the gate) and asserts no stop record and
+no log line instead; T010's flag also covers the pipeline's own pre-approval and resume gate
+stops, `gate_ok` is computed without a command substitution, and the watchdog note is corrected
+(it notifies through its own installed copy); `done` records `stage=pr`; a `needs_you` run whose
+record is still active renders the recorded box as stopped with the `last-error` line; task
+counts come from a new `tasks counts` helper.
 Revised after plan review 9 (Claude fallback reviewer, P32–P38, all accepted; revision 10 in
 `.ai/current-plan.md`): new opus task T010 (gate-broken guard: no project helper runs after the
 approved gate changed; runs between T001 and T002, so T002 stays sonnet); `/proc` discovery gets
@@ -103,7 +111,10 @@ on any failure or deadline, so callers are never blocked or failed):
   `detail` changes, and only when STAGE is the recorded stage and the state is active or
   paused; otherwise no change, exit 0), `pause NOTE` (keep stage/detail/since, state paused),
   `resume` (state active, note cleared), `stop LABEL REASON`, `recovering NOTE [STAGE]`,
-  `done NOTE`. Unknown stage keys are refused (warning).
+  `done NOTE` (P43: always `stage=pr`, `state=done`, `note=NOTE`, detail cleared, new
+  `since`; the pipeline's `--no-pr` and no-origin finishes happen before its `step 'Pull
+  request'`, so the record would otherwise stay on `checks`). Unknown stage keys are refused
+  (warning).
   Stop precedence (P11; label list verified against ai-pipeline at master e9354d9): each
   outer label has a group of box keys and a target — `start` → {} / `none` (always none: the
   "base moved past the branch" stop happens before the flow); `plan review` →
@@ -128,6 +139,11 @@ on any failure or deadline, so callers are never blocked or failed):
   `<sha256(checkout)[:16]>.json` atomically, then prune: for each other entry, re-read it
   under the lock and delete it only when its JSON is invalid or its `checkout` is not an
   existing directory.
+- `tasks counts` (P45; in the existing `tasks` subcommand next to `count` ~480 and `progress`
+  ~482, which prints `<id> <title> (<done>/<total> done)` and nothing bare): prints
+  `<done> <total>` (DONE blocks over all blocks, the same counting as `progress`), fails like
+  `tasks count` on an unparsable queue. T004 reads it for the Build detail; T007's `inspect`
+  applies the same rule to `task_blocks` in-process.
 No flow-chart change (no behaviour yet).
 
 ### Likely affected modules
@@ -138,7 +154,9 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
   - each action produces the schema; a pause keeps stage/detail/since and `resume` restores
     `active`; `start` after a `stopped` or `done` record gives `stage=none, state=active`
     with detail and note cleared; `detail review "format retry"` after `step review` changes
-    only the detail (`since` kept), after `step build` changes nothing; called through
+    only the detail (`since` kept), after `step build` changes nothing; `done 'no PR'`
+    after `step checks` gives `stage=pr, state=done, note='no PR'` with a new `since`
+    (P43); called through
     `bash -c 'python3 … observe step build; echo $$'` the record's `pid` equals that bash's
     `$$` and `branch` the fixture branch (P38);
   - every stop label in ai-pipeline (`start`, `plan review`, `plan revision`,
@@ -176,7 +194,9 @@ scripts/lib/workflow.py, tests/test_workflow.py (or tests/test_dashboard.py)
   - `pipeline-register`: writes the entry; prunes a removed checkout and invalid JSON; a
     registration replaced between the prune's listing and its delete (simulated by a hook
     or by holding the lock in the test and rewriting the entry) is kept; `pipelines` being
-    a regular file → warning, exit 0, other state files untouched.
+    a regular file → warning, exit 0, other state files untouched;
+  - `tasks counts` on a queue with 2 DONE of 5 prints `2 5`; on the fixture `task('T001')`
+    prints `0 1`; an unparsable queue fails with the same error as `tasks count` (P45).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k observation_writer` (must say `Ran N tests`, N ≥ 1).
@@ -215,21 +235,40 @@ scripts/lib/common.sh:
 - `ai_notify_log MESSAGE`: same guard, then `python3 -B "$AI_BIN/lib/workflow.py" notify-log
   "${AI_ROOT:-$PWD}" "$MESSAGE" 2>/dev/null || true`. Defined here; T002 calls it from
   `ai_notify` (which stays byte-identical in what it sends).
-scripts/ai-run `on_exit` (~110): compute `gate_ok` once with `ai_gate_check "$AI_APPROVED_GATE"`
-(sets the flag on mismatch, so the ⛔ notification of a standalone run skips the log helper)
-and use it in the existing `attempt_open` condition; behaviour otherwise unchanged.
-scripts/ai-pipeline `stop()` (~148): hoist the digest comparison to the top of the function as
-`ai_gate_check "$AI_APPROVED_GATE"` into a local `gate_ok`; the recovery `if` tests
-`$gate_ok` instead of the inline digest. T003 places its `ai_observe stop` AFTER that line.
+`AI_GATE_BROKEN` is a plain shell variable, so it must never be set inside a command
+substitution (P42): `gate_ok=$(ai_gate_check …)` would set it in a subshell only. The form,
+written out, everywhere `gate_ok` is needed:
+`local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi`
+(in ai-run's `on_exit` without `local` if it is not a function-local there; `AI_APPROVED_GATE`
+is readonly at ai-run ~90 and ai-pipeline ~126 before either trap/function runs, so `set -u`
+cannot trip).
+scripts/ai-run `on_exit` (~110): compute `gate_ok` once with the form above (sets the flag on
+mismatch, so the ⛔ notification of a standalone run skips the log helper) and use
+`"$gate_ok" == yes` in the existing `attempt_open` condition; behaviour otherwise unchanged.
+scripts/ai-pipeline:
+- `stop()` (~148): hoist the digest comparison to the top of the function in the form above;
+  the recovery `if` tests `"$gate_ok" == yes` instead of the inline digest. T003 places its
+  `ai_observe stop` AFTER that line.
+- The two gate stops before the first step, both after the marker is set (~84) and so on
+  the pipeline-shell `ai_die` path that T003 makes record a stop (P41): ~125
+  `AI_APPROVED_GATE=$(ai_guard_digest) || ai_die …` (digest unreadable) and ~129–130 (resume:
+  current digest ≠ manifest gate) become `… || { AI_GATE_BROKEN=1; ai_die '…'; }` with the
+  messages unchanged. (The helper already ran before both decisions, ~120 and ~129; the flag
+  only prevents one more call after the gate is known bad.)
 scripts/ai-recover: the comparisons at ~97–99, ~160, ~187, ~197, ~207 set the flag:
 ~97 (`current_gate=$(ai_guard_digest) || …`) sets `AI_GATE_BROKEN=1` before its `escalate`,
 ~98 and the others become `ai_gate_check "$approved_gate" || escalate …` (messages
 unchanged). T005's `ai_observe stop` in `escalate` and `on_exit` is then skipped on exactly
-those paths.
-Known limit (record in docs/workflow.md with T009): the watchdog's notification path
-(`bash -c 'source common.sh; …'`, watchdog.py ~478) has no approved gate to compare with
-and already runs checkout `.ai/bin` code today (`start_recovery` execs `.ai/bin/ai-recover`);
-no new exposure, unchanged.
+those paths. ai-recover and ai-pipeline do run the checkout helper before they compare the
+gate with the manifest (`ai_root` ~29 → `workflow.py paths`, then ~58–77; ai-pipeline
+~120–129), today and unchanged; the guard covers the stop itself, not that window, which
+is why T005's gate test cannot plant a sentinel in `workflow.py` (P39).
+Watchdog (P40; record in docs/workflow.md with T009): no guard is needed. The watchdog
+notifies through its OWN copy of common.sh, `Path(__file__).resolve().with_name('common.sh')`
+(watchdog.py ~478), so `AI_BIN` there is the timer's installed copy and T002's `notify-log`
+runs that copy's `workflow.py`, never the checkout's; `start_recovery` (~286–305) refuses to
+run from inside a checkout and compares `ai_guard_digest` of its own copy with the manifest
+gate before it launches the checkout's `.ai/bin/ai-recover`.
 No flow-chart change.
 
 ### Likely affected modules
@@ -244,6 +283,15 @@ tests/test_workflow.py
   - `ai_gate_check "$digest"` returns 0 and leaves `AI_GATE_BROKEN` unset on an intact gate;
     after a byte changes under `.ai/bin` it returns 1 and sets the flag; with `.ai/bin`
     replaced by a symlink (digest unreadable) it returns 1 and sets the flag;
+  - the written-out `gate_ok` form (P42), run in a function of a script that sources
+    common.sh with `AI_APPROVED_GATE` set to a stale digest: afterwards `gate_ok` is `no` AND
+    `AI_GATE_BROKEN` is set in the calling shell (printed after the function returns); the
+    same with a command substitution is the counter-example and must not be used;
+  - the pipeline's resume gate stop (P41): `ai-pipeline --approved` run with
+    `AI_RECOVERY_ATTEMPT=1` after the manifest's gate was recorded from a different
+    `.ai/validate` exits 1 with `Gate files changed since the run was approved` on stderr and
+    one ⛔ notification, exactly as today (the "no stop record" effect of the flag on this
+    path is T003's assertion, since T003 adds the record);
   - `ai_deps` whose `.ai/ci-setup` rewrites `.ai/bin/lib/workflow.py` leaves
     `AI_GATE_BROKEN=1` set and its existing error message unchanged;
   - ai-run `on_exit` after a tampering session (fixture as in
@@ -346,9 +394,14 @@ scripts/ai-pipeline (line numbers at master e9354d9):
   the `stop()` fall-through (`AI_AUTO_RECOVER=0` or a changed gate, ~154–156) does not record
   a second stop with the longer "Pipeline stopped during …" note (P35). Keeps the stage;
   silent so existing stderr assertions hold; T010's flag already skips it on a gate stop.
-- `finish()` (~85) takes an optional note: `ai_observe done "${1:-no PR}"`; the final call
-  passes `$url`, the no-origin and no-gh calls pass `no PR (local only)` / `pushed, no PR (gh
+- `finish()` (~85) takes an optional note: `ai_observe done "${1:-no PR}"` (T001's `done`
+  sets `stage=pr` itself, P43: the `--no-pr` finish at ~561 and the no-origin finish at ~567
+  happen before `step 'Pull request'` ~563, so the record is still on `checks` from
+  `ensure_validated` ~552 at that point); the final call passes `$url`, the `--no-pr` call
+  nothing (`no PR`), the no-origin and no-gh calls `no PR (local only)` / `pushed, no PR (gh
   missing)`.
+- The two gate stops before the first step (~125, ~129–130) set `AI_GATE_BROKEN` since T010
+  (P41), so the `ai_die` record below is skipped there: nothing to add, one assertion below.
 - Registration (P28): one call after `branch=$AI_START_BRANCH` (~139; after the manifest
   start/resume block, so initial start and recovery resume both pass it): `ai_helper
   pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || printf 'Warning: …\n' >&2` (no unset
@@ -364,6 +417,9 @@ scripts/ai-pipeline, scripts/lib/common.sh, tests/test_workflow.py, vault agents
 - Tests named `observation_pipeline_*` (existing fixture pipelines with mock claude/codex/gh,
   like `test_deps_runner_pipeline_end_to_end`, capturing `observation.json` inside the mocks):
   - a normal run records `plan_review`, `build`, `review`, `pr`, then `done` with the PR URL;
+    a `--no-pr` run (fixture as the second run of `test_base_moved_stops_before_any_agent`,
+    `Pipeline complete (no PR requested)`) ends `stage=pr, state=done, note='no PR'` although
+    `step 'Pull request'` never ran (P43);
   - a review failure → `stage=review, state=stopped` with the reason; a plan-review stop →
     `plan_review`;
   - supervised plan revision (fixture as in `test_revise_plan_accept_*`/the supervised plan
@@ -379,7 +435,10 @@ scripts/ai-pipeline, scripts/lib/common.sh, tests/test_workflow.py, vault agents
     run's `done` record planted): ends `stage=none, state=stopped`, note names the base;
   - a human start that dies at the clean-checkpoint check with a planted `stage=pr,
     state=done` record ends `stage=none, state=stopped`; a resume (`AI_RECOVERY_ATTEMPT`
-    set) that dies at its gate check keeps the planted stage;
+    set) that dies at its gate check (manifest gate recorded from a different
+    `.ai/validate`; T010's fixture) leaves the planted record byte-identical (no `stopped`
+    record: the flag skips `ai_die`'s record, P41), `notifications.log` gains no line while
+    the mock `AI_NOTIFY_CMD` receives the ⛔, exit code and stderr unchanged;
   - a review failure with `AI_AUTO_RECOVER=0` (the `stop()` → `ai_die` fall-through) leaves
     exactly one stop record whose note is the last-error reason, not "Pipeline stopped
     during …" (P35; count the helper's `observe stop` calls through a logging wrapper or
@@ -414,7 +473,10 @@ retry show on the right box, including after failures.
   (state stays recovering), else `ai_observe step setup`. Nothing is recorded when
   dependencies are current. (T005 sets `AI_OBSERVE_RECOVERY` in ai-recover.)
 - scripts/ai-run: `ai_observe step build "<id> · <model or default> · <done+1>/<total>"`
-  when a task starts (after `task_model` ~461; counts from the existing `tasks` helpers);
+  when a task starts (after `task_model` ~461; counts via `read -r done total < <(ai_helper
+  tasks counts)` from T001's `tasks counts` (P45: no existing `tasks` action prints bare
+  counts; `progress` prints a sentence), read once per loop iteration, after
+  `ai_guard_verify` ~430 like every helper call; on a helper failure skip the record);
   `ai_observe step checks "<id>"` before its post-task `ai-check` (~478) and `ai_observe step
   checks final` before the final one (~441). After a PASSING post-task gate, right after the
   `ai_guard_verify` at ~485 and before the dirty-tree bookkeeping: `ai_observe step build
@@ -530,10 +592,17 @@ scripts/ai-recover, tests/test_workflow.py
     state=stopped` with the questions in the note and exactly one ⛔ notification;
   - base moved (fixture as in `test_base_moved_recovery_escalates_without_claude`) ends
     `stage=none, state=stopped`;
-  - gate changed before recovery (fixture as in
-    `test_recovery_never_passes_a_changed_gate_or_hard_stop`, with `.ai/bin/lib/workflow.py`
-    replaced by the sentinel script instead of `.ai/validate`): the ⛔ notification is sent,
-    `UNTRUSTED_HELPER_RAN` absent, exit code unchanged (P32).
+  - gate changed before recovery (P32, P39; fixture exactly as
+    `test_recovery_never_passes_a_changed_gate_or_hard_stop`, i.e. `.ai/validate` changed
+    and committed, `workflow.py` intact: ai-recover runs the checkout helper from `ai_root`
+    (~29) through ~77 before it compares the gate at ~97–99, so a sentinel in `workflow.py`
+    would fire at line 29 and `reserve-attempt` would escalate with another message; that
+    assertion is impossible and the flag's mechanics are T010's unit tests): the ⛔ with
+    `gate files changed since you approved the run` reaches the mock `AI_NOTIFY_CMD` (existing
+    assertion), the record read afterwards is the `recovering` one written at ~95
+    (`state=recovering`, stage of the original stop, no `stopped` record: `escalate`'s
+    `ai_observe` was skipped), and `notifications.log` has no line for that ⛔ (the flag
+    skips `ai_notify_log`); exit code and `recovery_calls()` unchanged.
 - All existing tests pass unchanged.
 
 ### Validation
@@ -644,7 +713,8 @@ cannot be read safely shows as `unknown` while the others render:
   `plan_revision` and `none`, known states; else none), `events` (last 20 parsed
   notification lines from `read_record(local_fd, 'notifications.log', 256 KiB, tail=True)`,
   P36; malformed lines skipped), `last_error`, `tasks` (done/total via
-  workflow `task_blocks` (~388) on `.ai/tasks.md` text; on error none), `status`, `stage`,
+  workflow `task_blocks` (~388) on `.ai/tasks.md` text, counted exactly as T001's `tasks
+  counts` (DONE over all blocks, P45); on error none), `status`, `stage`,
   `since`, `updated` (newest mtime of the files read).
 - `snapshot()` also returns `state_root` (the `state_root()` path as a string); `--json`
   prints it as a top-level field next to `runs`, and the empty-state text names it (P37:
@@ -653,7 +723,9 @@ cannot be read safely shows as `unknown` while the others render:
   that; alive → `running`; state `stopped` (any stage, including `none` after a stop at
   start), or a `last-error` newer than the observation, with nothing alive → `needs_you`;
   state `done` → `finished`; else `idle`. Legacy (no observation): stage `unknown`; alive →
-  `running`.
+  `running`. The `last-error` case (P44) is what a gate-broken stop leaves behind (T010: no
+  record written, state still `active` or `recovering`): the snapshot then carries
+  `last_error` (first line, sanitised) and T008 draws it as a stop.
 - Pass every checkout-derived string (project, branch, observation detail/note, checkout
   path, notifications, last error, task titles) through T006's `sanitize()` before it enters
   the snapshot (P29).
@@ -687,7 +759,9 @@ tests/test_dashboard.py or tests/test_workflow.py
     symlinked script, paused, recovering, needs_you, crashed, finished, idle) gives the
     expected status and stage; a stopped `plan_revision` record whose note holds a decision
     question → `needs_you`, stage `plan_revision`, the question in the snapshot; a stop at
-    start (`stage=none, state=stopped`) → `needs_you`, stage `none`;
+    start (`stage=none, state=stopped`) → `needs_you`, stage `none`; a planted `build`
+    record with `state=active` older than a planted `last-error` and no process →
+    `needs_you`, stage `build`, `last_error` = that file's first line (P44);
   - a legacy checkout with no marker and no observation, found only via `/proc` → running,
     stage unknown (process identity cases are T006's tests);
   - malformed `observation.json` (incl. an unknown stage key), malformed log lines and an
@@ -736,7 +810,11 @@ scripts/lib/dashboard.py:
   `active_codex`, P18), PR (script).
   The box is always the observation's `stage`; `state` only decorates it: `stopped` → that box
   in style `stopped` and the note (stop reason, e.g. a decision's questions) on the marker
-  line, `paused` ⏸ / `recovering` 🔧 inside it, `done` → all passed. No parsing of free text.
+  line, `paused` ⏸ / `recovering` 🔧 inside it, `done` → all passed. Status `needs_you`
+  with a state other than `stopped` (P44: a `last-error` newer than the record, the
+  gate-broken stop of T010) → the recorded stage's box in style `stopped` too, with the
+  snapshot's `last_error` (already sanitised, first line) as the marker-line note; stage
+  `none` there reads like the stop at start. No parsing of free text.
   Stage `none` with state `stopped` (stop at start, e.g. base moved): no box highlighted, the
   marker line says `⛔ stopped before Plan check` and the note follows. Stage `none` otherwise,
   `unknown`, or no/malformed observation (P17): no box is highlighted or ticked, the marker
@@ -785,6 +863,9 @@ scripts/lib/dashboard.py, tests/test_dashboard.py
     marker line; an extra fix round: detail `round 3 · extra (…)` under Triage; a format
     retry: `format retry` under Review;
   - a stop at start: no box highlighted, `⛔ stopped before Plan check`;
+  - `needs_you` with an `active` `build` record and a `last_error` (P44, golden): the Build
+    box in style `stopped`, the `last_error` line on the marker line, no active-style box;
+    the same through `ai-dashboard --once` on T007's planted fixture;
   - writer-to-renderer: observations produced by the T001 `observe` helper (not hand-written
     fixtures) for a paused build, a paused review, a paused plan revision, a recovery and a
     stop from each real stop label (the twelve labels of T001) render the overlay in the
@@ -832,8 +913,11 @@ Users find and understand the dashboard; records match the code.
   pipelines and the watchdog timer (it lists the registry of that state root only; `--json`
   prints `state_root`, P37); a row in the scripts table.
 - docs/workflow.md: the observation records and the host registry (one paragraph); the
-  gate-broken guard (T010: no project helper runs after the approved gate changed, the
-  watchdog's notification path excepted as today); `AI_DASHBOARD_PROC` and
+  gate-broken guard (T010: no project helper runs after the approved gate changed; the
+  watchdog notifies through its own installed copy of common.sh/workflow.py and verifies the
+  gate digest before launching the checkout's ai-recover, so it needs no guard, P40; ai-recover
+  and ai-pipeline do run the checkout helper before they compare the gate with the manifest,
+  as today); `AI_DASHBOARD_PROC` and
   `AI_DASHBOARD_ROOT` as test-only variables (process source and root filter of the
   dashboard's discovery, P33), not user settings.
 - Vault (`--knowledge-dir`): `agents-flow.md` note checked against the code (T002/T003 wrote it);

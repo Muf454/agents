@@ -65,13 +65,17 @@ providers, gate files are never edited by a pipeline session.
   a stop only when `stop()` has not already done so (`AI_STOP_NOTIFIED`, P35).
 - **Gate-broken guard (plan review 9, P32; security).** The helpers above are project code
   (`.ai/bin/lib/workflow.py` is part of the approved gate). On a stop caused by a changed or
-  unreadable gate (`ai_guard_verify`, `ai_deps`, ai-run's exit handler, ai-pipeline's `stop()`,
-  ai-recover's gate escalations) no observation or notification-log helper runs: those paths
-  set the shell flag `AI_GATE_BROKEN` and `ai_observe`/`ai_notify_log` return without
-  calling the helper. The ⛔ notification itself (the user's `AI_NOTIFY_CMD`) is still sent;
-  exit codes and messages are unchanged. The existing gate tests (sentinel
-  `UNTRUSTED_HELPER_RAN`) keep passing. The watchdog's notification path, which has no
-  approved gate and already runs checkout code today, is unchanged.
+  unreadable gate (`ai_guard_verify`, `ai_deps`, ai-run's exit handler, ai-pipeline's `stop()`
+  and its two gate stops before the first step, ai-recover's gate escalations) no observation
+  or notification-log helper runs: those paths set the shell flag `AI_GATE_BROKEN` (a plain
+  variable, never set inside a command substitution) and `ai_observe`/`ai_notify_log` return
+  without calling the helper. The ⛔ notification itself (the user's `AI_NOTIFY_CMD`) is still
+  sent; exit codes and messages are unchanged. The existing gate tests (sentinel
+  `UNTRUSTED_HELPER_RAN`) keep passing. ai-recover and ai-pipeline run the checkout helper
+  before they compare the gate with the run manifest, as today (plan review 10, P39); the
+  watchdog needs no guard: it notifies through its own installed copy of common.sh and
+  workflow.py and verifies the gate digest with that copy before launching the checkout's
+  ai-recover (P40).
 - **Safety and bounds (plan review 2, P11–P14).** A recorded substage wins over an outer stop
   label from the same group (`implementation` covers setup/build/checks), so a failed
   validation or install stays on Checks/Setup. All record I/O (writers and the dashboard's
@@ -132,7 +136,9 @@ providers, gate files are never edited by a pipeline session.
   → PR joined by `──`; the active box has a double border, bold and the role colour of the
   flow chart (Claude orange: plan revision/build/triage; Codex blue: plan check/review/
   re-check; scripts grey: setup/checks/PR); passed boxes dim with ✓ below; a stopped run's box
-  red with the stop reason (e.g. a plan decision's questions) on the marker line; a stop at
+  red with the stop reason (e.g. a plan decision's questions) on the marker line, and likewise
+  a `needs_you` run whose record is not `stopped` (a `last-error` newer than the record, as a
+  gate-broken stop leaves it) with the sanitised first `last-error` line (P44); a stop at
   start (stage none) highlights no box and says `⛔ stopped before Plan check`; paused ⏸,
   recovering 🔧, crashed ⚠ inside the box; detail (`T003 · sonnet · 12m`, `round 3 · extra
   (5 → 3 → 1)`, `format retry`) under the active box; last notification line (▶ ✅ ⏸ 🔧 🔁 ⚠
