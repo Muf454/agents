@@ -115,6 +115,12 @@ immediately after the CLI returns (before using any local helper), after host
 validation, and after runner checkpoint commits. Persistent changes stop the run,
 even when the agent committed them. A legitimate gate change requires inspection,
 checkpointing, and a new explicit approval; the baseline is never refreshed mid-run.
+No project helper runs after the gate is known changed or unreadable: every gate comparison
+(`ai_gate_check` and `ai_guard_verify` in `common.sh`, the pipeline's approval and resume
+checks, `ai_deps`, each ai-recover comparison) sets the shell variable `AI_GATE_BROKEN`, and
+the record helpers `ai_observe` and `ai_notify_log` (the checkout's `workflow.py`) then skip
+themselves; the ⛔ notification (your `AI_NOTIFY_CMD`) is still sent. The flag is never
+exported and never set inside a command substitution, which would set it in a subshell only.
 Project deny rules prevent Edit/Write on gate tooling, validation, prompts, and
 permission/settings files. Existing project settings need those rules merged.
 
@@ -792,7 +798,7 @@ exactly one line: the result above, or, when the runner stops first, from the EX
 `AI_LIMIT_MAX_WAIT`, ...). A usage-limit pause and retry inside the session belong to the
 same attempt and keep its start time. A run with no time left before the session starts logs
 nothing, and so does a stop because the approved gate changed (the handler never runs a
-project helper after that). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
+project helper after that, nor the plan-revision outcome line). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
 from the task's heading, or is empty.
 
 Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
@@ -807,4 +813,35 @@ minutes) by category, and every attempt by the model that ran it ("Attempts by m
 "Attempts by model and category": attempts, done, not done, first-time pass over tasks
 whose first line ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
+
+## Observation records and the dashboard
+
+`ai-dashboard` (`scripts/lib/dashboard.py`) shows each pipeline's current flow stage. The
+inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agent-writable):
+`observation.json` holds the stage, state (`active`, `paused`, `recovering`, `stopped`,
+`done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
+`workflow.py observe` from `ai-pipeline`, `ai-run`, `ai-review`, `ai-recover` and the
+pause/resume helpers in `common.sh`. `notifications.log` keeps the last 200 notification
+lines (`notify-log`, also when no `AI_NOTIFY_CMD` is set). Every notification is mirrored
+there, but a stop caused by a changed gate writes no observation and no log line (see the
+gate section). The host registry is `<state root>/pipelines/<sha256(checkout)[:16]>.json`,
+written by `pipeline-register` on each start and resume; entries whose checkout is gone or
+whose JSON is invalid are pruned. All of these writers are best effort: they warn on
+failure and never change a run's outcome. Writes go through pinned no-follow directory
+descriptors, under a bounded `flock`, via temp file and rename; reads are bounded and never
+block on FIFOs or devices.
+
+The dashboard only reads these records, and the process table through `/proc` (`ProcSource`).
+It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
+semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
+dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+
+`AI_DASHBOARD_PROC` (process-table root) and `AI_DASHBOARD_ROOT` (only checkouts under this
+absolute path) are test-only variables that make the dashboard tests deterministic; they are
+not user settings. The dashboard must run with the same `AI_STATE_DIR`/`XDG_STATE_HOME` as the
+pipelines, because it lists only that state root's registry (`--json` prints `state_root`).
+
+The watchdog needs no gate guard: its timer uses its own installed copy of `common.sh` and
+`workflow.py`, and verifies the gate digest of that copy before it launches the checkout's
+`ai-recover`.
 

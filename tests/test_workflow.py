@@ -71,6 +71,11 @@ if 'RECOVERY CONTRACT' in prompt:
     assert args[args.index('--tools')+1] == 'Read,Glob,Grep'
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
     with open(state / 'recover-calls', 'a') as f: f.write(prompt.split('RECOVERY CONTRACT')[1][:400].replace('\n', ' ') + '\n')
+    if os.path.exists('.ai/local/observation.json'):
+        with open(state / 'obs-recover', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    if os.environ.get('MOCK_RECOVER_KILL'):
+        # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
+        os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
     decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
@@ -130,6 +135,8 @@ if 'REVISION CONTRACT' in prompt:
             crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
             sys.exit(0)
     crash('before')
+    if os.path.exists('.ai/local/observation.json'):
+        with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
     mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
     review = pathlib.Path('.ai/reviews/plan.md').read_text()
     majors = review.split('## MAJOR findings')[1].split('## MINOR findings')[0]
@@ -175,6 +182,8 @@ mode = os.environ.get('MOCK_CLAUDE', 'success')
 if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
     assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
+if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
+    with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
     pathlib.Path('.ai/local/mock-limit-hit').touch()
@@ -335,6 +344,8 @@ assert '--ignore-user-config' in args
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
 with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
 with open(state / 'codex-prompts.log', 'a') as log: log.write('=== PROMPT ===\n' + args[-1] + '\n')
+if os.path.exists('.ai/local/observation.json'):
+    with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
     with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
     print('ERROR: You have hit your usage limit. Try again in 7 days.')
@@ -474,6 +485,7 @@ DEPS_SETUP = r'''#!/usr/bin/env bash
 # ai-deps-outputs: vendor-deps
 set -euo pipefail
 printf 'call\n' >> "$MOCK_STATE_DIR/deps-calls"
+cat .ai/local/observation.json >> "$MOCK_STATE_DIR/deps-obs" 2>/dev/null || true
 first=no
 [[ -e "$MOCK_STATE_DIR/deps-once" ]] || { first=yes; touch "$MOCK_STATE_DIR/deps-once"; }
 case "${MOCK_DEPS:-ok}" in
@@ -526,8 +538,10 @@ class ToolkitTest(unittest.TestCase):
         self.project.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
-                     'AI_DISPUTES_BASE'):
-            # set when the gate runs inside a pipeline (or one resumed by ai-recover)
+                     'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
+                     'AI_SUPERVISE_ESCALATE_MODEL'):
+            # set when the gate runs inside a pipeline (or one resumed by ai-recover); the
+            # supervision settings would override the fixture's config file
             self.env.pop(name, None)
         self.run_cmd(['git', 'init', '-b', 'main'])
         self.run_cmd(['git', 'config', 'user.name', 'Toolkit Test'])
@@ -1394,6 +1408,186 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         hook.chmod(0o755)
         result = self.tool('ai-run', '--approved', expected=1)
         self.assertIn('Approved workflow gate changed', result.stderr)
+
+    # ---------------------------------------------------------------- gate-broken guard (T010)
+    def gate_shell(self, script, *args, expected=0):
+        return self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh\n' + script, 'gate-test', *args],
+                            expected=expected)
+
+    def gate_digest(self):
+        return self.gate_shell('ai_guard_digest').stdout.strip()
+
+    def test_observation_gate_flag_skips_record_helpers(self):
+        self.setup_project()
+        ran = self.base / 'helper-ran'
+        (self.project / '.ai/bin/lib/workflow.py').write_text(
+            'import os, sys\n'
+            f'with open({str(ran)!r}, "a") as f: f.write(" ".join(sys.argv[1:]) + "\\n")\n')
+        result = self.gate_shell('AI_GATE_BROKEN=1 ai_observe step build; echo "observe=$?"\n'
+                                 'AI_GATE_BROKEN=1 ai_notify_log m; echo "log=$?"')
+        self.assertEqual(result.stdout, 'observe=0\nlog=0\n')
+        self.assertFalse(ran.exists())
+        result = self.gate_shell('ai_observe step build; echo "observe=$?"\n'
+                                 'ai_notify_log m; echo "log=$?"')
+        self.assertEqual(result.stdout, 'observe=0\nlog=0\n')
+        self.assertEqual(ran.read_text().splitlines(),
+                         ['observe step build', f'notify-log {self.project} m'])
+
+    def test_observation_gate_check_sets_flag_on_changed_or_unreadable_gate(self):
+        self.setup_project()
+        digest = self.gate_digest()
+        probe = ('if ai_gate_check "$1"; then rc=0; else rc=1; fi\n'
+                 'printf "rc=%s flag=%s\\n" "$rc" "${AI_GATE_BROKEN:-unset}"')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=0 flag=unset\n')
+        check = self.project / '.ai/bin/ai-check'
+        original = check.read_bytes()
+        check.write_bytes(original + b'#')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=1 flag=1\n')
+        check.write_bytes(original)
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=0 flag=unset\n')
+        # .ai/bin replaced by a symlink: the digest is unreadable, which counts as broken.
+        (self.project / '.ai/bin').rename(self.project / '.ai/bin-real')
+        (self.project / '.ai/bin').symlink_to('bin-real')
+        self.assertEqual(self.gate_shell(probe, digest).stdout, 'rc=1 flag=1\n')
+
+    def test_observation_gate_ok_form_sets_flag_in_calling_shell(self):
+        self.setup_project()
+        script = ('AI_APPROVED_GATE=0000; readonly AI_APPROVED_GATE\n'
+                  'written() { local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi\n'
+                  '  printf "gate_ok=%s\\n" "$gate_ok"; }\n'
+                  # Counter-example (never use it): the flag is set in the subshell only.
+                  'substituted() { local gate_ok; gate_ok=$(ai_gate_check "$AI_APPROVED_GATE" && echo yes || echo no)\n'
+                  '  printf "gate_ok=%s\\n" "$gate_ok"; }\n'
+                  '"$1"\nprintf "flag=%s\\n" "${AI_GATE_BROKEN:-unset}"')
+        self.assertEqual(self.gate_shell(script, 'written').stdout, 'gate_ok=no\nflag=1\n')
+        self.assertEqual(self.gate_shell(script, 'substituted').stdout, 'gate_ok=no\nflag=unset\n')
+
+    def test_observation_gate_pipeline_resume_gate_stop_unchanged(self):
+        self.ready()
+        validate = self.project / '.ai/validate'
+        original = validate.read_bytes()
+        validate.write_bytes(original + b'# approved before a change\n')
+        self.approve_run()
+        validate.write_bytes(original)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Error: Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.',
+                      result.stderr)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertIn('Gate files changed since the run was approved', self.notifications())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_observation_gate_deps_installer_changing_gate_sets_flag(self):
+        self.deps_ready()
+        with (self.project / '.ai/ci-setup').open('a') as file:
+            file.write("printf '# installer\\n' >> .ai/bin/lib/workflow.py\n")
+        (self.project / '.ai/local').mkdir(exist_ok=True)  # ai_root makes it in the scripts
+        result = self.gate_shell('gate=$(ai_guard_digest)\n'
+                                 'if ai_deps "$gate" 60; then echo installed; fi\n'
+                                 'printf "error=%s\\nflag=%s\\n" "$AI_DEPS_ERROR" "${AI_GATE_BROKEN:-unset}"')
+        self.assertRegex(result.stdout, r'error=Dependency setup \(\.ai/ci-setup\) changed the approved workflow '
+                                        r'gate; see \.ai/local/deps-\w{8}\.log\nflag=1\n$')
+        self.assertNotIn('installed', result.stdout)
+
+    def test_observation_gate_runner_tamper_stop_runs_no_helper(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertIn('Error: Approved workflow gate changed during this run. Stop, inspect the diff, '
+                      'and explicitly reapprove before resuming.', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertEqual(self.notifications().count('⛔ STOPPED, needs you: runner stopped at T001'), 1)
+
+    def logged_notifications(self):
+        path = self.project / '.ai/local/notifications.log'
+        return [json.loads(line)['message'] for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_observation_notify_log_mirrors_what_was_sent(self):
+        self.ready()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once')
+        sent = self.notifications().splitlines()
+        self.assertTrue(any('⏸ PAUSED: Claude usage limit' in line for line in sent), sent)
+        self.assertEqual(self.logged_notifications(), sent)
+        # without a notification command the lines are still kept
+        (self.project / '.ai/local/notifications.log').unlink()
+        self.notify_log.unlink()
+        env = dict(self.env)
+        env.pop('AI_NOTIFY_CMD')
+        self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; AI_ROOT=$PWD; ai_notify "hello there"'], env=env)
+        self.assertEqual(self.logged_notifications(), ['[project with spaces] hello there'])
+        self.assertFalse(self.notify_log.exists())
+
+    def test_observation_notify_watchdog_notification_is_logged_and_symlink_safe(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        other = self.base / 'other'
+        other.mkdir()
+        self.watchdog_runner(other)
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep\n')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        (self.project / '.ai/local/notifications.log').symlink_to(sentinel)
+        self.watchdog(expected=1)
+        self.assertEqual(sentinel.read_text(), 'keep\n')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        (self.project / '.ai/local/notifications.log').unlink()
+        self.watchdog_phase('ready_for_review')
+        self.watchdog()
+        self.watchdog_phase('fixing_review')
+        self.watchdog(expected=1)
+        self.assertEqual(self.logged_notifications(), self.notifications().splitlines()[1:])
+
+    def test_observation_notify_fifo_log_and_held_lock_do_not_block_the_run(self):
+        import fcntl
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        os.mkfifo(local / 'notifications.log')
+        with open(local / 'notifications.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once')
+        self.helper('tasks', 'complete')
+        self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
+
+    def pause_probe(self):
+        probe = self.mock_bin / 'probe-sleep'
+        probe.write_text('#!/usr/bin/env bash\n'
+                         f'cp .ai/local/observation.json "{self.base}/during.json"\n')
+        probe.chmod(0o755)
+        return probe
+
+    def test_observation_notify_usage_limit_pause_marks_the_stage_paused(self):
+        self.ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'build', 'T001')
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='limit-once', AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'build'))
+        self.assertIn('Claude until', during['note'])
+        after = json.loads((self.project / '.ai/local/observation.json').read_text())
+        # ai-run goes on to its own validation (T004), so the resumed run ends on the checks box
+        self.assertEqual((after['state'], after['stage'], after['note']), ('active', 'checks', ''))
+
+    def test_observation_notify_codex_pause_marks_the_stage_paused(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'review')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', AI_REVIEWER='codex',
+                  AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'review'))
+        self.assertIn('Codex until', during['note'])
+        after = json.loads((self.project / '.ai/local/observation.json').read_text())
+        self.assertEqual((after['state'], after['stage']), ('active', 'review'))
+
+    def test_observation_notify_gate_changed_stop_notifies_but_logs_nothing(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertIn('Approved workflow gate changed during this run', result.stderr)
+        self.assertEqual(self.notifications().count('⛔ STOPPED, needs you: runner stopped at T001'), 1)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertFalse((self.project / '.ai/local/notifications.log').exists())
 
     def test_integrity_verifier_cannot_import_project_modules(self):
         self.ready()
@@ -4090,7 +4284,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         f'exec {real} "$@"\n')
         slow.chmod(0o755)
         result = self.tool('ai-run', '--approved', '--run-timeout', '1', expected=1)
-        self.assertIn('Run time limit', result.stderr)
+        # The limit can be reached in dependency setup ("... not run: run time limit reached.") or later.
+        self.assertIn('run time limit', result.stderr.lower())
         self.assertEqual(self.outcome_rows(), [])
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
 
@@ -6681,6 +6876,416 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
         self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    # ---------------------------------------------------------------- stage records (T003)
+    def observation(self):
+        return json.loads((self.project / '.ai/local/observation.json').read_text())
+
+    def seen(self):
+        """The records the mock agents saw, in order (observation.json at each session start)."""
+        path = self.project / '.ai/local/obs-history'
+        decoder, text, records = json.JSONDecoder(), path.read_text() if path.exists() else '', []
+        while text.strip():
+            record, end = decoder.raw_decode(text.lstrip())
+            records.append(record)
+            text = text.lstrip()[end:]
+        return records
+
+    def plant_observation(self, **fields):
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        record = dict(stage='pr', state='done', detail='', since='2026-01-01T00:00:00Z', note='old',
+                      pid=1, branch='feature/test', updated='2026-01-01T00:00:00Z')
+        (self.project / '.ai/local/observation.json').write_text(json.dumps(dict(record, **fields)) + '\n')
+
+    def test_observation_pipeline_normal_run_records_stages_and_the_pr(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        stages = [r['stage'] for r in self.seen()]
+        self.assertEqual([s for i, s in enumerate(stages) if i == 0 or s != stages[i - 1]],
+                         ['plan_review', 'build', 'review'])
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']),
+                         ('pr', 'done', 'https://github.com/example/project/pull/7'))
+
+    def test_observation_pipeline_no_pr_run_ends_at_pr_with_a_note(self):
+        self.ready()
+        self.plant_observation(stage='review', state='stopped')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']), ('pr', 'done', 'no PR'))
+
+    def test_observation_pipeline_local_only_finish_notes_it(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']), ('pr', 'done', 'no PR (local only)'))
+
+    def test_observation_pipeline_review_stop_records_one_stop_with_the_reason(self):
+        self.ready(task('T001', 'DONE'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        (self.project / 'T001.txt').write_text('checkpointed implementation\n')
+        self.commit('done task, committed through a filter')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('review', 'stopped'))
+        # stop() recorded the last-error reason; ai_die did not add the longer "Pipeline stopped" note
+        self.assertTrue(stopped['note'].startswith('Committed content differs'), stopped['note'])
+
+    def test_observation_pipeline_plan_review_stop_records_plan_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                  AI_SUPERVISE='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
+
+    def test_observation_pipeline_supervised_plan_revision_shows_round_then_review(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once')
+        seen = [(r['stage'], r['detail']) for r in self.seen()]
+        revision = seen.index(('plan_revision', '1/3 · round 1'))
+        self.assertIn('plan_review', [stage for stage, _ in seen[revision + 1:]])
+
+    def test_observation_pipeline_stored_needs_human_decision_stops_on_plan_revision(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                        MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_revision', 'stopped'))
+        self.assertIn('Keep option A or switch to B?', stopped['note'])
+
+    def test_observation_pipeline_extra_fix_round_detail(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('4,3,2,1')
+        details = [r['detail'] for r in self.seen() if r['stage'] == 'triage']
+        self.assertIn('round 3 · extra (4 → 3 → 2)', details)
+        self.assertIn('round 1', details)
+
+    def test_observation_pipeline_base_moved_stops_with_stage_none(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.plant_observation()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn(self.git_out('rev-parse', '--short', sha), stopped['note'])
+
+    def test_observation_pipeline_start_dying_at_the_clean_check_records_stop_none(self):
+        self.ready()
+        self.plant_observation()
+        (self.project / 'stray.txt').write_text('uncommitted\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn('clean checkpoint', stopped['note'])
+
+    def test_observation_pipeline_resume_gate_stop_leaves_the_record_untouched(self):
+        self.ready()
+        validate = self.project / '.ai/validate'
+        original = validate.read_bytes()
+        validate.write_bytes(original + b'# approved before a change\n')
+        self.approve_run()
+        validate.write_bytes(original)
+        self.plant_observation()
+        before = (self.project / '.ai/local/observation.json').read_bytes()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Gate files changed since the run was approved', result.stderr)
+        self.assertEqual((self.project / '.ai/local/observation.json').read_bytes(), before)
+        self.assertFalse((self.project / '.ai/local/notifications.log').exists())
+        self.assertIn('⛔', self.notifications())
+
+    def test_observation_pipeline_gate_changed_by_a_hook_runs_no_helper(self):
+        self.ready()
+        self.hook('post-commit', 'if [[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]]; then\n'
+                                 '  printf "from pathlib import Path\\nPath(\'UNTRUSTED_HELPER_RAN\').touch()\\n" > .ai/bin/lib/workflow.py\n'
+                                 'fi\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        # the last record is the review step: no stop was written after the gate changed
+        last = self.observation()
+        self.assertEqual((last['stage'], last['state']), ('review', 'active'))
+
+    def registry(self):
+        return sorted((self.base / 'host-state').rglob('pipelines/*.json'))
+
+    def test_observation_pipeline_registers_the_checkout_on_start_and_resume(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        entries = [json.loads(path.read_text()) for path in self.registry()]
+        self.assertEqual([(e['checkout'], e['branch']) for e in entries],
+                         [(str(self.project), 'feature/test')])
+        for path in self.registry():
+            path.unlink()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_RECOVERY_ATTEMPT='1')
+        self.assertEqual(len(self.registry()), 1)
+
+    def test_observation_pipeline_unusable_registry_only_warns(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        directory = self.registry()[0].parent
+        shutil.rmtree(directory)
+        directory.write_text('not a directory\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        self.assertIn('pipeline-register', result.stderr)
+        self.assertTrue(list((self.base / 'host-state').rglob('run.json')))
+        self.assertTrue(directory.is_file())
+
+    # ---------------------------------------------------------------- runner records (T004)
+    RECORDING_VALIDATE = """#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import json, os, pathlib, sys
+path = pathlib.Path('.ai/local/observation.json')
+record = json.loads(path.read_text()) if path.exists() else {}
+with open('.ai/local/val-history', 'a') as f: f.write(json.dumps(record) + '\\n')
+fail = os.environ.get('MOCK_VALIDATE_FAIL')
+if fail and fail in (record.get('detail'), 'all'): sys.exit(1)
+PY
+"""
+
+    def runner_ready(self, queue=None):
+        """The fixture gate records the observation it runs under (val-history) and fails on demand."""
+        self.ready(queue)
+        (self.project / '.ai/validate').write_text(self.RECORDING_VALIDATE)
+        self.commit('recording fixture gate')
+
+    def validated(self):
+        path = self.project / '.ai/local/val-history'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def runner_pipeline(self, expected=1, **env):
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                         **dict({'AI_AUTO_RECOVER': '0'}, **env))
+
+    def test_observation_runner_normal_run_shows_build_then_checks(self):
+        self.runner_ready()
+        self.tool('ai-run', '--approved')
+        built = [r for r in self.seen() if r['stage'] == 'build']
+        self.assertEqual(len(built), 1)
+        self.assertRegex(built[0]['detail'], r'^T001 · .+ · 1/1$')
+        details = [r['detail'] for r in self.validated() if r['stage'] == 'checks']
+        self.assertEqual(details, ['T001', 'final'])
+        final = self.observation()
+        self.assertEqual((final['stage'], final['state'], final['detail']), ('checks', 'active', 'final · passed'))
+
+    def test_observation_runner_failing_post_task_gate_ends_on_checks(self):
+        self.runner_ready()
+        self.runner_pipeline(MOCK_VALIDATE_FAIL='T001')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+
+    def test_observation_runner_failing_final_gate_ends_on_checks(self):
+        self.runner_ready()
+        self.runner_pipeline(MOCK_VALIDATE_FAIL='final')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+        self.assertIn('Final validation failed', stopped['note'])
+
+    def test_observation_runner_failing_install_ends_on_setup(self):
+        self.deps_ready()
+        self.runner_pipeline(MOCK_DEPS='fail')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('setup', 'stopped'))
+        self.assertIn('Dependency setup', stopped['note'])
+
+    def test_observation_runner_current_dependencies_record_no_setup(self):
+        self.runner_ready()
+        self.tool('ai-run', '--approved')
+        self.assertNotIn('setup', [r['stage'] for r in self.seen() + self.validated()])
+
+    def test_observation_runner_recovery_install_records_setup_recovering(self):
+        self.deps_ready()
+        self.plant_observation(stage='build', state='recovering', note='1/2')
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_deps "$1" 100', 'deps', gate],
+                     env=dict(self.env, AI_OBSERVE_RECOVERY='2'))
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('setup', 'recovering', '2'))
+
+    def test_observation_runner_session_limit_between_tasks_stops_on_build(self):
+        self.runner_ready(task('T001') + task('T002'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--sessions', '1', expected=1,
+                  AI_AUTO_RECOVER='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state'], stopped['detail']),
+                         ('build', 'stopped', 'T001 · checkpointed · 1/2'))
+        self.assertIn('Session limit reached', stopped['note'])
+
+    def test_observation_runner_triage_in_a_pipeline_keeps_the_pipeline_detail(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('4,3,2,1')
+        details = [r['detail'] for r in self.seen() if r['stage'] == 'triage']
+        self.assertIn('round 1', details)
+        self.assertNotIn('', details)
+
+    def test_observation_runner_standalone_triage_records_triage(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.plant_observation()
+        self.tool('ai-run', '--approved', '--triage')
+        self.assertEqual([(r['stage'], r['state']) for r in self.seen()][-1:], [('triage', 'active')])
+
+    def test_observation_runner_standalone_revise_plan_records_the_round_and_model(self):
+        self.revise_ready()
+        self.revise()
+        revision = [r for r in self.seen() if r['stage'] == 'plan_revision']
+        self.assertEqual([r['detail'] for r in revision], ['round 1 · opus'])
+
+    def test_observation_runner_format_retry_shows_on_the_review_boxes(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_SUPERVISE='1',
+                  MOCK_CODEX_PLAN_FORMAT='malformed,ok', MOCK_CODEX='empty,success')
+        seen = [(r['stage'], r['detail']) for r in self.seen()]
+        self.assertIn(('plan_review', 'format retry'), seen)
+        self.assertIn(('review', 'format retry'), seen)
+
+    def test_observation_runner_by_hand_plan_review_retry_leaves_another_stage_alone(self):
+        self.ready()
+        self.plant_observation(stage='build', state='active', detail='T001 · busy')
+        before = (self.project / '.ai/local/observation.json').read_bytes()
+        self.tool('ai-review', '--plan', AI_SUPERVISE='1', MOCK_CODEX_PLAN_FORMAT='malformed,ok')
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual((self.project / '.ai/local/observation.json').read_bytes(), before)
+
+    # ---------------------------------------------------------------- recovery records (T005)
+    def recorded(self, path):
+        """Every JSON record appended to PATH (a mock agent's snapshots of observation.json)."""
+        decoder, text, records = json.JSONDecoder(), path.read_text() if path.exists() else '', []
+        while text.strip():
+            record, end = decoder.raw_decode(text.lstrip())
+            records.append(record)
+            text = text.lstrip()[end:]
+        return records
+
+    def stopped_notifications(self):
+        return self.notifications().count('⛔ STOPPED')
+
+    def test_observation_recovery_keeps_the_stage_then_the_resumed_pipeline_replaces_it(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        during = self.recorded(self.base / 'obs-recover')
+        self.assertEqual([(r['stage'], r['state'], r['note']) for r in during], [('build', 'recovering', '1/2')])
+        # the resumed pipeline's first step replaced the recovering record
+        self.assertEqual(self.seen()[-1]['state'], 'active')
+        self.assertEqual(self.observation()['state'], 'done')
+
+    def test_observation_recovery_validation_shows_checks_and_its_failure_stops_there(self):
+        queue = task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n')
+        self.runner_ready(queue)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun', MOCK_VALIDATE_FAIL='all')
+        self.assertEqual(self.stopped_notifications(), 1)
+        recovering = [r for r in self.validated() if r['state'] == 'recovering']
+        self.assertEqual([(r['stage'], r['note']) for r in recovering], [('checks', '1/2')])
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+        self.assertIn('leftover work fails validation', self.notifications())
+        self.assertIn('(stopped during implementation)', stopped['note'])
+
+    def test_observation_recovery_validation_failure_after_later_stops_ends_on_checks(self):
+        queue = task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n')
+        self.runner_ready(queue)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        for label in ('review', 're-check', 'pull request'):
+            with self.subTest(label):
+                self.plant_observation(stage={'review': 'review', 're-check': 'recheck', 'pull request': 'pr'}[label],
+                                       state='stopped', note=label)
+                (self.project / 'partial.txt').write_text('leftover\n')
+                self.tool('ai-recover', '--stage', label, expected=1, MOCK_RECOVER='commit_and_rerun',
+                          MOCK_VALIDATE_FAIL='all')
+                stopped = self.observation()
+                self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
+                self.assertIn(f'(stopped during {label})', stopped['note'])
+
+    def test_observation_recovery_unexpected_term_stops_once_and_keeps_the_substage(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        notified = self.stopped_notifications()
+        self.tool('ai-recover', '--stage', 'implementation', expected=143, AI_AUTO_RECOVER='1',
+                  MOCK_RECOVER_KILL='1')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.assertIn('auto-recovery failed unexpectedly (exit 143)', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def test_observation_recovery_unexpected_failing_command_stops_once(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        notified = self.stopped_notifications()
+        with open(self.project / '.ai/run-log.md', 'a') as log:  # new bookkeeping only: recovery records it
+            log.write('- a later bookkeeping line\n')
+        (self.project / '.git/index.lock').write_text('')  # the bookkeeping `git add` fails under set -e
+        result = self.tool('ai-recover', '--stage', 'implementation', expected=128, AI_AUTO_RECOVER='1')
+        self.assertIn('index.lock', result.stderr)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.assertIn('auto-recovery failed unexpectedly (exit 128)', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def assert_recovery_install_records(self, mode):
+        self.deps_recovery_run(mode, 1)
+        during = self.recorded(self.base / 'deps-obs')[-1]
+        self.assertEqual((during['stage'], during['state'], during['note']), ('setup', 'recovering', '1/2'))
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('setup', 'stopped'))
+        self.assertIn('(stopped during implementation)', stopped['note'])
+
+    def test_observation_recovery_failed_install_shows_setup_then_stops_there(self):
+        self.assert_recovery_install_records('fail-later')
+
+    def test_observation_recovery_changing_install_shows_setup_then_stops_there(self):
+        self.assert_recovery_install_records('change-later')
+
+    def test_observation_recovery_stored_decision_stops_on_plan_revision(self):
+        self.revision_written(findings='P1|Rollback choice;P2|Gap in tests',
+                              MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        self.plant_observation(stage='plan_review', state='active')
+        notified = self.stopped_notifications()
+        self.resume('watchdog', expected=1, MOCK_CODEX_PLAN='major')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_revision', 'stopped'))
+        self.assertIn('Keep option A or switch to B?', stopped['note'])
+        self.assertEqual(self.stopped_notifications(), notified + 1)
+
+    def test_observation_recovery_base_moved_ends_on_none(self):
+        self.origin_with_main()
+        self.advance_origin_main()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertEqual(self.recovery_calls(), [])
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn('moved past the branch', stopped['note'])
+
+    def test_observation_recovery_changed_gate_leaves_the_recovering_record_and_no_log_line(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        calls = len(self.recovery_calls())
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')
+        self.commit('weaken the gate')
+        log = self.project / '.ai/local/notifications.log'
+        before = log.read_text() if log.exists() else ''
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('gate files changed since you approved the run', self.notifications())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('build', 'recovering'))
+        self.assertEqual(log.read_text() if log.exists() else '', before)
+        self.assertEqual(len(self.recovery_calls()), calls)
 
 
 class ReviewHistoryTest(unittest.TestCase):

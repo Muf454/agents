@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Watch every pipeline on this machine. Works outside a checkout and through a symlink.
+set -euo pipefail
+dir="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+exec python3 -B "$dir/lib/dashboard.py" "$@"

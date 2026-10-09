@@ -82,7 +82,9 @@ rm -f .ai/local/last-error
 # with no runner alive means the pipeline was killed or the machine restarted.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
+[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || ai_observe start
 finish() {
+  ai_observe done "${1:-no PR}"
   ai_helper run-manifest clear-attempts 2>/dev/null || true
   ai_drop_marker
   exit 0
@@ -122,12 +124,12 @@ open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this bran
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
 # The pipeline holds its own baseline of the gate across all steps.
-AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
+AI_APPROVED_GATE=$(ai_guard_digest) || { AI_GATE_BROKEN=1; ai_die 'Cannot approve missing/unsafe workflow gate.'; }
 readonly AI_APPROVED_GATE
 if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   # A resume must run under the gate and branch the human approved (host-side manifest).
   [[ "$AI_APPROVED_GATE" == "$(ai_helper run-manifest gate 2>/dev/null)" ]] || \
-    ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'
+    { AI_GATE_BROKEN=1; ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'; }
   [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
     ai_die 'Resumed on a different branch than the approved run.'
 else
@@ -137,6 +139,8 @@ else
 fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
+ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \
+  printf 'Warning: could not register this checkout for ai-dashboard.\n' >&2
 # Fix rounds are counted from host state, never from commit subjects agents can choose.
 ai_helper fix-rounds init "$base_sha" || ai_die 'Cannot record the fix rounds in the host state directory.'
 
@@ -144,9 +148,11 @@ stop() {
   local stage=$1 reason
   reason=$(cat .ai/local/last-error 2>/dev/null || true)
   reason=${reason:-see terminal}
+  # Sets AI_GATE_BROKEN on a changed gate, so no project helper records this stop.
+  local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
+  ai_observe stop "$stage" "$reason"
   # Only hand over to checkout code that is still exactly the approved gate.
-  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && \
-        "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+  if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && "$gate_ok" == yes ]]; then
     # Bounded auto-recovery takes over this process (same PID, lock and marker).
     [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
     exec "$AI_BIN/ai-recover" --stage "$stage"
@@ -155,7 +161,8 @@ stop() {
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
 }
-step() { printf '\n== %s ==\n' "$*"; }
+# step KEY TITLE [DETAIL]: KEY is the dashboard box recorded for the stage.
+step() { printf '\n== %s ==\n' "$2"; ai_observe step "$1" "${@:3}"; }
 count_commits() { git log --oneline "$base_sha..HEAD" --grep="$1" | wc -l; }
 # Commit host records, then re-verify before any project-local helper runs again
 # (commit hooks could otherwise swap gate code in between).
@@ -228,7 +235,7 @@ push() {
 }
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
-    step 'Validation'
+    step checks 'Validation'
     "$AI_BIN/ai-check" || stop validation
     ai_guard_verify
   fi
@@ -321,7 +328,7 @@ reconcile_disputes() {
   fi
   [[ "$status" != none ]] || return 0
   if [[ "$status" == pending ]]; then
-    step 'Re-check of rejected findings (Codex; Claude fallback)'
+    step recheck 'Re-check of rejected findings (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
     ai_guard_verify
   fi
@@ -361,7 +368,7 @@ fi
 # Did this process just complete a plan revision stage? (the "Plan revised" notification)
 plan_revised=no
 if [[ "$open_stage" == 'plan-revision '* ]]; then
-  step 'Completing the interrupted plan revision'
+  step plan_revision 'Completing the interrupted plan revision' resumed
   # The round (revision model) needs the record of a plan review whose host commit is made.
   ai_helper plan-rounds sync "$base_sha" || plan_stage_fail 'cannot read the host plan review records.'
   complete_plan_stage
@@ -369,7 +376,7 @@ if [[ "$open_stage" == 'plan-revision '* ]]; then
     plan_stage_fail 'the checkout is not clean after completing the plan revision.'
   plan_revised=yes
 elif [[ -n "$open_stage" ]]; then
-  step 'Completing the interrupted review triage'
+  step triage 'Completing the interrupted review triage'
   complete_stage
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     stage_fail 'the checkout is not clean after completing the triage.'
@@ -389,7 +396,8 @@ plan_decision_check() {
   local questions rc=0 current
   questions=$(ai_helper plan-revisions decision 2>&1) || rc=$?
   case "$rc" in
-    0) # The round number only labels the stop, so a failed sync just leaves it unknown.
+    0) ai_observe step plan_revision 'needs your decision'
+       # The round number only labels the stop, so a failed sync just leaves it unknown.
        ai_helper plan-rounds sync "$base_sha" >/dev/null 2>&1 || true
        current=$(ai_helper plan-rounds current "$base_sha" 2>/dev/null) || current='?'
        printf 'plan review needs your decision (round %s): %s\n' "${current%% *}" "${questions//$'\n'/; }" \
@@ -433,7 +441,7 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
       esac
     fi
     if [[ "$review_due" == yes ]]; then
-      step 'Plan review (Codex; Claude fallback)'
+      step plan_review 'Plan review (Codex; Claude fallback)'
       "$AI_BIN/ai-review" --plan --base "$base_sha" "${review_args[@]}" || stop 'plan review'
       ai_guard_verify
       mapfile -t records < <(review_record .ai/reviews/plan.md)
@@ -458,7 +466,8 @@ if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
       printf '%s; BLOCKER %s, MAJOR %s remain\n' "${reserved#Error: }" "$plan_blockers" "$plan_majors" > .ai/local/last-error
       stop 'plan review'
     fi
-    step "Plan revision $reserved/$AI_SUPERVISE_PLAN_ROUNDS, review round ${current%% *} (Claude)"
+    step plan_revision "Plan revision $reserved/$AI_SUPERVISE_PLAN_ROUNDS, review round ${current%% *} (Claude)" \
+      "$reserved/$AI_SUPERVISE_PLAN_ROUNDS · round ${current%% *}"
     ai_helper run-manifest stage-set plan-revision "$(git rev-parse HEAD)" || stop 'plan revision'
     complete_plan_stage
     ai_guard_verify
@@ -473,7 +482,7 @@ while true; do
   unresolved=0
   ai_guard_verify
   if ! ai_helper tasks complete 2>/dev/null; then
-    step 'Implementation (Claude)'
+    step build 'Implementation (Claude)'
     "$AI_BIN/ai-run" --approved "${run_args[@]}" || stop implementation
     ai_guard_verify
   fi
@@ -487,7 +496,7 @@ while true; do
       printf 'Committed content differs from the validated content: %s\n' "${why#Error: }" > .ai/local/last-error
       stop review
     fi
-    step 'Independent review (Codex; Claude fallback)'
+    step review 'Independent review (Codex; Claude fallback)'
     "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
     ai_guard_verify
     mapfile -t records < <(review_record .ai/reviews/current.md)
@@ -530,7 +539,9 @@ while true; do
       break
     fi
   fi
-  step "Review triage, round $(( fixes + 1 )) (Claude)"
+  triage_detail="round $(( fixes + 1 ))"
+  case "$extra" in '') ;; resumed) triage_detail+=' · extra' ;; *) triage_detail+=" · extra ($extra)" ;; esac
+  step triage "Review triage, round $(( fixes + 1 )) (Claude)" "$triage_detail"
   # Recorded before triage starts, so a stop or crash anywhere in it resumes this stage.
   ai_helper run-manifest stage-set triage "$(git rev-parse HEAD)" || stop triage
   # The triage commit carries this line (the run log is a triage record).
@@ -560,16 +571,16 @@ if [[ "$open_pr" != yes ]]; then
   printf '%s\n' 'Pipeline complete (no PR requested).'
   finish
 fi
-step 'Pull request'
+step pr 'Pull request'
 if ! git remote get-url origin >/dev/null 2>&1; then
   ai_notify "🏁 FINISHED on $branch (local only): no 'origin' remote to open a PR on. Your todo: push and open a PR."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
-  finish
+  finish 'no PR (local only)'
 fi
 push push 'git push failed (3 tries)' -u origin "$branch"
 if ! command -v gh >/dev/null; then
   ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
-  finish
+  finish 'pushed, no PR (gh missing)'
 fi
 title=$(ai_helper pr-title)
 body=$(mktemp .ai/local/pr-XXXXXXXX.md)
@@ -597,4 +608,4 @@ host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md
 push 'final push' "PR is open at $url, but pushing the final handoff commit failed" origin "$branch"
 ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
-finish
+finish "$url"

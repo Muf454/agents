@@ -106,15 +106,17 @@ attempt_open=no
 session_code=
 on_exit() {
   local code=$?
-  # Never run a project helper after the approved gate changed: a stop for that reason logs nothing.
-  if [[ "$attempt_open" == yes && "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+  # Never run a project helper after the approved gate changed: a stop for that reason logs
+  # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
+  local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
+  if [[ "$attempt_open" == yes && "$gate_ok" == yes ]]; then
     if (( code == 130|| code == 143 )); then task_outcome interrupted
     elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
     else task_outcome error
     fi
   fi
   if [[ "$finished" != yes ]]; then
-    if [[ -n "${revision_started:-}" ]]; then
+    if [[ -n "${revision_started:-}" && "$gate_ok" == yes ]]; then
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
         2>/dev/null || true
     fi
@@ -252,6 +254,7 @@ if [[ "$revise_plan" == yes ]]; then
   check_args=(--since "$since" --base "$plan_base" --fresh)
   revision_model=${explicit_model:-opus}
   revision_started=$SECONDS
+  [[ -n "${AI_PIPELINE:-}" ]] || ai_observe step plan_revision "round $revision_round · $revision_model"
   if ai_helper plan-dispositions-check "${check_args[@]}" >/dev/null 2>&1; then
     # An interrupted revision whose section is complete: record it, no new session.
     printf '%s\n' 'Plan dispositions are already complete; recording the revision.'
@@ -352,6 +355,7 @@ if [[ "$triage" == yes ]]; then
   [[ -f .ai/reviews/current.md ]] || ai_die 'No review to triage.'
   reviewed=$(ai_helper review-info) || ai_die 'Current review was not produced by ai-review.'
   active_task=triage
+  [[ -n "${AI_PIPELINE:-}" ]] || ai_observe step triage
   since=${since:-$(git rev-parse HEAD)}
   # Triage may only touch workflow records (committed or not), never source, tests, or the gate.
   triage_scope() {
@@ -431,6 +435,8 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_branch
   ai_helper tasks check
   active_task=$(ai_helper tasks next)
+  counts_done='' counts_total=''
+  if counts=$(ai_helper tasks counts 2>/dev/null); then read -r counts_done counts_total <<< "$counts" || true; fi
   if [[ "$active_task" == none ]]; then
     if ! ai_helper tasks complete; then
       ai_helper state blocked 'No runnable tasks; resolve blockers/dependencies'
@@ -438,12 +444,14 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     fi
     remaining=$(remaining_time)
     (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
+    ai_observe step checks final
     if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
       ai_guard_verify
       ai_helper state blocked 'Final validation failed; inspect validation log'
       ai_die 'Final validation failed; readiness is not established.'
     fi
     ai_guard_verify
+    ai_observe detail checks 'final · passed'
     ai_helper state ready_for_review 'Run independent Codex review, then human testing'
     ai_log none 'queue complete; ready for independent review' PASS 'Human acceptance remains'
     git add -- .ai/state.md .ai/run-log.md
@@ -459,6 +467,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   (( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun --approved to continue.'
   ai_helper state implementing "Resume/implement $active_task"
   task_model=$(ai_helper tasks model "$active_task")
+  if [[ -n "$counts_total" ]]; then
+    ai_observe step build "$active_task · ${task_model:-${model:-default}} · $(( counts_done + 1 ))/$counts_total"
+  fi
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
@@ -475,6 +486,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     DONE)
       remaining=$(remaining_time)
       (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
+      ai_observe step checks "$active_task"
       if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
         ai_guard_verify
         task_outcome validation_failed
@@ -483,6 +495,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
         ai_die "Validation failed; $active_task returned to IN_PROGRESS."
       fi
       ai_guard_verify
+      if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
+        ai_observe step build "$active_task · checkpointed · $counts_done/$counts_total"
+      fi
       if [[ -n "$(dirty_beyond_records)" ]]; then
         # Tier-1 recovery: the session finished and the full gate just passed on exactly
         # this content (gate files verified unchanged), but it didn't commit. Commit it.

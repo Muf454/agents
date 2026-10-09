@@ -36,6 +36,7 @@ reason=${reason:-unknown (no last-error recorded)}
 
 escalate() {
   AI_STOP_NOTIFIED=1
+  ai_observe stop '' "${reason% } (stopped during $stage)"
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}"
   printf '%s\n' "$reason" > .ai/local/last-error
   touch .ai/local/last-error.notified 2>/dev/null || true
@@ -79,6 +80,7 @@ done < <(ai_helper run-manifest env)
 on_exit() {
   local code=$?
   if (( code != 0 )) && [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
+    ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"
     ai_notify "⛔ STOPPED, needs you: auto-recovery failed unexpectedly (exit $code) during $stage. Inspect the checkout, then rerun ai-pipeline."
     touch .ai/local/last-error.notified 2>/dev/null || true
     ai_drop_marker
@@ -93,9 +95,14 @@ AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 max=${AI_RECOVER_MAX:-2}
 [[ "$max" =~ ^[0-9]$ ]] || max=2
+# Shell variable only: resume execs ai-pipeline with explicit variables, so it never reaches it.
+AI_OBSERVE_RECOVERY="$attempt/$max"
+ai_observe recovering "$AI_OBSERVE_RECOVERY"
 [[ "${AI_AUTO_RECOVER:-1}" != 0 ]] || escalate 'auto-recovery is off (AI_AUTO_RECOVER=0).' 'fix the cause, then rerun ai-pipeline.'
-current_gate=$(ai_guard_digest) || escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'
-[[ "$current_gate" == "$approved_gate" ]] || \
+ai_guard_digest >/dev/null || { AI_GATE_BROKEN=1
+  escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'; }
+# ai_gate_check sets AI_GATE_BROKEN, so no project helper records these stops.
+ai_gate_check "$approved_gate" || \
   escalate 'gate files changed since you approved the run.' 'review the change and rerun ai-pipeline --approved yourself.'
 [[ "$branch" == "$(ai_helper run-manifest branch)" ]] || \
   escalate "the checkout is on $branch, not the approved run's branch." 'switch back or rerun ai-pipeline --approved yourself.'
@@ -112,6 +119,7 @@ case "$decision_rc" in
            "$(ai_helper stage-verify 2>/dev/null)" == committed ]]; then
        ai_helper run-manifest stage-clear 2>/dev/null || true
      fi
+     ai_observe recovering "$AI_OBSERVE_RECOVERY" plan_revision
      escalate 'a plan revision recorded questions only you can answer.' \
        'answer them in .ai/reviews/plan-dispositions.md and the plan, commit, run ai-review --plan, then rerun ai-pipeline.' ;;
   1) ;;
@@ -157,7 +165,7 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" && \
       -z "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md')" ]]; then
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
   git commit -q -m "chore(ai): record stop during $stage" || escalate 'recording the stop failed (commit hook?).' 'inspect the checkout.'
-  [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed after recording the stop (hook?).' 'inspect the diff.'
+  ai_gate_check "$approved_gate" || escalate 'gate files changed after recording the stop (hook?).' 'inspect the diff.'
 fi
 [[ -f .ai/prompts/recover.md ]] || escalate 'missing .ai/prompts/recover.md.' 'copy it from the toolkit templates.'
 command -v claude >/dev/null || escalate 'claude is not installed.' 'rerun ai-pipeline by hand.'
@@ -184,7 +192,7 @@ set -e
 IFS=$'\t' read -r action why human < <(ai_helper recover-decision "$log" "$claude_code")
 printf 'Recovery decision: %s (%s)\n' "$action" "$why"
 # The session is read-only, but re-check before acting on its advice.
-[[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during recovery.' 'inspect the diff.'
+ai_gate_check "$approved_gate" || escalate 'gate files changed during recovery.' 'inspect the diff.'
 
 case "$action" in
   commit_and_rerun)
@@ -193,8 +201,9 @@ case "$action" in
     ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}" || \
       escalate "$why; but dependency setup failed: $AI_DEPS_ERROR." \
         'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
+    ai_observe recovering "$AI_OBSERVE_RECOVERY" checks
     "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
-    [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed during validation.' 'inspect the diff.'
+    ai_gate_check "$approved_gate" || escalate 'gate files changed during validation.' 'inspect the diff.'
     git add --all -- .
     if ! new_files=$(ai_helper checkpoint-guard); then
       git reset -q
@@ -204,7 +213,7 @@ case "$action" in
 
 Stopped during $stage: $reason
 Recovery: $why" || escalate 'the recovery commit failed (commit hook?).' 'inspect the checkout.'
-    [[ "$(ai_guard_digest)" == "$approved_gate" ]] || escalate 'gate files changed after the recovery commit (hook?).' 'inspect the diff.'
+    ai_gate_check "$approved_gate" || escalate 'gate files changed after the recovery commit (hook?).' 'inspect the diff.'
     # A commit hook must not have slipped unvalidated content into the checkpoint.
     [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
       ai_helper committed-matches-worktree || \

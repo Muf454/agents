@@ -1,61 +1,44 @@
-<!-- Host evidence: HEAD 43a705f209562af6977275e14249e33d506a7c19; merge-base 5e837acd20bd82f69d0fab38e5810e8eac076238; saved 2026-10-09T07:37:15Z. -->
+<!-- Host evidence: HEAD 6700246c6bafbab83682cbd100fbe61c3c000e90; merge-base 1b914159633bff5897a4e120a9c61c094c0b5493; saved 2026-10-09T14:10:01Z. -->
 
-> **Reviewer: Claude fallback (claude-opus-5-5, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+
+I have what I need. The three accepted findings from round 1 are fixed in the source, the regression tests exercise the real paths, and the host gate evidence covers HEAD's validated content. Here is the review.
+
+<!-- Host evidence: HEAD 6700246c6bafbab83682cbd100fbe61c3c000e90; merge-base 1b914159633bff5897a4e120a9c61c094c0b5493. -->
 
 # Independent review
 
-Overall verdict: APPROVE. CU-1, CU-3 and CU-4 are implemented as the spec and tasks require, and the merge of master keeps both sides of `outcome` correctly. Two MINOR record and telemetry gaps remain.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Overall verdict: APPROVE. Round 1's accepted findings M1, N1 and N2 are fixed in `scripts/lib/dashboard.py` with regression tests that exercise the real paths (pty loop with a changing run list, `--once`/`--json` on legacy and malformed checkouts, fixture and real processes for the runner predicate). The pre-existing flake (T014) is handled by a test-only change that keeps the test's two meaningful assertions. I found no new defect in the changed code and no regression in the rest of the range.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
-Reviewed HEAD: `43a705f209562af6977275e14249e33d506a7c19` (merge of master into `fix/outcome-followups`)
+Reviewed HEAD: `6700246c6bafbab83682cbd100fbe61c3c000e90` (`feature/dashboard`)
 
-Supplied base: `5e837acd20bd82f69d0fab38e5810e8eac076238` (the merge-base is the same commit)
+Supplied base: `1b914159633bff5897a4e120a9c61c094c0b5493` (the merge-base is the same commit)
 
 Inspected:
-- `.ai/local/review-context/diff.patch`, `log.txt` and `files.txt`.
-- The actual source of `scripts/lib/workflow.py`:
-  - `outcome` and `outcomes_report` (2713–2867)
-  - `rejected_rows`, `publish_recheck` and `recheck_values` (1355–1502)
-  - `pr_body` (2990–3069)
-- `scripts/ai-review` (255–369) and `tests/run_parallel.py` (whole file).
-- The new and updated tests in `tests/test_workflow.py` (3963–4010, 5514–5570, 6805–6890).
-- The frozen `.ai/bin/lib/workflow.py` `outcome`, to check the merge resolution.
-- Spec, tasks, handoff, state, `.ai/reviews/plan.md` (plan review round 5) and `.ai/reviews/dispositions.md`.
+- `.ai/local/review-context/since-last-review.patch` (whole), `log.txt`, `files.txt`, `.ai/local/validation.json` and its log `.ai/local/check-l0RjuF5y.log`.
+- Actual source: `scripts/lib/dashboard.py` (whole file at HEAD: `is_runner` 28–39, `discover` 122–150, `liveness` 167–186, `inspect` 267–308, `position` 381–395, `marker_text` 419–435, `compact_card` 491–514, `wide_card` 462–488, `draw` 604–629, `interface` 632–663), `scripts/lib/watchdog.py` 74–87, 108, 286–345 (unchanged, confirmed via `files.txt`), the shebang line of every script under `scripts/`, the `ai-run`/`ai-recover` launch sites in `scripts/ai-pipeline` (158, 262, 306, 486), the limit messages in `scripts/ai-run` 184/446/488 and `scripts/lib/common.sh` 208.
+- Tests: `tests/test_dashboard.py` 1–140 (fixtures, `spawn`, real-process and non-runner tests), 339–348 and 574–578 (`run_cli`), 643–728 (stop-at-start, writer-to-renderer, legacy/malformed, new legacy-with-error test), 762–830 (`pty_run`, `read_until`, `finish`, `fixture_runs`, smoke) and the two new pty tests in the patch; `tests/test_workflow.py` hunk at 4284–4288.
+- `.ai/tasks.md` T011–T014, `.ai/handoff.md`, `.ai/state.md`, `.ai/reviews/current.md` (round 1), `.ai/reviews/dispositions.md`.
 
 ## Validation observed/run
 
-- **Host evidence:** `.ai/local/validation.json` reports **PASS**, exit 0, `unchanged: true`, timestamp `2026-10-09T07:34:11Z`, `head` = `1d07424` (the pre-merge parent, not the reviewed HEAD). Its log `.ai/local/check-3tqUH4WJ.log` reads `Ran 411 tests in 237.1s (8 shards, 411 collected)` / `OK`.
-- **Which tree it covers:** the branch had 297 tests before the merge (T003 result). The merge commit (07:34:20Z, 9 s after the evidence) claims 411, so this run almost certainly covered the merged working tree before the merge was committed. I cannot compare the fingerprint to HEAD's tree without a shell.
-- **Merge resolution:** checked against `.ai/bin/lib/workflow.py:2713–2751` (master's `outcome`). The merged `outcome` is master's function plus the branch's `elif mode == 'recheck'` arm, and master's `plan_revision` kind is kept (`workflow.py:2743–2765`).
-- **Duplicate test methods:** none among the new or helper names (`outcome_report_for`, `recheck_outcomes`, `colour_env`, `test_outcome_*`, `test_parallel_runner_*`). A duplicate name would silently shadow a test.
-- I ran no commands (this review has no shell).
+- **Host evidence:** `.ai/local/validation.json` reports **PASS**, exit 0, `unchanged: true`, `2026-10-09T14:05:06Z`, `head` = `eae2a10`. Its log reads `Ran 547 tests in 344.1s (8 shards, 547 collected)` / `OK`. HEAD `6700246` changes only `.ai/run-log.md` and `.ai/state.md`, both excluded from the validation fingerprint, so the evidence covers HEAD's validated content.
+- Test count moved 541 → 547 since round 1: +2 pty tests (T011), +1 legacy-with-error (T012), +1 non-runner predicate (T013); the remaining +2 are subtests/cases I did not attribute individually. The T013 run-log entry records one gate run at 546/547 with the T014 flake as the single failure, then 547 OK after T014.
+- I ran no commands (no shell) and did not rerun the tests.
 
 Limitations:
-- I did not rerun the tests.
-- I could not confirm that the validation fingerprint equals the tree at `43a705f`.
-- I did not open the vault notes, which are outside the checkout.
-- The mutation checks recorded in T001 (Python 3.14.7) are claims; I did not reproduce them.
+- No shell: the TUI tests' claim "fails on the old code" is from the run log, not reproduced here; I verified by reading that the old code path (`selected = None` then `min(None, …)`) is exactly what the new tests drive.
+- T014's acceptance criterion (10 consecutive runs of the test alone) was not executed by the implementing session (shell allowlist); the run log records this. The fix is a widened string match, so its correctness follows from the two messages at `ai-run:184` and `common.sh:208` both containing `run time limit` case-insensitively.
+- I did not re-read the bodies of the ~60 `test_observation_*` tests nor the shell callers again; nothing in the since-last-review diff touches them.
 
 ## Requirement assessment
 
-- **R1 (CU-4):** done.
-  - `run_shard` drops `FORCE_COLOR` and sets `NO_COLOR=1` and `PYTHON_COLORS=0` (`run_parallel.py:71–73`).
-  - `summary()` strips SGR escapes before parsing (`:56–64`). The task notes suggested a broader escape regex; the narrower one matches what `_colorize` emits.
-  - Before each case, the tests remove the host's `NO_COLOR`, `FORCE_COLOR` and `PYTHON_COLORS` (`test_workflow.py:6854–6857`), so no case passes on inherited settings.
-  - The failing-shard test asserts that no `\x1b` reaches the echoed output (`:6868–6874`). On Python < 3.13 this test proves nothing, as the task records.
-- **R2 (CU-1):** done.
-  - `attempts_table` groups each task row by its own model (`workflow.py:2808–2824`).
-  - The first-time-pass denominator counts each task once, via its first row in file order (`first_row`, `:2804–2806`, identity check at `:2812`).
-  - The category table is still per task (`:2830`).
-  - The expected rows in `test_outcome_report_credits_each_attempt_to_its_model` check out by hand: sonnet (600+60)/2/60 = 5.5; opus `-`; category row 1.5 attempts, 8.0 min.
-- **R3 (CU-3):** done.
-  - Counts come only from the host-bound `recheck.md`, through `recheck_values()` and `rejected_rows()` (`workflow.py:2753–2762`).
-  - `reviewed_head` is resolved with `rev-parse --verify`.
-  - Any failure drops the new fields but still writes the line. `fail()` raises `ValueError`, which the `except` catches.
-  - `ai-review` writes the line right after `publish-recheck` (`ai-review:354–355`), so the counts cannot come from an earlier re-check.
-  - The report splits plan/code reviews from re-checks and builds the catch-up list from all reviews, outside both table blocks (`workflow.py:2833–2866`).
-- **R4 (CU-2):** deferred as the spec says. The report behaves as before for Claude reviews.
-- **Constraints:** `ai-review`, `ai-pipeline`, `ai-recover`, `.ai/bin` and the gate files are untouched (`files.txt`). The changes stay inside `outcome`, `outcomes_report`, `run_parallel.py`, new tests and docs.
+- **M1 → T011 (TUI survives empty ↔ non-empty):** fixed. `interface` now clamps `selected = max(min(selected, len(runs) - 1), 0)` (`dashboard.py:644`), so it is always an int (0 when empty); only `shown` (`:645`) is `None` for the empty state and is what `layout`/`draw` receive, keeping their contract. The refresh branch (`:660–663`) leaves `selected` an int when `current` is `None`. Key handlers that index `runs` stay guarded (`:651–656`). `test_dashboard_render_curses_runs_appear_and_disappear` starts on an empty state root, registers a checkout while the loop runs, waits for the title through the 2 s auto-refresh, unlinks the registry entry, presses `r`, waits for the empty text, quits and asserts exit 0 and no `Traceback`; `..._all_toggle_with_only_old_runs` covers `a` with a 25 h old finished run (empty → shown → empty). Both drive the exact `None → min()` path that crashed before.
+- **N1 → T012 (legacy checkout with `last-error`):** fixed. `position` returns `(None, 'unknown')` whenever there is no usable observation, before the `needs_you` test (`:388–389`); `finished` is still tested first but needs a `done` record, so it cannot apply. `marker_text`'s unknown branch appends `· ⛔ <last_error>` in style `stopped` (`:429–430`); `compact_card` emits the same marker line for `unknown` mode (`:511–513`). Status stays `needs_you` (unchanged `inspect`). The recorded `stage=none` stop still reaches `(None, 'stopped')` → "⛔ stopped before Plan check" (`:390–391`, `:425`), and `test_dashboard_render_stop_at_start` (`:646`) and the writer-to-renderer `start` case (`:676`) still assert that wording. `test_dashboard_render_legacy_checkout_with_last_error` covers no record and a record with an unknown stage, at 140 and 80 columns via `COLUMNS` (honoured by `shutil.get_terminal_size`, inherited by `run_cli`), and `needs_you` in `--json`.
+- **N2 → T013 (editors naming a runner script):** fixed. Dashboard-only `is_runner` (`:28–39`): `argv[0]` basename is a runner, or is `bash`/`sh` and the first non-option argument's basename is a runner. Every runner script starts with `#!/usr/bin/env bash`, so a running runner's argv is `bash <path> …`; `ai-pipeline` execs `ai-recover` (`ai-pipeline:158`) and runs `ai-run` by path (`:262`, `:306`, `:486`), and the watchdog hands `systemd-run` the script path (`watchdog.py:315`), all of which go through the shebang and land on `bash <script>`. Used in both `discover` (`:142`) and the marker check in `liveness` (`:177`). `watchdog.py` is untouched (`files.txt`). Empty cmdlines (kernel threads) and the trailing empty element from the `\0` split are handled (`:31`, `:38`). The regression test covers `vim`, `less`, `git diff` (not discovered, `gone` when registered) and `bash <script> --approved` / bare script (discovered, `alive`); the real-process test now spawns a `#!/usr/bin/env bash` script with a trailing `:` so bash does not exec-optimise `sleep` away, which keeps argv as `bash <link>` like a real runner.
+- **T014 (pre-existing flake):** test-only, as required. The limit can be hit in `ai_deps` (`common.sh:208`, "… not run: run time limit reached.") or later (`ai-run:184`); the test now matches `run time limit` case-insensitively and keeps the no-outcome-rows and no-mock-invocation assertions, so a run that starts a session still fails it.
+- **Records:** tasks T011–T014 DONE with results (T011/T012/T014 result sections are empty in `tasks.md` but the run log carries the evidence); handoff names the four new tests under "Covered by automated tests" and adds the empty-start and `vim` manual check; state `ready_for_review`, 14 tasks complete.
 
 ## BLOCKER findings
 
@@ -67,94 +50,48 @@ None found.
 
 ## MINOR findings
 
-### N1 — "Codex catch-up pending" shows the wrong HEAD for a Claude re-check, and plan review round 5 was never dispositioned
-
-**Status:** demonstrated (path traced; the branch's own test confirms the two SHAs differ).
-
-**Location:** `scripts/lib/workflow.py:2746` (outcome `head`), `:2864–2865` (catch-up list), `scripts/ai-review:355` → `:277` (fallback record), `.ai/reviews/plan.md:34–39` (round 5 P2), `.ai/reviews/dispositions.md` (no round 5 section).
-
-**Problem:** a Claude re-check is logged in two places, and the catch-up line uses the wrong one of the two HEADs available:
-- `ai-review` writes the re-check's row in `fallback-log.md` with the *reviewed* HEAD (`review_records "$head" recheck`, where `$head` comes from `recheck-prepare`).
-- The outcome line's `head` is `git rev-parse HEAD` when the line is written. For a re-check that is after the triage commit, because `ai-review:342` requires a committed triage.
-- The "Codex catch-up pending" list prints `head`, not the new `reviewed_head`.
-
-`test_outcome_recheck_records_upheld_and_withdrawn_totals` asserts `reviewed_head != head` (test line ~5530), which proves the mismatch. The JSONL report test also locks it in (`recheck HEAD abcdef012345`, taken from `head`).
-
-Plan review round 5 raised exactly this (P2): use `reviewed_head` when present, or else document the mismatch in the README "Outcome log". It also raised P1, which category the combined table uses. Neither was applied or recorded:
-- `dispositions.md` stops at round 4.
-- README:1345–1347 and `docs/workflow.md:785` describe `reviewed_head` but not the mismatch.
-- Per P1, the code uses the task's final row's category (`last.get('category')`, `:2832`). That is a reasonable reading of the spec's "the task's category", but it is undocumented.
-
-**Impact:** advisory telemetry only. A human matching catch-up entries against `fallback-log.md` sees two different SHAs for the same Claude re-check. The field that would match (`reviewed_head`) is recorded but not used. CU-2 will need to match on it later. Nothing in the pipeline's behaviour changes.
-
-**Recommended direction:** in the catch-up line, print `r.get('reviewed_head') or r.get('head')`. Old lines fall back to `head`, so nothing disappears. Update the JSONL test to give the line both fields with different values and assert the `reviewed_head` prefix. Add a "Plan review round 5" section to `dispositions.md` recording P1 (final-row category; a one-line note in docs) and P2.
-
-### N2 — `.ai/handoff.md` still says T003 is TODO and that nothing is implemented
-
-**Status:** demonstrated.
-
-**Location:** `.ai/handoff.md:4` ("Planned (revision 5), nothing implemented yet."), `:7` ("T003 (CU-3, TODO)"), `:30–31` ("Next action: Implement T003.").
-
-**Problem:** the handoff contradicts the actual state:
-- `.ai/tasks.md` marks T001–T003 DONE with evidence.
-- `.ai/state.md` says `Phase: ready_for_review`, `Tasks remaining: 0`.
-- The source contains T003's code and tests.
-
-The project rules require keeping the handoff current at each checkpoint. The T003 commit (`f89b08c`) and the two later record commits did not update it, and the merge kept "this branch's versions" of `.ai/` records.
-
-**Impact:** a person or a fresh session resuming from the handoff would try to implement T003 again. The PR body takes only "Flow chart" and "Manual testing for the human" from the handoff (`workflow.py:3020`, `:3060`), and both are correct, so the published PR is not affected.
-
-**Recommended direction:**
-- Mark T003 DONE in "What has been implemented?" and drop "nothing implemented yet".
-- Set "Next action" to the review/acceptance step.
-- Mention the master merge (toolkit upgrade 4), so the human knows the branch also carries master's changes.
+None found.
 
 ## Missing test coverage
 
-Checklist items checked (Python/shell telemetry; no database, UI or authorization surface):
-- **3, attribution:** re-check counts and `reviewed_head` come only from the sha256-bound `recheck.md`, re-verified against the current review and rejected-rows digests (`workflow.py:1490–1497`), never from Codex's raw `$report`.
-- **4, stale results:** the line is written once, right after `publish-recheck`. A failed publish exits before `review_records`, so an earlier re-check's counts cannot be logged.
-- **8, data hidden from views:**
-  - Re-checks leave "Reviews by reviewer" on purpose and are still counted in the summary line.
-  - Claude re-checks stay in the catch-up list, including a log that holds only re-checks (tested).
-  - `plan_revision` lines are ignored by the report, as master documents.
-- **1, 2, 5, 6, 7, 9, 10:** do not apply.
+Checklist items checked (Python tooling; no database, tenant or role surface):
+- **4, stale async results:** the TUI loop is synchronous; the only state carried across refreshes is `selected`, `expanded` and `offset`, and `selected` is now re-clamped at the top of every iteration (`dashboard.py:644`), so a run list that shrinks between refreshes cannot leave an out-of-range index. Checked.
+- **5, refresh wiring:** registry add/remove and `a` are both covered by the new pty tests; the auto-refresh path (`getch` → `-1`) is what the first test relies on. Checked.
+- **8, data hidden from views:** `position` now reports `unknown` for every record-less run, including `crashed` and `running` legacy runs, which is the same result those statuses had before via `index is None`; `needs_you`/`crashed` are still never hidden. Checked.
+- **1, 2, 3, 6, 7, 9, 10:** not touched by this round.
 
-Gaps:
-- "Attempts by model and category" is asserted only for `sonnet / feature`. There is no `opus / feature` row assertion. The `## Attempts by model` assertion is a substring of the combined heading, but the `| sonnet | 2 | …` row assertion can only match the per-model table, so that table is effectively covered.
-- No test has a task whose rows have different categories, which is what decides `last` versus the row's own category (N1).
-- The `CalledProcessError` arm in the re-check outcome (an unresolvable reviewed head) is untested. That is acceptable: the head comes from a bound header that was just verified.
-- The JSONL report tests do not cover multiple input files (file order across arguments for `first_row`).
+Gaps (not counted):
+- The pty tests depend on curses emitting the whole target string on a redraw. `fixture_runs` documents the trick (a name sharing no character with its neighbours); the two new tests use the same name and the empty-state phrase, which shares no run of identical characters with the card title at the same columns, so ncurses' inline-cost rule will emit it whole. Two green gate runs agree. Noted as the one flake risk if the empty-state text or the header is ever changed.
+- `spawn` now leaves an orphaned `sleep 120` per subtest when `process.kill` kills bash (two per gate run). Harmless, but a `trap`/`exec`-free cleanup or killing the process group would be tidier.
+- `ProcSource.start_ns` still has no guard for a `stat` without `btime` (round 1 note, unchanged; real `/proc/stat` always has it).
 
 ## Security concerns
 
-None.
-- `tests/run_parallel.py` runs inside the gate. The change can only cause false failures: a shard still passes only on `returncode == 0` plus a parsed `OK`, and the collected-versus-ran count check is unchanged (`run_parallel.py:110`, `:123`).
-- The re-check outcome is read-only and nonfatal: `ai-review:279–280` runs it as `2>/dev/null || printf …`.
+None new.
+- The runner predicate only reads process argv already read by `ProcSource.process`; it narrows which processes count, so it cannot make the dashboard trust more than before.
+- `marker_text` now prints `run['last_error']` on one more path; that value is already the sanitised first line (`inspect`, `:292`), so no new agent-controlled text reaches the terminal unsanitised.
+- No gate file, `.ai/bin`, `.ai/prompts` or `.ai/validate` is in `files.txt`.
 
 ## Architecture concerns
 
-None. The hunks stay inside `outcome`, `outcomes_report` and the test runner, as the spec's concurrency constraint asks. The merge kept master's `plan_revision` kind next to the new re-check arm with no duplicated logic.
-
-Not counted: `tests/test_workflow.py:4009` now reads `path =self.base / …`. This is a whitespace slip from the T002 edit, harmless.
+None. The dashboard-only `is_runner` replaces the `watchdog` import and leaves the watchdog's orphan semantics unchanged, as the task prescribes; `position` keeps the "box is the observation's stage" rule and only reorders the record-less case ahead of the status check.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Re-run `.ai/bin/ai-check` at `43a705f` (or confirm the fingerprint), because the recorded evidence names the pre-merge parent `1d07424`.
-- After `setup-project --upgrade` installs the new copy, run `.ai/bin/ai-status --outcomes` on real host data. Check:
-  - "Attempts by model" reads sensibly for tasks retried on a different model.
-  - Older re-check lines show as zero totals under "Re-checks by reviewer".
-  - "Codex catch-up pending" still lists every Claude review. If N1 is not fixed, Claude re-check entries show the triage-commit HEAD, not the HEAD in `fallback-log.md`.
-- On Python 3.14, run `PYTHON_COLORS=1 FORCE_COLOR=3 python3 tests/run_parallel.py` once and confirm that it ends with `OK` and that failing-shard output has no escape codes.
+- Open `ai-dashboard` in tmux with no pipeline running, then start `ai-pipeline --approved` in another checkout: the card appears within about 2 s and the dashboard stays up (handoff "Needs you" item 2).
+- With only old finished runs present, press `a` twice: runs appear, then the empty state returns, no exit.
+- Open `vim scripts/ai-run` in `~/Projects/agents` while the dashboard runs: that checkout must not appear as running.
+- A project whose `.ai/bin` is not yet upgraded and whose last run died: the card reads "stage unknown (older toolkit) · ⛔ <error>", not "stopped before Plan check".
+- The look-and-feel check from handoff item 1 (two runs, keys, resize across 120 columns, `q`).
 
 ### Covered by automated tests
 
-- Colour settings set by the caller, ANSI-safe summary parsing, and no escapes in a failing shard's echoed output: `test_parallel_runner_passes_with_caller_colour_settings`, `..._failing_shard_output_has_no_escapes`, `..._summary_parses_coloured_and_plain`.
-- Per-attempt model credit, old attempt-less lines, and an old line followed by `attempt=2`: `test_outcome_report_*`. The updated `test_runner_logs_task_outcomes_and_report` covers the end-to-end table.
-- Re-check upheld/withdrawn totals with `reviewed_head` after a real mocked re-check, a malformed answer (all upheld), BLOCKER counting through the helper, a line still written when unverifiable, and the separate re-check table plus a re-check-only catch-up list: `test_outcome_recheck_*`.
-- Should be added (N1): a catch-up line that prefers `reviewed_head`, and a task whose rows have mixed categories in "Attempts by model and category".
-- Full suite: 411 tests OK on the merged tree (host evidence above, labelled with the pre-merge head).
+- Empty ↔ non-empty run list in the live loop, auto-refresh and `r`/`a`: `test_dashboard_render_curses_runs_appear_and_disappear`, `test_dashboard_render_curses_all_toggle_with_only_old_runs`.
+- Legacy and malformed-record checkouts with a `last-error` at 140 and 80 columns and `needs_you` in JSON: `test_dashboard_render_legacy_checkout_with_last_error`; the recorded stop at start keeps its wording: `test_dashboard_render_stop_at_start`, `test_dashboard_render_writer_to_renderer_stops_and_overlays`.
+- Editors, pagers and git naming a runner script are not runners; `bash <script>` and a bare script are; a real bash-shebang process is alive: `test_dashboard_liveness_ignores_non_runner_processes`, `test_dashboard_liveness_real_pipeline_and_recover`.
+- Time-limit stop without a session, either message: `test_outcome_no_time_left_logs_nothing` (T014).
+- Full suite: 547 tests OK per host evidence at `eae2a10` (fingerprint unchanged at HEAD).
 
 Review approval does not constitute human acceptance.
