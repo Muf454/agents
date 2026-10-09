@@ -119,6 +119,12 @@ case "$decision_rc" in
 esac
 # Hard rules: never let an AI talk the workflow past its own gate, policy or integrity checks.
 case "$reason" in
+  *'moved past the branch'*)
+    # escalate prints only its summary: keep the base, SHA and merge advice on stderr too.
+    printf 'Error: %s\n' "${reason% }" >&2
+    escalate 'the review base moved past the branch.' 'merge the base into the branch, then rerun ai-pipeline.' ;;
+esac
+case "$reason" in
   *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
   *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
   *'differs from the validated content'*|*'Triage stage'*|*'Dependency setup'*|*'Plan revision stage'*|\

@@ -1,18 +1,18 @@
 {
-  "toolkit_commit": "b98aa66a939681b0b254ceef26ac7d41639e9e7b",
+  "toolkit_commit": "3765afc25e775b1b467f168d5cd2a398afcffcb3",
   "files": {
     ".ai/bin/ai-check": "1f1b6d9c909831572bf23546049a7ee9f1426dcc083806935c229fe87ea6fc6f",
     ".ai/bin/ai-pipeline": "a7f2fe60621a72468510f3a8faaf61bce9df748175c681753670f4286d297285",
     ".ai/bin/ai-recover": "c957510083e3e223ed96e39f142cf324b221597b86e84b514df8a13ed353c40b",
-    ".ai/bin/ai-review": "216a05d5cbd377db7696bf1a973826fd19931682a0925107469c439799c5602a",
-    ".ai/bin/ai-run": "a388dc003664d362b3c64c750a4e27c5da43f7a47465dbbddca72d95b02eb004",
+    ".ai/bin/ai-review": "d9319f1a824b7785c7bb6369d1b4f04deb6a0a7a95bb1bb74bde5cc265c68a57",
+    ".ai/bin/ai-run": "1a38a01d3a8336a908483a69e7407dfac67f5a614729169a2915939370cf0d0c",
     ".ai/bin/ai-status": "983ef180750fcbed6ea96cb4170643dbe2b3c88b77922c38becdbef0ce89f79d",
     ".ai/bin/ai-task": "ddf1d23a93e245d43a34632fa1a3eee320ddf0c0aec8c6e76990cbd4a4bca449",
     ".ai/bin/ai-watchdog": "bbdc7dea49750deb3727ea6ccf7e668ca2cae119f014c67eb90ad51b57801177",
     ".ai/bin/lib/common.sh": "2fd76fe0f006c470c5a21ac0f96016e3f87ce61d89f249df939c9cef407a7089",
     ".ai/bin/lib/watchdog.py": "d55a6087afa00339d859ddcde4d042315e78b411bd4182bf02b5c90890b041da",
-    ".ai/bin/lib/workflow.py": "754f7ad39d334d9bf687a5909e9478f245854933bfa3f3b23a92f825662c553a",
-    ".ai/prompts/claude-review.md": "ffa7e4a50e84d3f21f0155d799f2a22b90534183bde18e9207c0d37b2f1ff7f6",
+    ".ai/bin/lib/workflow.py": "37aff55a10fe6220242b08f2768674bb61bd6fd37b872104835e927a4c6da5a1",
+    ".ai/prompts/claude-review.md": "17e78e9f1b28018edc2b61997df25af653e92259e53beca817a53fa88f9e1004",
     ".ai/prompts/fix-review.md": "aeba23349fd8b7cc169cbf6103570f795c4ffb598f3d21509a40bb62aedd43b0",
     ".ai/prompts/implement.md": "2251ee7e086d01c7cfd5eb80bfce4990e37f69798fe3bf07d41e3efac69c303e",
     ".ai/prompts/plan-review.md": "4a9817c628a6635b83ce86c875944513acc6cd2e03209ea3f89048beafbf27b0",
@@ -20,9 +20,9 @@
     ".ai/prompts/recheck.md": "57a2e44d0f14c0bf2dac6d1d77379fdc17fa5cd6d94d5c02c72f2500b062f49f",
     ".ai/prompts/recover.md": "76316752dddfb1ca50e3042d55d09a6679f61342755bbe1cce15410d9ad77975",
     ".ai/prompts/resume.md": "d05c3a641c2a2a305d6fdd95b58192468a6d40922582e330ffe146d1353dce2c",
-    ".ai/prompts/review.md": "d39d73e8245c8aaabca58a3ffb586e7d8d4cb3c9a0649bd235c7a58b2a0c28fa",
+    ".ai/prompts/review.md": "10c5406b5d43c55ac2fe46af13218021aa04954f67e3777316d6a517da992a70",
     ".ai/prompts/runner.md": "3f37c0f69d1af463f5946eb6e2918f3b0b25aa13232d445c1fc295f3e19417f1",
-    ".ai/prompts/triage.md": "440645372108f8c213a105f4eb92505cb34688e5c50306eb3f8b767bc428b571"
+    ".ai/prompts/triage.md": "2090a354cf2650eee2fa9b6145dd3671a81bf65fd45047abdf741262c221f237"
   },
   "templates": {}
 }

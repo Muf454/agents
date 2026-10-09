@@ -98,8 +98,21 @@ all_tools=Read,Glob,Grep,Edit,Write,Bash
 started=$SECONDS
 active_task=none
 finished=no
+# A task attempt is open from the moment its implementation session starts until its outcome is
+# logged; any stop in between (session error, timeout, interruption, a limit wait beyond the
+# budget, a malformed queue) logs exactly one outcome. Triage never tracks an attempt.
+track_attempt=no
+attempt_open=no
+session_code=
 on_exit() {
   local code=$?
+  # Never run a project helper after the approved gate changed: a stop for that reason logs nothing.
+  if [[ "$attempt_open" == yes && "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+    if (( code == 130|| code == 143 )); then task_outcome interrupted
+    elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
+    else task_outcome error
+    fi
+  fi
   if [[ "$finished" != yes ]]; then
     if [[ -n "${revision_started:-}" ]]; then
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
@@ -125,6 +138,7 @@ dirty_beyond_records() {
 
 # Host-side outcome log for tuning the model rules (ai-status --outcomes); never fatal.
 task_outcome() {
+  attempt_open=no
   ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" 2>/dev/null || \
     printf '%s\n' 'Note: could not append to the outcome log.' >&2
 }
@@ -173,6 +187,12 @@ claude_session() {
     review_before=$(review_digest)
     printf 'Session: %s%s (limit %ss; log %s)\n' "$active_task" \
       "${session_model:+ [model $session_model]}" "$limit" "$log"
+    if [[ "$track_attempt" == yes && "$attempt_open" == no ]]; then
+      # After the preflight checks; a limit pause and retry stays inside this attempt.
+      task_started=$SECONDS
+      session_code=
+      attempt_open=yes
+    fi
     set +e
     timeout --signal=TERM --kill-after=10s "$limit" claude -p \
       --permission-mode dontAsk --output-format json \
@@ -182,6 +202,7 @@ claude_session() {
       -- "$prompt" < /dev/null > "$log" 2> "$errors"
     code=$?
     set -e
+    session_code=$code
     ai_guard_verify
     # The independent review is Codex's evidence; no Claude session may alter it.
     [[ "$(review_digest)" == "$review_before" ]] || \
@@ -444,8 +465,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
-  task_started=$SECONDS
+  track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
+  track_attempt=no
   ai_branch
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")

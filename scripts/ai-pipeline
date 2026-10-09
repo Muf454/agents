@@ -16,8 +16,9 @@ Hands-off delivery of an approved plan on a feature branch:
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
   Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
---base is the review base (default main); --pr-base is the PR target branch
-(default: --base when it is a local or origin/ branch).
+--base is the review base (default main); a local branch B is replaced by origin/B when
+origin/B is strictly ahead of it (never fetched), and the resolved base is printed.
+--pr-base is the PR target branch (default: --base when it is a local or origin/ branch).
 The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
 an interrupted review triage is verified and recorded once, and pending re-checks of
 rejected findings run, before anything else.
@@ -88,7 +89,21 @@ finish() {
 }
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD; use a feature branch.'
 ai_branch
-base_sha=$(git rev-parse --verify --quiet "${base}^{commit}") || ai_die "Invalid base: $base"
+# A local base branch that is behind origin/<base> would make the review cover already
+# merged work: review against origin/<base> when it is strictly ahead. Never fetches.
+base_ref=$base base_note=''
+if git show-ref --verify --quiet "refs/heads/$base" && \
+   git show-ref --verify --quiet "refs/remotes/origin/$base" && \
+   [[ "$(git rev-parse "refs/heads/$base")" != "$(git rev-parse "refs/remotes/origin/$base")" ]]; then
+  if git merge-base --is-ancestor "refs/heads/$base" "refs/remotes/origin/$base"; then
+    base_ref=origin/$base base_note=" (local $base is behind)"
+  elif ! git merge-base --is-ancestor "refs/remotes/origin/$base" "refs/heads/$base"; then
+    printf 'Local %s and origin/%s have diverged; reviewing against local %s.\n' "$base" "$base" "$base"
+  fi
+fi
+base_sha=$(git rev-parse --verify --quiet "${base_ref}^{commit}") || ai_die "Invalid base: $base"
+base_label="$base_ref ($(git rev-parse --short "$base_sha"))"
+printf 'Review base: %s at %s%s\n' "$base_ref" "$(git rev-parse --short "$base_sha")" "$base_note"
 # A dispute file unchanged since the merge-base was merged by the human: historical, not active.
 export AI_DISPUTES_BASE=$base_sha
 if [[ "$open_pr" == yes && -z "$pr_base" ]]; then
@@ -166,6 +181,9 @@ review_current() {
   git merge-base --is-ancestor "$base_sha" "$reviewed" 2>/dev/null || return 1
   git diff --quiet "$reviewed" HEAD -- . ':!.ai/reviews' ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md'
 }
+# The base must be contained in the branch, or no review of it can ever be current.
+base_reached() { git merge-base --is-ancestor "$base_sha" HEAD 2>/dev/null; }
+base_moved="Review base $base_label moved past the branch; merge it into $branch and rerun ai-pipeline"
 # Publish invariants: what gets published is exactly what was reviewed and validated.
 # Checked after host commits on the publish path, before and after every push attempt
 # (commit and push hooks run project code); any failure stops. The committed bytes come
@@ -178,6 +196,7 @@ publish_ready() {
   elif [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then why='the checkout is not clean'
   elif ! why=$(ai_helper committed-matches-worktree 2>&1 >/dev/null); then why="committed content differs from the validated content: ${why#Error: }"
   elif ! ai_helper tasks complete >/dev/null 2>&1; then why='not all tasks are DONE'
+  elif ! base_reached; then why=$base_moved
   elif ! review_current; then why='the review is not current for HEAD (reviewed content changed)'
   elif ! ai_helper stamp verify >/dev/null 2>&1; then why='the validation stamp is not current for HEAD'
   else return 0
@@ -356,6 +375,12 @@ elif [[ -n "$open_stage" ]]; then
     stage_fail 'the checkout is not clean after completing the triage.'
 fi
 reconcile_disputes
+# Settled above (they act on the published review only), so the human's merge never lands
+# in an open stage. The base is fixed for the run and HEAD only gains commits: check once.
+if ! base_reached; then
+  printf '%s\n' "$base_moved" > .ai/local/last-error
+  stop start
+fi
 # A recorded needs-human revision of the current plan review stops for the human (host record,
 # also after a crash); it clears only when a new plan review replaces the report. Checked on
 # every start whatever --skip-plan-review or the task queue say, in the plan review loop and
@@ -463,7 +488,7 @@ while true; do
       stop review
     fi
     step 'Independent review (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --base "$base" "${review_args[@]}" || stop review
+    "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
     ai_guard_verify
     mapfile -t records < <(review_record .ai/reviews/current.md)
     host_commit 'chore(ai): record independent review' "${records[@]}"

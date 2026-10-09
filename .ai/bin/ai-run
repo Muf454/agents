@@ -78,8 +78,21 @@ mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/per
 started=$SECONDS
 active_task=none
 finished=no
+# A task attempt is open from the moment its implementation session starts until its outcome is
+# logged; any stop in between (session error, timeout, interruption, a limit wait beyond the
+# budget, a malformed queue) logs exactly one outcome. Triage never tracks an attempt.
+track_attempt=no
+attempt_open=no
+session_code=
 on_exit() {
   local code=$?
+  # Never run a project helper after the approved gate changed: a stop for that reason logs nothing.
+  if [[ "$attempt_open" == yes && "$(ai_guard_digest 2>/dev/null)" == "$AI_APPROVED_GATE" ]]; then
+    if (( code == 130|| code == 143 )); then task_outcome interrupted
+    elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
+    else task_outcome error
+    fi
+  fi
   if [[ "$finished" != yes ]]; then
     ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
@@ -101,6 +114,7 @@ dirty_beyond_records() {
 
 # Host-side outcome log for tuning the model rules (ai-status --outcomes); never fatal.
 task_outcome() {
+  attempt_open=no
   ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" 2>/dev/null || \
     printf '%s\n' 'Note: could not append to the outcome log.' >&2
 }
@@ -148,6 +162,12 @@ claude_session() {
     review_before=$(review_digest)
     printf 'Session: %s%s (limit %ss; log %s)\n' "$active_task" \
       "${session_model:+ [model $session_model]}" "$limit" "$log"
+    if [[ "$track_attempt" == yes && "$attempt_open" == no ]]; then
+      # After the preflight checks; a limit pause and retry stays inside this attempt.
+      task_started=$SECONDS
+      session_code=
+      attempt_open=yes
+    fi
     set +e
     timeout --signal=TERM --kill-after=10s "$limit" claude -p \
       --permission-mode dontAsk --output-format json \
@@ -157,6 +177,7 @@ claude_session() {
       -- "$prompt" < /dev/null > "$log" 2> "$errors"
     code=$?
     set -e
+    session_code=$code
     ai_guard_verify
     # The independent review is Codex's evidence; no Claude session may alter it.
     [[ "$(review_digest)" == "$review_before" ]] || \
@@ -200,6 +221,11 @@ if [[ "$triage" == yes ]]; then
     ai_guard_verify
     prompt=$(cat .ai/prompts/triage.md)
     prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+    # Same routine as triage-check --fresh, so the prompt and the check agree on the round.
+    rounds=$(ai_helper review-history --current --count) || ai_die 'Triage stage: cannot count the earlier review rounds.'
+    history=$(ai_helper review-history --current) || ai_die 'Triage stage: cannot summarise the earlier review rounds.'
+    prompt+=$'\n\nThis review is round '"$(( rounds + 1 ))."
+    [[ -z "$history" ]] || prompt+=$'\n\nPREVIOUS ROUNDS:\n'"$history"
     prompt+=$(knowledge_prompt)
     claude_session "$prompt" "$model"
     ai_branch
@@ -208,7 +234,7 @@ if [[ "$triage" == yes ]]; then
   fi
   ai_helper tasks check
   triage_scope ''
-  ai_helper triage-check --fresh >/dev/null || ai_die 'Triage incomplete: every BLOCKER/MAJOR finding needs a valid disposition.'
+  error=$(ai_helper triage-check --fresh 2>&1 >/dev/null) || ai_die "Triage incomplete: ${error#Error: }"
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
   # The one counted commit of this round, including leftovers of an interrupted triage.
@@ -287,8 +313,9 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
-  task_started=$SECONDS
+  track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}"
+  track_attempt=no
   ai_branch
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")

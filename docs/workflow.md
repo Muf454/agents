@@ -360,13 +360,17 @@ fewer than two counted rounds, the reservation used) ends with the draft PR as b
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
-deferred → draft PR. Triage sessions may change only `.ai/tasks.md`,
+deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
+decorations do not match. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
-reviews need exactly one counts line that agrees with the listed finding IDs, plus the
-verdict and the BLOCKER/MAJOR/MINOR sections; the other sections the prompt asks for are
-optional, so a renamed one doesn't discard the review.
+reviews need exactly one counts line that agrees with the listed finding IDs, plus (code
+reviews only) a verdict, either an `Overall verdict: <text>` line or an `## Overall verdict`
+heading (optional trailing colon) followed by non-empty text; the PR body shows that text.
+A `## <LEVEL> findings` section may be left out when its count is 0 (FL-14); a count above
+0 with the section missing or only `None.` is still rejected. The other sections the prompt
+asks for are optional, so a renamed one doesn't discard the review.
 On rerun, complete dispositions for the current review are reused, not re-triaged.
 
 Convergence (FL-03): the triage prompt gets `This review is round <n>.` and, from round 2,
@@ -468,9 +472,31 @@ recorded again on the new branch. Without `AI_DISPUTES_BASE` (a helper run by ha
 nothing is inherited. Limitation: reusing a branch name whose host records were already
 merged fails verification (its old records sit both in the inherited copy and the store).
 
+Review base (FL-15): `ai-pipeline --base B` resolves the base once per run, without
+fetching. When both the local branch `B` and `origin/B` exist and differ, `origin/B` is
+used if the local branch is its ancestor (local is stale); if neither contains the other
+the run prints `Local B and origin/B have diverged; reviewing against local B.` and keeps
+the local branch. Any other base (an `origin/` ref, a SHA) is used as given. The run
+prints `Review base: <ref> at <short sha>` (with ` (local B is behind)` when it switched)
+and passes the resolved SHA to `ai-review`, the fix-round counter and the dispute base.
+The PR target is still inferred from the name `B`. A rerun resolves again, so the base
+can advance between runs after a fetch.
+
+Base moved past the branch (FL-17): when the resolved base is not an ancestor of HEAD,
+no review can ever be current, so the run stops at the start with `Review base <ref>
+(<sha>) moved past the branch; merge it into <branch> and rerun ai-pipeline`, before the
+plan review, implementation and code review. An interrupted review triage and a pending
+re-check are completed first (both act only on the already published review, and their
+scope checks would reject a merge made while they are open); merge only after this stop.
+Without either, no agent runs at all. The base is fixed for a run and HEAD only gains
+commits, so one check per start suffices; a rerun re-resolves the base and checks again.
+`publish_ready` names the same case (history rewritten by a hook) before its "review
+current" check, and `ai-recover` escalates it by hard rule with the full message on stderr.
+
 Publish invariants (`publish_ready`): before the PR stage, before every push attempt
 (retries included) and after every push attempt (failed or successful, before the retry
-wait), the review must verify and be current for HEAD (only workflow records changed
+wait), the review base must be an ancestor of HEAD (else "moved past the branch"), the
+review must verify and be current for HEAD (only workflow records changed
 since the reviewed commit), the validation stamp must be current, the tree clean
 (untracked files too), the committed bytes equal to the validated files on disk
 (`committed-matches-worktree`) and all tasks DONE; a push hook that commits other bytes
@@ -520,7 +546,9 @@ whose `stage-verify` says `committed` is cleared first, so the run continues onc
 answer has a new plan review (the stage would be foreign to it); an unreadable revision store
 (exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
-`Triage stage`, `Plan revision stage`, `supervision limit reached`, `needs your decision`);
+`Triage stage`, `Plan revision stage`, `supervision limit reached`, `needs your decision`,
+and the review base that moved past the branch, whose full recorded reason is printed to
+stderr before the escalation summary);
 an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage or plan-revision
 stage for the branch (also after a watchdog crash recovery) it never commits anything: changes
 since the stage start outside that stage's records (`triage-scope` / `plan-revision-scope`)
@@ -693,18 +721,37 @@ an incident as a successful probe. Nothing is installed by `setup-project`.
 pauses and retries under `codex`; under `auto` it switches to `claude_attempt` for this
 review (any other Codex failure stops as before; a missing Codex CLI goes straight to
 Claude). `claude_attempt`: `claude -p --permission-mode dontAsk --output-format json
---tools Read,Glob,Grep,Bash,Edit,Write --allowedTools $(workflow.py review-allowlist)
+--tools Read,Glob,Grep --allowedTools $(workflow.py review-allowlist)
 --setting-sources project --strict-mcp-config --model M --effort E`, stdin `/dev/null`,
-the mode prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` keeps Read/Glob/
-Grep, read-only git subcommands and the project's `Bash(...)` entries except writers,
-runners and open interpreters (`REVIEW_DROP_FIRST`, `REVIEW_DROP_OPEN`), and
-adds `Edit(./.ai/local/review-probes/**)` (verified live: in dontAsk mode this rule lets
-the Write tool create files there and nowhere else). The probe directory is recreated
-before and removed after the session. A Claude usage limit pauses (`ai_limit_pause
-Claude`) and the loop starts again with Codex. The final text (`claude-text`) becomes
-the report (denials go to `.ai/local/review-denials.log`; the allowlist it got to
-`.ai/local/review-*.allowlist`); the usual "checkout unchanged" check and publish
-helpers follow.
+the mode's Claude prompt plus `.ai/prompts/claude-review.md`. `review-allowlist` prints
+just `Read`, `Glob`, `Grep` and does not read `.ai/permissions.allow`.
+
+No shell, by design: plan review rounds 1–4 each found a new command-argument route
+through Bash allow/deny lists (runner options, exact entries, git option abbreviations
+such as `git grep --open-files=`), so the reviewer gets no Bash, Edit or Write tool. The
+host prepares the git context instead: `review_context`, called by `claude_attempt` right
+before each session (a retry after a Claude usage-limit pause rebuilds it), recreates the
+ignored `.ai/local/review-context/` and writes, with `git … --no-ext-diff --no-textconv`
+and no truncation:
+- code: `diff.patch` (`git diff MERGE_BASE..HEAD`), `log.txt` (`git log --stat`),
+  `files.txt` (`--name-only`), and `since-last-review.patch` when the last reviewed HEAD
+  is an ancestor of HEAD;
+- recheck: the same three for the current review's range from `workflow.py review-range`
+  (`HEAD MERGE_BASE` of the verified review, parsed with the header regex
+  `current_review_rounds` uses; it must match `recheck-prepare`'s HEAD), plus
+  `findings.txt` (the rejected rows);
+- plan: `files.txt` (spec, plan, tasks) and `log.txt` (`git log --stat -n 20`).
+
+`run_review` calls `claude_attempt` in a conditional context, where bash disables
+`errexit`, so every context step is checked explicitly; the first failure removes the
+directory and dies (`Could not prepare the review context; prior review preserved.`)
+before `claude` runs. The directory is removed right after the session, before any
+result check. Each mode builds `claude_prompt` next to the Codex prompt: same template,
+history and output contract, with scope lines naming the context files instead of git
+commands. A Claude usage limit pauses (`ai_limit_pause Claude`) and the loop starts
+again with Codex. The final text (`claude-text`) becomes the report (denials go to
+`.ai/local/review-denials.log`; the tool list to `.ai/local/review-*.allowlist`); the
+usual "checkout unchanged" check and publish helpers follow.
 
 Model (`review-risk`): `high` when a task has `Model: opus*` or a title matching (whole
 words) RLS, row-level, auth/authn/authz/authentication/authorization, permission, policy,
@@ -723,10 +770,29 @@ commits with its own record). `pr-body` titles the review section "Claude fallba
 
 `workflow.py outcome task|review` appends one JSON line to `<state root>/outcomes.jsonl`
 (checked with `check_state_root`: never inside the checkout). `ai-run` writes `done`,
-`blocked`, `validation_failed` or `no_checkpoint` per task attempt with the session
-model and the seconds from session start to result; the attempt number counts earlier
-lines for the same project (main repository name, shared by worktrees), branch and task.
-Failures to write are reported and never stop the run. `outcomes-report` (`ai-status
+`blocked`, `validation_failed`, `no_checkpoint`, `timeout`, `interrupted` or `error` per
+task attempt with the session model and the seconds from session start to result; the
+attempt number counts earlier lines for the same project (main repository name, shared by
+worktrees), branch and task. Failures to write are reported and never stop the run.
+
+An attempt opens immediately before the implementation session's `claude` call (after the
+dependency step and the remaining-time check; `--triage` never opens one) and closes with
+exactly one line: the result above, or, when the runner stops first, from the EXIT handler:
+`timeout` (the session exited 124/137), `interrupted` (the runner exited 130/143) or `error`
+(anything else: a failed session, a malformed queue, a usage-limit wait beyond
+`AI_LIMIT_MAX_WAIT`, ...). A usage-limit pause and retry inside the session belong to the
+same attempt and keep its start time. A run with no time left before the session starts logs
+nothing, and so does a stop because the approved gate changed (the handler never runs a
+project helper after that). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
+from the task's heading, or is empty.
+
+Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
+returns, and GNU `timeout` runs the session in its own process group, so neither a signal to
+the runner nor Ctrl-C reaches the session. The runner exits 130/143 only when the session
+ends (or hits its limit), and the `interrupted` line's time is then, not the keypress. A
+pipeline launched in the background from a non-interactive shell (`nohup … &`) inherits SIGINT
+as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
+`outcomes-report` (`ai-status
 --outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
 minutes) by model, category and both, and reviews by reviewer/model/mode.
 

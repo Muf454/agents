@@ -10,22 +10,23 @@ to find what breaks in production, not to confirm that the work is done.
 - A test proves only what it asserts. Read the tests for the risky paths and say what they
   miss. A green gate on code that doesn't run the risky path is no evidence.
 - Prefer one proven finding over five guesses. Mark each finding as **demonstrated**
-  (you ran a probe or traced the exact path) or **suspected** (reasoned, not run).
-  Leave a suspected finding out unless its impact is high. Don't pad with style nits.
+  (you traced the exact code path, or the validation output shows it) or **suspected**
+  (reasoned). Leave a suspected finding out unless its impact is high. Don't pad with
+  style nits.
 
-## Prove findings with probes
-- Use the project's own approved test commands (see your allowed tools) to run scenario
-  probes. Write probe files only under `.ai/local/review-probes/` (ignored, deleted after
-  the review). Never edit project files, never commit, never install packages, never use
-  the network, production services or secrets.
-- Database work: apply the real migrations in the project's in-memory test setup (e.g.
-  PGlite) and run the scenario as each role. For example: user A in guild 1 tries to read or
-  write guild 2's rows; delete an account that has attendance, notes and assignments.
-  With vitest, a probe config can extend the project's config:
-  `npx vitest run --config .ai/local/review-probes/vitest.config.ts`.
-- Code paths: small scripts or tests that call the real functions with edge inputs.
-- Put the probe and its observed output (or the exact trace) in the finding's evidence.
-  If a probe can't run here, say so and keep the finding as suspected.
+## Evidence
+- Your tools are Read, Glob and Grep: no shell, no commands, no probes, no writes. The
+  host prepared the git context in `.ai/local/review-context/` (the diff, commits, changed
+  paths; the scope lines above name the files). Page large files with Read offset/limit.
+- Trace the exact code path through the actual source: callers, migrations, policies,
+  triggers, error branches. Read the tests for the risky paths and say what they miss.
+- Use the validation evidence the host recorded (`.ai/local/validation.json` and the gate
+  logs in `.ai/local/`) for what actually ran and passed.
+- Database work: follow each role through the real migrations and policies. For example:
+  user A in guild 1 tries to read or write guild 2's rows; delete an account that has
+  attendance, notes and assignments.
+- Put the trace (files and lines) or the validation output in the finding's evidence.
+- Read only files inside this checkout; never files outside it (the review is published).
 
 ## Checklist of failure types seen in these projects
 Check each one that applies to the change, and name the ones you checked under

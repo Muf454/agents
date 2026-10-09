@@ -273,12 +273,13 @@ tmux new -s my-app-ai
    the current review (`🔁 Extra fix round: findings falling (x → y → z)`); otherwise the
    PR is a draft as before. Codex's report is never edited by Claude:
    the runner stops if any session changes `.ai/reviews/current.md`, and a report
-   whose counts disagree with its listed finding IDs is rejected. Supervised
-   (`AI_SUPERVISE=1`), a plan or code review that fails only these format checks (missing
-   field or section, counts not matching the listed IDs, empty answer) is requested once
-   more with the error appended (`🔁 Review format retry (plan|code): <error>`, one run-log
-   line naming the first report, committed with the review); a second format error stops
-   as before. Reviewer errors, a changed checkout and re-checks are never retried.
+   whose counts disagree with its listed finding IDs is rejected (a findings section with
+   a count of 0 may be left out, and the verdict may be an `## Overall verdict` heading).
+   Supervised (`AI_SUPERVISE=1`), a plan or code review that fails only these format checks
+   (missing field or section, counts not matching the listed IDs, empty answer) is requested
+   once more with the error appended (`🔁 Review format retry (plan|code): <error>`, one
+   run-log line naming the first report, committed with the review); a second format error
+   stops as before. Reviewer errors, a changed checkout and re-checks are never retried.
 4. **Pull request**: pushes the feature branch (never with force; never `main`) and
    opens or updates a PR with the summary, tasks, validation evidence, review result,
    and the handoff's manual test steps. Unresolved or deferred significant findings
@@ -289,10 +290,17 @@ tmux new -s my-app-ai
    disputes are history: a later branch inherits the unchanged file without a draft,
    and only disputes recorded on that branch count. The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
-   required. Without an `origin` remote or `gh`, it stops at a ready local branch.
+   required. The review itself compares against `origin/<base>` when that is strictly
+   ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
+   PRs into the review); the run prints `Review base: <ref> at <sha>`, warns when the two
+   have diverged (then local wins), and never fetches. If that base has moved past your
+   branch, the run stops at the start ("Review base … moved past the branch; merge it
+   into <branch> and rerun"), after finishing any interrupted triage or re-check and
+   before any other agent runs: merge the base only after that stop, then rerun.
+   Recovery escalates this stop and keeps the full message. Without an `origin` remote or `gh`, it stops at a ready local branch.
    Before every review it requires that the committed bytes equal the validated files.
-   Before and after every push attempt (failed or not) it re-checks that the review is
-   current for HEAD, validation is current, the tree is clean, the committed bytes
+   Before and after every push attempt (failed or not) it re-checks that the base is
+   still contained in HEAD, that the review is current for HEAD, validation is current, the tree is clean, the committed bytes
    equal the validated files and all tasks are DONE, and after a push that origin's
    branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
@@ -382,21 +390,26 @@ old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried a
 every later review, so it takes over as soon as it has usage.
 
 The Claude reviewer is a separate `claude -p` session with no access to the
-implementing session: tools Read/Glob/Grep/Bash/Edit/Write. Its allowlist is built from
-`.ai/permissions.allow`: Read/Glob/Grep, read-only git, and the project's fixed check
-commands (e.g. `npm test`, `npx vitest run *`). Dropped: Edit/Write, git writes, `ai-task`,
-`ai-check`, `.ai/validate`, pushes, deploys, `supabase`, `vercel`, writers and runners
-(`rm`, `tee`, `sed`, `find`, `curl`, ...), and open interpreters (`bash *`, `node *`,
-`npx *`, `npm run *`, `python3 *`). Writes are allowed only for scratch probes under the
-ignored `.ai/local/review-probes/` (deleted afterwards). The list it got is saved next
-to the review log (`.ai/local/review-*.allowlist`), denied attempts go to
-`.ai/local/review-denials.log`. The approved test commands still run project code, and
-Read is not limited to the checkout. No MCP; project settings only. It gets
-the mode's usual prompt plus `.ai/prompts/claude-review.md` (sceptical stance, scenario
-probes, a checklist of failure types seen in these projects) and returns the same
-format, so the host saves it to the same file with the same bindings; dispositions,
-re-checks and disputes work unchanged. The allowlist is not an OS sandbox: the
-checkout-unchanged check after the review and the gate check still apply.
+implementing session and no shell: tools Read/Glob/Grep only, whatever
+`.ai/permissions.allow` contains (every Bash allow/deny list tried left a route to
+running code or writing files through command arguments). It runs no commands, tests
+or probes. Instead the host writes the review's git context to the ignored
+`.ai/local/review-context/` right before the session and deletes it right after: for
+a code review the diff (`diff.patch`), commits (`log.txt`), changed paths (`files.txt`)
+and, on a later round, `since-last-review.patch`; for a re-check the same for the
+reviewed range plus the rejected findings (`findings.txt`); for a plan review the plan
+files and recent commits. If any of that fails, the review stops before Claude starts
+and the prior review stays. The reviewer works from traced code paths and the
+recorded validation evidence (`.ai/local/validation.json`, gate logs). The tool list is
+saved next to the review log (`.ai/local/review-*.allowlist`), denied attempts go to
+`.ai/local/review-denials.log`. Read is not limited to the checkout (the prompt tells it
+to stay inside, since the review is published). No MCP; project settings only. It gets
+the mode's usual prompt (naming the context files instead of git commands) plus
+`.ai/prompts/claude-review.md` (sceptical stance, evidence rules, a checklist of failure
+types seen in these projects) and returns the same format, so the host saves it to the
+same file with the same bindings; dispositions, re-checks and disputes work unchanged.
+The tool list is not an OS sandbox: the checkout-unchanged check after the review and
+the gate check still apply.
 
 Model by risk: `claude-fable-5-1` for plan and code reviews when any task runs on opus
 or a task title names RLS/row-level, auth/authentication/authorization, permissions,
@@ -421,7 +434,7 @@ branch) and note the result in the log.
 `~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
-no_checkpoint), attempt, first-time pass, duration; for reviews: mode, reviewer
+no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration.
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
 model, category and model/category, findings per reviewer and model, and the
