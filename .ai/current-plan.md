@@ -59,6 +59,11 @@ Small, local changes in the existing scripts; no new runtime dependency, no new 
        F --> G[human/mission control commits, starts ai-pipeline]
        G --> H[pipeline start record: Plan ✓]
      ```
+     Plan mode's session timeout defaults to 3600 s (`--session-timeout` wins). After the
+     session the host also runs `workflow.py plan-keeps-done START` (T011, plan review
+     round 1 P1): every task DONE at START must keep its identical block; the check is
+     unconditional (a template queue has no DONE tasks, so a first plan passes), so the
+     "keep DONE tasks" contract is enforced, not prompt-only.
    - Dashboard (T008): `FLOW` gains `('planning', 'Plan', 'Plan', 'claude')` first; Plan
      check's compact label becomes `PlanCheck`; `BOX_OF['recheck']` computed from Triage's
      index; joiners `─` (one column). Worst case at 120 columns: labels 4 + 10 + 13 + 5 + 11
@@ -71,8 +76,11 @@ Small, local changes in the existing scripts; no new runtime dependency, no new 
 
 ## Phases / tasks
 T001 (FL-18, sonnet) → T002 (FL-19 budget, sonnet) → T003 (FL-19 lock, opus) → T004 (FL-21,
-opus) → T005 (FL-22, opus) → T006 (plan records, sonnet) → T007 (`ai-run --plan`, sonnet) →
-T008 (dashboard Plan box, sonnet) → T009 (docs and audit, sonnet). The FL items are
+opus) → T005 (FL-22, sonnet) → T006 (plan records, sonnet) → T007 (`ai-run --plan`, opus) →
+T008 (dashboard Plan box, sonnet) → T009 (docs and audit, sonnet) → T010 (17-session budget
+end to end under the pipeline timeout, sonnet) → T011 (`plan-keeps-done`, opus). T010/T011
+come from plan review round 1 and document their own one-line changes.
+The ai-pipeline queue check runs whether or not the plan review is on (round 1 P7). The FL items are
 independent (`Dependencies: none`) so one blocked item never stops the others; DB-04 comes
 after them in queue order, and T007 depends on T001 (queue check) and T006.
 

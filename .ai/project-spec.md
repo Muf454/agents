@@ -36,9 +36,9 @@ never authorizes), gate files are never edited by a pipeline session.
 ## Requirements
 - **FL-18 queue check.** `ai-task check` (new subcommand) validates `.ai/tasks.md` read-only
   with the same rules as the runner (`workflow.py tasks check`) and prints
-  `Task queue OK: <total> tasks, <done> DONE` or the exact error (exit 1). `ai-pipeline`, when
-  the plan review is enabled, validates the queue BEFORE the `tasks untouched` gate and on
-  failure stops with `stop 'plan review'` and last-error
+  `Task queue OK: <total> tasks, <done> DONE` or the exact error (exit 1). `ai-pipeline`
+  always validates the queue BEFORE the `tasks untouched` gate and on failure stops with
+  `stop 'plan review'` (`stop implementation` with `--skip-plan-review`) and last-error
   `Task queue is invalid: <error>`; ai-recover always escalates that reason (a rerun cannot
   fix a plan). `templates/.ai/prompts/plan.md` tells planners with a shell to run
   `.ai/bin/ai-task check` (already allowed by the runner template); headless planners
@@ -86,8 +86,10 @@ never authorizes), gate files are never edited by a pipeline session.
     records (`workflow.py plan-scope HEAD`), checkout registered (`pipeline-register`),
     observation `step planning "<model> · first plan|revision"`, notification
     `📝 PLANNING on <branch> (<model>)`.
+  - Session timeout: 3600 s by default in plan mode (`--session-timeout` wins).
   - After the session: gate unchanged (existing check), `plan-scope <start HEAD>` (only the
-    six records plus the host's `.ai/run-log.md` changed), `tasks check`. Success →
+    six records plus the host's `.ai/run-log.md` changed), `plan-keeps-done <start HEAD>`
+    (every task DONE at the start keeps its identical block; always checked), `tasks check`. Success →
     `observe planned "<n> tasks"` (stage `planning`, state `done`) and
     `📝 Plan ready on <branch>: <n> tasks. Review and commit it, then start ai-pipeline
     --approved.`; failure → `last-error` = the reason, observation `stop plan <reason>`

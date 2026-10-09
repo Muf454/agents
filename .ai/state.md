@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: fix/night-stops
-Phase: implementing
+Phase: planning
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 9
-Last validation: not run (planning session; no code changed)
+Tasks remaining: 11
+Last validation: not run
 Blocked: no
-Next action: Runner: implement T001 (queue check, FL-18), then T002–T009 in order
-Last updated: 2026-10-09 (planning session)
+Next action: Review the revised plan (ai-review --plan)
+Last updated: 2026-10-09T21:08:10Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

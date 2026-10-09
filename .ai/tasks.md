@@ -35,11 +35,12 @@ silently skipping the review; planners have a read-only queue check they may run
   `Task queue OK: <total> tasks, <done> DONE` from `ai_helper tasks counts`. Read-only: no
   lock, no record. Update the usage lines (`set | show | check`).
 - `scripts/ai-pipeline` ~414: before `if [[ "$plan_review" == yes ]] && ai_helper tasks
-  untouched …`, when `plan_review == yes`:
+  untouched …`, ALWAYS (plan review on or off; plan review round 1 P7):
   `queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || { printf 'Task queue is invalid: %s\n'
-  "${queue_error#Error: }" > .ai/local/last-error; stop 'plan review'; }`.
+  "${queue_error#Error: }" > .ai/local/last-error; stop "$queue_stage"; }` with
+  `queue_stage='plan review'` when `plan_review == yes`, else `implementation`, so the
+  `Task queue is invalid` prefix always reaches ai-recover's escalation.
   The `tasks untouched` gate stays (a queue with a DONE task skips the review as today).
-  `--skip-plan-review` behaviour is unchanged (ai-run reports the error in implementation).
 - `scripts/ai-recover` ~136: add `*'Task queue is invalid'*` to the always-escalate patterns
   (a rerun cannot repair a plan; the read-only recovery session cannot edit it).
 - `templates/.ai/prompts/plan.md`: one sentence: "Check the queue with `.ai/bin/ai-task check`
@@ -66,6 +67,10 @@ tests/test_workflow.py, README.md, docs/workflow.md
     (`recover-calls` absent) and the ⛔ names the queue error;
   - with a DONE task in an otherwise valid queue the plan review is still skipped (existing
     behaviour; no codex plan call);
+  - `ai-pipeline --approved --skip-plan-review` with the invalid queue: exit 1, no Claude
+    session, `last-error` starts with `Task queue is invalid:`, observation
+    `stage=build, state=stopped` (`implementation` stop label), and with
+    `AI_AUTO_RECOVER=1` no recovery session (`recover-calls` absent);
   - `templates/.ai/prompts/plan.md` mentions `.ai/bin/ai-task check`.
 - All existing tests pass unchanged.
 
@@ -108,9 +113,9 @@ scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md
   - 3 TODO tasks: `Session budget: 16`; with 1 DONE of 20: `Session budget: 21`;
   - `--sessions 1` with two TODO tasks still stops with `Session limit reached` after one
     session and prints `Session budget: 1 (--sessions)`;
-  - end to end: 17 TODO tasks with the default mock (each session completes its task) run
-    to `Tasks complete and validation passed` without `Session limit reached` (bounded by
-    the test command timeout);
+  - every case above stays within `tool()`'s 25 s: at most two sessions run (stop the run
+    early with an existing failing mock mode or `--sessions`). The 17-session end-to-end
+    runs are T010 (they need the pipeline timeout; plan review round 1 P2).
   - `--triage` and `--revise-plan` do not print a session budget.
 - All existing tests pass unchanged.
 
@@ -238,8 +243,10 @@ scripts/lib/watchdog.py, tests/test_workflow.py, README.md, docs/workflow.md
   - crash with a marker whose PID is gone: the first probe reports `ai-pipeline is gone`
     (existing `test_watchdog_pipeline_marker_detects_killed_pipeline` unchanged);
   - observation `stage=planning` (active or done) with Phase `implementing` and no runner:
-    no `stalled` incident over two probes 10 min apart; a FIFO `observation.json` returns
-    within 10 s and is ignored;
+    no `stalled` incident over two probes 10 min apart (the test writes `observation.json`
+    by hand, e.g. `{"stage": "planning", "state": "active", …}`: `observe step planning`
+    is refused until T006 adds the key); a FIFO `observation.json` returns within 10 s and
+    is ignored;
   - a `watchdog.json` without `stall_seen_ns` (previous version) is accepted; one with
     `"stall_seen_ns": "x"` fails like any invalid dedupe record.
 - `test_watchdog_health_stall_recovery_and_checkout_scope` is updated to the confirmation
@@ -255,7 +262,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ## T005 — Runner template may make a new script executable (FL-22)
 Status: TODO
 Dependencies: none
-Model: opus
+Model: sonnet
 
 ### Goal
 A runner session can make a script it created executable, with the narrowest rule the
@@ -367,6 +374,10 @@ scripts/ai-run (structure like the `--revise-plan` branch ~225–351):
   used); `--model`, `--session-timeout`, `--knowledge-dir` allowed; `--triage`,
   `--revise-plan`, `--since`, `--base`, `--sessions`, `--run-timeout` refused; refused when
   `AI_PIPELINE` is set (`ai_die 'ai-run --plan runs outside a pipeline.'`). Usage text.
+  Plan mode's session timeout defaults to 3600 s unless `--session-timeout` is given (an
+  opus first plan on a real repo can exceed the 1800 s runner default, ai-run:32); usage
+  text and README say so and that the watchdog's `hung` warning (45 quiet minutes,
+  watchdog.py ~427) may still fire on a long plan (plan review round 1 P5).
 - Order in plan mode: `ai_supervise_settings`, claude check, `ai_root`, state-root check,
   `ai_lock`, `rm -f last-error`, branch (`AI_START_BRANCH`, `ai_branch`: protected branches
   refused), HEAD exists. Skip the clean-checkpoint check (~85) and `tasks check` (~87) (a
@@ -435,7 +446,10 @@ scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md
     without `--plan`, uncommitted `src.txt` before the start (no session ran in each case);
     a held checkout lock → T003's message;
   - a usage-limit pause (mock `limit-once` applied to the planning branch, `AI_SLEEP`) shows
-    `state=paused` on `planning` and the run then completes.
+    `state=paused` on `planning` and the run then completes;
+  - the plan session's timeout is 3600 s by default and the `--session-timeout` value when
+    given (visible through the existing session-timeout mechanism, e.g. a mock `timeout`
+    wrapper's arguments or the session log).
 - All existing tests pass unchanged.
 
 ### Validation
@@ -550,6 +564,96 @@ README.md, docs/workflow.md, .ai/handoff.md
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T010 — Session budget end to end inside the pipeline timeout (FL-19, plan review round 1 P2)
+Status: TODO
+Dependencies: T002
+Model: sonnet
+
+### Goal
+Prove the default budget end to end (17 tasks run past session 16) without the test
+exceeding or racing the harness's 25 s `tool()` timeout.
+
+### Implementation notes
+- `tool()` (tests/test_workflow.py ~1130) gives every command except `ai-pipeline`
+  `COMMAND_TIMEOUT` (25 s); one mock session costs ~5 s in parallel shards (the existing
+  budget test ~1266 already needs the full window for 5 sessions). Run `ai-run` here through
+  `self.run_cmd([...ai-run path..., '--approved'], timeout=PIPELINE_TIMEOUT)` (or add a
+  `timeout=` keyword to `tool()` that defaults to today's rule; existing callers unchanged).
+- Use the cheapest mock: the default mode whose session completes its task; no extra work
+  per session. Generous bounds only (gate note).
+- The two cases share nothing mutable; each builds its own fixture.
+
+### Likely affected modules
+tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_session_budget_end_to_end_*` in tests/test_workflow.py:
+  - 17 TODO tasks, no `--sessions`: output contains `Session budget: 19` and
+    `Iteration 17/19`, ends with `Tasks complete and validation passed`, no
+    `Session limit reached`;
+  - 17 TODO tasks, `--sessions 16`: stops with `Session limit reached`, never prints
+    `Iteration 17/`.
+- Both run under `PIPELINE_TIMEOUT`, not `COMMAND_TIMEOUT`. All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k session_budget_end_to_end` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T011 — Planning never loses DONE tasks: host check `plan-keeps-done` (DB-04, plan review round 1 P1)
+Status: TODO
+Dependencies: T006, T007
+Model: opus
+
+### Goal
+A planning session (first plan or `--revision`) cannot remove or alter a task that was
+DONE at its start; the host stops the run naming the task instead of
+leaving the loss for mission control to commit unseen.
+
+### Implementation notes
+- `scripts/lib/workflow.py`: `plan-keeps-done START`: parse `git show START:.ai/tasks.md`
+  (absent at START → pass) and the working-tree `.ai/tasks.md` with `task_blocks`; every
+  task whose `Status:` was `DONE` at START must still exist with the identical block (heading
+  and all lines, so status and `### Result / notes` included). Failure: `fail('DONE task
+  T00x was changed or removed')`, first offending ID in queue order. Reuse the existing
+  git/`records_scope` helpers for reading START; no shell.
+- The check is unconditional (not tied to `--revision`): a START queue without DONE tasks
+  passes trivially, so a first plan from the template stays free to replace the queue, and
+  a forgotten `--revision` cannot bypass it.
+- `scripts/ai-run` plan mode, after `plan-scope "$since"` and before `tasks check`:
+  `keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || ai_die "Planning:
+  ${keep_error#Error: }"`. Same stop path as the other post-session failures (record
+  `stop plan`, one ⛔). The PLANNING CONTRACT sentence for this rule now applies to every
+  plan with DONE tasks and says the host checks it.
+- Mock claude: mode `plan-revision-drops-done` (removes or flips a DONE task) and
+  `plan-revision-ok` (appends a TODO task, keeps DONE blocks).
+- README planning paragraph and `docs/workflow.md` plan stage: one sentence.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py, tests/test_observation.py,
+README.md, docs/workflow.md
+
+### Acceptance criteria
+- Tests named `test_plan_keeps_done_*` (helper) and `test_plan_session_revision_*`
+  (ai-run):
+  - helper: passes when a DONE block is unchanged and TODO tasks are added/removed/edited;
+    fails naming the ID when a DONE task is removed, set to TODO, or its result text changed;
+    passes when START has no `.ai/tasks.md` or no DONE task;
+  - `ai-run --plan p --revision` with `plan-revision-drops-done` on a queue with DONE
+    T001: exit 1, stderr and `last-error` contain `DONE task T001 was changed or removed`,
+    record `stage=planning, state=stopped`, one ⛔, the edited file left as written;
+  - same with `plan-revision-ok`: exit 0, `planned` record, note counts the new task;
+  - the same drop without `--revision` is also refused.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k plan_keeps_done` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k plan_session_revision` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes

@@ -72,7 +72,9 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
 ### Covered by automated tests
 Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_budget_*`,
 `test_lock_owner_*`, `test_watchdog_confirm_*`, `test_permissions_chmod_*`,
-`test_observation_writer_plan_*`, `test_plan_session_*`, `test_dashboard_plan_*`.
+`test_observation_writer_plan_*`, `test_plan_session_*`, `test_dashboard_plan_*`,
+`test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` and
+`test_plan_session_revision_*` (T011).
 
 ## Human todos
 - Gate (this repo, before a run that needs it): add `Bash(chmod +x *)` to
@@ -87,5 +89,5 @@ Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_bud
 - No CI workflow change needed.
 
 ## Next action
-Runner: implement T001–T009 in order. Human afterwards: the checks under "Needs you", the
+Runner: implement T001–T011 in order (T010/T011 added by plan review round 1). Human afterwards: the checks under "Needs you", the
 gate/vault/timer todos, and the PR review.
