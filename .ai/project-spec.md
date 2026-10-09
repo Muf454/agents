@@ -1,175 +1,122 @@
-# Spec: Pipeline dashboard (`ai-dashboard`)
+# Spec: Night-stop fixes (FL-18, FL-19, FL-21, FL-22) and a Plan stage (DB-04)
 
 ## Objective
-Pipeline dashboard (`ai-dashboard`)
-One read-only terminal view of every AI pipeline on this machine: the pipeline flow drawn as
-boxes with the active stage highlighted, plus one short ntfy-style status line per run
-(▶ / ✅ / ⏸ / 🔧 / ⚠ / ⛔ / 🏁). Zack runs several pipelines at once (worktrees under
-`~/Projects/wt/`, each in its own tmux session); tmux only keeps them alive and `ai-status`
-covers one checkout and says nothing about where in the flow a run is.
+Remove the flow defects that stopped real night runs on 2026-10-07/08/09 and make planning
+sessions visible as a first pipeline stage. Source: vault `agents-backlog.md`, sections "Stop
+analysis 2026-10-07" (FL-18, FL-19, FL-21) and "Dashboard follow-ups" (FL-22, DB-04); Zack
+queued them into the night run `fix/night-stops` on 2026-10-09. Planned by Claude on
+2026-10-09 against `fix/night-stops` at 744827a (master after #25, the dashboard).
+Hub decisions respected: AD-4 (small atomic files in `.ai/local/`, no daemon), AD-5 (status
+never authorizes), gate files are never edited by a pipeline session.
 
-Source: Zack, 2026-10-07 ("high prio": a TUI overview of the whole flow, where each run is,
-all running pipelines, statuses like the ntfy app, active boxes highlighted, no overflow of
-information). It implements the approved terminal-first direction (Q1, 2026-10-05): backlog
-OR-19 plus the minimum of OR-12 (an observation snapshot) it needs, ahead of OR-11/14/18.
-Layout chosen by Zack: boxes. Planned by Claude on 2026-10-07; rebased on master e9354d9
-(FL-04 supervisor, FL-14–17) on 2026-10-09 with the plan revision as its own box (Zack,
-2026-10-09); the pipeline's Codex plan review gates it.
-Hub decisions respected: AD-4 (runtime observations are small atomic files in `.ai/local/`,
-no SQLite, no daemon), AD-5 (status never authorizes; the watchdog only observes), roles vs
-providers, gate files are never edited by a pipeline session.
+## Verified against the code (2026-10-09, 744827a)
+- **FL-18 open.** `scripts/ai-pipeline:414` runs the plan review only when
+  `ai_helper tasks untouched 2>/dev/null` succeeds; `tasks()` (workflow.py ~418) fails on an
+  invalid queue, so the review is skipped silently and `ai-run` stops in implementation with
+  the queue error. (Since FL-04 the `Plan review` header sits inside the loop, so it is no
+  longer printed; the silent skip remains.) `scripts/ai-task` has only `set`/`show`; the
+  runner allowlist template already allows `Bash(.ai/bin/ai-task *)`.
+- **FL-19 open.** `scripts/ai-run:32` `sessions=16` fixed default. `ai_lock` (common.sh ~236)
+  rejects a second process with `ai_die 'Another runner/reviewer owns this checkout.'`, which
+  also overwrites `.ai/local/last-error` (the real stop reason) and says nothing about who owns
+  the lock. During an in-pipeline recovery the owner is `ai-recover` (exec'd by `stop()`,
+  same PID, lock on fd 9, PID in `.ai/local/pipeline.active`).
+- **FL-21 open.** `ai-watchdog --install-timer` runs no probe itself; the timer unit has
+  `OnBootSec=2min` (watchdog.py ~231), and systemd fires an elapsed `OnBootSec` timer
+  immediately when it is started late (`enable --now`). The probe's `stalled` rule
+  (watchdog.py ~418: no runner, no `last-error`, Phase `implementing`/`fixing_review`)
+  notifies on the first sighting.
+- **FL-22 open.** `templates/.ai/permissions.allow` has no `chmod`; `git add --chmod=+x` is
+  allowed (via `git add *`) but leaves the working-tree file 644, so
+  `test_script_modes_all_shebang_scripts_are_executable` fails (DB-01 T007).
+- **DB-04 open.** Observation box keys (workflow.py ~3098) start at `plan_review`; the
+  dashboard draws eight boxes (`dashboard.py` ~330); no planning command exists. Planning
+  sessions are started by hand (`claude -p` with an `.ai`-only edit allowlist).
 
 ## Requirements
-- **Observation records (scripts only; revised after plan review 1, P1/P2/P4/P5/P9).**
-  One record per checkout, `.ai/local/observation.json`:
-  `{"stage", "state", "detail", "since", "note", "pid", "branch", "updated"}`.
-  `stage` is always a flow box key: `plan_review plan_revision setup build checks review
-  triage recheck pr` (or `none` before the first step and after a stop at start); `state` is
-  `active`, `paused`, `recovering`, `stopped` or `done`. A human (re)start of ai-pipeline
-  records `start` (stage `none`, state active, detail/note cleared) so an earlier run's record
-  never shows on the new run; a recovery resume keeps the recovering record. Overlays never
-  replace the underlying stage: a pause keeps `stage`, `detail` and `since` and sets
-  `state=paused`, `note=<agent> until <time>`; afterwards `state=active` again. `detail STAGE
-  TEXT` changes only the detail, and only when STAGE is the recorded stage (review format
-  retry). A stop sets `state=stopped`, `note=<reason>`, with the stage normalised from the
-  existing stop labels (revision 9, verified against the code): `start`→none (always; the
-  "base moved past the branch" early stop), `plan review`→plan_review (kept when the recorded
-  stage is plan_review or plan_revision), `plan revision`→plan_revision,
-  `implementation`→build (kept on setup/build/checks), `validation`→checks, `review`→review,
-  `triage`→triage, `re-check`→recheck, `pull request preparation`/`push`/`pull request`/`final
-  push`→pr; an empty or unknown label keeps the last stage. Recovery sets
-  `state=recovering`, `note=<attempt>/<max>`, keeping the stage that stopped. `done`:
-  `stage=pr`, `note=<PR url or "no PR">`.
-  Writers: `ai-pipeline` (`start`; each `step`, including the plan revision step with detail
-  `<r>/<max> · round <n>`, the interrupted revision (`resumed`), the stored needs-human
-  decision (Plan revision, `needs your decision`) and the triage round with `· extra (…)` for
-  the supervised extra fix round; `stop`; the pipeline-shell `ai_die`; `finish`),
-  `ai_deps` in common.sh (`setup` at an actual install, as a recovering overlay during
-  recovery), `ai-run` (`build` per task with detail
-  `<id> · <model> · <n>/<N>`; `checks` around its post-task and final `ai-check` calls,
-  then `build` with detail `<id> · checkpointed · <n>/<N>` as soon as the post-task gate
-  passed, so a stop between two tasks, the session limit included, lands on Build and not on
-  a passed Checks (plan review 9, P34); after a passing final gate the Checks detail is
-  `final · passed`; `triage`/`plan_revision` for `--triage` and
-  `--revise-plan` only outside a pipeline, whose own record they would overwrite),
-  `ai-review` (`detail <stage> format retry` after its 🔁 format retry notification),
-  `ai_limit_pause` (pause overlay), `ai-recover` (`recovering`; its recovery validation
-  shows `stage=checks, state=recovering`; a stored decision → Plan revision; escalation →
-  `stopped`, keeping the substage recovery last recorded), `ensure_validated` in the
-  pipeline (`checks`).
-  All writes go through one Python helper (`workflow.py observe`), which refuses a missing,
-  symlinked or non-directory `.ai/local`, writes via a temp file in `.ai/local` + `rename`
-  (never following a symlink at the destination) and never fails the caller (exit 0, warning
-  on stderr). It records `pid` as the calling script's PID (its parent) and `branch` from the
-  checkout's Git metadata without a git subprocess (P38). The pipeline-shell `ai_die` records
-  a stop only when `stop()` has not already done so (`AI_STOP_NOTIFIED`, P35).
-- **Gate-broken guard (plan review 9, P32; security).** The helpers above are project code
-  (`.ai/bin/lib/workflow.py` is part of the approved gate). On a stop caused by a changed or
-  unreadable gate (`ai_guard_verify`, `ai_deps`, ai-run's exit handler, ai-pipeline's `stop()`
-  and its two gate stops before the first step, ai-recover's gate escalations) no observation
-  or notification-log helper runs: those paths set the shell flag `AI_GATE_BROKEN` (a plain
-  variable, never set inside a command substitution) and `ai_observe`/`ai_notify_log` return
-  without calling the helper. The ⛔ notification itself (the user's `AI_NOTIFY_CMD`) is still
-  sent; exit codes and messages are unchanged. The existing gate tests (sentinel
-  `UNTRUSTED_HELPER_RAN`) keep passing. ai-recover and ai-pipeline run the checkout helper
-  before they compare the gate with the run manifest, as today (plan review 10, P39); the
-  watchdog needs no guard: it notifies through its own installed copy of common.sh and
-  workflow.py and verifies the gate digest with that copy before launching the checkout's
-  ai-recover (P40).
-- **Safety and bounds (plan review 2, P11–P14).** A recorded substage wins over an outer stop
-  label from the same group (`implementation` covers setup/build/checks), so a failed
-  validation or install stays on Checks/Setup. All record I/O (writers and the dashboard's
-  reads) goes through one helper set in workflow.py: directories opened with
-  `O_DIRECTORY|O_NOFOLLOW` and used as pinned descriptors; files opened `O_NOFOLLOW|O_NONBLOCK`,
-  regular files only, reads size-capped (head by default; the notification log is read as a
-  tail of the newest lines, P36); locks `LOCK_NB` with a 2 s deadline. Unsafe input or
-  a deadline → warning and skip, never a blocked or failed run, never a frozen dashboard.
-- **Notification mirror.** `ai_notify` also records each message through
-  `workflow.py notify-log` into `${AI_ROOT:-$PWD}/.ai/local/notifications.log` (JSON lines
-  `{"ts","message"}`, kept to the last 200), whether or not `AI_NOTIFY_CMD` is set. Writers
-  (every script that notifies, and the watchdog) serialise append + trim with `flock` on
-  `.ai/local/notifications.lock`; the existing log inode is never written (hard-link
-  safe): each update reads it bounded, appends and trims in memory, and replaces it with an
-  exclusively created temp file + `rename` under the lock. Readers take no lock
-  and skip a malformed or partial last line. Never fatal.
-- **Host registry.** `ai-pipeline` start (and resume) runs `workflow.py pipeline-register`:
-  under `flock` on `<state root>/pipelines/.lock` it writes
-  `<state root>/pipelines/<sha256(checkout)[:16]>.json` `{"checkout","project","branch",
-  "started"}` atomically and removes entries whose checkout is no longer an existing
-  directory or whose JSON is invalid (re-read under the lock before each delete). Only this
-  helper writes there. A failure (e.g. `pipelines` is not a directory) prints a warning and
-  never stops the run; the run manifest stays mandatory as today.
-- **Snapshot model** (`scripts/lib/dashboard.py`, Python stdlib only). Discovers checkouts
-  from the registry and from a `/proc` scan for live runner processes (`is_runner()` from
-  `scripts/lib/watchdog.py`; cwd → checkout root containing `.ai/`), so runs on an older
-  toolkit copy also appear. The process source and a root filter are injectable
-  (`AI_DASHBOARD_PROC`: a fixture tree instead of `/proc`; `AI_DASHBOARD_ROOT`: ignore
-  checkouts outside it) so the tests are deterministic next to other shards' and Zack's live
-  pipelines (plan review 9, P33); both are test-only and documented as such. The snapshot
-  names its `state_root` (`--json` field, empty-state line): only pipelines registered under
-  the same `AI_STATE_DIR`/XDG state root are listed (P37). Per checkout: project, branch, liveness
-  (as the watchdog decides it: `marker_snapshot`/`pipeline_died` semantics in watchdog.py,
-  i.e. PID, process start time not after the marker, `ai-pipeline`/`ai-recover` only, marker
-  re-read; with no marker, live runner processes found in that checkout count, so legacy
-  versions without `pipeline.active` show as running), observation, last notifications,
-  `last-error`, task counts (existing `tasks()` parser) → status one of `running`, `paused`,
-  `recovering`, `needs_you` (stopped/escalated), `crashed` (marker left but its process is
-  gone), `finished`, `idle`, with stage `unknown` when no observation exists. Missing or
-  malformed files degrade to `unknown`, never a crash. Strictly read-only: no writes, no
-  locks, no git commands that write.
-- **Sanitising.** Every string read from a checkout (agent-writable) has control characters
-  and escape sequences removed and is length-capped before output.
-- **Output modes.** `ai-dashboard --once` prints a plain-text rendering (no curses; for pipes,
-  Remote Control and tests) and `--json` the snapshot; plain `ai-dashboard` opens the TUI.
-  `--all` includes `finished` and `idle` runs whose newest record is older than 24 h (hidden by
-  default); `needs_you`, `crashed`, `running`, `paused` and `recovering` are always shown (Zack,
-  2026-10-09: a run that needs you never disappears).
-  No bytecode is written (`sys.dont_write_bytecode` before sibling imports; wrapper uses
-  `python3 -B`); the wrapper resolves its real path (`readlink -f`) so a symlink in
-  `~/.local/bin` works.
-- **TUI** (Python `curses`, `scripts/ai-dashboard` bash wrapper). Header: counts
-  (running / needs you / finished), clock, key help. One card per run, sorted needs you →
-  crashed → running/paused/recovering → finished → idle: title line
-  (`<icon> <project> · <branch>` and `<status> <age>`); at width ≥ 120 (revision 9: eight
-  boxes need up to 112 columns) a row of eight boxes
-  Plan check → Plan revision → Setup → Build n/N → Checks → Review → Triage (incl. re-check)
-  → PR joined by `──`; the active box has a double border, bold and the role colour of the
-  flow chart (Claude orange: plan revision/build/triage; Codex blue: plan check/review/
-  re-check; scripts grey: setup/checks/PR); passed boxes dim with ✓ below; a stopped run's box
-  red with the stop reason (e.g. a plan decision's questions) on the marker line, and likewise
-  a `needs_you` run whose record is not `stopped` (a `last-error` newer than the record, as a
-  gate-broken stop leaves it) with the sanitised first `last-error` line (P44); a stop at
-  start (stage none) highlights no box and says `⛔ stopped before Plan check`; paused ⏸,
-  recovering 🔧, crashed ⚠ inside the box; detail (`T003 · sonnet · 12m`, `round 3 · extra
-  (5 → 3 → 1)`, `format retry`) under the active box; last notification line (▶ ✅ ⏸ 🔧 🔁 ⚠
-  ⛔ 🏁 …) with its time. Width < 120: one compact line
-  `✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR`; a stopped stage is `✗Review`
-  in style `stopped`, a paused/recovering/crashed stage keeps `▶` followed by ⏸ / 🔧 / ⚠ (Zack,
-  2026-10-09, as in the review mockups). Finished: all ✓ and the 🏁 line.
-  Keys: `q` quit, `↑/↓` select, `Enter` toggles details (last 8 notifications, last error,
-  checkout path), `a` toggle all, `r` refresh; auto refresh every 2 s; resize handled;
-  terminal restored on exit and on exceptions; no colours → bold/reverse only.
-- **Install.** `setup-project` (and `setup-project --upgrade`, which uses the same list)
-  installs `ai-dashboard` and `lib/dashboard.py` into `.ai/bin` like the other scripts; it
-  also runs from `~/Projects/agents/scripts/`.
+- **FL-18 queue check.** `ai-task check` (new subcommand) validates `.ai/tasks.md` read-only
+  with the same rules as the runner (`workflow.py tasks check`) and prints
+  `Task queue OK: <total> tasks, <done> DONE` or the exact error (exit 1). `ai-pipeline`, when
+  the plan review is enabled, validates the queue BEFORE the `tasks untouched` gate and on
+  failure stops with `stop 'plan review'` and last-error
+  `Task queue is invalid: <error>`; ai-recover always escalates that reason (a rerun cannot
+  fix a plan). `templates/.ai/prompts/plan.md` tells planners with a shell to run
+  `.ai/bin/ai-task check` (already allowed by the runner template); headless planners
+  (DB-04) get the same check from the host after their session.
+- **FL-19 session budget.** Without `--sessions`, `ai-run` uses
+  `max(16, <not DONE tasks> + 2)` sessions, computed after the queue check and printed
+  (`Session budget: N (…)`). Each pipeline call of ai-run recomputes it, so fix-round tasks
+  (added by triage before the next call) are covered; `--sessions N` still wins.
+- **FL-19 relaunch while recovery holds the lock.** A process rejected by `ai_lock` never
+  writes `last-error`, the marker, observations or notifications; its message keeps the
+  prefix `Another runner/reviewer owns this checkout` and names the owner when the marker's
+  PID is a live `ai-recover` ("auto-recovery (PID N) is deciding whether to resume the
+  pipeline itself; wait for its 🔧 Recovered or ⛔ STOPPED notification, or stop it with
+  `kill N` before relaunching") or `ai-pipeline` ("a pipeline (PID N) is running here").
+- **FL-21 watchdog false stop.** The timer unit uses `OnActiveSec=2min` instead of
+  `OnBootSec=2min` (first probe 2 min after the timer starts: at boot as before, and no
+  longer at once after `--install-timer`). The `stalled` incident needs confirmation: the
+  first probe that sees it records `stall_seen_ns` in `watchdog.json` and stays silent; a
+  later probe at least 5 minutes after that sighting that still sees it reports it (once, as
+  today); any probe that does not see it clears the record. A checkout whose observation
+  record is at stage `planning` is never stalled. `died` (marker whose process is gone),
+  `hung` and `stop` incidents are unchanged and stay immediate.
+- **FL-22 executable scripts.** The runner permission TEMPLATE gains exactly
+  `Bash(chmod +x *)` (no other chmod form) with a comment; the runner prompt TEMPLATE says:
+  make a new script executable with `chmod +x <path inside the checkout>`, never other modes
+  or paths outside the checkout, then `git add -- <path>`. This repo's own gate copy is a
+  human step.
+- **DB-04 plan stage.**
+  - Command: `ai-run --plan PROMPT_FILE [--model M] [--revision] [--session-timeout S]
+    [--knowledge-dir DIR]` (a mode of the installed `ai-run`, like `--triage` and
+    `--revise-plan`; see the plan for why not a new script). Does not need `--approved`
+    (no project allowlist is used); refused inside a pipeline (`AI_PIPELINE` set) and with
+    `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions`, `--run-timeout`.
+    Default model opus. One headless Claude session (`claude_session`, so usage-limit
+    pauses, timeouts, `.ai/local/claude-*.json` logs and the post-session gate check apply)
+    with tools `Read,Glob,Grep,Edit,Write` and the allowlist from `workflow.py
+    plan-allowlist`: `Read`, `Glob`, `Grep`, and `Edit(./X)`/`Write(./X)` for X in
+    `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/state.md`,
+    `.ai/handoff.md`, `.ai/reviews/dispositions.md`. No Bash. Never commits.
+  - Prompt: `.ai/prompts/plan.md` (if present) + the prompt file + a host PLANNING CONTRACT
+    (editable files, no shell, no commit, no implementation; the host validates the queue
+    with the `ai-task check` rules afterwards; `--revision`: an earlier plan exists, keep
+    DONE tasks and their results unchanged).
+  - Before the session: lock, protected-branch check, uncommitted changes only in the plan
+    records (`workflow.py plan-scope HEAD`), checkout registered (`pipeline-register`),
+    observation `step planning "<model> · first plan|revision"`, notification
+    `📝 PLANNING on <branch> (<model>)`.
+  - After the session: gate unchanged (existing check), `plan-scope <start HEAD>` (only the
+    six records plus the host's `.ai/run-log.md` changed), `tasks check`. Success →
+    `observe planned "<n> tasks"` (stage `planning`, state `done`) and
+    `📝 Plan ready on <branch>: <n> tasks. Review and commit it, then start ai-pipeline
+    --approved.`; failure → `last-error` = the reason, observation `stop plan <reason>`
+    (stage `planning`, state `stopped`), one ⛔ notification (ai-run's existing exit
+    handler). Changes are never reverted.
+  - Observation schema: box key `planning` first; stop label `plan` → planning; new action
+    `planned NOTE`.
+  - Dashboard: nine boxes, **Plan** (Claude orange) before Plan check; still fits 120
+    columns (one-column `─` joiners). Plan is ✓ for every record whose stage is not
+    `planning` (a pipeline's `start` record, stage `none`, included: the pipeline marks Plan
+    passed when it starts); no observation (legacy) leaves Plan unticked as `stage unknown`,
+    never a failure. Stage `planning`: active → Plan box active; stopped → Plan box stopped
+    with the reason; done → new status `planned` (Plan ✓, marker `📝 <note>`). Compact line
+    `✓Plan ·PlanCheck ·Revise …`; `--json` carries stage `planning` and status `planned`.
+- **Docs.** README ("Watch all pipelines", planning, scripts/modes tables, session default,
+  watchdog timer) and `docs/workflow.md` describe each change. The vault flow chart is NOT
+  edited by sessions in this run: the handoff lists the needed flow-chart changes.
 
 ## Non-goals
-No control actions (stop, resume, approve) from the dashboard; no event history (OR-17); no
-`ai-status --json`/`--watch` (OR-11/OR-18 stay in the backlog); no web or phone view; no
-change to `.ai/validate`, `.ai/bin`, `.ai/prompts`, permissions or the CI workflow of this
-repo; no new runtime dependency (curses is stdlib); no change to what ntfy sends.
+No change to `.ai/bin`, `.ai/prompts`, `.ai/validate`, `.ai/permissions.allow`,
+`.claude/settings.json` or `.github/workflows/*` of this repo (human steps). No FL-20
+(per-run record paths), FL-23 (CI speed), DB-02/DB-03. No automatic commit of a plan, no
+dashboard actions, no change to what the watchdog does after a real crash.
 
 ## Acceptance
-- Fixture pipeline runs (mock claude/codex) leave the expected `observation.json` stages and
-  notification lines; a stop records `stopped` with its reason; a pause records `paused`; a
-  supervised plan revision, a stored needs-human decision, an extra fix round, a review format
-  retry and the base-moved early stop each leave their box and detail;
-  observation and registry failures never change a run's outcome.
-- `ai-dashboard --once` / `--json` on fixture checkouts show each status correctly, including
-  a legacy checkout with no observation and malformed files; escape sequences are removed;
-  nothing is written anywhere (verified by a before/after tree comparison).
-- `render()` golden outputs at widths 60, 119, 120 and 140 (double-bordered active box, red
-  stopped box, compact line below 120); a curses smoke test under a pty quits on `q` and
-  restores the terminal.
-- README and `docs/workflow.md` describe it; vault notes updated.
-- All existing tests pass; `.ai/validate` passes.
+- Offline regression tests for every behaviour change (names per task in `.ai/tasks.md`),
+  in the existing styles of `tests/test_workflow.py`, `tests/test_observation.py`,
+  `tests/test_dashboard.py`; existing tests pass (golden dashboard outputs and the watchdog
+  stall test are updated to the new behaviour on purpose).
+- `.ai/validate` passes.
+- README and `docs/workflow.md` describe the changes; the handoff lists the vault
+  flow-chart changes and the human steps.
