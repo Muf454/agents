@@ -52,3 +52,10 @@ Plan review HEAD: f1f575dd8e19f04b6d962c85730e23479fd9af04
 | P6 | rejected | Out of FL-19's scope: the night stop was a relaunch against ai-recover, which writes the marker; a hand-started `ai-run` (or `--plan`) holder still gets the correct plain `Another runner/reviewer owns this checkout` message. Reading `observation.json`'s `pid` would add a second agent-writable input to the lock-rejection path for a cosmetic hint. Can be a backlog item. | — |
 | P7 | accepted | Verified ai-recover's escalate patterns (scripts/ai-recover:136–139) miss ai-run's raw queue error, so a `--skip-plan-review` run would burn recovery attempts. T001 now runs the queue check unconditionally before :414 (`stop 'plan review'` or `stop implementation`) with a `--skip-plan-review` test incl. `AI_AUTO_RECOVER=1`. | T001 |
 | P8 | rejected | Optional per the reviewer; `Bash(chmod +x ./*)` is still a prefix rule that admits `./../x` and other out-of-checkout paths, so it is not a real path bound, while it would change the literal in the template, the prompt, the human gate step and the tests. The plan's Risks entry already states the limit; keep one form. | — |
+
+## Plan review round 2 (report c994227a0e05c2c1115df7e652ef3964edb8db17d4535fdbde820fcb376d0e60)
+
+Plan review HEAD: 13be9926c2303bff4a3c20677e2ff71a5f35d58e
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
