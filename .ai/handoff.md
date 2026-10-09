@@ -99,6 +99,10 @@ itself is unchanged.
    `r` refreshes, `q` quits and the terminal is back to normal (cursor, scrollback).
    Resize: widen the window to 120 columns or more for the boxes, then narrow it below 120: the
    cards become one compact line. Expected: no garbled lines and no crash at either width.
+2. After T011–T013 (review round 1 fixes): open `ai-dashboard` in tmux with **no** pipeline
+   running, then start `ai-pipeline --approved` in another checkout. Expected: the card appears
+   within 2 s and the dashboard stays up. Then open `vim scripts/ai-run` in `~/Projects/agents`
+   (no pipeline there): that checkout must not show up as running.
 
 ### Covered by automated tests
 - Renderer and TUI (`test_dashboard_render_*`): golden boxes at 140/120/119/60, worst-case row,
@@ -168,5 +172,12 @@ itself is unchanged.
 - Optional: upgrade each project's `.ai/bin` (`setup-project --upgrade --apply`) so its runs
   record their stages. Runs on older copies show "stage unknown (older toolkit)".
 
+## Review round 1 (2026-10-09)
+Claude fallback review (Codex usage limit): MAJOR=1 (M1 TUI crash when runs go from empty to
+non-empty), MINOR=2 (N1 legacy checkout with `last-error` labelled "before Plan check", N2 editors
+naming a runner script count as runners). All accepted → T011, T012, T013; see
+`.ai/reviews/dispositions.md`.
+
 ## Next action
-Human: the live terminal check under "Needs you" and the PR review. T001–T010 are DONE.
+Runner: implement T011, T012, T013, then re-review. Human afterwards: the live terminal checks
+under "Needs you" and the PR review.

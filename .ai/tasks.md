@@ -1052,3 +1052,108 @@ TUI check, optional PATH symlink and `.ai/bin` upgrade), backlog DB-01 status. H
 keys, resize, q), Human todos, Next action. Evidence: `python3 -m unittest discover -s tests -k Docs`: Ran 3
 tests, OK; `.ai/bin/ai-check`: Ran 541 tests, OK (8 shards) on the final run; an earlier run had one failure in shard 2 (name not captured, not reproduced in the next run; flaky under load, to check). Limitation: the live TUI check in a real
 terminal is not done here (human todo). Flow unchanged.
+
+## T011 — TUI survives the run list changing between empty and non-empty (review M1)
+Status: TODO
+Dependencies: T009
+Model: sonnet
+
+### Goal
+The curses view never crashes when runs appear or disappear while it is open (review round 1, M1).
+
+### Implementation notes
+- `scripts/lib/dashboard.py` `interface`: `selected` is always an int (e.g. `0` when there are no
+  runs, clamped to `len(runs) - 1` otherwise); the refresh branch restores an int when the
+  previously selected checkout is gone. Check that `layout`/`draw` still show no selection
+  highlight in the empty state (they currently receive `None`; pass `None` to them when `runs`
+  is empty rather than changing their contract).
+- Key handlers that index `runs` stay guarded by `if runs`.
+
+### Likely affected modules
+scripts/lib/dashboard.py, tests/test_dashboard.py, .ai/handoff.md
+
+### Acceptance criteria
+- Regression pty test `test_dashboard_render_curses_runs_appear_and_disappear`: the TUI starts
+  with an empty state root (empty-state text shown), a fixture checkout/process is added while the
+  loop runs, the card title appears after the auto-refresh (or `r`), the run is removed again and
+  the empty state returns; `q` exits 0 with no traceback. Also cover `a` with only old runs
+  (empty → shown → empty). The test fails on the current code.
+- Existing `test_dashboard_render_curses_*` tests still pass.
+- Handoff "Covered by automated tests" names the new test.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k dashboard_render_curses` (must say `Ran N tests`, N ≥ 4).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+
+## T012 — Legacy checkout with a last-error says "older toolkit", not "before Plan check" (review N1)
+Status: TODO
+Dependencies: T009
+Model: sonnet
+
+### Goal
+A checkout without a usable `observation.json` (older toolkit or malformed record) that has a
+`last-error` is shown as needing the human with "stage unknown (older toolkit)" and the error,
+never as stopped before Plan check (review round 1, N1).
+
+### Implementation notes
+- `scripts/lib/dashboard.py` `position`: when `run['observation']` is `None`, return
+  `(None, 'unknown')` whatever the status (except `finished`, which needs a record anyway);
+  `marker_text`'s unknown branch appends `⛔ <last_error>` when `run['last_error']` is set.
+  The recorded `stage=none` stop keeps "⛔ stopped before Plan check".
+- Status stays `needs_you` (sorting and hiding unchanged); only the box/marker wording changes.
+  Check the compact (< 120 columns) line uses the same wording.
+
+### Likely affected modules
+scripts/lib/dashboard.py, tests/test_dashboard.py, .ai/handoff.md
+
+### Acceptance criteria
+- Regression test `test_dashboard_render_legacy_checkout_with_last_error`: no `observation.json`
+  (and a second case with a malformed one) plus a `last-error` file; `--once` output at 140 and
+  at 80 columns contains "older toolkit" and the error text and not "before Plan check"; status
+  is `needs_you` in `--json`. Fails on the current code.
+- The existing stop-at-start test (recorded `stage=none`) still shows "stopped before Plan check".
+- Handoff "Covered by automated tests" names the new test.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k dashboard_render` (must say `Ran N tests`, N ≥ 16).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+
+## T013 — Discovery counts only real runner processes, not editors or pagers naming a runner script (review N2)
+Status: TODO
+Dependencies: T009
+Model: sonnet
+
+### Goal
+`vim scripts/ai-run`, `less .ai/bin/ai-pipeline` or `git diff scripts/ai-recover` in a checkout
+never make that checkout a running card (review round 1, N2).
+
+### Implementation notes
+- Add a dashboard-only predicate in `scripts/lib/dashboard.py` (leave `watchdog.is_runner` and
+  the watchdog's behaviour unchanged): a process is a runner when `basename(args[0])` is a runner
+  name, or `basename(args[0])` is a shell (`bash`, `sh`) and its first non-option argument's
+  basename is a runner name. Runners start via `#!/usr/bin/env bash`, so their argv is
+  `bash /path/ai-run …`; ai-recover launched by the watchdog through `systemd-run` ends up the same.
+  Use it in `discover` and for the marker PID check in `liveness` (consistent identity).
+- Verify against a real process in the existing `real_pipeline_and_recover` liveness test.
+
+### Likely affected modules
+scripts/lib/dashboard.py, tests/test_dashboard.py, .ai/handoff.md
+
+### Acceptance criteria
+- Regression test `test_dashboard_liveness_ignores_non_runner_processes`: fixture processes
+  `['vim', '/x/scripts/ai-run']`, `['less', '.ai/bin/ai-pipeline']`, `['git', 'diff', 'scripts/ai-recover']`
+  in a checkout with `.ai/` and no marker do not add a runner (checkout not discovered, or `gone`
+  if registered); `['bash', '/x/.ai/bin/ai-run', '--approved']` and `['/x/.ai/bin/ai-pipeline']`
+  still do. Fails on the current code.
+- All existing `test_dashboard_liveness_*` tests still pass, including the real-process test.
+- Handoff "Covered by automated tests" names the new test.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k dashboard_liveness` (must say `Ran N tests`, N ≥ 11).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
