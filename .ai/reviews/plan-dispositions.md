@@ -21,3 +21,10 @@ Plan review HEAD: 7247a731a21bbee24a459b19e4061d3d1b913c4b
 | P38 | accepted | Verified: the spec schema has `pid` and `branch` but T001's `observe ACTION [ARGS]` said nothing about how they are filled; the helper is a subprocess, so `os.getpid()` would be its own PID. Fix in T001: root from `AI_ROOT` else cwd, `pid = os.getppid()` (the calling script; an `or true` command list forks no subshell), `branch = git_branch(root_fd)` (None → `null`); acceptance asserts `pid` equals the calling bash's `$$`. | T001 |
 
 Convergence: no area repeats round after round. P32 (gate integrity on the stop path) and P33 (test determinism of discovery) are first findings in their areas. P34 is in the stop-attribution area last found in round 5 (P26); rounds 6–8 had no finding there, and P34 is a missing hook in ai-run's task loop exposed by the revision 9 rebase, not a defect of the T001 precedence design, so T004 gets the hook plus a stop-site table for the whole loop instead of a separate design task.
+
+## Plan review round 10 (report 03cb2c0a436bc56c49190bb90370f0db3d01dc8ccd2313c7cead6a8da1adba72)
+
+Plan review HEAD: 6a49e2b8124d3bb15e2a3e62340904d1bc397c29
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
