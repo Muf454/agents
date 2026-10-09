@@ -3,7 +3,7 @@
 ## What has been implemented?
 Branch `fix/outcome-followups` (from `origin/master` c7d4dee): outcome telemetry and parallel test runner follow-ups CU-1, CU-3 and CU-4 from the vault backlog. Planned (revision 5), nothing implemented yet.
 - T001 (CU-4, DONE): parallel runner shards now run with `PYTHON_COLORS=0` and `summary()` strips ANSI before parsing. The `FORCE_COLOR` case itself was already fixed on `fix/catchup-review` (T006); this adds the `PYTHON_COLORS=1` case and regression tests.
-- T002 (CU-1, TODO): `ai-status --outcomes` model tables per attempt.
+- T002 (CU-1, DONE): `ai-status --outcomes` "Attempts by model" and "Attempts by model and category" are per attempt (each credited to the model that ran it); the category table stays per task.
 - T003 (CU-3, TODO): re-check outcome lines carry upheld/withdrawn totals by severity and the reviewed HEAD; re-check table in the report; Claude re-checks stay listed under "Codex catch-up pending".
 
 Telemetry only: `ai-review`, `ai-pipeline`, `ai-recover`, `ai-run` and the gates are unchanged.
@@ -28,4 +28,4 @@ Flow unchanged
 - Keep CU-2 open in the vault backlog (`agents-backlog.md`) with the deferral reason and the open design question above, plus the `fallback_record` row-placement defect; a later batch should be started with `ai-run --knowledge-dir ~/zWiki/zWiki` if it edits the flow note (round 3 P4).
 
 ## Next action
-Implement T002.
+Implement T003.

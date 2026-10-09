@@ -2107,12 +2107,35 @@ def outcomes_report(arguments):
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
 
+    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
+    for r in task_rows:
+        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
+
+    def attempts_table(title, key):
+        groups = {}
+        for r in task_rows:
+            task_key = (r.get('project'), r.get('branch'), r.get('task'))
+            groups.setdefault(key(r, final[task_key]), []).append((r, first_row[task_key] is r))
+        lines = [f'## Attempts by {title}', '',
+                 f'| {title} | attempts | done | not done | first-time pass | avg minutes |',
+                 '| --- | --- | --- | --- | --- | --- |']
+        for name in sorted(groups, key=str):
+            rows = groups[name]
+            done = sum(r.get('result') == 'done' for r, _ in rows)
+            starts = [r for r, is_first in rows if is_first]
+            first = sum(bool(r.get('first_pass')) for r in starts)
+            rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
+            minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
+            lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')
+        return lines + ['']
+
     lines = ['# Outcomes report', '', f'{len(final)} task(s), {len(task_rows)} attempt(s), '
              f"{sum(r.get('kind') == 'review' for r in records)} review(s).", '']
     if final:
-        lines += table('model', lambda r: r.get('model', 'default'))
+        lines += attempts_table('model', lambda r, last: r.get('model', 'default'))
         lines += table('category', lambda r: r.get('category', 'feature'))
-        lines += table('model and category', lambda r: f"{r.get('model', 'default')} / {r.get('category', 'feature')}")
+        lines += attempts_table('model and category',
+                                lambda r, last: f"{r.get('model', 'default')} / {last.get('category', 'feature')}")
     reviews = [r for r in records if r.get('kind') == 'review']
     if reviews:
         groups = {}

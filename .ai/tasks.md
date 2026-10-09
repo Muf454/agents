@@ -34,7 +34,7 @@ tests/run_parallel.py, tests/test_workflow.py, README.md, docs/workflow.md
 `run_shard` now also sets `PYTHON_COLORS=0`; new `summary()` strips ANSI before parsing. Tests: `test_parallel_runner_passes_with_caller_colour_settings`, `..._failing_shard_output_has_no_escapes`, `..._summary_parses_coloured_and_plain`. Mutation checks on Python 3.14.7: removing `PYTHON_COLORS=0` failed the no-escape test; removing ANSI stripping failed the `summary()` test (both restored). `-k parallel_runner`: 10 OK; `.ai/bin/ai-check`: 290 tests OK. README and docs/workflow.md updated.
 
 ## T002 — Per-attempt model statistics in the outcome report (CU-1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -60,6 +60,7 @@ scripts/lib/workflow.py (outcomes_report only), tests/test_workflow.py, README.m
 `python3 -m unittest tests.test_workflow -k outcome`; `.ai/bin/ai-check`
 
 ### Result / notes
+Done. `outcomes_report` now prints per-attempt "Attempts by model" and "Attempts by model and category"; the category table is unchanged (per task). First-time pass counts each task's first file-order row once. New tests `test_outcome_report_*` (mixed model, old lines, old line then attempt=2) and the updated `test_runner_logs_task_outcomes_and_report` pass; `.ai/bin/ai-check` PASS (293 tests). README and docs/workflow.md updated.
 
 ## T003 — Re-check outcome lines carry upheld/withdrawn totals (CU-3)
 Status: TODO

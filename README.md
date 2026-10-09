@@ -403,7 +403,8 @@ feature; from the title), model, result (done, blocked, validation_failed,
 no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration.
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
-model, category and model/category, findings per reviewer and model, and the
+category (per task) and per model and model/category (per attempt, each credited to the
+model that ran it), findings per reviewer and model, and the
 Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
 move to haiku and which keep failing on sonnet.
 

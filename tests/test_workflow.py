@@ -2636,8 +2636,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(lines[0]['branch'], 'feature/test')
         self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1')
         report = self.tool('ai-status', '--outcomes').stdout
-        self.assertIn('## Tasks by model', report)
-        self.assertIn('| sonnet | 1 | 1/1 (100%) | 1 | 0 | 1.0 |', report)
+        self.assertIn('## Attempts by model', report)
+        self.assertIn('| sonnet | 1 | 1 | 0 | 1/1 (100%) |', report)
         self.assertIn('## Tasks by category', report)
         self.assertIn('| claude-fallback | claude-opus-5-5 | code | 1 | 0 | 0 | 0 |', report)
         self.assertIn('Codex catch-up pending', report)
@@ -2647,8 +2647,39 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         catch_up = report.split('Codex catch-up pending')[1]
         self.assertEqual(catch_up.count('code HEAD'), 2)  # forced Claude reviews are listed too
 
+    def outcome_report_for(self, rows):
+        self.setup_project()
+        path = self.base / 'report.jsonl'
+        base = {'kind': 'task', 'project': 'p', 'branch': 'b', 'category': 'feature'}
+        path.write_text(''.join(json.dumps({**base, **row}) + '\n' for row in rows))
+        return self.tool('ai-status', '--outcomes', str(path)).stdout
+
+    def test_outcome_report_credits_each_attempt_to_its_model(self):
+        report = self.outcome_report_for([
+            {'task': 'T001', 'model': 'sonnet', 'attempt': 1, 'result': 'error', 'first_pass': False, 'seconds': 600},
+            {'task': 'T001', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 300},
+            {'task': 'T002', 'model': 'sonnet', 'attempt': 1, 'result': 'done', 'first_pass': True, 'seconds': 60}])
+        self.assertIn('2 task(s), 3 attempt(s)', report)
+        self.assertIn('| sonnet | 2 | 1 | 1 | 1/2 (50%) | 5.5 |', report)
+        self.assertIn('| opus | 1 | 1 | 0 | - | 5.0 |', report)
+        self.assertIn('| sonnet / feature | 2 | 1 | 1 | 1/2 (50%) | 5.5 |', report)
+        self.assertIn('| feature | 2 | 1/2 (50%) | 2 | 0 | 1.5 | 8.0 |', report)  # per task, summed time
+
+    def test_outcome_report_old_lines_without_model_or_attempt(self):
+        report = self.outcome_report_for([
+            {'task': 'T009', 'result': 'error', 'seconds': 60},
+            {'task': 'T009', 'result': 'done', 'seconds': 60}])
+        self.assertIn('| default | 2 | 1 | 1 | 0/1 (0%) | 1.0 |', report)
+
+    def test_outcome_report_old_line_followed_by_new_attempt(self):
+        report = self.outcome_report_for([
+            {'task': 'T010', 'result': 'error', 'seconds': 60},
+            {'task': 'T010', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 120}])
+        self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
+        self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
+
     def outcome_rows(self):
-        path = self.base / 'host-state/outcomes.jsonl'
+        path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
 
     def task_rows(self):

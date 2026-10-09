@@ -607,5 +607,8 @@ pipeline launched in the background from a non-interactive shell (`nohup … &`)
 as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
 `outcomes-report` (`ai-status
 --outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
-minutes) by model, category and both, and reviews by reviewer/model/mode.
+minutes) by category, and every attempt by the model that ran it ("Attempts by model",
+"Attempts by model and category": attempts, done, not done, first-time pass over tasks
+whose first line ran on that model, average minutes per attempt), and reviews by
+reviewer/model/mode.
 
