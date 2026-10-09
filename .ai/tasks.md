@@ -1156,7 +1156,7 @@ Targeted: the loop above. Gate: `.ai/bin/ai-check` in the FOREGROUND with the Ba
 ### Result / notes
 
 ## T013 — Discovery counts only real runner processes, not editors or pagers naming a runner script (review N2)
-Status: TODO
+Status: DONE
 Dependencies: T014
 Model: sonnet
 
@@ -1190,4 +1190,4 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_liveness` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-Dashboard-only `is_runner` in `scripts/lib/dashboard.py` (argv[0] runner name, or bash/sh + first non-option arg), used by `discover` and `liveness`; watchdog unchanged. The real-process test now spawns a `#!/usr/bin/env bash` script (argv `bash <link>`, like real runners). Targeted `-k dashboard_liveness`: Ran 33, OK. Gate: 546/547 pass; the one failure, `test_outcome_no_time_left_logs_nothing` (workflow, unrelated), passes alone (load-dependent timing flake).
+Dashboard-only `is_runner` in `scripts/lib/dashboard.py` (argv[0] runner name, or bash/sh + first non-option arg), used by `discover` and `liveness`; watchdog unchanged. The real-process test now spawns a `#!/usr/bin/env bash` script (argv `bash <link>`, like real runners). Targeted `-k dashboard_liveness`: Ran 33, OK. Gate: 546/547 pass; the one failure, `test_outcome_no_time_left_logs_nothing` (workflow, unrelated), passes alone (load-dependent timing flake). After T014 (flake fixed), rerun: `.ai/bin/ai-check` Ran 547, OK.

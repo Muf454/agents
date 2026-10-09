@@ -231,3 +231,4 @@
 - 2026-10-09T13:34:29Z — mission control — T013 escalated on test_outcome_no_time_left_logs_nothing, a timing flake that also fails on master (1/4 runs). Added T014 (fix the flake, before T013); T013 back to TODO depending on T014; its committed work (cf3e8a6) stays.
 | 2026-10-09T13:50Z | claude (sonnet) | T014 | DONE: `test_outcome_no_time_left_logs_nothing` accepts either stop message (case-insensitive `run time limit`); no-outcome and no-invocation assertions kept | test alone OK; ai-check 547 OK | (this commit) | test-only change; the 10x loop was not runnable under the shell allowlist (single run passed) |
 | 2026-10-09T13:47:20Z | runner | T014 | completed | PASS | 12427e1 | Claude checkpointed; continuing queue |
+| 2026-10-09T13:55Z | claude (sonnet) | T013 | DONE (reconciled): work already in cf3e8a6; after T014 fixed the flake, gate rerun green | ai-check 547 OK | (this commit) | queue complete |
