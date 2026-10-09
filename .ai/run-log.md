@@ -215,3 +215,4 @@
 | 2026-10-09T11:33:57Z | runner | T006 | completed | PASS | 06023f4 | Claude checkpointed; continuing queue |
 | 2026-10-09T11:41:55Z | runner | T007 | blocked; try next independent task | not complete | 9eb9ce9 | See task result |
 | 2026-10-09T11:41:56Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | e86d862 | No merge or deployment performed |
+- 2026-10-09T11:48:13Z — mission control — T007 unblocked: `chmod +x scripts/ai-dashboard` (the runner may not chmod), gate PASS 516 tests, T007 DONE; pipeline resumed.

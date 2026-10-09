@@ -768,7 +768,7 @@ fails `..._reused_pid_is_crashed`. No-write test runs the module from a copied l
 `runpy.run_path` and compares the temp tree's mtimes and checks for `__pycache__`.
 
 ## T007 — Snapshot model, `--once`/`--json`, `ai-dashboard` wrapper
-Status: BLOCKED
+Status: DONE
 Dependencies: T006
 Model: sonnet
 
@@ -870,6 +870,8 @@ session's permissions ("don't ask mode"). The git index already has mode 100755
 (`git add --chmod=+x`), so a human or a session allowed to chmod only needs to run
 `chmod +x scripts/ai-dashboard` (or `git checkout -- scripts/ai-dashboard`), rerun
 `.ai/bin/ai-check`, and set T007 DONE.
+2026-10-09 (mission control): the committed mode was 100644 (not 100755 as noted above); ran
+`chmod +x scripts/ai-dashboard`, full gate PASS (516 tests OK), T007 set DONE.
 
 ## T008 — Curses TUI with the flow as boxes
 Status: TODO
