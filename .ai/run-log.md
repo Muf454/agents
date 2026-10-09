@@ -210,3 +210,4 @@
 | 2026-10-09T11:00Z | claude (sonnet) | T004 | DONE: `ai_deps` Setup record, `ai-run` build/checks/checkpointed/final records and standalone triage/revise-plan, `ai-review` format retry detail; vault flow note extended | observation_runner 12 OK; ai-check 472 OK | (this commit) | T002 pause test now expects `checks` after the resumed run; flow unchanged |
 | 2026-10-09T11:00:47Z | runner | T004 | completed | PASS | 3149768 | Claude checkpointed; continuing queue |
 | 2026-10-09T11:30Z | claude (sonnet) | T005 | DONE: `ai-recover` recovering/plan_revision/checks records, stop in `escalate` and `on_exit`; mocks snapshot the record | observation_recovery 10 OK; ai-check 482 OK | (this commit) | flow unchanged |
+| 2026-10-09T11:16:30Z | runner | T005 | completed | PASS | 0944104 | Claude checkpointed; continuing queue |
