@@ -1122,9 +1122,42 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T013 — Discovery counts only real runner processes, not editors or pagers naming a runner script (review N2)
-Status: DONE
+## T014 — Make the time-limit outcome test deterministic (pre-existing flake)
+Status: TODO
 Dependencies: T009
+Model: sonnet
+
+### Goal
+`test_outcome_no_time_left_logs_nothing` (tests/test_workflow.py) fails intermittently on master
+too (mission control: 1 of 4 runs on master 5e837ac, 1 of 3 here, and 3 gate runs in this batch):
+with `--run-timeout 1` and a git mock that sleeps 2 s, the limit is sometimes reached in the
+dependency setup step, whose message is "Dependency setup (.ai/ci-setup) not run: run time limit
+reached." instead of "Run time limit …". The test's intent (a run with no time left starts no
+session and logs no outcome) holds either way.
+
+### Implementation notes
+- Keep the intent and both other assertions (no outcome rows, no mock invocations). Accept either
+  stop message, e.g. a case-insensitive match on `run time limit`, or make the timing deterministic
+  (e.g. a dependency stamp so setup is skipped) — whichever is simpler and keeps the test meaningful.
+- Do not change product code for this; do not weaken any other test.
+
+### Likely affected modules
+tests/test_workflow.py
+
+### Acceptance criteria
+- The test passes 10 times in a row alone (`for i in $(seq 10); do python3 -m unittest
+  tests.test_workflow.ToolkitTest.test_outcome_no_time_left_logs_nothing || break; done`).
+- It still fails if the run starts a session (keep the no-outcome and no-invocation assertions).
+- Full gate passes.
+
+### Validation
+Targeted: the loop above. Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+
+## T013 — Discovery counts only real runner processes, not editors or pagers naming a runner script (review N2)
+Status: TODO
+Dependencies: T014
 Model: sonnet
 
 ### Goal
