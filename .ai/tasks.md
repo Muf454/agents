@@ -398,7 +398,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 `agents-flow.md` note added, `updated:` 2026-10-09; handoff "Flow chart" wording completed.
 
 ## T003 — Pipeline stage records and registration (ai-pipeline)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: sonnet
 
@@ -495,6 +495,12 @@ Targeted: `python3 -m unittest discover -s tests -k observation_pipeline` (must 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+`ai-pipeline`: `step KEY TITLE [DETAIL]` records the box (terminal output unchanged); start record
+(skipped on `AI_RECOVERY_ATTEMPT`), `stop()` records after the gate check, `finish [NOTE]` records
+`done`, needs-human decision records `plan_revision`, registration after `branch=`. `ai_die` records
+`stop ''` only when `stop()` did not already notify. Tests: 14 `observation_pipeline_*` OK; mock
+agents now append `observation.json` to `.ai/local/obs-history` per session. Full gate
+`.ai/bin/ai-check`: 460 tests OK. Vault `agents-flow.md` note extended.
 
 ## T004 — Runner, setup and review records (ai-run, ai_deps, ai-review)
 Status: TODO

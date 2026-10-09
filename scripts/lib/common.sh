@@ -14,7 +14,10 @@ ai_die() {
   [[ -d .ai/local ]] && printf '%s\n' "$*" > .ai/local/last-error 2>/dev/null || true
   if [[ -n "${AI_PIPELINE_MARKER:-}" ]]; then
     # The pipeline shell itself is stopping for good: say so unless stop() already did.
-    [[ -n "${AI_STOP_NOTIFIED:-}" ]] || ai_notify "⛔ STOPPED, needs you: $*"
+    if [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
+      ai_notify "⛔ STOPPED, needs you: $*"
+      ai_observe stop '' "$*" 2>/dev/null || true
+    fi
     AI_STOP_NOTIFIED=1
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker

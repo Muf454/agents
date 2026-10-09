@@ -130,6 +130,8 @@ if 'REVISION CONTRACT' in prompt:
             crash_kill(os.getppid(), int(pathlib.Path('.ai/local/pipeline.active').read_text()))
             sys.exit(0)
     crash('before')
+    if os.path.exists('.ai/local/observation.json'):
+        with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
     mode = os.environ.get('MOCK_CLAUDE', 'revise-accept')
     review = pathlib.Path('.ai/reviews/plan.md').read_text()
     majors = review.split('## MAJOR findings')[1].split('## MINOR findings')[0]
@@ -175,6 +177,8 @@ mode = os.environ.get('MOCK_CLAUDE', 'success')
 if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
     assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
+if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
+    with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
     pathlib.Path('.ai/local/mock-limit-hit').touch()
@@ -335,6 +339,8 @@ assert '--ignore-user-config' in args
 state = pathlib.Path(os.environ.get('MOCK_STATE_DIR', '.'))
 with open(state / 'codex-args.log', 'a') as log: log.write(' '.join(args[:-1]) + '\n')
 with open(state / 'codex-prompts.log', 'a') as log: log.write('=== PROMPT ===\n' + args[-1] + '\n')
+if os.path.exists('.ai/local/observation.json'):
+    with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
     with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
     print('ERROR: You have hit your usage limit. Try again in 7 days.')
@@ -6862,6 +6868,167 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len([c for c in self.gh_calls() if c[:2] == ['pr', 'create']]), 1)
         self.assertEqual(self.helper('deps-status').stdout.strip(), 'current')
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    # ---------------------------------------------------------------- stage records (T003)
+    def observation(self):
+        return json.loads((self.project / '.ai/local/observation.json').read_text())
+
+    def seen(self):
+        """The records the mock agents saw, in order (observation.json at each session start)."""
+        path = self.project / '.ai/local/obs-history'
+        decoder, text, records = json.JSONDecoder(), path.read_text() if path.exists() else '', []
+        while text.strip():
+            record, end = decoder.raw_decode(text.lstrip())
+            records.append(record)
+            text = text.lstrip()[end:]
+        return records
+
+    def plant_observation(self, **fields):
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        record = dict(stage='pr', state='done', detail='', since='2026-01-01T00:00:00Z', note='old',
+                      pid=1, branch='feature/test', updated='2026-01-01T00:00:00Z')
+        (self.project / '.ai/local/observation.json').write_text(json.dumps(dict(record, **fields)) + '\n')
+
+    def test_observation_pipeline_normal_run_records_stages_and_the_pr(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        stages = [r['stage'] for r in self.seen()]
+        self.assertEqual([s for i, s in enumerate(stages) if i == 0 or s != stages[i - 1]],
+                         ['plan_review', 'build', 'review'])
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']),
+                         ('pr', 'done', 'https://github.com/example/project/pull/7'))
+
+    def test_observation_pipeline_no_pr_run_ends_at_pr_with_a_note(self):
+        self.ready()
+        self.plant_observation(stage='review', state='stopped')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']), ('pr', 'done', 'no PR'))
+
+    def test_observation_pipeline_local_only_finish_notes_it(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        done = self.observation()
+        self.assertEqual((done['stage'], done['state'], done['note']), ('pr', 'done', 'no PR (local only)'))
+
+    def test_observation_pipeline_review_stop_records_one_stop_with_the_reason(self):
+        self.ready(task('T001', 'DONE'))
+        (self.project / '.gitattributes').write_text('*.txt filter=sneaky\n')
+        self.run_cmd(['git', 'config', 'filter.sneaky.clean', 'sed s/checkpointed/tampered/'])
+        (self.project / 'T001.txt').write_text('checkpointed implementation\n')
+        self.commit('done task, committed through a filter')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('review', 'stopped'))
+        # stop() recorded the last-error reason; ai_die did not add the longer "Pipeline stopped" note
+        self.assertTrue(stopped['note'].startswith('Committed content differs'), stopped['note'])
+
+    def test_observation_pipeline_plan_review_stop_records_plan_review(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                  AI_SUPERVISE='0')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
+
+    def test_observation_pipeline_supervised_plan_revision_shows_round_then_review(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once')
+        seen = [(r['stage'], r['detail']) for r in self.seen()]
+        revision = seen.index(('plan_revision', '1/3 · round 1'))
+        self.assertIn('plan_review', [stage for stage, _ in seen[revision + 1:]])
+
+    def test_observation_pipeline_stored_needs_human_decision_stops_on_plan_revision(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, MOCK_CODEX_PLAN='major',
+                        MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                        MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?')
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_revision', 'stopped'))
+        self.assertIn('Keep option A or switch to B?', stopped['note'])
+
+    def test_observation_pipeline_extra_fix_round_detail(self):
+        self.ready()
+        self.add_origin()
+        self.falling_run('4,3,2,1')
+        details = [r['detail'] for r in self.seen() if r['stage'] == 'triage']
+        self.assertIn('round 3 · extra (4 → 3 → 2)', details)
+        self.assertIn('round 1', details)
+
+    def test_observation_pipeline_base_moved_stops_with_stage_none(self):
+        self.origin_with_main()
+        sha = self.advance_origin_main()
+        self.plant_observation()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn(self.git_out('rev-parse', '--short', sha), stopped['note'])
+
+    def test_observation_pipeline_start_dying_at_the_clean_check_records_stop_none(self):
+        self.ready()
+        self.plant_observation()
+        (self.project / 'stray.txt').write_text('uncommitted\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('none', 'stopped'))
+        self.assertIn('clean checkpoint', stopped['note'])
+
+    def test_observation_pipeline_resume_gate_stop_leaves_the_record_untouched(self):
+        self.ready()
+        validate = self.project / '.ai/validate'
+        original = validate.read_bytes()
+        validate.write_bytes(original + b'# approved before a change\n')
+        self.approve_run()
+        validate.write_bytes(original)
+        self.plant_observation()
+        before = (self.project / '.ai/local/observation.json').read_bytes()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Gate files changed since the run was approved', result.stderr)
+        self.assertEqual((self.project / '.ai/local/observation.json').read_bytes(), before)
+        self.assertFalse((self.project / '.ai/local/notifications.log').exists())
+        self.assertIn('⛔', self.notifications())
+
+    def test_observation_pipeline_gate_changed_by_a_hook_runs_no_helper(self):
+        self.ready()
+        self.hook('post-commit', 'if [[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]]; then\n'
+                                 '  printf "from pathlib import Path\\nPath(\'UNTRUSTED_HELPER_RAN\').touch()\\n" > .ai/bin/lib/workflow.py\n'
+                                 'fi\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        # the last record is the review step: no stop was written after the gate changed
+        last = self.observation()
+        self.assertEqual((last['stage'], last['state']), ('review', 'active'))
+
+    def registry(self):
+        return sorted((self.base / 'host-state').rglob('pipelines/*.json'))
+
+    def test_observation_pipeline_registers_the_checkout_on_start_and_resume(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        entries = [json.loads(path.read_text()) for path in self.registry()]
+        self.assertEqual([(e['checkout'], e['branch']) for e in entries],
+                         [(str(self.project), 'feature/test')])
+        for path in self.registry():
+            path.unlink()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_RECOVERY_ATTEMPT='1')
+        self.assertEqual(len(self.registry()), 1)
+
+    def test_observation_pipeline_unusable_registry_only_warns(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        directory = self.registry()[0].parent
+        shutil.rmtree(directory)
+        directory.write_text('not a directory\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('Pipeline complete (no PR requested).', result.stdout)
+        self.assertIn('pipeline-register', result.stderr)
+        self.assertTrue(list((self.base / 'host-state').rglob('run.json')))
+        self.assertTrue(directory.is_file())
 
 
 class ReviewHistoryTest(unittest.TestCase):

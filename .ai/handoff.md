@@ -97,9 +97,14 @@ itself is unchanged.
   `test_observation_gate_deps_installer_changing_gate_sets_flag`,
   `test_observation_gate_runner_tamper_stop_runs_no_helper`, and the existing
   `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`.
+- Pipeline stage records and registration (`test_observation_pipeline_*`): normal run to `done` with
+  the PR URL, `--no-pr`/local-only finish notes, review and plan-review stops, supervised plan
+  revision detail, stored needs-human decision, extra fix round detail, base moved, clean-check
+  death, resume gate stop leaves the record untouched, hook-changed gate runs no helper, registry
+  on start/resume and an unusable registry only warns.
 
 ## Human todos
 None yet (T009 adds the optional PATH symlink and the `.ai/bin` upgrade of projects).
 
 ## Next action
-T001, T010 and T002 done; next T003 (ai-pipeline stage records).
+T001, T010, T002 and T003 done; next T004 (ai-run, ai_deps, ai-review records).
