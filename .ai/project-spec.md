@@ -4,7 +4,9 @@
 Close the MINOR follow-ups of the Codex catch-up review that the vault backlog
 (`agents-backlog.md`, "Codex catch-up review follow-ups (2026-10-07, MINOR, deferred from
 `chore/toolkit-upgrade-2`)") lists as CU-1..CU-4. Branch `fix/outcome-followups` from
-`origin/master` c7d4dee. CU-5 (crash-durable outcomes) stays in the backlog.
+`origin/master` c7d4dee. CU-5 (crash-durable outcomes) stays in the backlog. CU-2 (Codex
+catch-up coverage) was planned as R4/T004 but is deferred after plan review round 3 (see
+"Deferred" below); this batch delivers CU-1, CU-3 and CU-4.
 
 **Telemetry is advisory.** Nothing here may change what the pipeline does (gates, review
 flow, triage, re-checks, commits, notifications). Only what is recorded in the host outcome
@@ -25,7 +27,7 @@ the line.
 - **CU-3: open.** `outcome review` skips the report for `mode == 'recheck'`; re-check lines
   carry no counts. Also, the line's `head` is `git rev-parse HEAD` at logging time, which for
   a re-check is after the triage commits, not the reviewed HEAD.
-- **CU-2: open.** `outcomes_report` lists every review whose reviewer starts with `claude`
+- **CU-2: open (deferred, not in this batch).** `outcomes_report` lists every review whose reviewer starts with `claude`
   under "Claude-only reviews (Codex catch-up pending)"; nothing records coverage. The
   catch-up outcome is a hand-written `## Codex catch-up` section in
   `.ai/reviews/fallback-log.md`. Related defect found while verifying: `fallback_record`
@@ -46,25 +48,27 @@ the line.
   `withdrawn_blocker`, `withdrawn_major` (from the verified, published `.ai/reviews/recheck.md`
   and the level of each rejected finding) and `reviewed_head` (full SHA). The report shows
   re-checks in their own table with these totals; plan/code reviews keep theirs.
-- **R4 (CU-2)** A Codex code review's outcome line records its merge-base (`base`, full SHA,
-  from the published review header) and `covers`: the Claude fallback reviews listed in the
-  checkout's `.ai/reviews/fallback-log.md` whose reviewed range lies inside the Codex range
-  (rule in T004). Code review lines of any reviewer record `base`. The report lists a Claude
-  review as pending only when no Codex line of the same project covers it (matched on mode
-  and reviewed HEAD), and shows the coverage. `fallback_record` inserts new rows into the
-  table instead of after a later section. Covered work is never hidden by a guess: rows that
-  cannot be resolved stay pending. Each log row is judged on its own: a row that is not
-  covered or cannot be resolved never drops the coverage of the other rows.
+- **R4 (CU-2): deferred.** Not in this batch; the report keeps listing every Claude review
+  under "Codex catch-up pending" and the hand-written `## Codex catch-up` section of
+  `.ai/reviews/fallback-log.md` stays the record. The `fallback_record` row-placement defect
+  above moves with it.
+
+## Deferred: CU-2
+Plan review rounds 1–3 each found problems in the same coverage rule, and the result is
+advisory telemetry, so by the convergence rule it leaves this batch. Open design question for
+a later batch: when does a Codex catch-up review cover a Claude fallback review across merges
+(master merged into the branch, rebases, a re-check's parent range)? Candidate rules and the
+remaining sub-questions are in `.ai/current-plan.md` "Deferred: CU-2".
 
 ## Constraints
 - Edit `scripts/`, `tests/`, docs only; never `.ai/bin`, `.ai/prompts`, `.ai/validate`,
   `.ai/permissions.allow` or `.claude/settings.json`. No gate change is needed.
 - No change to `scripts/ai-review`, `scripts/ai-pipeline`, `scripts/ai-recover`: everything
-  happens inside `workflow.py` `outcome`/`outcomes_report`/`fallback_record` (called with the
-  same arguments as today) and `tests/run_parallel.py`.
+  happens inside `workflow.py` `outcome`/`outcomes_report` (called with the same arguments as
+  today) and `tests/run_parallel.py`.
 - Tests offline and fast: new test methods; report tests feed hand-written JSONL files to
   `ai-status --outcomes FILE`.
 - Keep the report heading text "Codex catch-up pending" (existing tests and habits use it).
 - Concurrent work: PR #21 (`feature/supervisor`) and PR #22 (`fix/robustness-batch`) edit
   `scripts/lib/workflow.py` and `tests/test_workflow.py` (plus scripts this batch does not
-  touch). Keep hunks local to the outcome/fallback/report functions and to new test methods.
+  touch). Keep hunks local to the outcome/report functions and to new test methods.

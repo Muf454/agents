@@ -98,3 +98,29 @@ Claude fallback plan review (Codex usage limit), plan digest a62a92a1, HEAD 3ec6
 | P4 colour tests inherit host `NO_COLOR`/`PYTHON_COLORS` | accepted | Confirmed: `ParallelRunnerTest.setUp` copies `os.environ` (`tests/test_workflow.py:4669`). Each subtest removes `NO_COLOR`, `FORCE_COLOR`, `PYTHON_COLORS` before setting its own; the mutation check is recorded with the Python version (fails only on 3.14+). | T001 |
 | P5 first-time-pass denominator for attempt-less rows | accepted | T002 defines one attempt-1 row per task key (first `attempt == 1` row, else the first row in file order; x from that row's `first_pass`) and adds an old-line test expecting `0/1`. | T002 |
 | P6 re-check table grouping and sort order | accepted | T003 groups by (`reviewer`, `model`, missing → `default`), sorts with `key=str` like "Reviews by reviewer", and does not print `reviewed_head`. | T003 |
+
+## Plan review round 2 (outcome follow-ups)
+
+Claude fallback plan review (Codex usage limit), HEAD 5626730: BLOCKER 0, MAJOR 1, MINOR 4. Recorded late (round 3 P2); P1, P2, P5 were applied in plan revision 3; P3 and P4 were left unaddressed in revision 3 and are now deferred with CU-2 (plan revision 4).
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 T001 env line has no test; mutation check unsatisfiable | accepted | Confirmed: `summary()` strips escapes, so the passing-suite cases cannot see the `PYTHON_COLORS=0` line. T001 adds a failing-suite test with only `PYTHON_COLORS=1` asserting no `\x1b[` in the echoed shard output (`run_parallel.py:106`), keeps the `summary()` unit test for the stripping, and records two mutation checks with the Python version. | T001 |
+| P2 `rejected_rows()` returns tuples, not a dict | accepted | Confirmed (`workflow.py:1250-1253`). T003 now builds `{finding: level for finding, level, _ in rejected_rows()[1]}` and the counting helper takes `(answers, levels)`. | T003 |
+| P3 coverage rule leaves reviews pending after a master merge or rebase | deferred | Real (`.ai/run-log.md:108` shows master merged into a feature branch), but it is the CU-2 coverage rule, which is dropped from this batch by the convergence rule after round 3 raised it again as P1. Risk: none for this batch; the report keeps listing every Claude review as pending, as today. Carried to the CU-2 design question. | — |
+| P4 re-check row covered while its parent code row is not | deferred | Same area and reason as P3 (CU-2 dropped). | — |
+| P5 existing report assertion would depend on wall-clock minutes | accepted | Confirmed (`tests/test_workflow.py:2640` stops before minutes). T002 asserts the row prefix up to the first-time-pass cell. | T002 |
+
+## Plan review round 3 (outcome follow-ups)
+
+Claude fallback plan review (Codex usage limit), plan digest d85a5ce7, HEAD 55e5382, 2026-10-09: BLOCKER 0, MAJOR 1, MINOR 4. Convergence: the MAJOR is the third round of findings on T004's coverage rule (rounds 1, 2, 3), in advisory telemetry, so CU-2/T004 leaves this batch instead of being patched again (plan revision 4). The hand-written `## Codex catch-up` section in `.ai/reviews/fallback-log.md` stays the record; open question recorded in `.ai/current-plan.md` "Deferred: CU-2".
+
+| Finding | Disposition | Evidence / reason | Fix task |
+| --- | --- | --- | --- |
+| P1 coverage rule incomplete after a master merge (carried from round 2 P3) | deferred | Real (same evidence as round 2 P3), but CU-2/T004 is dropped from this batch by the convergence rule. Risk: Claude-only reviews stay listed as "Codex catch-up pending" in `ai-status --outcomes`, which is today's behaviour; nothing is hidden. The exact-containment rule proposed here is the leading candidate for the later CU-2 batch. | — |
+| P2 round 2 dispositions missing; plan revision not bumped | accepted | Confirmed. Round 2 section added above; `current-plan.md` now says revision 4 with this round. | — |
+| P3 re-check row vs parent code row (carried from round 2 P4) | deferred | Only in T004's rule; deferred with CU-2, reason as P1. | — |
+| P4 vault flow-note edit may be denied in an unattended run | deferred | Only T004 edited the vault; T001–T003 leave the flow unchanged and write nothing outside the checkout. Deferred with CU-2; the later batch must plan for `--knowledge-dir` or a handoff fallback. | — |
+| P5 ambiguous "number of Claude reviews covered" | deferred | Only in T004's report section; deferred with CU-2. | — |
+
+Also taken from the round 3 notes: T001 sets the test env on `self.env` before `self.runner()` copies it.
