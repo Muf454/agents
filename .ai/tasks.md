@@ -291,6 +291,14 @@ allowlist can express, so a new script no longer blocks a task.
   listed as human steps in the handoff (`setup-project --upgrade` updates `.ai/prompts` but
   never `.ai/permissions.allow`).
 - README (permissions section) and `docs/workflow.md` (allowlist description): one line each.
+- Existing test changed on purpose (plan review round 3 P12):
+  `test_permissions_template_excludes_network_installs_and_writers` (tests/test_workflow.py
+  ~1369–1379) takes `command.split()[0]` of every `Bash(...)` entry and asserts it is not in
+  `programs`, which lists `chmod` (~1372), so the new line fails that subTest as written.
+  In that test: remove `chmod` from `programs` and add the assertion that every entry
+  starting with `Bash(chmod` equals exactly `Bash(chmod +x *)` (so `Bash(chmod *)`, numeric
+  modes and `Bash(chmod -R *)` stay forbidden). Do not weaken anything else in it; name the
+  updated test in the result.
 
 ### Likely affected modules
 templates/.ai/permissions.allow, templates/.ai/prompts/runner.md, tests/test_workflow.py,
@@ -305,7 +313,10 @@ README.md, docs/workflow.md
   - `templates/.ai/prompts/runner.md` contains `chmod +x` and the "inside this checkout"
     rule; the installed `.ai/prompts/runner.md` after `setup-project --upgrade --apply` of an
     older install contains it too.
-- All existing tests pass unchanged (incl. any test that compares the template allowlist).
+- `test_permissions_template_excludes_network_installs_and_writers` is updated as in the
+  notes (`chmod` removed from `programs`; every `Bash(chmod` entry must equal
+  `Bash(chmod +x *)`) and passes; the update is named in the result. All other existing
+  tests pass unchanged.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k permissions_chmod` (must say `Ran N tests`, N ≥ 1).
@@ -459,7 +470,11 @@ scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md
   - refusals: `AI_PIPELINE=1`, `--plan p --triage`, `--plan p --sessions 2`,
     `--plan p --sessions 16`, `--revision`
     without `--plan`, uncommitted `src.txt` before the start (no session ran in each case);
-    a held checkout lock → T003's message;
+    a held checkout lock (holder set up as in `test_pipeline_holds_the_shared_checkout_lock`):
+    exit 1, stderr contains the stable prefix `Another runner/reviewer owns this checkout`,
+    no session ran; the owner hint and the "no `last-error` written" guarantee are T003's
+    tests and are NOT asserted here, so this case passes whether or not T003 is done (T007
+    does not depend on T003; plan review round 3 P15);
   - a usage-limit pause (mock `limit-once` applied to the planning branch, `AI_SLEEP`) shows
     `state=paused` on `planning` and the run then completes;
   - the plan session's timeout is 3600 s by default and the `--session-timeout` value when
@@ -538,51 +553,6 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
-## T009 — Docs, handoff and final audit for the batch
-Status: TODO
-Dependencies: T001, T002, T003, T004, T005, T006, T007, T008
-Model: sonnet
-
-### Goal
-README, `docs/workflow.md` and the handoff describe what the code now does; the human knows
-which gate, vault and timer steps remain.
-
-### Implementation notes
-- README: "Watch all pipelines" (~566): nine boxes (Plan first, Claude), when Plan is ✓
-  (any pipeline record; a pipeline start marks it), `planned` status and `📝` line, old
-  records and older toolkits (Plan unticked, never failed), the `─` box layout from 120
-  columns; the planning paragraph and Modes/scripts tables from T007 checked; session
-  default (T002), `ai-task check` (T001), relaunch during recovery (T003), watchdog first
-  probe and stall confirmation (T004), `chmod +x` rule (T005) each present once.
-- `docs/workflow.md`: plan stage (command, allowlist, records `planning`/`planned`/`plan`
-  stop, registration, queue check, never commits), observation schema line updated, and the
-  T001–T005 changes checked against the code.
-- `.ai/handoff.md`: "## Flow chart" starts `Flow chart updated: PENDING` (keep the planner's
-  list of vault changes, add anything the tasks changed); "Manual testing for the human"
-  (`### Needs you` / `### Covered by automated tests` naming every new test); "Human todos"
-  (gate line, upgrades, timer reinstall, vault).
-- Search the tests for any remaining `eight boxes` / `OnBootSec` / `16 sessions` wording in
-  docs and fix it.
-
-### Likely affected modules
-README.md, docs/workflow.md, .ai/handoff.md
-
-### Acceptance criteria
-- `DocsConsistencyTest` passes; README mentions `ai-run --plan`, `ai-task check`, `planned`,
-  `Session budget`, `OnActiveSec` (or "2 minutes after install") and `chmod +x`;
-  `docs/workflow.md` mentions `planning`, `plan-allowlist` and `stall_seen_ns`.
-- `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names every `test_queue_check_*`, `test_session_budget_*`, `test_lock_owner_*`,
-  `test_watchdog_confirm_*`, `test_permissions_chmod_*`, `test_observation_writer_plan_*`,
-  `test_plan_session_*` and `test_dashboard_plan_*` group under "Covered by automated tests".
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
-
-### Result / notes
-
 ## T010 — Session budget end to end under a long-run test timeout (FL-19, plan review rounds 1–2 P2)
 Status: TODO
 Dependencies: T002
@@ -638,13 +608,18 @@ leaving the loss for mission control to commit unseen.
 ### Implementation notes
 - `scripts/lib/workflow.py`: `plan-keeps-done START`: parse `git show START:.ai/tasks.md`
   (absent at START → pass) and the working-tree `.ai/tasks.md` with `task_blocks`; every
-  task whose `Status:` was `DONE` at START must still exist with the identical block (heading
-  and all lines, so status and `### Result / notes` included), compared after stripping
-  trailing empty lines of each block (`task_blocks` keeps the blank lines before the next
-  `## `, so appending a task after the last DONE block must not count as a change; plan
-  review round 2 P9). Failure: `fail('DONE task T00x was changed or removed')`, first
-  offending ID in queue order. Reuse the existing git/`records_scope` helpers for reading
-  START; no shell.
+  task whose `Status:` was `DONE` at START must still exist with the identical block.
+  Comparison rule (plan review round 2 P9 and round 3 P13, one rule for the whole block):
+  compare the RAW text slice of each DONE task, i.e. every source line from its `## Txxx`
+  heading up to the line before the next `## ` heading outside a fence, fenced lines
+  included, after stripping trailing empty lines. `task_blocks` drops fenced lines from
+  `lines` (~403–404: lines inside a code fence are skipped) and keeps the blank lines before
+  the next `## `, so the parsed `lines` are NOT the comparison input: add an optional
+  `raw` list to each block in `task_blocks` (every line after the heading until the next
+  heading or non-task `## ` section, fences included; `lines` and all existing callers
+  unchanged) and compare heading + `raw`. Failure: `fail('DONE task T00x was changed or
+  removed')`, first offending ID in queue order. Reuse the existing git/`records_scope`
+  helpers for reading START; no shell.
 - The check is unconditional (not tied to `--revision`): a START queue without DONE tasks
   passes trivially, so a first plan from the template stays free to replace the queue, and
   a forgotten `--revision` cannot bypass it.
@@ -669,8 +644,12 @@ README.md, docs/workflow.md
   (ai-run):
   - helper: passes when a DONE block is unchanged and TODO tasks are added/removed/edited;
     fails naming the ID when a DONE task is removed, set to TODO, or its result text changed;
-    passes when START has no `.ai/tasks.md` or no DONE task; passes when the last DONE
-    block only gains or loses trailing blank lines because a task was appended after it;
+    fails naming the ID when only text INSIDE a code fence of a DONE task's
+    `### Result / notes` changed (e.g. a line of command output in a code-fence block; plan
+    review round 3 P13); passes when START has no `.ai/tasks.md` or no DONE task; passes when the
+    last DONE block only gains or loses trailing blank lines because a task was appended
+    after it; `task_blocks(...)['lines']` of a fixture with a fence is unchanged by the new
+    `raw` list;
   - `ai-run --plan p` on a committed queue with a malformed `## T0x` heading: exit 1 with
     `Malformed task heading`, no Claude session ran;
   - `ai-run --plan p --revision` with `plan-revision-drops-done` on a queue with DONE
@@ -686,3 +665,54 @@ Targeted: `python3 -m unittest discover -s tests -k plan_session_revision` (must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+## T009 — Docs, handoff and final audit for the batch
+Status: TODO
+Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T010, T011
+Model: sonnet
+
+### Goal
+README, `docs/workflow.md` and the handoff describe what the code now does; the human knows
+which gate, vault and timer steps remain.
+
+### Implementation notes
+- README: "Watch all pipelines" (~566): nine boxes (Plan first, Claude), when Plan is ✓
+  (any pipeline record; a pipeline start marks it), `planned` status and `📝` line, old
+  records and older toolkits (Plan unticked, never failed), the `─` box layout from 120
+  columns; the planning paragraph and Modes/scripts tables from T007 checked; session
+  default (T002), `ai-task check` (T001), relaunch during recovery (T003), watchdog first
+  probe and stall confirmation (T004), `chmod +x` rule (T005) each present once.
+- `docs/workflow.md`: plan stage (command, allowlist, records `planning`/`planned`/`plan`
+  stop, registration, queue check, `plan-keeps-done` (T011), never commits), observation
+  schema line updated, and the T001–T005 changes checked against the code.
+- This task is the last of the batch: it depends on T010 and T011 as well (plan review
+  round 3 P14), so `tasks next` runs them first and the audit covers their tests and docs
+  sentences (T010's `LONG_RUN_TIMEOUT` tests, T011's README/docs sentence).
+- `.ai/handoff.md`: "## Flow chart" starts `Flow chart updated: PENDING` (keep the planner's
+  list of vault changes, add anything the tasks changed); "Manual testing for the human"
+  (`### Needs you` / `### Covered by automated tests` naming every new test); "Human todos"
+  (gate line, upgrades, timer reinstall, vault).
+- Search the tests for any remaining `eight boxes` / `OnBootSec` / `16 sessions` wording in
+  docs and fix it.
+
+### Likely affected modules
+README.md, docs/workflow.md, .ai/handoff.md
+
+### Acceptance criteria
+- `DocsConsistencyTest` passes; README mentions `ai-run --plan`, `ai-task check`, `planned`,
+  `Session budget`, `OnActiveSec` (or "2 minutes after install") and `chmod +x`;
+  `docs/workflow.md` mentions `planning`, `plan-allowlist` and `stall_seen_ns`.
+- `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
+- The handoff names every `test_queue_check_*`, `test_session_budget_*`, `test_lock_owner_*`,
+  `test_watchdog_confirm_*`, `test_permissions_chmod_*`, `test_observation_writer_plan_*`,
+  `test_plan_session_*`, `test_dashboard_plan_*`, `test_session_budget_end_to_end_*`,
+  `test_plan_keeps_done_*` and `test_plan_session_revision_*` group under "Covered by
+  automated tests", and every group exists in the tests (T010 and T011 are DONE before this
+  task runs).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+

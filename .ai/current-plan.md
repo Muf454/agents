@@ -61,10 +61,14 @@ Small, local changes in the existing scripts; no new runtime dependency, no new 
      ```
      Plan mode's session timeout defaults to 3600 s (`--session-timeout` wins). After the
      session the host also runs `workflow.py plan-keeps-done START` (T011, plan review
-     round 1 P1): every task DONE at START must keep its identical block (trailing blank
-     lines ignored; also run on HEAD before the session to validate the START queue); the check is
-     unconditional (a template queue has no DONE tasks, so a first plan passes), so the
-     "keep DONE tasks" contract is enforced, not prompt-only.
+     round 1 P1): every task DONE at START must keep its identical block. The comparison is
+     on the raw text of the block (heading to the line before the next `## ` outside a
+     fence, fenced lines included, trailing blank lines ignored), not on the parsed `lines`
+     of `task_blocks`, which drop fenced content (rounds 2–3, P9/P13: one rule for the whole
+     block instead of per-symptom exceptions); also run on HEAD before the session to
+     validate the START queue. The check is unconditional (a template queue has no DONE
+     tasks, so a first plan passes), so the "keep DONE tasks" contract is enforced, not
+     prompt-only.
    - Dashboard (T008): `FLOW` gains `('planning', 'Plan', 'Plan', 'claude')` first; Plan
      check's compact label becomes `PlanCheck`; `BOX_OF['recheck']` computed from Triage's
      index; joiners `─` (one column). Worst case at 120 columns: labels 4 + 10 + 13 + 5 + 11
@@ -84,14 +88,21 @@ end to end under a dedicated `LONG_RUN_TIMEOUT` = 600 s × scale, sonnet) → T0
 one-line changes. Round 2 refined them in place: T010's bound (P2), T011's trailing-blank
 comparison and pre-session START check (P9), T007's `sessions_given` flag so it does not
 depend on T002 (P10), and T003's documented limit for a watchdog-started recovery (P11).
+Round 3: T009 (the audit) now depends on T010 and T011 too, so `tasks next` runs it last
+although it sits before them in the file (P14); T005 names the existing permissions test it
+must update (P12); T011's comparison is on raw block text (P13); T007's lock case asserts
+only the stable message prefix (P15).
 The ai-pipeline queue check runs whether or not the plan review is on (round 1 P7). The FL items are
 independent (`Dependencies: none`) so one blocked item never stops the others; DB-04 comes
 after them in queue order, and T007 depends on T001 (queue check) and T006.
 
 ## Risks
-- Golden dashboard outputs and `test_watchdog_health_stall_recovery_and_checkout_scope`
-  change on purpose (T008, T004): each task updates them with the new expectation and says so
-  in its result; no other existing test is weakened.
+- Golden dashboard outputs, `test_watchdog_health_stall_recovery_and_checkout_scope` and
+  `test_permissions_template_excludes_network_installs_and_writers` change on purpose (T008,
+  T004, T005): each task updates them with the new expectation and says so in its result.
+  The permissions test drops `chmod` from its forbidden programs and instead requires every
+  `Bash(chmod` entry to be exactly `Bash(chmod +x *)` (round 3 P12). No other existing test
+  is weakened.
 - Stall confirmation delays the markerless "killed runner" notice by one timer period
   (~10 min). Accepted: the `died` rule (marker with a dead PID) is the real crash detector and
   stays immediate; FL-21 was a false alarm from exactly this rule.

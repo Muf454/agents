@@ -89,7 +89,8 @@ never authorizes), gate files are never edited by a pipeline session.
   - Session timeout: 3600 s by default in plan mode (`--session-timeout` wins).
   - After the session: gate unchanged (existing check), `plan-scope <start HEAD>` (only the
     six records plus the host's `.ai/run-log.md` changed), `plan-keeps-done <start HEAD>`
-    (every task DONE at the start keeps its identical block; always checked), `tasks check`. Success →
+    (every task DONE at the start keeps its identical block, compared as raw text incl.
+    fenced lines; always checked), `tasks check`. Success →
     `observe planned "<n> tasks"` (stage `planning`, state `done`) and
     `📝 Plan ready on <branch>: <n> tasks. Review and commit it, then start ai-pipeline
     --approved.`; failure → `last-error` = the reason, observation `stop plan <reason>`

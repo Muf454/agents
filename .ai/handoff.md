@@ -93,5 +93,6 @@ Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_bud
 - No CI workflow change needed.
 
 ## Next action
-Runner: implement T001–T011 in order (T010/T011 added by plan review round 1). Human afterwards: the checks under "Needs you", the
-gate/vault/timer todos, and the PR review.
+Runner: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
+T009, the audit, depends on T010 and T011 since round 3 and runs last). Human afterwards: the
+checks under "Needs you", the gate/vault/timer todos, and the PR review.

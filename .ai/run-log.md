@@ -237,3 +237,5 @@
 | 2026-10-09T14:10:26Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/25 | PASS | b6add1d | Human acceptance and merge remain |
 | 2026-10-09T21:08:10Z | runner | plan-revision | plan revised (round 1): accepted 6, rejected 2, needs-human 0 | n/a | 470d958 | Plan review runs again |
 | 2026-10-09T22:21:29Z | runner | plan-revision | plan revised (round 2): accepted 4, rejected 0, needs-human 0 | n/a | 5621c14 | Plan review runs again |
+| 2026-10-09T22:31:31Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | caeb7e3 | No merge or deployment performed |
+| 2026-10-10T05:25:59Z | runner | plan-revision | plan revised (round 3): accepted 4, rejected 0, needs-human 0 | n/a | caeb7e3 | Plan review runs again |
