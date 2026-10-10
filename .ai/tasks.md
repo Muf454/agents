@@ -602,7 +602,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 Done 2026-10-10. `FLOW` has Plan (claude) first, Plan check compact `PlanCheck`; `BOX_OF['recheck']` derives from Triage; one-column `─` joiners (box x step `inner + 3`); `passed()` ticks Plan for a stage-`none` observation; `planned` status (Plan ✓, `📝 <note>` marker under Plan check, no active box), ranked after live and before finished, hidden after 24 h. Tests `test_dashboard_plan_*` (9) added in tests/test_dashboard.py. Existing tests with updated goldens/counts: `test_dashboard_render_golden_widths`, `test_dashboard_render_worst_case_row_is_not_truncated`, `test_dashboard_render_stopped_review_and_finished`, `test_dashboard_render_plan_revision_stored_decision_extra_round_format_retry`, `test_dashboard_render_stop_at_start_highlights_no_box` (Plan ✓ before the stop marker), `test_dashboard_render_overlays_and_line_widths` (stopped re-check checked at width 80: nine compact labels no longer fit 60), `test_dashboard_snapshot_unreadable_checkout_next_to_healthy_one` (5 ticks), `test_observation_writer_plan_dashboard_snapshot`. `.ai/bin/ai-check` PASS, 597 tests.
 
 ## T010 — Session budget end to end under a long-run test timeout (FL-19, plan review rounds 1–2 P2)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: sonnet
 
@@ -642,6 +642,7 @@ Targeted: `python3 -m unittest discover -s tests -k session_budget_end_to_end` (
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. Added `LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE` and a `timeout=` keyword on `tool()` (defaults unchanged). Tests `test_session_budget_end_to_end_runs_past_session_16` (Session budget: 19, Iteration 17/19, complete, no limit) and `test_session_budget_end_to_end_explicit_16_stops` in tests/test_workflow.py; targeted run: 2 tests OK (~44 s). `.ai/bin/ai-check` PASS, 599 tests.
 
 ## T011 — Planning never loses DONE tasks: host check `plan-keeps-done` (DB-04, plan review round 1 P1)
 Status: TODO

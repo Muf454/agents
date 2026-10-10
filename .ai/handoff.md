@@ -54,6 +54,10 @@ the running-planning and running-build goldens at 140/120/119/60, nine boxes at 
 truncation (widths 40–200), `planned` (JSON, ordering, 📝 line, 24 h hiding), a stopped Plan,
 a pipeline start record, old/legacy records, a live `ai-run --plan` and the Triage re-check box.
 
+T010 done (2026-10-10): `.ai/bin/ai-check` PASS, 599 tests; `test_session_budget_end_to_end_*`
+(2) run 17 mock sessions under `LONG_RUN_TIMEOUT` (budget 19, `Iteration 17/19`; `--sessions 16`
+stops at the limit).
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode

@@ -18,6 +18,9 @@ HELPER = ROOT / 'scripts/lib/workflow.py'
 TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
 PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
+# 17 mock sessions in one ai-run (about 5 s each in parallel shards); CI runs on a 2-core runner
+# without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
+LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE
 
 
 def task(task_id, status='TODO', dependencies='none'):
@@ -1244,10 +1247,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -c "assert 2 + 2 == 4"\n')
         self.commit('approved plan and real fixture gate')
 
-    def tool(self, name, *args, expected=0, **env):
+    def tool(self, name, *args, expected=0, timeout=None, **env):
+        if timeout is None:
+            timeout = PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
-                            env=dict(self.env, **env),
-                            timeout=PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT)
+                            env=dict(self.env, **env), timeout=timeout)
 
     def test_setup_dry_run_preservation_and_repeatability(self):
         (self.project / 'CLAUDE.md').write_text('human instructions\n')
@@ -2161,6 +2165,20 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-run', '--approved', '--sessions', '1', expected=1)
         self.assertIn('Session budget: 1 (--sessions)', result.stdout)
         self.assertIn('Session limit reached', result.stderr)
+
+    def test_session_budget_end_to_end_runs_past_session_16(self):
+        self.ready(self.budget_queue(17))
+        result = self.tool('ai-run', '--approved', timeout=LONG_RUN_TIMEOUT)
+        self.assertIn('Session budget: 19', result.stdout)
+        self.assertIn('Iteration 17/19', result.stdout)
+        self.assertIn('Tasks complete and validation passed', result.stdout + result.stderr)
+        self.assertNotIn('Session limit reached', result.stdout + result.stderr)
+
+    def test_session_budget_end_to_end_explicit_16_stops(self):
+        self.ready(self.budget_queue(17))
+        result = self.tool('ai-run', '--approved', '--sessions', '16', expected=1, timeout=LONG_RUN_TIMEOUT)
+        self.assertIn('Session limit reached', result.stdout + result.stderr)
+        self.assertNotIn('Iteration 17/', result.stdout + result.stderr)
 
     def test_session_budget_not_printed_for_triage_and_revise_plan(self):
         self.ready()
