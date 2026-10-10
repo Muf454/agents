@@ -131,7 +131,8 @@ permission/settings files. Existing project settings need those rules merged.
 
 Claude's runner uses `dontAsk` and explicit `.ai/permissions.allow` entries. It loads
 project settings and disables MCP integrations for that invocation. Necessary commands
-outside the allowlist become denials. Denials are logged and the run continues
+outside the allowlist become denials. The template allows `chmod +x` (and no other chmod
+form) so a session can make a script it created executable. Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
 and the run stops there. Inspect the log and adjust permissions yourself.
 

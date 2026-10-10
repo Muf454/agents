@@ -27,6 +27,10 @@ Bash(git add *)
 Bash(git commit *)
 Bash(git rm *)
 Bash(git mv *)
+# Only `+x`, only for a script the task created inside the checkout (the runner prompt says
+# so). Bash rules are prefix matches and cannot restrict the path; not a sandbox either.
+# `git add --chmod=+x` is no substitute: it leaves the working-tree file mode alone.
+Bash(chmod +x *)
 Bash(ls)
 Bash(ls *)
 Bash(grep *)

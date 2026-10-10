@@ -307,7 +307,7 @@ dedupe record and timer (reinstall note). Validation: `-k watchdog` Ran 51 tests
 `.ai/bin/ai-check` PASS, 571 tests.
 
 ## T005 — Runner template may make a new script executable (FL-22)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -361,6 +361,13 @@ Targeted: `python3 -m unittest discover -s tests -k permissions_chmod` (must say
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `Bash(chmod +x *)` added to the template with a comment; runner prompt bullet
+added (also to `triage.md`, because `test_tool_contract_section_is_shared_by_prompts` requires
+the two sections to be identical); README and docs/workflow.md one line each. New tests
+`test_permissions_chmod_*` (3). Updated on purpose:
+`test_permissions_template_excludes_network_installs_and_writers` (`chmod` removed from
+`programs`; any `chmod` entry must equal `chmod +x *`). Gate: `.ai/bin/ai-check` PASS, 574
+tests (one earlier run had a 25 s timeout in an unrelated recover test, passed on rerun).
 
 ## T006 — Plan stage records: `planning` box key, `plan` stop label, `planned`, allowlist and scope helpers (DB-04)
 Status: TODO

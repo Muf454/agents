@@ -1456,14 +1456,38 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_permissions_template_excludes_network_installs_and_writers(self):
         commands = [entry[5:-1] for entry in self.permissions_template_entries() if entry.startswith('Bash(')]
         self.assertTrue(commands)
-        programs = ('curl', 'wget', 'ssh', 'scp', 'rm', 'sed', 'rg', 'find', 'xargs', 'chmod',
+        programs = ('curl', 'wget', 'ssh', 'scp', 'rm', 'sed', 'rg', 'find', 'xargs',
                     'sudo', 'sh', 'python', 'python3')
         phrases = ('npm install', 'npm i ', 'pip install', 'git push', 'git reset --hard', 'bash -c')
         for command in commands:
             with self.subTest(command=command):
                 self.assertNotIn(command.split()[0], programs)
+                if command.startswith('chmod'):
+                    self.assertEqual(command, 'chmod +x *')
                 for phrase in phrases:
                     self.assertNotIn(phrase, command + ' ')
+
+    def test_permissions_chmod_template_has_only_plus_x(self):
+        entries = self.permissions_template_entries()
+        self.assertEqual(entries.count('Bash(chmod +x *)'), 1)
+        self.assertEqual([e for e in entries if e.startswith('Bash(chmod')], ['Bash(chmod +x *)'])
+
+    def test_permissions_chmod_installed_and_passed_to_runner(self):
+        self.ready()
+        self.assertIn('Bash(chmod +x *)', (self.project / '.ai/permissions.allow').read_text().splitlines())
+        self.tool('ai-run', '--approved')
+        calls = (self.project / '.ai/local/mock-args').read_text().splitlines()
+        self.assertTrue(any('Bash(chmod +x *)' in call for call in calls))
+
+    def test_permissions_chmod_runner_prompt_rule(self):
+        section = ' '.join(self.prompt_section('runner').split())
+        self.assertIn('chmod +x', section)
+        self.assertIn('inside this checkout', section)
+        self.setup_old(self.old_toolkit())
+        self.upgrade('--apply')
+        installed = ' '.join((self.project / '.ai/prompts/runner.md').read_text().split())
+        self.assertIn('chmod +x', installed)
+        self.assertIn('inside this checkout', installed)
 
     def test_runner_detects_even_committed_gate_changes_before_untrusted_helpers(self):
         self.ready()

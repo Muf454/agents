@@ -51,6 +51,8 @@ your checkpoint and continues the queue.
   the task BLOCKED with the evidence instead of ending without a checkpoint. When the task
   names its own targeted test command, run that command as written.
 - Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
+- A new script must be executable: run `chmod +x <path>` on the file you created inside this
+  checkout (never other modes, never paths outside the checkout), then `git add -- <path>`.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
   it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
 - Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).

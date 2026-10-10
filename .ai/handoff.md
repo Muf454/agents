@@ -35,6 +35,11 @@ cover the `OnActiveSec` unit, the silent install-then-start probe, the confirmed
 dedupe records. Six diagnosis/notification tests now seed an old sighting
 (`watchdog_stalled`) instead of relying on the immediate stall.
 
+T005 done (2026-10-10): `.ai/bin/ai-check` PASS, 574 tests; `test_permissions_chmod_*` (3)
+cover the template line (exactly `+x`), the install and ai-run `--allowedTools`, and the runner
+prompt rule (also after an upgrade). The runner and triage prompts share the section, so both
+got the bullet.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode
