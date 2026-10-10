@@ -258,3 +258,4 @@
 | 2026-10-10T10:03:59Z | runner | T010 | completed | PASS | 2f6c722 | Claude checkpointed; continuing queue |
 | 2026-10-10T10:30:00Z | claude | T011 | `plan-keeps-done START` (raw block compare, fences included) before/after every planning session; mock revision modes; docs | PASS (ai-check, 609 tests) | see git log | vault flow-chart plan box and hub Log updated |
 | 2026-10-10T10:18:51Z | runner | T011 | completed | PASS | 68a255a | Claude checkpointed; continuing queue |
+| 2026-10-10T10:30Z | claude | T009 | DONE: README dashboard section (nine boxes, planned, old records, `─` layout), workflow.md stage list; audit of docs/test groups | PASS (ai-check, 609 tests; Docs and flow_this_repo targeted OK) | see git log | vault flow chart still PENDING (human) |

@@ -17,7 +17,9 @@ the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
 - T011 (done): host check `plan-keeps-done START` before and after every planning session;
   a task DONE at START that is changed or removed stops the run (`Planning: DONE task T00x
   was changed or removed`), with or without `--revision`.
-- T009: docs and audit.
+- T009 (done): README dashboard section now describes nine boxes (Plan first, `planned`,
+  old records, `─` layout); docs/workflow.md observation schema lists the stages; audit of
+  all test groups, `OnActiveSec`, `Session budget`, `chmod +x` wording found them present.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run

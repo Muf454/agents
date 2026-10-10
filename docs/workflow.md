@@ -873,8 +873,10 @@ reviewer/model/mode.
 
 `ai-dashboard` (`scripts/lib/dashboard.py`) shows each pipeline's current flow stage. The
 inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agent-writable):
-`observation.json` holds the stage, state (`active`, `paused`, `recovering`, `stopped`,
-`done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
+`observation.json` holds the stage (`planning`, `plan_review`, `plan_revision`, `setup`,
+`build`, `checks`, `review`, `triage`, `recheck`, `pr`; the dashboard draws nine boxes, Plan
+first, and a finished `planning` record is shown as status `planned`), state (`active`,
+`paused`, `recovering`, `stopped`, `done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
 `workflow.py observe` from `ai-pipeline`, `ai-run`, `ai-review`, `ai-recover` and the
 pause/resume helpers in `common.sh`. `notifications.log` keeps the last 200 notification
 lines (`notify-log`, also when no `AI_NOTIFY_CMD` is set). Every notification is mirrored

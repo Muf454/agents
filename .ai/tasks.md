@@ -726,7 +726,7 @@ notes "DONE tasks kept unchanged". Evidence: `-k plan_keeps_done` Ran 6 tests OK
 (609 tests). Existing tests unchanged.
 
 ## T009 — Docs, handoff and final audit for the batch
-Status: TODO
+Status: DONE
 Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T010, T011
 Model: sonnet
 

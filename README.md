@@ -608,8 +608,12 @@ checkout's `.ai/bin/` or from `scripts/ai-dashboard` in this toolkit (a symlink 
 too). It lists the pipelines registered in the host state directory and the runners
 alive now, one card per checkout:
 
-- The flow is eight boxes in order: Plan check (Codex), Plan revision (Claude), Setup
-  (script), Build (Claude), Checks (script), Review (Codex), Triage (Claude), PR (script).
+- The flow is nine boxes in order: Plan (Claude), Plan check (Codex), Plan revision
+  (Claude), Setup (script), Build (Claude), Checks (script), Review (Codex), Triage
+  (Claude), PR (script). Plan is ticked ✓ as soon as any pipeline record exists (a
+  pipeline start marks it); a card with no record, an old record or an older toolkit
+  leaves Plan unticked ("stage unknown"), never failed. A finished `ai-run --plan` shows
+  the status `planned` with a `📝 <n> tasks` line and Plan check as the next box.
   The active box is double-bordered in its role colour (orange Claude, blue Codex, grey
   script); a ✓ under each finished box. Re-check shares the Triage box and is drawn in
   Codex's colour. The Build box is labelled with its task count (`Build 2/5`). The marker
@@ -620,7 +624,7 @@ alive now, one card per checkout:
   first box (for example, the base moved) is marked `stopped before Plan check`.
 - Keys in the terminal view: ↑↓ move, Enter shows or hides a card's details, `a` toggles
   old finished and idle runs, `r` refreshes, `q` quits and restores the terminal.
-- The boxes need 120 columns; below that each card becomes one compact line.
+- The boxes, joined by `─`, need 120 columns; below that each card becomes one compact line.
 - `ai-dashboard --once` prints the same view once (also used when output is piped).
   `--json` prints the snapshot (`state_root` and the runs) for other tools. `--all` shows
   finished or idle runs older than 24 hours; by default they are hidden, while crashed and
