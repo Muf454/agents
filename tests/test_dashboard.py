@@ -388,6 +388,12 @@ class SnapshotTest(DashboardTest):
         ranks = [dash.RANK[status] for status in order]
         self.assertEqual(ranks, sorted(ranks))
 
+    def test_observation_writer_plan_dashboard_snapshot(self):
+        # T008 draws the Plan box; until then a planning record is accepted as "stage unknown".
+        self.plant('planning', 'planning', detail='opus · first plan')
+        runs = self.runs()
+        self.assertIn('planning', runs)
+
     def test_dashboard_snapshot_real_process_through_symlink(self):
         checkout = self.plant('real', 'build')
         process = self.spawn('ai-pipeline', checkout)

@@ -370,7 +370,7 @@ the two sections to be identical); README and docs/workflow.md one line each. Ne
 tests (one earlier run had a 25 s timeout in an unrelated recover test, passed on rerun).
 
 ## T006 — Plan stage records: `planning` box key, `plan` stop label, `planned`, allowlist and scope helpers (DB-04)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -420,6 +420,7 @@ Targeted: `python3 -m unittest discover -s tests -k observation_writer` (must sa
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `planning` is the first `BOX_KEYS` entry; `plan` stop label; `observe planned NOTE`; `plan-allowlist` and `plan-scope` helpers in workflow.py. Tests `test_observation_writer_plan_*` (5; one in tests/test_dashboard.py for the dashboard fixture). `.ai/bin/ai-check` PASS, 579 tests. No existing test iterated `BOX_KEYS`. The editable dispositions record is `.ai/reviews/dispositions.md` as the task specifies (not `plan-dispositions.md`).
 
 ## T007 — `ai-run --plan PROMPT_FILE`: headless planning session as a registered stage (DB-04)
 Status: TODO

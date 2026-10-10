@@ -2478,6 +2478,28 @@ def plan_revision_allowlist(arguments):
     print('\n'.join(['Read', 'Glob', 'Grep'] + [f'Edit(./{path})' for path in PLAN_REVISION_EDITABLE]))
 
 
+# The records a planning session may edit (Edit and Write, no Bash). run-log.md is written by
+# ai-run's exit handler, never by the session, so only the scope check allows it.
+PLAN_EDITABLE = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/state.md',
+                 '.ai/handoff.md', '.ai/reviews/dispositions.md')
+
+
+def plan_allowlist(arguments):
+    """--allowedTools entries for the planning session, one per line: read tools and Edit/Write
+    of the plan records. Nothing from .ai/permissions.allow, no Bash."""
+    entries = ['Read', 'Glob', 'Grep']
+    for path in PLAN_EDITABLE:
+        entries += [f'Edit(./{path})', f'Write(./{path})']
+    print('\n'.join(entries))
+
+
+def plan_scope(arguments):
+    """Since START, only the plan records (and the run log) changed (committed or not)."""
+    if len(arguments) != 1:
+        fail('Usage: plan-scope START')
+    records_scope(arguments[0], PLAN_EDITABLE + ('.ai/run-log.md',), 'Planning')
+
+
 def plan_revisions_store():
     """Host-side plan revision records of the current branch (agents can't write here)."""
     branch = current_branch()
@@ -3095,12 +3117,13 @@ NOTIFICATIONS_LIMIT = 256 * 1024
 NOTIFICATIONS_KEEP = 200
 SMALL_LIMIT = 4 * 1024
 TASKS_LIMIT = 1024 * 1024
-BOX_KEYS = ('plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
+BOX_KEYS = ('planning', 'plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
             'recheck', 'pr')
 OBSERVATION_STATES = ('active', 'paused', 'recovering', 'stopped', 'done')
 # ai-pipeline's stop labels: (box keys the label covers, stage when the recorded one is outside).
 STOP_LABELS = {
     'start': ((), 'none'),
+    'plan': (('planning',), 'planning'),
     'plan review': (('plan_review', 'plan_revision'), 'plan_review'),
     'plan revision': (('plan_revision',), 'plan_revision'),
     'implementation': (('setup', 'build', 'checks'), 'build'),
@@ -3351,6 +3374,9 @@ def observation_update(record, action, values):
     if action == 'done':
         needs((1, 1), 'done NOTE')
         return {**record, 'stage': 'pr', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
+    if action == 'planned':
+        needs((1, 1), 'planned NOTE')
+        return {**record, 'stage': 'planning', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
     raise RecordError(f'unknown observe action: {action}')
 
 
@@ -3584,6 +3610,10 @@ def main():
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':
         plan_revision_allowlist(arguments)
+    elif command == 'plan-allowlist':
+        plan_allowlist(arguments)
+    elif command == 'plan-scope':
+        plan_scope(arguments)
     elif command == 'plan-revisions':
         plan_revisions(arguments)
     elif command == 'limit-check':

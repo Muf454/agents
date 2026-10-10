@@ -40,6 +40,10 @@ cover the template line (exactly `+x`), the install and ai-run `--allowedTools`,
 prompt rule (also after an upgrade). The runner and triage prompts share the section, so both
 got the bullet.
 
+T006 done (2026-10-10): `.ai/bin/ai-check` PASS, 579 tests; `test_observation_writer_plan_*` (5)
+cover the `planning` step/`planned`/stop-label records, the 15-line `plan-allowlist` and
+`plan-scope`, and a dashboard snapshot with a `planning` record.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode
