@@ -250,3 +250,4 @@
 | 2026-10-10T09:03:31Z | claude | T005 | Bash(chmod +x *) in permissions template; chmod rule in runner and triage prompts; docs | PASS (ai-check, 574 tests) | see git log | this repo's own permissions.allow is a human step |
 | 2026-10-10T09:09:07Z | runner | T005 | completed | PASS | f15efe8 | Claude checkpointed; continuing queue |
 | 2026-10-10T09:20:00Z | claude | T006 | planning box key, `plan` stop label, `observe planned`, plan-allowlist/plan-scope helpers | PASS (ai-check, 579 tests) | see git log | dashboard draws no Plan box until T008 |
+| 2026-10-10T09:21:01Z | runner | T006 | completed | PASS | 1fb2634 | Claude checkpointed; continuing queue |
