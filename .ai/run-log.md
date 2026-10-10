@@ -248,3 +248,4 @@
 | 2026-10-10T08:43:13Z | claude | T004 | watchdog timer OnActiveSec=2min; stalled confirmed after ≥5 min (stall_seen_ns); planning never stalled | PASS (ai-check, 571 tests) | see git log | six diagnosis tests seed an old sighting; vault flow chart still pending |
 | 2026-10-10T08:50:21Z | runner | T004 | completed | PASS | b901c50 | Claude checkpointed; continuing queue |
 | 2026-10-10T09:03:31Z | claude | T005 | Bash(chmod +x *) in permissions template; chmod rule in runner and triage prompts; docs | PASS (ai-check, 574 tests) | see git log | this repo's own permissions.allow is a human step |
+| 2026-10-10T09:09:07Z | runner | T005 | completed | PASS | f15efe8 | Claude checkpointed; continuing queue |
