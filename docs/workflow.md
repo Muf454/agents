@@ -230,7 +230,8 @@ no project allowlist is used.
 Order: supervisor settings, Claude present, checkout root, state root, checkout lock, branch
 (protected branches refused), HEAD exists, `workflow.py plan-scope HEAD` (no uncommitted work
 outside the plan records; the queue itself is not checked yet, a first plan starts from the
-template), gate digest. Then the host registers the checkout for the dashboard, records
+template), `plan-keeps-done HEAD` (parses the START queue, so a malformed task heading stops
+before a session is spent), gate digest. Then the host registers the checkout for the dashboard, records
 `observe step planning "<model> · first plan|revision"` and notifies `📝 PLANNING`. The session
 (model `--model` or `opus`, limit `--session-timeout` or 3600 s) gets `.ai/prompts/plan.md`, the
 objective and a `PLANNING CONTRACT`; its tools are `Read,Glob,Grep,Edit,Write` and its
@@ -239,7 +240,10 @@ objective and a `PLANNING CONTRACT`; its tools are `Read,Glob,Grep,Edit,Write` a
 limit pauses on the `planning` stage and resumes.
 
 After the session: gate verified, branch unchanged, `plan-scope START` (the run log is also
-allowed, for the exit handler's stop line), and `tasks check`
+allowed, for the exit handler's stop line), `plan-keeps-done START` (every task DONE in START's
+`.ai/tasks.md` keeps its raw block, fenced lines included and trailing blank lines ignored;
+unconditional, so a forgotten `--revision` cannot bypass it: `Planning: DONE task T00x was
+changed or removed`), and `tasks check`
 (`Planning: task queue is invalid: …` with the same text as `ai-task check`). Success records
 `observe planned "<N> tasks"`, notifies `📝 Plan ready` and exits 0. Any stop after the start
 records `observe stop plan <first line of last-error>` and one ⛔ notification, unless the gate

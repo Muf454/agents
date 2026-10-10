@@ -256,3 +256,4 @@
 | 2026-10-10T10:10:00Z | claude | T008 | dashboard: Plan box first (nine boxes, `─` joiners), `planned` status with 📝 marker, stage-none ticks Plan | PASS (ai-check, 597 tests) | see git log | README/docs sentences are T009; flow-chart dashboard note still pending in vault |
 | 2026-10-10T09:50:31Z | runner | T008 | completed | PASS | 58ec2ba | Claude checkpointed; continuing queue |
 | 2026-10-10T10:03:59Z | runner | T010 | completed | PASS | 2f6c722 | Claude checkpointed; continuing queue |
+| 2026-10-10T10:30:00Z | claude | T011 | `plan-keeps-done START` (raw block compare, fences included) before/after every planning session; mock revision modes; docs | PASS (ai-check, 609 tests) | see git log | vault flow-chart plan box and hub Log updated |

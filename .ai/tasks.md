@@ -645,7 +645,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 Done 2026-10-10. Added `LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE` and a `timeout=` keyword on `tool()` (defaults unchanged). Tests `test_session_budget_end_to_end_runs_past_session_16` (Session budget: 19, Iteration 17/19, complete, no limit) and `test_session_budget_end_to_end_explicit_16_stops` in tests/test_workflow.py; targeted run: 2 tests OK (~44 s). `.ai/bin/ai-check` PASS, 599 tests.
 
 ## T011 — Planning never loses DONE tasks: host check `plan-keeps-done` (DB-04, plan review round 1 P1)
-Status: TODO
+Status: DONE
 Dependencies: T006, T007
 Model: opus
 
@@ -714,6 +714,17 @@ Targeted: `python3 -m unittest discover -s tests -k plan_session_revision` (must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-10: `workflow.py plan-keeps-done START` compares heading + `raw` (new per-block list in
+`task_blocks`: every source line incl. fenced ones, trailing blank lines stripped) of every
+task DONE at START; absent queue / no DONE task passes; unknown START fails. `ai-run --plan`
+calls it with HEAD before the session (after `plan-scope HEAD`) and with START after
+`plan-scope`, unconditionally; the PLANNING CONTRACT now always says DONE blocks stay
+unchanged and the host checks it. Mock modes `plan-revision-ok` / `plan-revision-drops-done`.
+README planning paragraph and `docs/workflow.md` plan stage updated; vault flow-chart plan box
+notes "DONE tasks kept unchanged". Evidence: `-k plan_keeps_done` Ran 6 tests OK;
+`-k plan_session` Ran 12 tests OK (4 `test_plan_session_revision_*`); `.ai/bin/ai-check` PASS
+(609 tests). Existing tests unchanged.
+
 ## T009 — Docs, handoff and final audit for the batch
 Status: TODO
 Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T010, T011

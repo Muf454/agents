@@ -187,6 +187,15 @@ if 'PLANNING CONTRACT' in prompt:
         print(json.dumps({'type':'result','subtype':'error','is_error':True}))
         sys.exit(0)
     template = open(os.environ['MOCK_TASK_TEMPLATE']).read()
+    if mode in ('plan-revision-ok', 'plan-revision-drops-done'):
+        # A revision of a committed queue: append a TODO task; the drop variant flips DONE to TODO.
+        queue = pathlib.Path('.ai/tasks.md').read_text()
+        if mode == 'plan-revision-drops-done':
+            queue = queue.replace('Status: DONE', 'Status: TODO', 1)
+        new_id = 'T%03d' % (len(re.findall(r'^## T\d+', queue, re.M)) + 1)
+        pathlib.Path('.ai/tasks.md').write_text(queue.rstrip('\n') + '\n\n' + template.replace('TXXX', new_id))
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+        sys.exit(0)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
     if mode == 'plan-bad-queue':
         first = first.replace('Dependencies: none', 'Dependencies: T002')
@@ -2822,6 +2831,112 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((during['state'], during['stage']), ('paused', 'planning'))
         after = self.observation()
         self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '2 tasks'))
+
+    # ---------------------------------------------------------------- plan keeps DONE tasks (T011)
+    def keeps_done(self, start_queue, queue, expected=0):
+        """Commit START_QUEUE (None: no queue at START), write QUEUE (None: removed), run the check."""
+        path = self.project / '.ai/tasks.md'
+        path.parent.mkdir(exist_ok=True)
+        (self.project / 'README.md').write_text('fixture\n')
+        if start_queue is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(start_queue)
+        self.run_cmd(['git', 'add', '--all'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'start'])
+        if queue is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(queue)
+        return self.helper('plan-keeps-done', 'HEAD', expected=expected)
+
+    def test_plan_keeps_done_passes_when_done_blocks_are_unchanged(self):
+        start = '# Task queue\n\n' + task('T001', 'DONE') + task('T002') + task('T003')
+        edited = task('T002').replace('Write a local', 'Write another local')
+        self.keeps_done(start, '# Task queue\n\n' + task('T001', 'DONE') + edited + task('T004'))
+
+    def test_plan_keeps_done_ignores_trailing_blank_lines_of_the_last_done_task(self):
+        start = '# Task queue\n\n' + task('T001', 'DONE').rstrip('\n') + '\n'
+        self.keeps_done(start, '# Task queue\n\n' + task('T001', 'DONE') + '\n\n' + task('T002'))
+        self.keeps_done(start + '\n\n\n', start)
+
+    def test_plan_keeps_done_fails_naming_the_task(self):
+        start = '# Task queue\n\n' + task('T001') + task('T002', 'DONE') + task('T003', 'DONE')
+        changes = {
+            'removed': task('T001') + task('T003', 'DONE'),
+            'set to TODO': task('T001') + task('T002') + task('T003', 'DONE'),
+            'result changed': (task('T001') + task('T002', 'DONE').replace('Pending.', 'Passed.')
+                               + task('T003', 'DONE').replace('Pending.', 'Passed.')),
+        }
+        for name, queue in changes.items():
+            with self.subTest(name):
+                result = self.keeps_done(start, '# Task queue\n\n' + queue, expected=1)
+                self.assertIn('DONE task T002 was changed or removed', result.stderr)
+        result = self.keeps_done(start, None, expected=1)
+        self.assertIn('DONE task T002 was changed or removed', result.stderr)
+
+    def test_plan_keeps_done_compares_fenced_lines(self):
+        fenced = task('T001', 'DONE').replace('Pending.', 'Pending.\n```\nRan 3 tests\nOK\n```')
+        start = '# Task queue\n\n' + fenced
+        result = self.keeps_done(start, start.replace('Ran 3 tests', 'Ran 4 tests'), expected=1)
+        self.assertIn('DONE task T001 was changed or removed', result.stderr)
+        # A "## " line inside a fence belongs to the block too.
+        start = '# Task queue\n\n' + fenced.replace('OK\n', 'OK\n## not a heading\n')
+        self.keeps_done(start, start)
+        self.keeps_done(start, start.replace('## not a heading', '## changed'), expected=1)
+
+    def test_plan_keeps_done_passes_without_done_tasks_at_start(self):
+        self.keeps_done(None, '# Task queue\n\n' + task('T001'))
+        self.keeps_done('# Task queue\n\n' + task('T001') + task('T002', 'IN_PROGRESS'), None)
+        self.assertIn('Malformed task heading', self.keeps_done('## T01 broken\n', None, expected=1).stderr)
+        self.assertIn('Unknown commit', self.helper('plan-keeps-done', 'no-such-ref', expected=1).stderr)
+
+    def test_plan_keeps_done_raw_leaves_parsed_lines_unchanged(self):
+        text = ('# Task queue\n\n' + task('T001', 'DONE').replace('Pending.', 'Pending.\n```\nStatus: TODO\n```')
+                + '## Notes\nnot a task\n')
+        code = (f'import json, sys; sys.path.insert(0, {str(ROOT / "scripts/lib")!r}); import workflow; '
+                'print(json.dumps(workflow.task_blocks(sys.stdin.read())))')
+        result = subprocess.run(['python3', '-c', code], input=text, capture_output=True, text=True, check=True)
+        [block] = json.loads(result.stdout)
+        self.assertEqual(block['lines'], task('T001', 'DONE').splitlines()[1:])
+        self.assertEqual(block['raw'], text.split('\n## Notes')[0].splitlines()[3:] + [''])
+        self.assertIn('Status: TODO', block['raw'])
+        self.assertNotIn('Status: TODO', block['lines'])
+
+    def done_queue_ready(self):
+        self.plan_ready()
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n' + task('T001', 'DONE') + task('T002'))
+        self.commit('plan with a DONE task')
+
+    def test_plan_session_revision_malformed_start_queue_runs_no_session(self):
+        self.plan_ready()
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n## T01 broken heading\n')
+        self.commit('broken queue')
+        result = self.plan('--revision', expected=1)
+        self.assertIn('Malformed task heading', result.stderr)
+        self.assertEqual(self.plan_args(), [])
+
+    def test_plan_session_revision_dropping_a_done_task_stops(self):
+        self.done_queue_ready()
+        result = self.plan('--revision', expected=1, MOCK_CLAUDE='plan-revision-drops-done')
+        self.assert_plan_stopped(result, 'DONE task T001 was changed or removed')
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertNotIn('Status: DONE', queue)
+        self.assertIn('## T003', queue)
+
+    def test_plan_session_revision_flag_missing_still_refuses_the_drop(self):
+        self.done_queue_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-revision-drops-done')
+        self.assert_plan_stopped(result, 'DONE task T001 was changed or removed')
+
+    def test_plan_session_revision_keeping_done_tasks_completes(self):
+        self.done_queue_ready()
+        result = self.plan('--revision', MOCK_CLAUDE='plan-revision-ok')
+        self.assertIn('Plan ready on feature/test: 3 tasks', result.stdout)
+        self.assertIn('the host stops the run when a DONE task was changed or removed', self.plan_prompt())
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '3 tasks'))
+        self.assertNotIn('⛔', self.notifications())
 
     def test_plan_dispositions_pending_accepts_only_the_host_header(self):
         self.revise_ready()

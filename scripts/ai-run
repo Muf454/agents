@@ -124,8 +124,10 @@ plan_scope() {
   }
 }
 if [[ -n "$plan_file" ]]; then
-  # A first plan starts from the template queue, so the queue is checked after the session.
+  # A first plan starts from the template queue, so the queue is checked after the session;
+  # the START queue is parsed here so a malformed heading stops before a session is spent.
   plan_scope HEAD
+  keep_error=$(ai_helper plan-keeps-done HEAD 2>&1 >/dev/null) || ai_die "Planning: ${keep_error#Error: }"
 else
   # Triage and plan revision check their own leftovers below (an interrupted one may leave
   # workflow records).
@@ -296,6 +298,8 @@ if [[ -n "$plan_file" ]]; then
   prompt+='After you finish, the host validates .ai/tasks.md with the same rules as .ai/bin/ai-task check: '
   prompt+='dependencies only on earlier tasks, exactly one Status: and one Dependencies: line per task, and '
   prompt+='the required sections.'
+  prompt+=' Keep every DONE task block exactly as it is (status, text and results); the host stops '
+  prompt+='the run when a DONE task was changed or removed.'
   if [[ "$plan_revision" == yes ]]; then
     prompt+=' An earlier plan exists: keep DONE tasks, their status and results unchanged.'
   fi
@@ -304,6 +308,7 @@ if [[ -n "$plan_file" ]]; then
   claude_session "$prompt" "$plan_model" Read,Glob,Grep,Edit,Write "${plan_allowed[@]}"
   ai_branch
   plan_scope "$since"
+  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || ai_die "Planning: ${keep_error#Error: }"
   queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'

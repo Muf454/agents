@@ -399,12 +399,18 @@ def task_blocks(text):
                 fence = value
             elif value[0] == fence[0] and len(value) >= len(fence):
                 fence = None
+            if current is not None:
+                current['raw'].append(line)
             continue
         if fence:
+            if current is not None:
+                current['raw'].append(line)
             continue
         heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
         if heading:
-            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': []}
+            # raw: every source line of the block, fenced lines included (plan-keeps-done).
+            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': [],
+                       'heading': line, 'raw': []}
             blocks.append(current)
         elif re.match(r'^##\s+T\d', line):
             fail(f'Malformed task heading: {line}')
@@ -412,6 +418,7 @@ def task_blocks(text):
             current = None
         elif current is not None:
             current['lines'].append(line)
+            current['raw'].append(line)
     return blocks
 
 
@@ -2500,6 +2507,40 @@ def plan_scope(arguments):
     records_scope(arguments[0], PLAN_EDITABLE + ('.ai/run-log.md',), 'Planning')
 
 
+def plan_keeps_done(arguments):
+    """Every task DONE in START's .ai/tasks.md is still in the working tree, block unchanged."""
+    if len(arguments) != 1:
+        fail('Usage: plan-keeps-done START')
+    start = arguments[0]
+    try:
+        git('rev-parse', '--verify', '--quiet', f'{start}^{{commit}}')
+    except subprocess.CalledProcessError:
+        fail(f'Unknown commit: {start}')
+    if subprocess.run(['git', 'cat-file', '-e', f'{start}:.ai/tasks.md'],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        return
+    before = task_blocks(git('show', f'{start}:.ai/tasks.md').decode(errors='replace'))
+    done = [task for task in before
+            if any(line.startswith('Status:') and line.split(':', 1)[1].strip() == 'DONE'
+                   for line in task['lines'])]
+    if not done:
+        return
+    path = Path('.ai/tasks.md')
+    after = {}
+    for task in task_blocks(path.read_text()) if path.is_file() else []:
+        after.setdefault(task['id'], task)
+
+    def block(task):
+        raw = list(task['raw'])
+        while raw and not raw[-1].strip():
+            raw.pop()
+        return [task['heading'], *raw]
+
+    for task in done:
+        if task['id'] not in after or block(after[task['id']]) != block(task):
+            fail(f"DONE task {task['id']} was changed or removed")
+
+
 def plan_revisions_store():
     """Host-side plan revision records of the current branch (agents can't write here)."""
     branch = current_branch()
@@ -3614,6 +3655,8 @@ def main():
         plan_allowlist(arguments)
     elif command == 'plan-scope':
         plan_scope(arguments)
+    elif command == 'plan-keeps-done':
+        plan_keeps_done(arguments)
     elif command == 'plan-revisions':
         plan_revisions(arguments)
     elif command == 'limit-check':

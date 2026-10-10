@@ -14,6 +14,9 @@ the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
 - T006–T008 DB-04: `ai-run --plan PROMPT_FILE [--model M] [--revision]` (headless planning
   session, plan-records-only allowlist, registered, `planning`/`planned` records, host queue
   check), and a ninth dashboard box **Plan** before Plan check.
+- T011 (done): host check `plan-keeps-done START` before and after every planning session;
+  a task DONE at START that is changed or removed stops the run (`Planning: DONE task T00x
+  was changed or removed`), with or without `--revision`.
 - T009: docs and audit.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
@@ -83,6 +86,7 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
   only, never commits) → human/mission control commits → `ai-pipeline --approved`.
   Applied by T007 (2026-10-10): the plan box names `ai-run --plan` and the notification
   table has a 📝 PLANNING / Plan ready row; the other bullets are still pending.
+  T011 (2026-10-10) added "DONE tasks kept unchanged" to the plan box.
 - Plan review step: the queue is validated first (`ai-task check` rules); an invalid queue
   stops at the plan review ("Task queue is invalid"), recovery always escalates it.
 - Implementation: default session budget `max(16, unfinished tasks + 2)`.
@@ -121,8 +125,12 @@ versions), `test_permissions_chmod_*`,
 `test_observation_writer_plan_*`, `test_plan_session_*` (`ai-run --plan`: allowlist without
 Bash, no commit, `planning`/`planned`/stopped records, one ⛔ per stop, refusals before any
 session, usage-limit pause on Plan), `test_dashboard_plan_*`,
-`test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` and
-`test_plan_session_revision_*` (T011).
+`test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` (unchanged DONE block
+passes, removed/flipped/result-changed/fenced-line change fails naming the ID, no queue or no
+DONE task at START passes, trailing blank lines ignored, `lines` unchanged by `raw`) and
+`test_plan_session_revision_*` (T011: malformed START heading runs no session; a dropped
+DONE task stops with or without `--revision`, one ⛔, file left as written; keeping it
+completes with 3 tasks).
 
 ## Human todos
 - Gate (this repo, before a run that needs it): add `Bash(chmod +x *)` to
