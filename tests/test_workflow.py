@@ -606,6 +606,17 @@ class ToolkitTest(unittest.TestCase):
             time.sleep(0.01)
         return process
 
+    def watchdog_stalled(self, phase):
+        # A stall a probe already sighted long ago: the next probe confirms it.
+        self.watchdog_phase(phase)
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        record = json.loads(state.read_text()) if state.exists() else {}
+        state.write_text(json.dumps(dict(record, stall_seen_ns=0)) + '\n')
+
+    def watchdog_state(self):
+        return json.loads((self.project / '.ai/local/watchdog.json').read_text())
+
     def test_watchdog_health_stall_recovery_and_checkout_scope(self):
         self.setup_project()
         self.watchdog()
@@ -614,14 +625,90 @@ class ToolkitTest(unittest.TestCase):
         other = self.base / 'other'
         other.mkdir()
         self.watchdog_runner(other)
-        self.watchdog(expected=1)
-        self.watchdog(expected=1)
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))  # first sighting: not confirmed yet
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 600))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1200))
         self.assertEqual(len(self.notifications().splitlines()), 1)
         self.watchdog_phase('ready_for_review')
-        self.watchdog()
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 1800))
         self.watchdog_phase('fixing_review')
-        self.watchdog(expected=1)
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 2400))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 3000))
         self.assertEqual(len(self.notifications().splitlines()), 2)
+
+    def test_watchdog_confirm_timer_first_probe_two_minutes_after_activation(self):
+        self.setup_project()
+        self.mock_systemctl()
+        self.watchdog('--install-timer')
+        timer = next((self.config / 'systemd/user').glob('*.timer')).read_text()
+        self.assertIn('OnActiveSec=2min\n', timer)
+        self.assertIn('OnUnitActiveSec=10min\n', timer)
+        self.assertNotIn('OnBootSec', timer)
+
+    def test_watchdog_confirm_install_before_pipeline_start_is_silent(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))
+        self.assertIsInstance(self.watchdog_state()['stall_seen_ns'], int)
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        (self.project / '.ai/local/pipeline.active').write_text(f'{pipeline.pid}\n')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 600))
+        self.assertEqual(self.notifications(), '')
+        self.assertNotIn('stall_seen_ns', self.watchdog_state())
+
+    def test_watchdog_confirm_killed_runner_reported_once_after_five_minutes(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 120))
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 360))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 960))
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('⛔', self.notifications())
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_dead_pipeline_marker_reported_at_first_probe(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        self.crashed_marker()
+        self.watchdog(expected=1)
+        self.assertIn('ai-pipeline is gone', self.notifications())
+        self.assertNotIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_planning_stage_is_not_stalled(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        observation = self.project / '.ai/local/observation.json'
+        observation.parent.mkdir(exist_ok=True)
+        start = time.time()
+        for offset, state in ((0, 'active'), (600, 'done')):
+            observation.write_text(json.dumps({'stage': 'planning', 'state': state}) + '\n')
+            self.watchdog(AI_WATCHDOG_NOW=str(start + offset))
+            self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        self.assertEqual(self.notifications(), '')
+        # An unreadable record (a FIFO) is ignored without blocking: the stall rule applies.
+        observation.unlink()
+        os.mkfifo(observation)
+        command = [str(self.project / '.ai/bin/ai-watchdog')]
+        self.run_cmd(command, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1200)), timeout=10)
+        self.assertIn('stall_seen_ns', self.watchdog_state())
+        self.run_cmd(command, expected=1, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1800)), timeout=10)
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_dedupe_record_versions(self):
+        self.setup_project()
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        state.write_text('{"active": [], "notified_at_ns": 0}\n')  # previous version
+        self.watchdog()
+        state.write_text('{"active": [], "notified_at_ns": 0, "stall_seen_ns": "x"}\n')
+        result = self.watchdog(expected=2)
+        self.assertIn('invalid dedupe record', result.stderr)
 
     def test_watchdog_hung_activity_sources_and_new_incident(self):
         import time
@@ -677,7 +764,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.setup_project()
         self.watchdog('--stale-minutes', '0', expected=2)
         self.watchdog('--unknown', expected=2)
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
         self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
@@ -764,7 +851,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_diagnosis_defaults_to_codex(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         self.watchdog('--diagnose', expected=1)
         self.assertIn('Codex: the runner was killed.', self.notifications())
         self.assertIn('Evidence follows.', (self.project / '.ai/local/diagnosis.md').read_text())
@@ -1101,7 +1188,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'claude').write_text(
             '#!/usr/bin/env bash\nprintf "call\\n" >> "$MOCK_STATE_DIR/timeout-calls"\nsleep 30\n')
         command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude']
@@ -1518,7 +1605,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_observation_notify_watchdog_notification_is_logged_and_symlink_safe(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         other = self.base / 'other'
         other.mkdir()
         self.watchdog_runner(other)
@@ -1532,7 +1619,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/local/notifications.log').unlink()
         self.watchdog_phase('ready_for_review')
         self.watchdog()
-        self.watchdog_phase('fixing_review')
+        self.watchdog_stalled('fixing_review')
         self.watchdog(expected=1)
         self.assertEqual(self.logged_notifications(), self.notifications().splitlines()[1:])
 
@@ -4115,7 +4202,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_codex_diagnosis_does_not_fall_back(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\ntouch "$MOCK_STATE_DIR/claude-called"\n')
         self.watchdog('--diagnose', '--diagnosis-agent', 'codex', expected=1)
@@ -4417,7 +4504,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env python3\nimport os, sys\n'
                                               'a = sys.argv[1:]\n'

@@ -245,3 +245,4 @@
 | 2026-10-10T05:59:10Z | runner | T002 | completed | PASS | a78aa07 | Claude checkpointed; continuing queue |
 | 2026-10-10T08:21:00Z | claude | T003 | lock rejection names the owner (auto-recovery/pipeline PID), writes no last-error | PASS (ai-check, 565 tests) | see git log | Resumed interrupted diff; vault flow chart still pending |
 | 2026-10-10T08:28:50Z | runner | T003 | completed | PASS | fa57b4d | Claude checkpointed; continuing queue |
+| 2026-10-10T08:43:13Z | claude | T004 | watchdog timer OnActiveSec=2min; stalled confirmed after ≥5 min (stall_seen_ns); planning never stalled | PASS (ai-check, 571 tests) | see git log | six diagnosis tests seed an old sighting; vault flow chart still pending |

@@ -29,6 +29,12 @@ T003 done (2026-10-10): `.ai/bin/ai-check` PASS, 565 tests; `test_lock_owner_*` 
 auto-recovery/pipeline hints, unknown owners, ai-run/ai-review, the symlink/FIFO guard and the
 unchanged quiet ai-recover rejection. A symlinked marker is refused earlier by `ai_root`.
 
+T004 done (2026-10-10): `.ai/bin/ai-check` PASS, 571 tests; `test_watchdog_confirm_*` (6)
+cover the `OnActiveSec` unit, the silent install-then-start probe, the confirmed killed runner
+(once), the immediate dead-marker crash, the planning exemption (FIFO ignored) and old/invalid
+dedupe records. Six diagnosis/notification tests now seed an old sighting
+(`watchdog_stalled`) instead of relying on the immediate stall.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode
@@ -84,7 +90,9 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
 
 ### Covered by automated tests
 Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_budget_*`,
-`test_lock_owner_*`, `test_watchdog_confirm_*`, `test_permissions_chmod_*`,
+`test_lock_owner_*`, `test_watchdog_confirm_*` (timer unit, install-then-start silence,
+killed runner confirmed once, dead marker immediate, planning exemption, dedupe record
+versions), `test_permissions_chmod_*`,
 `test_observation_writer_plan_*`, `test_plan_session_*`, `test_dashboard_plan_*`,
 `test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` and
 `test_plan_session_revision_*` (T011).

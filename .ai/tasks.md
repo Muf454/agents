@@ -219,7 +219,7 @@ directly for the symlink/FIFO guard. README and docs/workflow.md note the hint a
 watchdog-started recovery limit.
 
 ## T004 — Watchdog: no false STOPPED right after the timer is installed (FL-21)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -286,6 +286,25 @@ Targeted: `python3 -m unittest discover -s tests -k watchdog` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-10, claude: timer unit `OnActiveSec=2min` (commented); `stalled` needs confirmation via
+`stall_seen_ns` in `watchdog.json` (`STALL_CONFIRM_NS` 5 min; dropped when the condition stops
+holding or a `died` incident takes precedence; validated like `notified_at_ns`); a checkout
+whose `observation.json` (pinned `checkout_fds` + `read_record`) has `stage == "planning"` is
+never stalled. New tests: `test_watchdog_confirm_timer_first_probe_two_minutes_after_activation`,
+`_install_before_pipeline_start_is_silent`, `_killed_runner_reported_once_after_five_minutes`,
+`_dead_pipeline_marker_reported_at_first_probe`, `_planning_stage_is_not_stalled` (incl. FIFO
+within 10 s), `_dedupe_record_versions`. Updated: `test_watchdog_health_stall_recovery_and_checkout_scope`
+(first sighting silent, confirmed probe notifies; other assertions kept). Deviation from "all
+other tests unchanged": six tests that used the immediate stall only to trigger a diagnosis or
+notification (`test_watchdog_diagnosis_failure_is_not_retried_and_usage`,
+`_diagnosis_defaults_to_codex`, `_diagnosis_timeout_and_concurrent_dedupe`,
+`_codex_diagnosis_does_not_fall_back`, `_auto_diagnosis_falls_back_to_claude_sonnet`,
+`test_observation_notify_watchdog_notification_is_logged_and_symlink_safe`) now call the new
+helper `watchdog_stalled(phase)`, which seeds an old `stall_seen_ns` so the stall is confirmed;
+their assertions are unchanged. `test_watchdog_pipeline_marker_detects_killed_pipeline`
+unchanged. Docs: README watchdog list and timer paragraph, docs/workflow.md stalled incident,
+dedupe record and timer (reinstall note). Validation: `-k watchdog` Ran 51 tests OK;
+`.ai/bin/ai-check` PASS, 571 tests.
 
 ## T005 — Runner template may make a new script executable (FL-22)
 Status: TODO

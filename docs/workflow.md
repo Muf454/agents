@@ -698,7 +698,12 @@ Incidents:
   killed, crashed or the machine restarted, in any phase. A new pipeline run rewrites
   the marker and rearms the incident.
 - **stalled**: implementing/fixing_review, no runner, no marker and no `last-error`
-  (a killed standalone `ai-run`). A recorded stop is reported as **stop** instead.
+  (a killed standalone `ai-run`), confirmed: the first probe that sees it only records
+  `stall_seen_ns` in `watchdog.json`; a probe at least 5 minutes later that still sees it
+  reports it, and any probe that doesn't drops the record (a probe just before a pipeline
+  starts stays silent). A checkout whose `.ai/local/observation.json` is at stage
+  `planning` is never stalled (read without following symlinks; unreadable counts as
+  absent). A recorded stop is reported as **stop** instead.
 - **hung**: a live runner whose newest activity is older than `--stale-minutes`
   (default 45). Activity is the newest mtime of `.ai/run-log.md`,
   `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in
@@ -711,7 +716,8 @@ Incidents:
 
 A separate `.ai/local/watchdog.lock` serializes probes without blocking the
 workflow lock. Atomic `.ai/local/watchdog.json` records active incidents and the
-last notification timestamp, written via unpredictable temp files. Files that
+last notification timestamp (and the optional `stall_seen_ns`; records without it stay
+valid), written via unpredictable temp files. Files that
 runners delete mid-probe count as absent. Persistent incidents notify once; recovery rearms them.
 Hung incidents are bound to process start identities and activity timestamps.
 Healthy checks are silent. Exit codes: 0 healthy, 1 incident, 2 invalid
@@ -732,7 +738,10 @@ merely because the option is enabled. No diagnosis runs by default.
 
 `--install-timer [--diagnose ...]` generates a per-checkout systemd user service and
 10-minute timer with systemd-quoted absolute paths and the current `PATH`, then
-enables it; `--uninstall-timer` disables and removes it. `SuccessExitStatus=1` treats
+enables it; `--uninstall-timer` disables and removes it. The first probe runs 2 minutes
+after the timer starts (`OnActiveSec=2min`: after boot, and after `--install-timer`,
+never at once); timers installed before this change used `OnBootSec` and need
+`--install-timer` again (host copy and unit). `SuccessExitStatus=1` treats
 an incident as a successful probe. Nothing is installed by `setup-project`.
 
 ## Reviewer selection and the Claude fallback

@@ -805,7 +805,8 @@ without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` wh
 - `ai-pipeline` is gone without finishing or reporting a stop (killed, crashed or
   machine restarted), in any phase, even if an orphaned `ai-run` child survives;
 - an implementing/fixing_review checkout has no runner and no recorded stop
-  (e.g. a killed standalone `ai-run`);
+  (e.g. a killed standalone `ai-run`), still so at a probe at least 5 minutes after the
+  first one that saw it (a planning session is never stalled);
 - an alive runner has no log activity for `--stale-minutes` (default 45), not
   counting a usage-limit pause until its announced resume time or logs from before
   the current run started;
@@ -833,6 +834,11 @@ Run it every 10 minutes with a systemd user timer (one per checkout):
 systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
+
+The first probe runs 2 minutes after the timer starts (after boot or after
+`--install-timer`), so installing it just before starting a pipeline raises no alarm.
+Timers installed before this change fire at once after install: run `--install-timer`
+again to update the host copy and unit.
 
 `ai-watchdog --timer-status` prints `installed`, `missing (reason)` or `unknown (reason)`
 (exit 0, 1, 2); `installed` needs both unit files, `enabled` and `active`. `ai-pipeline`

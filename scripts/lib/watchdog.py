@@ -18,7 +18,12 @@ import time
 # No __pycache__: .ai/bin is part of the approved gate digest.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workflow import check_state_root, overlap  # noqa: E402
+from workflow import (OBSERVATION_LIMIT, check_state_root, checkout_fds, close_fds,  # noqa: E402
+                      overlap, read_record)
+
+# A stall must still hold this long after its first sighting: a probe right before a
+# pipeline starts (e.g. just after --install-timer) is not a killed runner.
+STALL_CONFIRM_NS = 5 * 60 * 1_000_000_000
 
 
 class Refused(Exception):
@@ -228,7 +233,9 @@ def timer(root, args, install):
         '# Exit 1 means "incident reported", not a failed probe.\nSuccessExitStatus=1\n')
     timer_unit.write_text(
         '[Unit]\nDescription=Check AI workflow health every 10 minutes\n\n'
-        '[Timer]\nOnBootSec=2min\nOnUnitActiveSec=10min\nUnit=' + service.name + '\n\n'
+        # OnActiveSec counts from the timer's start: 2 min after boot as before, and 2 min after
+        # `enable --now` here (an elapsed OnBootSec fires at once, before a pipeline is started).
+        '[Timer]\nOnActiveSec=2min\nOnUnitActiveSec=10min\nUnit=' + service.name + '\n\n'
         '[Install]\nWantedBy=timers.target\n')
     systemctl('daemon-reload')
     systemctl('enable', '--now', timer_unit.name)
@@ -328,6 +335,22 @@ def start_recovery(root, local, marker):
     return 'auto-recovery did not confirm it started within 20 seconds'
 
 
+def planning(root):
+    """True when the observation record is at stage planning (a planning session or a plan
+    waiting for approval, not an implementation); unreadable or malformed counts as no."""
+    fds = checkout_fds(root)
+    if fds is None:
+        return False
+    try:
+        record = read_record(fds[2], 'observation.json', OBSERVATION_LIMIT) if fds[2] is not None else None
+    finally:
+        close_fds(*fds)
+    try:
+        return json.loads(record[0]).get('stage') == 'planning'
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def runners(root):
     found = []
     for entry in Path('/proc').iterdir():
@@ -389,6 +412,7 @@ def main():
             previous = json.loads(state_file.read_text())
             if (not isinstance(previous, dict)
                     or not isinstance(previous.get('notified_at_ns', 0), int)
+                    or not isinstance(previous.get('stall_seen_ns', 0), int)
                     or not isinstance(previous.get('active', []), list)
                     or not all(isinstance(key, str) for key in previous.get('active', []))):
                 raise ValueError('invalid dedupe record')
@@ -411,14 +435,19 @@ def main():
         # killed, crashed or rebooted, even if an orphaned ai-run child still runs.
         marker = local / 'pipeline.active'
         died = pipeline_died(marker)
+        stall_seen = None
         if died:
             incidents['died:' + str(died)] = (
                 '⛔ STOPPED, needs you: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
-        elif not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review'):
-            # With a last-error the stop below explains it; this catches a killed ai-run.
-            incidents['stalled'] = (f'⛔ STOPPED, needs you: nothing is running but the checkout is mid-'
-                                    f'{phase[1]} (killed runner?). Rerun ai-pipeline or ai-run to resume.')
+        elif (not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review')
+              and not planning(root)):
+            # With a last-error the stop below explains it; this catches a killed ai-run once a
+            # later probe confirms it (the first sighting may be just before a start).
+            stall_seen = previous.get('stall_seen_ns', now)
+            if now - stall_seen >= STALL_CONFIRM_NS:
+                incidents['stalled'] = (f'⛔ STOPPED, needs you: nothing is running but the checkout is mid-'
+                                        f'{phase[1]} (killed runner?). Rerun ai-pipeline or ai-run to resume.')
         # Quiet time counts from this run's start (old logs of a resumed run don't count),
         # and a usage-limit pause is quiet by design until its announced resume time.
         quiet_since = max(newest, paused_until(local))
@@ -438,6 +467,8 @@ def main():
             incidents.setdefault(stop_key, 'Stopped.')
         fresh = sorted(set(incidents) - set(previous.get('active', [])))
         record = {'active': sorted(incidents), 'notified_at_ns': previous.get('notified_at_ns', 0)}
+        if stall_seen is not None:
+            record['stall_seen_ns'] = stall_seen
         if fresh:
             record['notified_at_ns'] = now
             # Reserve before inference/notification: interrupted probes never start it twice.
