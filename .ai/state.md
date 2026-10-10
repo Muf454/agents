@@ -9,8 +9,8 @@ Tasks complete: 7
 Tasks remaining: 4
 Last validation: PASS at 2026-10-10T09:36:30Z
 Blocked: no
-Next action: Continue queue; see task results for any blockers
-Last updated: 2026-10-10T09:36:30Z
+Next action: Resume/implement T008
+Last updated: 2026-10-10T09:36:31Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

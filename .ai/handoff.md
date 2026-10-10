@@ -49,6 +49,11 @@ T007 done (2026-10-10): `.ai/bin/ai-check` PASS, 587 tests; `test_plan_session_*
 📝 notifications, no commit, `--revision`/`--model`/`--session-timeout`, prompt-file paths, the
 invalid-queue/out-of-scope/gate-change/error stops, the refusals and the usage-limit pause.
 
+T008 done (2026-10-10): `.ai/bin/ai-check` PASS, 597 tests; `test_dashboard_plan_*` (9) cover
+the running-planning and running-build goldens at 140/120/119/60, nine boxes at 120 without
+truncation (widths 40–200), `planned` (JSON, ordering, 📝 line, 24 h hiding), a stopped Plan,
+a pipeline start record, old/legacy records, a live `ai-run --plan` and the Triage re-check box.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode

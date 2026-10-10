@@ -536,7 +536,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 Done 2026-10-10. `ai-run --plan PROMPT_FILE [--revision]` (scripts/ai-run): prompt file resolved and size-checked while parsing; refusals by given flags (`AI_PIPELINE`, `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions`, `--run-timeout`; `--revision` without `--plan`); default session limit 3600 s; `plan-scope HEAD` replaces the clean/queue checks before the session; no project allowlist read. Session `Read,Glob,Grep,Edit,Write` with `plan-allowlist`; afterwards `plan-scope START`, `tasks check` (`Planning: task queue is invalid: …`), `observe planned "<N> tasks"`, 📝 notifications, exit 0 without committing. `on_exit` records `stop plan <last-error line>` unless the gate changed. A `plan-scope` error already starting with "Planning" is not prefixed twice. Mock claude `PLANNING CONTRACT` branch (plan-ok, plan-bad-queue, plan-outside, plan-gate, plan-error, limit-once). Tests `test_plan_session_*` (8): `Ran 8 tests … OK`. `.ai/bin/ai-check` PASS, 587 tests. README "Plan with a headless session" + Modes row; `docs/workflow.md` "Plan stage"; vault flow chart plan box and 📝 row.
 
 ## T008 — Dashboard: nine boxes with Plan first, `planned` status (DB-04)
-Status: TODO
+Status: DONE
 Dependencies: T006, T007
 Model: sonnet
 
@@ -599,6 +599,7 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `FLOW` has Plan (claude) first, Plan check compact `PlanCheck`; `BOX_OF['recheck']` derives from Triage; one-column `─` joiners (box x step `inner + 3`); `passed()` ticks Plan for a stage-`none` observation; `planned` status (Plan ✓, `📝 <note>` marker under Plan check, no active box), ranked after live and before finished, hidden after 24 h. Tests `test_dashboard_plan_*` (9) added in tests/test_dashboard.py. Existing tests with updated goldens/counts: `test_dashboard_render_golden_widths`, `test_dashboard_render_worst_case_row_is_not_truncated`, `test_dashboard_render_stopped_review_and_finished`, `test_dashboard_render_plan_revision_stored_decision_extra_round_format_retry`, `test_dashboard_render_stop_at_start_highlights_no_box` (Plan ✓ before the stop marker), `test_dashboard_render_overlays_and_line_widths` (stopped re-check checked at width 80: nine compact labels no longer fit 60), `test_dashboard_snapshot_unreadable_checkout_next_to_healthy_one` (5 ticks), `test_observation_writer_plan_dashboard_snapshot`. `.ai/bin/ai-check` PASS, 597 tests.
 
 ## T010 — Session budget end to end under a long-run test timeout (FL-19, plan review rounds 1–2 P2)
 Status: TODO

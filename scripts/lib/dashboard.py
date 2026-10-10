@@ -206,8 +206,8 @@ def sanitize(text, limit=200):
 STAGES = (*BOX_KEYS, 'none')
 EVENT_COUNT = 20
 HIDE_AFTER = 24 * 3600
-RANK = {'needs_you': 0, 'crashed': 1, 'running': 2, 'paused': 2, 'recovering': 2, 'finished': 3,
-        'idle': 4, 'unknown': 5}
+RANK = {'needs_you': 0, 'crashed': 1, 'running': 2, 'paused': 2, 'recovering': 2, 'planned': 3,
+        'finished': 4, 'idle': 5, 'unknown': 6}
 
 
 def text_field(value, limit=200):
@@ -298,7 +298,7 @@ def inspect(checkout, runners, now, source=None):
         elif state == 'stopped' or errored:
             status = 'needs_you'
         elif state == 'done':
-            status = 'finished'
+            status = 'planned' if observation['stage'] == 'planning' else 'finished'
         else:
             status = 'idle'
         run.update(status=status, stage=observation['stage'] if observation else 'unknown',
@@ -309,14 +309,14 @@ def inspect(checkout, runners, now, source=None):
 
 
 def snapshot(all_runs=False, now=None, source=None):
-    """{'state_root', 'runs'}: needs_you, crashed, live, finished, idle, then newest first. Old
-    (> 24 h) finished and idle runs are hidden unless ALL_RUNS."""
+    """{'state_root', 'runs'}: needs_you, crashed, live, planned, finished, idle, then newest
+    first. Old (> 24 h) planned, finished and idle runs are hidden unless ALL_RUNS."""
     now = time.time() if now is None else now
     source = source or ProcSource()
     runs = [inspect(checkout, runners, now, source) for checkout, runners in discover(source)]
     if not all_runs:
         runs = [run for run in runs
-                if run['status'] not in ('finished', 'idle') or now - run['updated'] <= HIDE_AFTER]
+                if run['status'] not in ('planned', 'finished', 'idle') or now - run['updated'] <= HIDE_AFTER]
     runs.sort(key=lambda run: (RANK[run['status']], -run['updated']))
     return {'state_root': str(state_root()), 'runs': runs}
 
@@ -327,11 +327,13 @@ def title_line(run):
 
 
 # The flow, left to right: (stage key, label, compact label, role). `recheck` shares Triage's box.
-FLOW = (('plan_review', 'Plan check', 'Plan', 'codex'), ('plan_revision', 'Plan revision', 'Revise', 'claude'),
+FLOW = (('planning', 'Plan', 'Plan', 'claude'), ('plan_review', 'Plan check', 'PlanCheck', 'codex'),
+        ('plan_revision', 'Plan revision', 'Revise', 'claude'),
         ('setup', 'Setup', 'Setup', 'script'), ('build', 'Build', 'Build', 'claude'),
         ('checks', 'Checks', 'Checks', 'script'), ('review', 'Review', 'Review', 'codex'),
         ('triage', 'Triage', 'Triage', 'claude'), ('pr', 'PR', 'PR', 'script'))
-BOX_OF = {**{key: index for index, (key, *_rest) in enumerate(FLOW)}, 'recheck': 6}
+BOX_OF = {key: index for index, (key, *_rest) in enumerate(FLOW)}
+BOX_OF['recheck'] = BOX_OF['triage']
 WIDE_FROM = 120
 OVERLAYS = {'paused': '⏸', 'recovering': '🔧', 'crashed': '⚠'}
 ACTIVE = ('running', 'paused', 'recovering', 'crashed', 'needs_you')
@@ -387,12 +389,22 @@ def position(run):
         return len(FLOW), 'done'
     if not observation:
         return None, 'unknown'
+    if status == 'planned':
+        return BOX_OF['plan_review'], 'planned'
     if status == 'needs_you':
         return index, 'stopped'
     if index is None:
         return None, 'unknown'
     return index, {'running': 'active', 'paused': 'paused', 'recovering': 'recovering',
                    'crashed': 'crashed'}.get(status, 'idle')
+
+
+def passed(run, index, i):
+    """Whether box I is ticked: before the current box, or, for an observation without a box (a
+    pipeline's start record), the Plan box."""
+    if index is not None:
+        return i < index
+    return bool(run['observation']) and i == 0
 
 
 def box_label(run, index, here):
@@ -424,6 +436,8 @@ def marker_text(run, index, mode):
         if index is None:
             return ' · '.join(part for part in ('⛔ stopped before Plan check', note) if part), 'stopped'
         return f"⛔ {note or 'stopped'}", 'stopped'
+    if mode == 'planned':
+        return f"📝 {observation['note'] or 'planned'}", 'dim'
     if mode == 'unknown':
         text = 'stage unknown' if observation else 'stage unknown (older toolkit)'
         if not observation and run['last_error']:
@@ -439,10 +453,10 @@ def box_rows(run, index, mode):
     """[(top, middle, bottom) segment lists, x offset, width] per box, and the next x."""
     boxes, x = [], 2
     for i, (key, _label, _compact, _role) in enumerate(FLOW):
-        here = i == index
+        here = i == index and mode != 'planned'
         overlay = f' {OVERLAYS[mode]}' if here and mode in OVERLAYS else ''
         label = box_label(run, i, here) + overlay
-        if mode == 'done' or (index is not None and i < index):
+        if mode == 'done' or passed(run, index, i):
             style = 'done'
         elif not here:
             style = 'pending'
@@ -455,7 +469,7 @@ def box_rows(run, index, mode):
         tl, h, tr, v, bl, _h, br = DOUBLE if here and mode != 'idle' else SINGLE
         inner = cols(label) + 2
         boxes.append(((tl + h * inner + tr, f'{v} {label} {v}', bl + h * inner + br), x, inner + 2, style))
-        x += inner + 4
+        x += inner + 3
     return boxes
 
 
@@ -466,7 +480,7 @@ def wide_card(run, width):
     for i, (rows, _x, _w, style) in enumerate(boxes):
         for row, text in enumerate(rows):
             if i:
-                lines[row].append(('──' if row == 1 else '  ', 'dim'))
+                lines[row].append(('─' if row == 1 else ' ', 'dim'))
             lines[row].append((text, style))
     marker, used = [], 0
 
@@ -476,7 +490,7 @@ def wide_card(run, width):
         used = column + cols(text)
 
     for i, (_rows, x, _w, _style) in enumerate(boxes):
-        if mode == 'done' or (index is not None and i < index):
+        if mode == 'done' or passed(run, index, i):
             place(x + 2, '✓', 'done')
     if mode != 'done':
         text, style = marker_text(run, index, mode)
@@ -492,8 +506,8 @@ def compact_card(run):
     index, mode = position(run)
     line = [('  ', 'dim')]
     for i, (_key, _label, short, _role) in enumerate(FLOW):
-        here = i == index
-        if mode == 'done' or (index is not None and i < index):
+        here = i == index and mode != 'planned'
+        if mode == 'done' or passed(run, index, i):
             mark, style = '✓', 'done'
         elif not here:
             mark, style = '·', 'pending'

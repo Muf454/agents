@@ -389,10 +389,10 @@ class SnapshotTest(DashboardTest):
         self.assertEqual(ranks, sorted(ranks))
 
     def test_observation_writer_plan_dashboard_snapshot(self):
-        # T008 draws the Plan box; until then a planning record is accepted as "stage unknown".
         self.plant('planning', 'planning', detail='opus · first plan')
         runs = self.runs()
         self.assertIn('planning', runs)
+        self.assertEqual(runs['planning']['stage'], 'planning')
 
     def test_dashboard_snapshot_real_process_through_symlink(self):
         checkout = self.plant('real', 'build')
@@ -452,7 +452,7 @@ class SnapshotTest(DashboardTest):
         result = self.run_cli('--once')
         self.assertLess(time.monotonic() - start, BOUND)
         self.assertIn('healthy · main', result.stdout)
-        self.assertEqual(result.stdout.count('✓'), 4)  # the four boxes before Checks, healthy run only
+        self.assertEqual(result.stdout.count('✓'), 5)  # the five boxes before Checks, healthy run only
         runs = self.runs()
         self.assertEqual(runs['healthy']['stage'], 'checks')
         self.assertEqual(runs['hostile']['stage'], 'unknown')
@@ -552,11 +552,11 @@ def styles(lines):
 
 HEADER = 'AI pipelines  1 running · 0 needs you · 0 finished  00:00  ↑↓ ⏎ a r q'
 WIDE_BOXES = [
-    '  ┌────────────┐  ┌───────────────┐  ┌───────┐  ╔═══════════╗  ┌────────┐  ┌────────┐  ┌────────┐  ┌────┐',
-    '  │ Plan check │──│ Plan revision │──│ Setup │──║ Build 3/7 ║──│ Checks │──│ Review │──│ Triage │──│ PR │',
-    '  └────────────┘  └───────────────┘  └───────┘  ╚═══════════╝  └────────┘  └────────┘  └────────┘  └────┘',
+    '  ┌──────┐ ┌────────────┐ ┌───────────────┐ ┌───────┐ ╔═══════════╗ ┌────────┐ ┌────────┐ ┌────────┐ ┌────┐',
+    '  │ Plan │─│ Plan check │─│ Plan revision │─│ Setup │─║ Build 3/7 ║─│ Checks │─│ Review │─│ Triage │─│ PR │',
+    '  └──────┘ └────────────┘ └───────────────┘ └───────┘ ╚═══════════╝ └────────┘ └────────┘ └────────┘ └────┘',
 ]
-WIDE_MARKS = '    ✓' + ' ' * 15 + '✓' + ' ' * 18 + '✓' + ' ' * 8 + 'T003 · sonnet · 12m'
+WIDE_MARKS = '    ✓' + ' ' * 8 + '✓' + ' ' * 14 + '✓' + ' ' * 17 + '✓' + ' ' * 7 + 'T003 · sonnet · 12m'
 WRITER_STAGES = {'start': None, 'plan review': 'plan_review', 'plan revision': 'plan_revision',
                  'implementation': 'build', 'validation': 'checks', 'review': 'review',
                  'triage': 'triage', 're-check': 'recheck', 'pull request preparation': 'pr',
@@ -595,11 +595,11 @@ class RenderTest(DashboardTest):
         self.assertEqual(wide, [HEADER, '', '  demo · feature/x · running · 2/7 tasks', *WIDE_BOXES,
                                 WIDE_MARKS, '  10:00 🔁 Round 2'])
         self.assertEqual(plain(self.view(fake_run(), 120)), wide)
-        compact = ['  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2']
+        compact = ['  ✓Plan ✓PlanCheck ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2']
         self.assertEqual(plain(self.view(fake_run(), 119))[2:], ['  demo · feature/x · running · 2/7 tasks',
                                                                 *compact])
         narrow = plain(self.view(fake_run(), 60))
-        self.assertEqual(narrow[3], '  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·…')
+        self.assertEqual(narrow[3], '  ✓Plan ✓PlanCheck ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Revie…')
         self.assertTrue(all(dash.cols(line) <= 60 for line in narrow))
 
     def test_dashboard_render_styles_of_the_active_box(self):
@@ -614,8 +614,9 @@ class RenderTest(DashboardTest):
             self.assertNotIn('…', line)
         self.assertIn('║ Plan revision ⏸ ║', lines[4])
         self.assertLessEqual(max(dash.cols(line) for line in lines), 120)
-        longest = ['Plan check', 'Plan revision ⏸', 'Setup', 'Build 99/99', 'Checks', 'Review', 'Re-check', 'PR']
-        self.assertLessEqual(sum(dash.cols(label) + 4 for label in longest) + 14 + 2, 120)
+        longest = ['Plan', 'Plan check', 'Plan revision ⏸', 'Setup', 'Build 99/99', 'Checks', 'Review', 'Re-check',
+                   'PR']
+        self.assertLessEqual(sum(dash.cols(label) + 4 for label in longest) + 8 + 2, 120)
         lines = plain(self.view(fake_run('build', tasks=(99, 120)), 120))
         self.assertIn('Build 100/…', lines[4])
 
@@ -625,7 +626,7 @@ class RenderTest(DashboardTest):
         self.assertIn('⛔ 2 blockers', plain(stopped)[6])
         self.assertFalse([s for s in styles(stopped) if s[1].startswith('active_')])
         done = plain(self.view(fake_run('pr', 'done', 'finished', note='PR open')))
-        self.assertEqual(done[6].count('✓'), 8)
+        self.assertEqual(done[6].count('✓'), 9)
         self.assertEqual(done[7], '  🏁 PR open')
 
     def test_dashboard_render_plan_revision_stored_decision_extra_round_format_retry(self):
@@ -636,9 +637,9 @@ class RenderTest(DashboardTest):
         self.assertIn(('║ Plan revision ║', 'stopped'), styles(decision))
         self.assertIn('⛔ Which database?', plain(decision)[6])
         extra = plain(self.view(fake_run('triage', detail='round 3 · extra (5 → 3 → 1)')))[6]
-        self.assertEqual(extra.index('round 3'), 83)  # the Triage box column; Build is short here
+        self.assertEqual(extra.index('round 3'), 86)  # the Triage box column; Build is short here
         retry = plain(self.view(fake_run('review', detail='format retry')))[6]
-        self.assertEqual(retry.index('format retry'), 71)
+        self.assertEqual(retry.index('format retry'), 75)
 
     def test_dashboard_render_recheck_is_the_triage_box(self):
         lines = self.view(fake_run('recheck'))
@@ -647,9 +648,10 @@ class RenderTest(DashboardTest):
 
     def test_dashboard_render_stop_at_start_highlights_no_box(self):
         lines = self.view(fake_run('none', 'stopped', 'needs_you', note='base moved', detail=''))
-        self.assertFalse([s for s in styles(lines) if s[1] in ('stopped', 'done') and '│' in s[0]])
+        self.assertEqual([s for s in styles(lines) if s[1] in ('stopped', 'done') and '│' in s[0]],
+                         [('│ Plan │', 'done')])  # the pipeline got past planning
         self.assertNotIn('╔', ''.join(plain(lines)))
-        self.assertEqual(plain(lines)[6], '  ⛔ stopped before Plan check · base moved')
+        self.assertEqual(plain(lines)[6], '    ✓ ⛔ stopped before Plan check · base moved')
 
     def test_dashboard_render_needs_you_with_active_record_and_last_error(self):
         run = fake_run('build', 'active', 'needs_you', last_error='gate broken', detail='T003')
@@ -752,8 +754,147 @@ class RenderTest(DashboardTest):
         self.assertIn('▶PR ⚠', crashed[3])
         paused = plain(self.view(runs[1], 119))
         self.assertIn('▶Revise ⏸', paused[3])
-        stopped = plain(self.view(runs[4], 60))
+        stopped = plain(self.view(runs[4], 80))
         self.assertIn('✗Re-check', stopped[3])
+
+    def planned_checkout(self, name, *steps, age=0):
+        """A registered checkout whose observation is written by `workflow.py observe`."""
+        checkout = self.checkout(name)
+        self.register(name + '.json', checkout)
+        for step in steps:
+            self.observe(checkout, *step)
+        if age:
+            then = time.time() - age
+            for path in checkout.rglob('*'):
+                if path.is_file():
+                    os.utime(path, (then, then))
+        return checkout
+
+    def json_runs(self, *options):
+        data = json.loads(self.run_cli('--json', *options).stdout)
+        return {run['project']: run for run in data['runs']}
+
+    def test_dashboard_plan_running_session_golden_widths(self):
+        planning = fake_run('planning', detail='opus · first plan', tasks=None)
+        wide = plain(self.view(planning))
+        self.assertEqual(wide[3:], [
+            '  ╔══════╗ ┌────────────┐ ┌───────────────┐ ┌───────┐ ┌───────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────┐',
+            '  ║ Plan ║─│ Plan check │─│ Plan revision │─│ Setup │─│ Build │─│ Checks │─│ Review │─│ Triage │─│ PR │',
+            '  ╚══════╝ └────────────┘ └───────────────┘ └───────┘ └───────┘ └────────┘ └────────┘ └────────┘ └────┘',
+            '  opus · first plan', '  10:00 🔁 Round 2'])
+        self.assertNotIn('✓', ''.join(wide))
+        self.assertIn(('║ Plan ║', 'active_claude'), styles(self.view(planning)))
+        self.assertEqual(plain(self.view(planning, 120)), wide)
+        self.assertEqual(plain(self.view(planning, 119))[3:], [
+            '  ▶Plan ·PlanCheck ·Revise ·Setup ·Build ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2'])
+        narrow = plain(self.view(planning, 60))
+        self.assertEqual(narrow[3], '  ▶Plan ·PlanCheck ·Revise ·Setup ·Build ·Checks ·Review ·T…')
+        self.assertTrue(all(dash.cols(line) <= 60 for line in narrow))
+
+    def test_dashboard_plan_running_build_ticks_plan(self):
+        wide = plain(self.view(fake_run()))
+        self.assertEqual(wide[3:6], WIDE_BOXES)
+        self.assertEqual(wide[6], WIDE_MARKS)
+        self.assertEqual(wide[6].index('✓'), 4)  # under the Plan box
+
+    def test_dashboard_plan_nine_boxes_fit_120_without_truncation(self):
+        runs = [fake_run('plan_revision', 'paused', 'paused', note='limit', tasks=(98, 99)),
+                fake_run('recheck', tasks=(98, 99)), fake_run('planning', detail='opus · first plan'),
+                fake_run('planning', 'done', 'planned', note='7 tasks'),
+                fake_run('planning', 'stopped', 'needs_you', note='Task queue is invalid: x' * 20),
+                fake_run('none', 'active'), fake_run('none', 'stopped', 'needs_you', note='z' * 300)]
+        for number, run in enumerate(runs):
+            lines = plain(self.view(run, 120))
+            with self.subTest(run=number):
+                for line in lines[3:6]:
+                    self.assertNotIn('…', line)
+                self.assertEqual(lines[4].count('│') + lines[4].count('║'), 18)
+            for width in range(40, 201):
+                for line in plain(render_lines(run, width, expanded=frozenset({'/x/demo'}))):
+                    self.assertLessEqual(dash.cols(line), width, (width, line))
+        build = plain(self.view(fake_run('build', tasks=(98, 99)), 120))
+        self.assertIn('Build 99/99', build[4])
+        recheck = plain(self.view(runs[1], 120))
+        self.assertIn('Re-check', recheck[4])
+        self.assertEqual(dash.BOX_OF['recheck'], dash.BOX_OF['triage'])
+
+    def test_dashboard_plan_planned_status(self):
+        planned = self.planned_checkout('planned', ('planned', '7 tasks'))
+        running = self.planned_checkout('running', ('step', 'build'))
+        self.proc.add(6001, ['bash', '/x/.ai/bin/ai-pipeline'], running)
+        self.mark(running, 6001)
+        self.planned_checkout('finished', ('done', 'PR open'))
+        runs = self.json_runs()
+        self.assertEqual((runs['planned']['status'], runs['planned']['stage']), ('planned', 'planning'))
+        self.assertEqual(runs['planned']['observation']['note'], '7 tasks')
+        self.assertEqual(list(runs), ['running', 'planned', 'finished'])
+        lines = plain(self.view(dash.inspect(str(planned), [], time.time())))
+        self.assertEqual(lines[6][:5], '    ✓')
+        self.assertNotIn('╔', ''.join(lines))
+        self.assertTrue(lines[6].endswith('📝 7 tasks'))
+        self.assertEqual(lines[6].index('📝'), 11)  # under the Plan check box
+        self.assertIn('planned', lines[2])
+        compact = plain(self.view(dash.inspect(str(planned), [], time.time()), 100))
+        self.assertTrue(compact[3].startswith('  ✓Plan ·PlanCheck ·Revise'))
+        self.assertNotIn('▶', compact[3])
+        self.assertEqual(len(compact), 5)
+
+    def test_dashboard_plan_planned_hidden_after_a_day(self):
+        self.planned_checkout('old', ('planned', '3 tasks'), age=25 * 3600)
+        self.planned_checkout('new', ('planned', '3 tasks'))
+        self.assertEqual(sorted(self.json_runs()), ['new'])
+        self.assertEqual(sorted(self.json_runs('--all')), ['new', 'old'])
+
+    def test_dashboard_plan_stopped_planning_needs_you(self):
+        stopped = self.planned_checkout('stopped', ('step', 'planning', 'opus · first plan'),
+                                        ('stop', 'plan', 'Task queue is invalid: T002 has no Goal'))
+        runs = self.json_runs()
+        self.assertEqual((runs['stopped']['status'], runs['stopped']['stage']), ('needs_you', 'planning'))
+        run = dash.inspect(str(stopped), [], time.time())
+        self.assertIn(('║ Plan ║', 'stopped'), styles(self.view(run)))
+        self.assertIn('⛔ Task queue is invalid: T002 has no Goal', plain(self.view(run))[6])
+        compact = plain(self.view(run, 100))
+        self.assertTrue(compact[3].startswith('  ✗Plan ·PlanCheck'))
+
+    def test_dashboard_plan_pipeline_start_record_ticks_plan(self):
+        checkout = self.planned_checkout('started', ('start',))
+        self.proc.add(6002, ['bash', '/x/.ai/bin/ai-pipeline'], checkout)
+        self.mark(checkout, 6002)
+        run = dash.inspect(str(checkout), dash.discover(dash.ProcSource())[0][1], time.time())
+        self.assertEqual((run['status'], run['stage']), ('running', 'none'))
+        segments = styles(self.view(run))
+        self.assertIn(('│ Plan │', 'done'), segments)
+        self.assertFalse([s for s in segments if s[1].startswith('active_') or s[1] == 'stopped'])
+        self.assertNotIn('╔', ''.join(plain(self.view(run))))
+        stopped = self.planned_checkout('start-stop', ('start',), ('stop', 'start', 'base moved'))
+        run = dash.inspect(str(stopped), [], time.time())
+        self.assertIn(('│ Plan │', 'done'), styles(self.view(run)))
+        self.assertEqual(plain(self.view(run))[6], '    ✓ ⛔ stopped before Plan check · base moved')
+
+    def test_dashboard_plan_old_records_and_legacy(self):
+        checkout = self.checkout('old')
+        (checkout / '.ai/local/observation.json').write_text(json.dumps(
+            {'stage': 'build', 'state': 'active', 'detail': 'T003', 'note': '', 'since': ''}))
+        run = dash.inspect(str(checkout), [(1, '1')], time.time())
+        self.assertIn(('│ Plan │', 'done'), styles(self.view(run)))
+        legacy = plain(self.view(fake_run(observed=False, tasks=None)))
+        segments = styles(self.view(fake_run(observed=False, tasks=None)))
+        self.assertEqual(legacy[6], '  stage unknown (older toolkit)')
+        self.assertIn(('│ Plan │', 'pending'), segments)
+        self.assertFalse([s for s in segments if s[1] in ('stopped', 'done')])
+
+    def test_dashboard_plan_live_ai_run_plan_is_running_on_plan(self):
+        checkout = self.planned_checkout('live', ('step', 'planning', 'opus · first plan'))
+        self.proc.add(6003, ['bash', '/x/.ai/bin/ai-run', '--plan', 'p.md'], checkout)
+        runs = self.json_runs()
+        self.assertEqual((runs['live']['status'], runs['live']['stage']), ('running', 'planning'))
+        self.assertIn('║ Plan ║', self.run_cli('--once').stdout)
+
+    def test_dashboard_plan_recheck_stays_in_the_triage_box(self):
+        lines = self.view(fake_run('recheck'))
+        self.assertIn(('║ Re-check ║', 'active_codex'), styles(lines))
+        self.assertNotIn('Triage', plain(lines)[4])
+        self.assertEqual(plain(lines)[4].index('Re-check'), 88)
 
     def test_dashboard_render_empty_state_and_expanded_events(self):
         empty = plain(dash.render([], 140, now=0, state_root='/some/root'))
