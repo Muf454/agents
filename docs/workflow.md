@@ -594,7 +594,13 @@ from the checkout it refuses and reports (a human running checkout scripts trust
 as with `ai-pipeline`; the protected path is the timer's host copy). Order in
 `ai-recover`: take the lock (a rejected second process exits quietly and touches neither
 `last-error` nor the marker), check the state directory, reserve the attempt, then publish the marker; TERM/INT/HUP
-handlers make kills end in one ⛔. Checkpoints must also satisfy `committed-matches-worktree`
+handlers make kills end in one ⛔. A relaunched `ai-pipeline`, `ai-run` or `ai-review` that
+finds the lock held exits 1 and writes nothing (no `last-error`, marker, observation or
+notification); its `Another runner/reviewer owns this checkout` message names the owner when
+`pipeline.active` (a regular file only) holds the PID of a live `ai-recover` (auto-recovery,
+with its PID and `kill` hint) or `ai-pipeline`. Known limit: an `ai-recover` started by
+`ai-watchdog --recover` after a crash leaves `pipeline.active` naming the dead pipeline (the
+watchdog's `pipeline_died` input), so a relaunch during it gets the plain message. Checkpoints must also satisfy `committed-matches-worktree`
 (HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
 filters and staged mode changes). The recovery decision must be exactly one JSON object
 (optionally fenced); envelope and decision reject duplicate keys.

@@ -4870,6 +4870,132 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertIn('Another runner/reviewer owns this checkout', result.stderr)
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
 
+    # ---------------------------------------------------------------- lock owner hint (FL-19)
+    def lock_owner(self, name, through_bash=False):
+        """A process holding the checkout lock with pipeline.active naming it: argv
+        `<name> 30` (exec -a), or `bash …/<name>` when through_bash."""
+        import time
+        script = self.base / 'owner-bin' / name
+        script.parent.mkdir(exist_ok=True)
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        tail = 'sleep 30 9>&-\n' if through_bash else f'exec -a {name} sleep 30\n'
+        script.write_text('#!/usr/bin/env bash\nexec 9>.ai/local/workflow.lock\nflock 9\n'
+                          'printf "%s\\n" $$ > .ai/local/pipeline.active\n' + tail)
+        script.chmod(0o755)
+        command = ['bash', str(script)] if through_bash else [str(script)]
+        process = subprocess.Popen(command, cwd=self.project, env=self.env)
+        self.addCleanup(lambda: (process.kill(), process.wait()) if process.poll() is None else None)
+        marker = self.project / '.ai/local/pipeline.active'
+        for _ in range(500):
+            cmdline = Path(f'/proc/{process.pid}/cmdline').read_bytes()
+            ready = marker.exists() and marker.read_text() == f'{process.pid}\n'
+            if ready and (through_bash or cmdline.startswith(name.encode() + b'\0')):
+                return process
+            time.sleep(0.01)
+        self.fail(f'lock owner {name} did not start')
+
+    def rejected(self, name, *args):
+        """Run a tool that must be refused by the lock: exit 1 within 10 s."""
+        return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=1, timeout=10)
+
+    def test_lock_owner_recovery_hint_changes_nothing(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        owner = self.lock_owner('ai-recover')
+        (local / 'last-error').write_text('Session limit reached; 16 sessions used.\n')
+        (local / 'observation.json').write_text('{"state": "recovering", "attempt": "1/2"}\n')
+        (local / 'notifications.log').write_text('')
+        names = ('last-error', 'pipeline.active', 'observation.json', 'notifications.log')
+        before = {name: (local / name).read_bytes() for name in names}
+        result = self.rejected('ai-pipeline', '--approved', '--sessions', '20')
+        self.assertIn('Another runner/reviewer owns this checkout', result.stderr)
+        self.assertIn(f'auto-recovery (PID {owner.pid})', result.stderr)
+        self.assertIn(f'kill {owner.pid}', result.stderr)
+        self.assertEqual({name: (local / name).read_bytes() for name in names}, before)
+        self.assertFalse((local / 'last-error.notified').exists())
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((local / 'mock-invocations').exists())
+        self.assertFalse((self.base / 'codex-calls').exists())
+
+    def test_lock_owner_recovery_through_bash_and_other_tools(self):
+        self.ready()
+        owner = self.lock_owner('ai-recover', through_bash=True)
+        for name, args in (('ai-pipeline', ('--approved',)), ('ai-run', ('--approved',)),
+                           ('ai-review', ('--base', 'main'))):
+            result = self.rejected(name, *args)
+            self.assertIn('Another runner/reviewer owns this checkout: auto-recovery '
+                          f'(PID {owner.pid})', result.stderr, name)
+            self.assertIn(f'kill {owner.pid}', result.stderr, name)
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_lock_owner_pipeline_hint(self):
+        self.ready()
+        owner = self.lock_owner('ai-pipeline')
+        result = self.rejected('ai-pipeline', '--approved')
+        self.assertIn(f'Another runner/reviewer owns this checkout: a pipeline (PID {owner.pid}) '
+                      'is running here', result.stderr)
+        self.assertNotIn('auto-recovery', result.stderr)
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+
+    def test_lock_owner_unknown_owner_gets_the_plain_message(self):
+        import fcntl
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        marker = local / 'pipeline.active'
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        runner = self.watchdog_runner(name='ai-pipeline')  # a runner the marker must not reach
+        target = self.base / 'elsewhere-marker'
+        target.write_text(f'{runner.pid}\n')
+        cases = {'no marker': None, 'dead PID': f'{dead.pid}\n', 'non-runner': f'{os.getpid()}\n',
+                 'garbage': 'ai-recover\n', 'fifo': os.mkfifo, 'symlink': target}
+        with (local / 'workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for label, plant in cases.items():
+                if marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                if isinstance(plant, str):
+                    marker.write_text(plant)
+                elif isinstance(plant, Path):
+                    marker.symlink_to(plant)
+                elif plant is not None:
+                    plant(marker)
+                result = self.rejected('ai-pipeline', '--approved')
+                # ai_root refuses any symlink under .ai before the lock; the hint's own guard
+                # is covered by test_lock_owner_hint_never_follows_a_symlink_or_fifo.
+                expected = ('Error: Unsafe symlink in workflow path' if label == 'symlink' else
+                            'Error: Another runner/reviewer owns this checkout.\n')
+                self.assertIn(expected, result.stderr, label)
+                self.assertNotIn('PID', result.stderr, label)
+                self.assertFalse((local / 'last-error').exists(), label)
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((local / 'mock-invocations').exists())
+
+    def test_lock_owner_hint_never_follows_a_symlink_or_fifo(self):
+        self.ready()
+        owner = self.lock_owner('ai-recover')
+        local = self.project / '.ai/local'
+        marker = local / 'pipeline.active'
+        target = self.base / 'elsewhere-marker'
+        target.write_text(f'{owner.pid}\n')
+        hint = ['bash', '-c', 'source "$1"; ai_lock_owner_hint', '_',
+                str(self.project / '.ai/bin/lib/common.sh')]
+        self.assertIn(f'(PID {owner.pid})', self.run_cmd(hint, timeout=10).stdout)
+        for label, plant in (('symlink', lambda: marker.symlink_to(target)),
+                             ('fifo', lambda: os.mkfifo(marker))):
+            marker.unlink()
+            plant()
+            self.assertEqual(self.run_cmd(hint, timeout=10).stdout, '.', label)
+
+    def test_lock_owner_quiet_recovery_rejection_unchanged(self):
+        self.ready()
+        self.lock_owner('ai-recover')
+        result = self.rejected('ai-recover', '--stage', 'implementation')
+        self.assertEqual(result.stderr, 'Another runner owns this checkout; nothing to recover.\n')
+
     def test_hook_on_host_review_commit_cannot_run_modified_helper(self):
         self.ready()
         hook = self.project / '.git/hooks/post-commit'

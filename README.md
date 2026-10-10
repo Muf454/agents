@@ -563,7 +563,10 @@ conversation context. Full CLI/validation logs are ignored under `.ai/local/`;
 compact state, tasks, handoff, and run log are checkpointed in Git. Do not run a
 second implementation agent in the same checkout. The tools use a per-checkout
 kernel lock; it releases when the process exits. A copied `workflow.lock` file is
-not a stale lock to delete.
+not a stale lock to delete. Relaunching while auto-recovery holds the lock is refused
+without touching its records; the message names `auto-recovery (PID n)`, so wait for its
+🔧 Recovered or ⛔ STOPPED notification or `kill n` first. (A recovery the watchdog started
+after a crash gets the plain "Another runner/reviewer owns this checkout" message.)
 
 Do not rely on this to survive machine shutdown or sleep as a live process. It
 survives those events through saved files/checkpoints and a new session. No daemon

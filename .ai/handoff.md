@@ -25,6 +25,10 @@ plan prompt.
 T002 done (2026-10-10): `.ai/bin/ai-check` PASS, 559 tests; `test_session_budget_*` (5) cover
 the 22/16/21 budgets, `--sessions 1` and the triage/revise-plan runs.
 
+T003 done (2026-10-10): `.ai/bin/ai-check` PASS, 565 tests; `test_lock_owner_*` (6) cover the
+auto-recovery/pipeline hints, unknown owners, ai-run/ai-review, the symlink/FIFO guard and the
+unchanged quiet ai-recover rejection. A symlinked marker is refused earlier by `ai_root`.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode

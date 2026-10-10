@@ -138,7 +138,7 @@ docs/workflow.md updated. Tests `test_session_budget_*` (5) pass; `.ai/bin/ai-ch
 The 22/16/21 cases stop after one session via `MOCK_CLAUDE=error`.
 
 ## T003 — A relaunch during auto-recovery says who holds the lock and changes nothing (FL-19, part 2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -208,6 +208,15 @@ Targeted: `python3 -m unittest discover -s tests -k shared_checkout_lock` (must 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-10: `ai_lock` non-quiet rejection prints `Error: Another runner/reviewer owns this
+checkout` plus `ai_lock_owner_hint` and exits 1 without `ai_die` (no last-error, marker,
+observation or notification). Tests `test_lock_owner_*` (6) pass; `shared_checkout_lock` (1)
+passes unchanged; `.ai/bin/ai-check` PASS, 565 tests. Deviation: a symlinked
+`pipeline.active` never reaches `ai_lock` because `ai_root` (workflow.py `paths`) refuses
+any symlink under `.ai` first ("Unsafe symlink in workflow path", exit 1, no last-error); the
+test asserts that, and `test_lock_owner_hint_never_follows_a_symlink_or_fifo` calls the hint
+directly for the symlink/FIFO guard. README and docs/workflow.md note the hint and the
+watchdog-started recovery limit.
 
 ## T004 — Watchdog: no false STOPPED right after the timer is installed (FL-21)
 Status: TODO
