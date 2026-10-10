@@ -1995,6 +1995,38 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         text = (ROOT / 'templates/.ai/prompts/plan.md').read_text()
         self.assertIn('.ai/bin/ai-task check', text)
 
+    def budget_queue(self, todo, done=0):
+        return '\n'.join([task(f'T{n:03}', 'DONE') for n in range(1, done + 1)] +
+                         [task(f'T{n:03}', 'TODO', f'T{n - 1:03}' if n > done + 1 else 'none')
+                          for n in range(done + 1, done + todo + 1)])
+
+    def test_session_budget_covers_the_unfinished_queue(self):
+        self.ready(self.budget_queue(20))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 22 (default: 20 unfinished tasks + 2, at least 16)', result.stdout)
+
+    def test_session_budget_has_a_floor_of_16(self):
+        self.ready(self.budget_queue(3))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 16 (default: 3 unfinished tasks + 2, at least 16)', result.stdout)
+
+    def test_session_budget_ignores_done_tasks(self):
+        self.ready(self.budget_queue(19, done=1))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 21 (default: 19 unfinished tasks + 2', result.stdout)
+
+    def test_session_budget_explicit_sessions_wins(self):
+        self.ready(task('T001') + '\n' + task('T002'))
+        result = self.tool('ai-run', '--approved', '--sessions', '1', expected=1)
+        self.assertIn('Session budget: 1 (--sessions)', result.stdout)
+        self.assertIn('Session limit reached', result.stderr)
+
+    def test_session_budget_not_printed_for_triage_and_revise_plan(self):
+        self.ready()
+        for flag in ('--triage', '--revise-plan'):
+            result = self.tool('ai-run', '--approved', flag, expected=None)
+            self.assertNotIn('Session budget', result.stdout)
+
     def test_plan_review_is_bound_and_tracks_the_whole_tree(self):
         self.ready(task('T001', 'BLOCKED') + '\n' + task('T002'))
         # A BLOCKED task doesn't lift the gate for the untouched rest of the queue.

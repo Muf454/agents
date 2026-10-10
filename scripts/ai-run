@@ -6,7 +6,8 @@ Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeo
               [--model NAME] [--knowledge-dir DIRECTORY] [--triage [--since COMMIT]]
               [--revise-plan [--since COMMIT] [--base REF]]
 Run Claude on the approved plan, one recoverable task per fresh session.
-Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
+Defaults: sessions = unfinished tasks + 2 (at least 16; recomputed on every call, so fix-round
+tasks are covered), 1800 seconds/session, 14400 seconds/run. Rerun to resume.
 --model sets the Claude model (default: AI_MODEL or the CLI default); a task's
 optional "Model:" line overrides it. --triage runs one session that evaluates the
 current Codex review and turns accepted findings into new tasks (no implementation),
@@ -29,7 +30,7 @@ Before a task runs, the host runs .ai/ci-setup when dependencies are missing or 
 The human must inspect the plan, validation script, and permission allowlist first.
 EOF
 }
-sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
+sessions=''; sessions_given=no; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
 model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
 while (( $# )); do
   case "$1" in
@@ -56,7 +57,7 @@ while (( $# )); do
       (( $# >= 2 )) || ai_die "Missing value for $1"
       [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die "Invalid limit: $2"
       case "$1" in
-        --sessions) sessions=$2 ;; --session-timeout) session_timeout=$2 ;;
+        --sessions) sessions=$2; sessions_given=yes ;; --session-timeout) session_timeout=$2 ;;
         --run-timeout) run_timeout=$2 ;;
       esac
       shift 2 ;;
@@ -418,6 +419,16 @@ if [[ -f .ai/prompts/runner.md ]]; then
   base_prompt=$(cat .ai/prompts/runner.md)
 else
   base_prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
+fi
+
+if [[ "$sessions_given" == yes ]]; then
+  printf 'Session budget: %s (--sessions)\n' "$sessions"
+else
+  read -r budget_done budget_total < <(ai_helper tasks counts) || ai_die 'Cannot count tasks for the session budget.'
+  sessions=$(( budget_total - budget_done + 2 ))
+  (( sessions >= 16 )) || sessions=16
+  printf 'Session budget: %s (default: %s unfinished tasks + 2, at least 16)\n' \
+    "$sessions" "$(( budget_total - budget_done ))"
 fi
 
 # Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,

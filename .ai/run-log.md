@@ -241,3 +241,4 @@
 | 2026-10-10T05:25:59Z | runner | plan-revision | plan revised (round 3): accepted 4, rejected 0, needs-human 0 | n/a | caeb7e3 | Plan review runs again |
 | 2026-10-10T06:00:00Z | claude | T001 | ai-task check; pipeline stops on an invalid queue; recover escalates it | PASS (ai-check, 554 tests) | see git log | Vault flow chart still pending |
 | 2026-10-10T05:44:34Z | runner | T001 | completed | PASS | fc2e30f | Claude checkpointed; continuing queue |
+| 2026-10-10T06:30:00Z | claude | T002 | default session budget max(16, unfinished + 2), printed by ai-run | PASS (ai-check, 559 tests) | see git log | Vault flow chart still pending |

@@ -165,8 +165,12 @@ For the recoverable bounded runner, start from a clean committed feature branch:
 
 ```bash
 .ai/bin/ai-status
-.ai/bin/ai-run --approved --sessions 16 --session-timeout 1800 --run-timeout 14400
+.ai/bin/ai-run --approved --session-timeout 1800 --run-timeout 14400
 ```
+
+Without `--sessions` the session budget is `max(16, unfinished tasks + 2)`, recomputed on every
+`ai-run` call (so fix-round tasks added by triage are covered); `Session budget: N` is printed
+first. `--sessions N` sets it explicitly.
 
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production

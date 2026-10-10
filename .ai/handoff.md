@@ -22,6 +22,9 @@ T001 done (2026-10-10): `.ai/bin/ai-check` PASS, 554 tests; `test_queue_check_*`
 `ai-task check`, the plan-review and `--skip-plan-review` stops, recover escalation and the
 plan prompt.
 
+T002 done (2026-10-10): `.ai/bin/ai-check` PASS, 559 tests; `test_session_budget_*` (5) cover
+the 22/16/21 budgets, `--sessions 1` and the triage/revise-plan runs.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode

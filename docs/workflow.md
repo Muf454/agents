@@ -68,6 +68,11 @@ of unchanged content don't invalidate evidence. Environment/dependency/service
 changes are not represented by the digest: rerun checks when those change or when
 evidence is old. This is a local convenience gate, not tamper-proof attestation or CI.
 
+Session budget (FL-19): without `--sessions`, `ai-run` allows `max(16, unfinished tasks + 2)`
+sessions, computed on every call (so each pipeline call, recovery rerun and fix round covers
+the tasks it faces) and printed as `Session budget: N`. `--sessions N` overrides it. `--triage`
+and `--revise-plan` run no implementation sessions and print no budget.
+
 Dependencies (FL-01): when `ai-run` starts and a task will run (not `--triage`), the host
 runs `.ai/ci-setup` if `deps-status` reports it missing/stale (no `.ai/local/deps.json`
 stamp, `.ai/ci-setup` changed, an `# ai-deps-inputs:`/default lockfile changed, or an

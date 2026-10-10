@@ -87,7 +87,7 @@ escalates `Task queue is invalid`; plan prompt, README, docs/workflow.md updated
 tests assert containment, not a bare prefix.
 
 ## T002 — Default session budget covers the remaining queue (FL-19, part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -132,6 +132,10 @@ Targeted: `python3 -m unittest discover -s tests -k session_budget` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `ai-run` computes `max(16, unfinished + 2)` when `--sessions` is not given and prints
+`Session budget: …` (implementation path only; `sessions_given` flag added for T007). Usage, README and
+docs/workflow.md updated. Tests `test_session_budget_*` (5) pass; `.ai/bin/ai-check`: 559 tests OK.
+The 22/16/21 cases stop after one session via `MOCK_CLAUDE=error`.
 
 ## T003 — A relaunch during auto-recovery says who holds the lock and changes nothing (FL-19, part 2)
 Status: TODO
