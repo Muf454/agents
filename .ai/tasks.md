@@ -423,7 +423,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 Done 2026-10-10. `planning` is the first `BOX_KEYS` entry; `plan` stop label; `observe planned NOTE`; `plan-allowlist` and `plan-scope` helpers in workflow.py. Tests `test_observation_writer_plan_*` (5; one in tests/test_dashboard.py for the dashboard fixture). `.ai/bin/ai-check` PASS, 579 tests. No existing test iterated `BOX_KEYS`. The editable dispositions record is `.ai/reviews/dispositions.md` as the task specifies (not `plan-dispositions.md`).
 
 ## T007 — `ai-run --plan PROMPT_FILE`: headless planning session as a registered stage (DB-04)
-Status: TODO
+Status: DONE
 Dependencies: T001, T006
 Model: opus
 
@@ -533,6 +533,7 @@ Targeted: `python3 -m unittest discover -s tests -k plan_session` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `ai-run --plan PROMPT_FILE [--revision]` (scripts/ai-run): prompt file resolved and size-checked while parsing; refusals by given flags (`AI_PIPELINE`, `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions`, `--run-timeout`; `--revision` without `--plan`); default session limit 3600 s; `plan-scope HEAD` replaces the clean/queue checks before the session; no project allowlist read. Session `Read,Glob,Grep,Edit,Write` with `plan-allowlist`; afterwards `plan-scope START`, `tasks check` (`Planning: task queue is invalid: …`), `observe planned "<N> tasks"`, 📝 notifications, exit 0 without committing. `on_exit` records `stop plan <last-error line>` unless the gate changed. A `plan-scope` error already starting with "Planning" is not prefixed twice. Mock claude `PLANNING CONTRACT` branch (plan-ok, plan-bad-queue, plan-outside, plan-gate, plan-error, limit-once). Tests `test_plan_session_*` (8): `Ran 8 tests … OK`. `.ai/bin/ai-check` PASS, 587 tests. README "Plan with a headless session" + Modes row; `docs/workflow.md` "Plan stage"; vault flow chart plan box and 📝 row.
 
 ## T008 — Dashboard: nine boxes with Plan first, `planned` status (DB-04)
 Status: TODO

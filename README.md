@@ -120,6 +120,30 @@ and validation. It asks only for critical ambiguities and does not start coding.
 Tell it which scope is approved after inspecting the plan, and record that in
 the plan's Authorization section. Planning and implementation are separate phases.
 
+### Plan with a headless session
+
+To write the plan without an interactive session (for example from mission control), put the
+objective in a file (a regular file of at most 200 KB) and run:
+
+```bash
+.ai/bin/ai-run --plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS]
+```
+
+One Claude session (default model `opus`, default limit 3600 seconds; the watchdog's `hung`
+warning may still fire after 45 quiet minutes) gets `.ai/prompts/plan.md`, the objective and a
+planning contract. Its tools are `Read`, `Glob`, `Grep`, `Edit` and `Write`, and it may only
+write `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/state.md`,
+`.ai/handoff.md` and `.ai/reviews/dispositions.md`: no shell and no project allowlist, so
+`--approved` is not needed. The run starts from a feature branch with no uncommitted changes
+outside those records, registers the checkout for `ai-dashboard` (stage `planning` from the
+first second, `📝 PLANNING` notification), then checks that only the plan records changed and
+that `.ai/tasks.md` passes `ai-task check`. On success the record says `planned` with the task
+count and `📝 Plan ready` is sent; otherwise the run stops with the reason (⛔, record `stopped`)
+and leaves the session's edits as written. It never commits: review the plan, commit it, then
+start `ai-pipeline --approved`. `--revision` tells the session an earlier plan exists (keep DONE
+tasks). `--plan` refuses to run inside a pipeline and refuses `--triage`, `--revise-plan`,
+`--since`, `--base`, `--sessions` and `--run-timeout`.
+
 Before leaving an implementation session unattended:
 
 1. Review `.ai/project-spec.md`, `.ai/current-plan.md`, and `.ai/tasks.md`.
@@ -222,6 +246,7 @@ commands not yet authorized. The bounded runner is the no-prompt unattended path
 | Mode | Started by | May do | May not do |
 | --- | --- | --- | --- |
 | Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run --plan | you or mission control, `ai-run --plan objective.md` | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
 | ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
 | ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
 | ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |

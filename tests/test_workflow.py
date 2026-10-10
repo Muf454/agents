@@ -167,6 +167,36 @@ if 'REVISION CONTRACT' in prompt:
         sys.exit(0)
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
+if 'PLANNING CONTRACT' in prompt:
+    # A headless planning session (ai-run --plan): Edit/Write of the plan records, no shell, no commit.
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'plan-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
+    with open(state / 'plan-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    if os.path.exists('.ai/local/observation.json'):
+        with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    mode = os.environ.get('MOCK_CLAUDE', 'plan-ok')
+    if mode == 'limit-once' and not (state / 'plan-limit-hit').exists():
+        (state / 'plan-limit-hit').touch()
+        print(json.dumps({'type':'result','subtype':'error','is_error':True,
+                          'result':"You've hit your usage limit. Try again in 2 minutes."}))
+        sys.exit(1)
+    if mode == 'plan-error':
+        print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+        sys.exit(0)
+    template = open(os.environ['MOCK_TASK_TEMPLATE']).read()
+    first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
+    if mode == 'plan-bad-queue':
+        first = first.replace('Dependencies: none', 'Dependencies: T002')
+    pathlib.Path('.ai/tasks.md').write_text('# Task queue\n\n' + first + second)
+    with open('.ai/project-spec.md', 'a') as f: f.write('\nObjective from the planning session.\n')
+    if mode == 'plan-outside':
+        pathlib.Path('src.txt').write_text('not allowed in planning\n')
+    if mode == 'plan-gate':
+        helper = pathlib.Path('.ai/bin/lib/workflow.py')
+        helper.write_text(f'import pathlib; pathlib.Path({str(state / "UNTRUSTED_HELPER_RAN")!r}).touch()\n'
+                          + helper.read_text())
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+    sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
 assert '--strict-mcp-config' in args
@@ -2640,6 +2670,140 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.revision_commits(), 3)
         self.assertEqual(len(self.revision_args()), 3)
         self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
+
+    # ---------------------------------------------------------------- planning session (DB-04)
+    def plan_ready(self):
+        """An installed project on a feature branch with the template queue; returns the prompt file."""
+        self.setup_project()
+        self.commit('bootstrap')
+        self.run_cmd(['git', 'switch', '-c', 'feature/test'])
+        objective = self.base / 'objective.md'
+        objective.write_text('Build a tiny CLI that greets the user.\n')
+        return objective
+
+    def plan(self, *args, expected=0, **env):
+        return self.tool('ai-run', '--plan', str(self.base / 'objective.md'), *args, expected=expected, **env)
+
+    def plan_args(self):
+        log = self.base / 'plan-args.log'
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def plan_prompt(self):
+        return (self.base / 'plan-prompts.log').read_text().split('=== PROMPT ===')[-1]
+
+    def assert_plan_stopped(self, result, text):
+        self.assertIn(text, result.stderr)
+        self.assertIn(text, (self.project / '.ai/local/last-error').read_text())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('planning', 'stopped'))
+        self.assertIn(text, record['note'])
+        self.assertEqual(self.notifications().count('⛔'), 1)
+
+    def test_plan_session_writes_the_plan_without_committing(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan()
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        self.assertIn('limit 3600s', result.stdout)
+        args = self.plan_args()[0]
+        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep,Edit,Write')
+        self.assertEqual(args[args.index('--permission-mode') + 1], 'dontAsk')
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        start = args.index('--allowedTools') + 1
+        end = next(i for i in range(start, len(args)) if args[i].startswith('--'))
+        self.assertEqual(args[start:end], self.helper('plan-allowlist').stdout.splitlines())
+        self.assertFalse(any('Bash' in arg for arg in args[start:end]))
+        prompt = self.plan_prompt()
+        self.assertIn('OBJECTIVE (from objective.md):\nBuild a tiny CLI that greets the user.', prompt)
+        self.assertIn('PLANNING CONTRACT', prompt)
+        self.assertNotIn('keep DONE tasks', prompt)
+        during = self.seen()[-1]
+        self.assertEqual((during['stage'], during['state'], during['detail']),
+                         ('planning', 'active', 'opus · first plan'))
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '2 tasks'))
+        registry = [json.loads(p.read_text()) for p in (self.base / 'host-state/pipelines').glob('*.json')]
+        self.assertIn(os.path.realpath(self.project), [os.path.realpath(e['checkout']) for e in registry])
+        self.assertIn('📝 PLANNING on feature/test (opus, first plan).', self.notifications())
+        self.assertIn('📝 Plan ready on feature/test: 2 tasks.', self.notifications())
+        self.assertNotIn('⛔', self.notifications())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        changed = self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout
+        self.assertIn('.ai/tasks.md', changed)
+        self.assertIn('.ai/project-spec.md', changed)
+        # A revision on top of the uncommitted plan: another model and session limit.
+        result = self.plan('--revision', '--model', 'sonnet', '--session-timeout', '900')
+        self.assertIn('limit 900s', result.stdout)
+        args = self.plan_args()[1]
+        self.assertEqual(args[args.index('--model') + 1], 'sonnet')
+        self.assertIn('keep DONE tasks', self.plan_prompt())
+        self.assertEqual(self.seen()[-1]['detail'], 'sonnet · revision')
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_plan_session_prompt_file_paths(self):
+        self.plan_ready()
+        self.assertIn('Prompt file not found', self.tool('ai-run', '--plan', 'missing.md', expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        notes = self.project / 'notes'
+        notes.mkdir()
+        (notes / 'objective.md').write_text('Objective from a subdirectory.\n')
+        self.commit('objective')
+        result = subprocess.run([str(self.project / '.ai/bin/ai-run'), '--plan', 'objective.md'], cwd=notes,
+                                env=self.env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Objective from a subdirectory.', self.plan_prompt())
+
+    def test_plan_session_invalid_queue_stops_and_keeps_the_file(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        self.assert_plan_stopped(result, 'task queue is invalid')
+        self.assertIn('T001: dependencies must exist earlier in the queue: T002', result.stderr)
+        self.assertIn('Dependencies: T002', (self.project / '.ai/tasks.md').read_text())
+
+    def test_plan_session_outside_the_plan_records_stops(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-outside')
+        self.assert_plan_stopped(result, 'src.txt')
+        self.assertTrue((self.project / 'src.txt').exists())
+
+    def test_plan_session_gate_change_runs_no_helper(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-gate')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.base / 'UNTRUSTED_HELPER_RAN').exists())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('planning', 'active'))
+
+    def test_plan_session_error_result_stops(self):
+        self.plan_ready()
+        self.assert_plan_stopped(self.plan(expected=1, MOCK_CLAUDE='plan-error'), 'Claude session failed')
+
+    def test_plan_session_refusals_run_no_session(self):
+        import fcntl
+        self.plan_ready()
+        self.assertIn('runs outside a pipeline', self.plan(expected=1, AI_PIPELINE='1').stderr)
+        self.assertIn('--triage does not apply', self.plan('--triage', expected=1).stderr)
+        self.assertIn('--sessions does not apply', self.plan('--sessions', '2', expected=1).stderr)
+        self.assertIn('--sessions does not apply', self.plan('--sessions', '16', expected=1).stderr)
+        self.assertIn('--revision only applies', self.tool('ai-run', '--revision', expected=1).stderr)
+        (self.project / 'src.txt').write_text('uncommitted work\n')
+        result = self.plan(expected=1)
+        self.assertIn('Planning', result.stderr)
+        self.assertIn('src.txt', result.stderr)
+        (self.project / 'src.txt').unlink()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with (self.project / '.ai/local/workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIn('Another runner/reviewer owns this checkout', self.plan(expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+
+    def test_plan_session_usage_limit_pauses_then_completes(self):
+        self.plan_ready()
+        self.plan(MOCK_CLAUDE='limit-once', AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'planning'))
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '2 tasks'))
 
     def test_plan_dispositions_pending_accepts_only_the_host_header(self):
         self.revise_ready()

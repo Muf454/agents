@@ -44,6 +44,11 @@ T006 done (2026-10-10): `.ai/bin/ai-check` PASS, 579 tests; `test_observation_wr
 cover the `planning` step/`planned`/stop-label records, the 15-line `plan-allowlist` and
 `plan-scope`, and a dashboard snapshot with a `planning` record.
 
+T007 done (2026-10-10): `.ai/bin/ai-check` PASS, 587 tests; `test_plan_session_*` (8) cover
+`ai-run --plan`: tools/allowlist/model/prompt, the `planning` → `planned` records, registry,
+📝 notifications, no commit, `--revision`/`--model`/`--session-timeout`, prompt-file paths, the
+invalid-queue/out-of-scope/gate-change/error stops, the refusals and the usage-limit pause.
+
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
   allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode
@@ -67,6 +72,8 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
 `updated:`) before merging:
 - Big picture: a first stage **Plan** (Claude, `ai-run --plan PROMPT_FILE`, plan records
   only, never commits) → human/mission control commits → `ai-pipeline --approved`.
+  Applied by T007 (2026-10-10): the plan box names `ai-run --plan` and the notification
+  table has a 📝 PLANNING / Plan ready row; the other bullets are still pending.
 - Plan review step: the queue is validated first (`ai-task check` rules); an invalid queue
   stops at the plan review ("Task queue is invalid"), recovery always escalates it.
 - Implementation: default session budget `max(16, unfinished tasks + 2)`.
@@ -102,7 +109,9 @@ Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_bud
 `test_lock_owner_*`, `test_watchdog_confirm_*` (timer unit, install-then-start silence,
 killed runner confirmed once, dead marker immediate, planning exemption, dedupe record
 versions), `test_permissions_chmod_*`,
-`test_observation_writer_plan_*`, `test_plan_session_*`, `test_dashboard_plan_*`,
+`test_observation_writer_plan_*`, `test_plan_session_*` (`ai-run --plan`: allowlist without
+Bash, no commit, `planning`/`planned`/stopped records, one ⛔ per stop, refusals before any
+session, usage-limit pause on Plan), `test_dashboard_plan_*`,
 `test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` and
 `test_plan_session_revision_*` (T011).
 

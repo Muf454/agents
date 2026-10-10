@@ -218,6 +218,34 @@ Git hooks remain active and may consume additional time. Monitor your provider u
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
+## Plan stage (`ai-run --plan`)
+
+`ai-run --plan PROMPT_FILE [--revision]` writes the plan in one headless Claude session before
+any pipeline runs. The prompt file is resolved when the arguments are parsed (a missing,
+unreadable, non-regular or larger than 200 KB file stops before anything else). The run refuses
+`AI_PIPELINE`, `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions` and `--run-timeout`
+(by "given" flags, so a default value never slips through); `--approved` is not required because
+no project allowlist is used.
+
+Order: supervisor settings, Claude present, checkout root, state root, checkout lock, branch
+(protected branches refused), HEAD exists, `workflow.py plan-scope HEAD` (no uncommitted work
+outside the plan records; the queue itself is not checked yet, a first plan starts from the
+template), gate digest. Then the host registers the checkout for the dashboard, records
+`observe step planning "<model> · first plan|revision"` and notifies `📝 PLANNING`. The session
+(model `--model` or `opus`, limit `--session-timeout` or 3600 s) gets `.ai/prompts/plan.md`, the
+objective and a `PLANNING CONTRACT`; its tools are `Read,Glob,Grep,Edit,Write` and its
+`--allowedTools` are exactly `workflow.py plan-allowlist` (Edit/Write of `.ai/project-spec.md`,
+`current-plan.md`, `tasks.md`, `state.md`, `handoff.md`, `reviews/dispositions.md`). A usage
+limit pauses on the `planning` stage and resumes.
+
+After the session: gate verified, branch unchanged, `plan-scope START` (the run log is also
+allowed, for the exit handler's stop line), and `tasks check`
+(`Planning: task queue is invalid: …` with the same text as `ai-task check`). Success records
+`observe planned "<N> tasks"`, notifies `📝 Plan ready` and exits 0. Any stop after the start
+records `observe stop plan <first line of last-error>` and one ⛔ notification, unless the gate
+changed (then no project helper runs and the record stays `active`). The run never commits and
+never reverts the session's edits: the human reviews and commits the plan.
+
 ## Plan review rounds
 
 Each plan review is a round, numbered from host records, not commit subjects: after the host
