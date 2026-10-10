@@ -252,3 +252,4 @@
 | 2026-10-10T09:20:00Z | claude | T006 | planning box key, `plan` stop label, `observe planned`, plan-allowlist/plan-scope helpers | PASS (ai-check, 579 tests) | see git log | dashboard draws no Plan box until T008 |
 | 2026-10-10T09:21:01Z | runner | T006 | completed | PASS | 1fb2634 | Claude checkpointed; continuing queue |
 | 2026-10-10T09:45:00Z | claude | T007 | `ai-run --plan PROMPT_FILE [--revision]`: confined planning session, planning/planned/stop records, registry, 📝 notifications, no commit | PASS (ai-check, 587 tests) | see git log | vault flow chart plan box and 📝 row applied; dashboard Plan box is T008 |
+| 2026-10-10T09:36:30Z | runner | T007 | completed | PASS | 276cd54 | Claude checkpointed; continuing queue |
