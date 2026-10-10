@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID>
+# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID> | ai-task check
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 ai_root
 case "${1:-}" in
@@ -7,5 +7,10 @@ case "${1:-}" in
        ai_helper tasks set "$2" "$3" ;;
   show) [[ $# -eq 2 ]] || { echo 'Usage: ai-task show <ID>' >&2; exit 2; }
         ai_helper tasks show "$2" ;;
-  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID>' >&2; exit 2 ;;
+  check) [[ $# -eq 1 ]] || { echo 'Usage: ai-task check' >&2; exit 2; }
+         # Read-only: validates the queue like the pipeline does, changes nothing.
+         ai_helper tasks check || exit 1
+         read -r done total < <(ai_helper tasks counts)
+         echo "Task queue OK: $total tasks, $done DONE" ;;
+  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID> | ai-task check' >&2; exit 2 ;;
 esac

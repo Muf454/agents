@@ -330,6 +330,8 @@ stops are terminal for `ai-recover`.
 
 ## Pipeline contract (`ai-pipeline`)
 
+Before the plan review (review on or off) the queue is validated like `ai-task check`; an
+invalid queue stops with `Task queue is invalid: …` and recovery always escalates it.
 Stages, each resumable by rerunning: plan review (only while no task is DONE;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the

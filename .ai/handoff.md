@@ -18,7 +18,9 @@ the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-None yet (planning only).
+T001 done (2026-10-10): `.ai/bin/ai-check` PASS, 554 tests; `test_queue_check_*` (7) cover
+`ai-task check`, the plan-review and `--skip-plan-review` stops, recover escalation and the
+plan prompt.
 
 ## Assumptions
 - DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen

@@ -1932,6 +1932,69 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
         self.helper('tasks', 'complete')
 
+    def invalid_queue(self):
+        return task('T001', dependencies='T002') + '\n' + task('T002')
+
+    def test_queue_check_command(self):
+        self.ready()
+        result = self.tool('ai-task', 'check')
+        self.assertEqual(result.stdout.strip(), 'Task queue OK: 1 tasks, 0 DONE')
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(self.invalid_queue())
+        before = queue.read_text()
+        result = self.tool('ai-task', 'check', expected=1)
+        self.assertIn('dependencies must exist earlier in the queue: T002', result.stderr)
+        self.assertEqual(queue.read_text(), before)
+
+    def test_queue_check_empty_template_queue_fails(self):
+        self.setup_project()
+        result = self.tool('ai-task', 'check', expected=1)
+        self.assertIn('No real tasks', result.stderr)
+
+    def test_queue_check_invalid_queue_stops_plan_review(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        error = (self.project / '.ai/local/last-error').read_text()
+        # ai_die prefixes the stage ("Pipeline stopped during plan review: ").
+        self.assertIn('Task queue is invalid:', error)
+        self.assertIn('T002', error)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('Task queue is invalid', notes)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
+
+    def test_queue_check_invalid_queue_escalates_without_recovery_session(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'recover-calls').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertIn('Task queue is invalid', self.notifications())
+
+    def test_queue_check_done_task_still_skips_plan_review(self):
+        self.ready(task('T001', 'DONE') + '\n' + task('T002'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+
+    def test_queue_check_invalid_queue_stops_with_skip_plan_review(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
+                  expected=1)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertIn('during implementation: Task queue is invalid:',
+                      (self.project / '.ai/local/last-error').read_text())
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
+                  expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'recover-calls').exists())
+
+    def test_queue_check_plan_prompt_mentions_the_command(self):
+        text = (ROOT / 'templates/.ai/prompts/plan.md').read_text()
+        self.assertIn('.ai/bin/ai-task check', text)
+
     def test_plan_review_is_bound_and_tracks_the_whole_tree(self):
         self.ready(task('T001', 'BLOCKED') + '\n' + task('T002'))
         # A BLOCKED task doesn't lift the gate for the untouched rest of the queue.

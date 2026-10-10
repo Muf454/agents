@@ -21,7 +21,7 @@ the fix, for the template only), which is why DB-04 is a mode of `ai-run` (see
 `.ai/current-plan.md`).
 
 ## T001 — Queue check: `ai-task check` and the plan review stops on an invalid queue (FL-18)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -79,6 +79,12 @@ Targeted: `python3 -m unittest discover -s tests -k queue_check` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-10. `ai-task check` added; `ai-pipeline` validates the queue before the plan review
+(stage `plan review`, or `implementation` with `--skip-plan-review`); `ai-recover` always
+escalates `Task queue is invalid`; plan prompt, README, docs/workflow.md updated. Tests
+`test_queue_check_*` (7) pass; `.ai/bin/ai-check`: 554 tests OK. Note: the final `last-error` reads
+`Pipeline stopped during <stage>: Task queue is invalid: …` (ai_die adds the stage prefix), so
+tests assert containment, not a bare prefix.
 
 ## T002 — Default session budget covers the remaining queue (FL-19, part 1)
 Status: TODO
