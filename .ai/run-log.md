@@ -254,3 +254,4 @@
 | 2026-10-10T09:45:00Z | claude | T007 | `ai-run --plan PROMPT_FILE [--revision]`: confined planning session, planning/planned/stop records, registry, 📝 notifications, no commit | PASS (ai-check, 587 tests) | see git log | vault flow chart plan box and 📝 row applied; dashboard Plan box is T008 |
 | 2026-10-10T09:36:30Z | runner | T007 | completed | PASS | 276cd54 | Claude checkpointed; continuing queue |
 | 2026-10-10T10:10:00Z | claude | T008 | dashboard: Plan box first (nine boxes, `─` joiners), `planned` status with 📝 marker, stage-none ticks Plan | PASS (ai-check, 597 tests) | see git log | README/docs sentences are T009; flow-chart dashboard note still pending in vault |
+| 2026-10-10T09:50:31Z | runner | T008 | completed | PASS | 58ec2ba | Claude checkpointed; continuing queue |
