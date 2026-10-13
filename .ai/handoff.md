@@ -17,6 +17,9 @@ the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
 - T011 (done): host check `plan-keeps-done START` before and after every planning session;
   a task DONE at START that is changed or removed stops the run (`Planning: DONE task T00x
   was changed or removed`), with or without `--revision`.
+- T012 (done, review M1): the check also covers tasks DONE only in the working tree at entry
+  (uncommitted): the host copies the queue to a `mktemp` baseline outside the checkout before
+  the session and runs `plan-keeps-done START --baseline <copy>` after it; removed on exit.
 - T009 (done): README dashboard section now describes nine boxes (Plan first, `planned`,
   old records, `─` layout); docs/workflow.md observation schema lists the stages; audit of
   all test groups, `OnActiveSec`, `Session budget`, `chmod +x` wording found them present.
@@ -132,7 +135,11 @@ passes, removed/flipped/result-changed/fenced-line change fails naming the ID, n
 DONE task at START passes, trailing blank lines ignored, `lines` unchanged by `raw`) and
 `test_plan_session_revision_*` (T011: malformed START heading runs no session; a dropped
 DONE task stops with or without `--revision`, one ⛔, file left as written; keeping it
-completes with 3 tasks).
+completes with 3 tasks), `test_plan_keeps_done_uncommitted_*` (T012: committed TODO T001,
+uncommitted DONE T001 at entry; a status flip, removal or result edit stops with
+`Planning: DONE task T001 was changed or removed`, one ⛔, file left as written, with and
+without `--revision`; kept identical completes with `planned`; the baseline file is removed;
+helper-level baseline union, baseline-wins, missing baseline and malformed baseline).
 
 ## Human todos
 - Gate (this repo, before a run that needs it): add `Bash(chmod +x *)` to
@@ -149,7 +156,8 @@ completes with 3 tasks).
 ## Next action
 Review round 1 (2026-10-13) accepted M1 → T012 (uncommitted DONE tasks protected during
 planning) and N1 → T013 (legacy active stall not re-announced); see
-`.ai/reviews/dispositions.md`. Runner: implement T012 and T013, then request another review.
+`.ai/reviews/dispositions.md`. T012 done (2026-10-13, ai-check PASS, 618 tests). Runner:
+implement T013, then request another review.
 
 Earlier: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
 T009, the audit, depends on T010 and T011 since round 3 and runs last). Human afterwards: the

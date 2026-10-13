@@ -125,9 +125,11 @@ plan_scope() {
 }
 if [[ -n "$plan_file" ]]; then
   # A first plan starts from the template queue, so the queue is checked after the session;
-  # the START queue is parsed here so a malformed heading stops before a session is spent.
+  # the START and working-tree queues are parsed here so a malformed heading stops before a
+  # session is spent.
   plan_scope HEAD
-  keep_error=$(ai_helper plan-keeps-done HEAD 2>&1 >/dev/null) || ai_die "Planning: ${keep_error#Error: }"
+  keep_error=$(ai_helper plan-keeps-done HEAD --baseline .ai/tasks.md 2>&1 >/dev/null) || \
+    ai_die "Planning: ${keep_error#Error: }"
 else
   # Triage and plan revision check their own leftovers below (an interrupted one may leave
   # workflow records).
@@ -159,6 +161,7 @@ attempt_open=no
 session_code=
 on_exit() {
   local code=$?
+  [[ -z "${plan_baseline:-}" ]] || rm -f -- "$plan_baseline"
   # Never run a project helper after the approved gate changed: a stop for that reason logs
   # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
   local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
@@ -305,10 +308,17 @@ if [[ -n "$plan_file" ]]; then
   fi
   prompt+=$(knowledge_prompt)
   mapfile -t plan_allowed < <(ai_helper plan-allowlist)
+  # DONE tasks of the working-tree queue (committed or not) are protected too: the host keeps
+  # its own copy outside the checkout, where the session cannot edit it (removed on exit).
+  plan_baseline=$(mktemp "${TMPDIR:-/tmp}/ai-plan-queue.XXXXXXXX") || ai_die 'Planning: cannot copy the task queue.'
+  if [[ -f .ai/tasks.md ]]; then cp -- .ai/tasks.md "$plan_baseline" || ai_die 'Planning: cannot copy the task queue.'
+  else rm -f -- "$plan_baseline"
+  fi
   claude_session "$prompt" "$plan_model" Read,Glob,Grep,Edit,Write "${plan_allowed[@]}"
   ai_branch
   plan_scope "$since"
-  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || ai_die "Planning: ${keep_error#Error: }"
+  keep_error=$(ai_helper plan-keeps-done "$since" --baseline "$plan_baseline" 2>&1 >/dev/null) || \
+    ai_die "Planning: ${keep_error#Error: }"
   queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'

@@ -778,7 +778,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T012 — Planning keeps DONE tasks that exist only in the working tree (review round 1 M1)
-Status: TODO
+Status: DONE
 Dependencies: T011
 Model: opus
 
@@ -822,7 +822,16 @@ Targeted: `python3 -m unittest discover -s tests -k plan_session` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
-
+Done 2026-10-13. `plan-keeps-done START [--baseline FILE]` protects the union of DONE tasks in
+START's queue and the baseline (a task DONE in both must match the baseline block). `ai-run
+--plan` checks `HEAD --baseline .ai/tasks.md` before the session (both queues parsed, malformed
+heading stops early), copies the working-tree queue to `mktemp "$TMPDIR/ai-plan-queue.XXXXXXXX"`
+just before the session (after the exit trap, which removes it) and checks `$since --baseline
+<copy>` afterwards. Tests: `test_plan_keeps_done_uncommitted_*` (9: status flip, removal,
+result edit, each with and without `--revision`; kept identical → `planned`, both flag
+variants; helper-level baseline cases); mock modes `plan-revision-removes-done`/`-edits-done`.
+Targeted: `-k plan_keeps_done` Ran 15 tests OK; `-k plan_session` Ran 12 tests OK (unchanged).
+Gate: `.ai/bin/ai-check` PASS, 618 tests. README and docs/workflow.md updated.
 
 ## T013 — Watchdog keeps an already-announced legacy stall active (review round 1 N1)
 Status: TODO

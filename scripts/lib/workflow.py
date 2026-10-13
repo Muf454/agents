@@ -2508,21 +2508,28 @@ def plan_scope(arguments):
 
 
 def plan_keeps_done(arguments):
-    """Every task DONE in START's .ai/tasks.md is still in the working tree, block unchanged."""
-    if len(arguments) != 1:
-        fail('Usage: plan-keeps-done START')
+    """Every task DONE in START's .ai/tasks.md, or in BASELINE (the host's copy of the working-tree
+    queue when planning started, committed or not), is still in the working tree, block unchanged.
+    A task DONE in both must match the BASELINE block, the queue the session actually started from."""
+    if len(arguments) not in (1, 3) or (len(arguments) == 3 and arguments[1] != '--baseline'):
+        fail('Usage: plan-keeps-done START [--baseline FILE]')
     start = arguments[0]
     try:
         git('rev-parse', '--verify', '--quiet', f'{start}^{{commit}}')
     except subprocess.CalledProcessError:
         fail(f'Unknown commit: {start}')
+    queues = []
     if subprocess.run(['git', 'cat-file', '-e', f'{start}:.ai/tasks.md'],
-                      stderr=subprocess.DEVNULL).returncode != 0:
-        return
-    before = task_blocks(git('show', f'{start}:.ai/tasks.md').decode(errors='replace'))
-    done = [task for task in before
+                      stderr=subprocess.DEVNULL).returncode == 0:
+        queues.append(git('show', f'{start}:.ai/tasks.md').decode(errors='replace'))
+    if len(arguments) == 3 and Path(arguments[2]).is_file():
+        queues.append(Path(arguments[2]).read_text(errors='replace'))
+    done = {}
+    for before in [task_blocks(text) for text in queues]:
+        for task in before:
             if any(line.startswith('Status:') and line.split(':', 1)[1].strip() == 'DONE'
-                   for line in task['lines'])]
+                   for line in task['lines']):
+                done[task['id']] = task
     if not done:
         return
     path = Path('.ai/tasks.md')
@@ -2536,7 +2543,7 @@ def plan_keeps_done(arguments):
             raw.pop()
         return [task['heading'], *raw]
 
-    for task in done:
+    for task in done.values():
         if task['id'] not in after or block(after[task['id']]) != block(task):
             fail(f"DONE task {task['id']} was changed or removed")
 

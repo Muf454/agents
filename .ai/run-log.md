@@ -262,3 +262,4 @@
 | 2026-10-10T10:31:21Z | runner | T009 | completed | PASS | c5500f1 | Claude checkpointed; continuing queue |
 | 2026-10-10T10:37:13Z | runner | none | queue complete; ready for independent review | PASS | 4d092ec | Human acceptance remains |
 | 2026-10-13T05:45:31Z | runner | triage | review triaged into dispositions/tasks | n/a | d2b4f2b | Fix tasks run next |
+| 2026-10-13T05:55:00Z | claude | T012 | DONE: `plan-keeps-done START --baseline FILE`; ai-run --plan protects working-tree (uncommitted) DONE tasks via a host mktemp copy removed on exit | PASS (ai-check, 618 tests) | see git log | vault not edited by this session |

@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: fix/night-stops
-Phase: fixing_review
+Phase: implementing
 Current task: none
-Last completed task: T009
-Tasks complete: 11
-Tasks remaining: 2
-Last validation: PASS at 2026-10-10T10:37:13Z
+Last completed task: T012
+Tasks complete: 12
+Tasks remaining: 1
+Last validation: PASS at 2026-10-13T05:54:00Z
 Blocked: no
-Next action: Run the fix tasks, then review again
-Last updated: 2026-10-13T05:45:31Z
+Next action: Implement T013, then request another review
+Last updated: 2026-10-13T05:55:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

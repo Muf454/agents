@@ -141,7 +141,7 @@ that `.ai/tasks.md` passes `ai-task check`. On success the record says `planned`
 count and `📝 Plan ready` is sent; otherwise the run stops with the reason (⛔, record `stopped`)
 and leaves the session's edits as written. It never commits: review the plan, commit it, then
 start `ai-pipeline --approved`. `--revision` tells the session an earlier plan exists (keep DONE
-tasks). With or without `--revision`, a task that was DONE when the session started must keep
+tasks). With or without `--revision`, a task that was DONE when the session started (committed or not) must keep
 its block unchanged: otherwise the run stops with `Planning: DONE task T00x was changed or
 removed`. `--plan` refuses to run inside a pipeline and refuses `--triage`, `--revise-plan`,
 `--since`, `--base`, `--sessions` and `--run-timeout`.
