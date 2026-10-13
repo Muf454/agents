@@ -749,6 +749,30 @@ class ToolkitTest(unittest.TestCase):
         self.run_cmd(command, expected=1, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1800)), timeout=10)
         self.assertIn('killed runner?', self.notifications())
 
+    def test_watchdog_confirm_legacy_active_stall(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        start = time.time()
+        # An older watchdog already announced this stall and recorded no stall_seen_ns.
+        state.write_text(json.dumps({'active': ['stalled'], 'notified_at_ns': int(start * 1e9) - 1}) + '\n')
+        for offset in (0, 360):
+            self.watchdog('--diagnose', expected=1, AI_WATCHDOG_NOW=str(start + offset))
+            self.assertEqual(self.watchdog_state()['active'], ['stalled'])
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((self.project / '.ai/local/diagnosis.md').exists())
+        # Once it clears and returns, it is a new stall that needs confirmation again.
+        self.watchdog_phase('ready_for_review')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 720))
+        self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        self.watchdog_phase('implementing')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 1080))
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1440))
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('killed runner?', self.notifications())
+
     def test_watchdog_confirm_dedupe_record_versions(self):
         self.setup_project()
         state = self.project / '.ai/local/watchdog.json'

@@ -20,6 +20,8 @@ the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
 - T012 (done, review M1): the check also covers tasks DONE only in the working tree at entry
   (uncommitted): the host copies the queue to a `mktemp` baseline outside the checkout before
   the session and runs `plan-keeps-done START --baseline <copy>` after it; removed on exit.
+- T013 (done, review N1): a stall an older watchdog record already lists as active (no
+  `stall_seen_ns`) stays confirmed after the upgrade: no repeated ⛔ or diagnosis.
 - T009 (done): README dashboard section now describes nine boxes (Plan first, `planned`,
   old records, `─` layout); docs/workflow.md observation schema lists the stages; audit of
   all test groups, `OnActiveSec`, `Session budget`, `chmod +x` wording found them present.
@@ -126,7 +128,10 @@ control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and 
 Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_budget_*`,
 `test_lock_owner_*`, `test_watchdog_confirm_*` (timer unit, install-then-start silence,
 killed runner confirmed once, dead marker immediate, planning exemption, dedupe record
-versions), `test_permissions_chmod_*`,
+versions; `test_watchdog_confirm_legacy_active_stall` (T013): an old `{"active": ["stalled"]}`
+record with the stall present sends nothing and starts no diagnosis on two `--diagnose` probes
+6 min apart; after it clears and returns it is announced once, only after confirmation),
+`test_permissions_chmod_*`,
 `test_observation_writer_plan_*`, `test_plan_session_*` (`ai-run --plan`: allowlist without
 Bash, no commit, `planning`/`planned`/stopped records, one ⛔ per stop, refusals before any
 session, usage-limit pause on Plan), `test_dashboard_plan_*`,
@@ -156,8 +161,8 @@ helper-level baseline union, baseline-wins, missing baseline and malformed basel
 ## Next action
 Review round 1 (2026-10-13) accepted M1 → T012 (uncommitted DONE tasks protected during
 planning) and N1 → T013 (legacy active stall not re-announced); see
-`.ai/reviews/dispositions.md`. T012 done (2026-10-13, ai-check PASS, 618 tests). Runner:
-implement T013, then request another review.
+`.ai/reviews/dispositions.md`. T012 done (2026-10-13, ai-check PASS, 618 tests). T013 done
+(2026-10-13, ai-check PASS, 619 tests). Next: another independent review.
 
 Earlier: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
 T009, the audit, depends on T010 and T011 since round 3 and runs last). Human afterwards: the

@@ -443,9 +443,10 @@ def main():
         elif (not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review')
               and not planning(root)):
             # With a last-error the stop below explains it; this catches a killed ai-run once a
-            # later probe confirms it (the first sighting may be just before a start).
+            # later probe confirms it (the first sighting may be just before a start). A stall
+            # an older record (no stall_seen_ns) already announced stays confirmed.
             stall_seen = previous.get('stall_seen_ns', now)
-            if now - stall_seen >= STALL_CONFIRM_NS:
+            if now - stall_seen >= STALL_CONFIRM_NS or 'stalled' in previous.get('active', []):
                 incidents['stalled'] = (f'⛔ STOPPED, needs you: nothing is running but the checkout is mid-'
                                         f'{phase[1]} (killed runner?). Rerun ai-pipeline or ai-run to resume.')
         # Quiet time counts from this run's start (old logs of a resumed run don't count),

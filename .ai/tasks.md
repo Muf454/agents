@@ -834,7 +834,7 @@ Targeted: `-k plan_keeps_done` Ran 15 tests OK; `-k plan_session` Ran 12 tests O
 Gate: `.ai/bin/ai-check` PASS, 618 tests. README and docs/workflow.md updated.
 
 ## T013 — Watchdog keeps an already-announced legacy stall active (review round 1 N1)
-Status: TODO
+Status: DONE
 Dependencies: T004
 Model: opus
 
@@ -864,4 +864,9 @@ Targeted: `python3 -m unittest discover -s tests -k watchdog_confirm` (must say 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
 
 ### Result / notes
+2026-10-13: `scripts/lib/watchdog.py` confirms the stall when `previous['active']` already
+contains `stalled` (and records `stall_seen_ns`); the clear path is unchanged. New
+`test_watchdog_confirm_legacy_active_stall` fails without the fix (verified) and passes with
+it; `-k watchdog_confirm` Ran 7 tests OK. docs/workflow.md dedupe-record sentence updated.
+`.ai/bin/ai-check` PASS, 619 tests.
 

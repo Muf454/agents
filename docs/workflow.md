@@ -754,7 +754,8 @@ Incidents:
 A separate `.ai/local/watchdog.lock` serializes probes without blocking the
 workflow lock. Atomic `.ai/local/watchdog.json` records active incidents and the
 last notification timestamp (and the optional `stall_seen_ns`; records without it stay
-valid), written via unpredictable temp files. Files that
+valid, and a stall such a record already lists as active stays confirmed, so upgrading
+never repeats its notification or diagnosis), written via unpredictable temp files. Files that
 runners delete mid-probe count as absent. Persistent incidents notify once; recovery rearms them.
 Hung incidents are bound to process start identities and activity timestamps.
 Healthy checks are silent. Exit codes: 0 healthy, 1 incident, 2 invalid
