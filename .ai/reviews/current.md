@@ -1,97 +1,128 @@
-<!-- Host evidence: HEAD 6700246c6bafbab83682cbd100fbe61c3c000e90; merge-base 1b914159633bff5897a4e120a9c61c094c0b5493; saved 2026-10-09T14:10:01Z. -->
-
-> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
-
-I have what I need. The three accepted findings from round 1 are fixed in the source, the regression tests exercise the real paths, and the host gate evidence covers HEAD's validated content. Here is the review.
-
-<!-- Host evidence: HEAD 6700246c6bafbab83682cbd100fbe61c3c000e90; merge-base 1b914159633bff5897a4e120a9c61c094c0b5493. -->
+<!-- Host evidence: HEAD e8eb6c8c561a47656b740c91f8609ef24783efbf; merge-base 744827a5212847d9734d197559321ca1c7f042cc; saved 2026-10-13T05:44:27Z. -->
 
 # Independent review
 
-Overall verdict: APPROVE. Round 1's accepted findings M1, N1 and N2 are fixed in `scripts/lib/dashboard.py` with regression tests that exercise the real paths (pty loop with a changing run list, `--once`/`--json` on legacy and malformed checkouts, fixture and real processes for the runner predicate). The pre-existing flake (T014) is handled by a test-only change that keeps the test's two meaningful assertions. I found no new defect in the changed code and no regression in the rest of the range.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Overall verdict: CHANGES REQUIRED. The requested features are implemented and the validation evidence is current, but planning can silently remove an uncommitted DONE task. The watchdog also repeats an already-announced stall after upgrading.
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
 
-Reviewed HEAD: `6700246c6bafbab83682cbd100fbe61c3c000e90` (`feature/dashboard`)
+Reviewed HEAD: `e8eb6c8c561a47656b740c91f8609ef24783efbf`
 
-Supplied base: `1b914159633bff5897a4e120a9c61c094c0b5493` (the merge-base is the same commit)
+Supplied base and merge-base: `744827a5212847d9734d197559321ca1c7f042cc`
 
-Inspected:
-- `.ai/local/review-context/since-last-review.patch` (whole), `log.txt`, `files.txt`, `.ai/local/validation.json` and its log `.ai/local/check-l0RjuF5y.log`.
-- Actual source: `scripts/lib/dashboard.py` (whole file at HEAD: `is_runner` 28–39, `discover` 122–150, `liveness` 167–186, `inspect` 267–308, `position` 381–395, `marker_text` 419–435, `compact_card` 491–514, `wide_card` 462–488, `draw` 604–629, `interface` 632–663), `scripts/lib/watchdog.py` 74–87, 108, 286–345 (unchanged, confirmed via `files.txt`), the shebang line of every script under `scripts/`, the `ai-run`/`ai-recover` launch sites in `scripts/ai-pipeline` (158, 262, 306, 486), the limit messages in `scripts/ai-run` 184/446/488 and `scripts/lib/common.sh` 208.
-- Tests: `tests/test_dashboard.py` 1–140 (fixtures, `spawn`, real-process and non-runner tests), 339–348 and 574–578 (`run_cli`), 643–728 (stop-at-start, writer-to-renderer, legacy/malformed, new legacy-with-error test), 762–830 (`pty_run`, `read_until`, `finish`, `fixture_runs`, smoke) and the two new pty tests in the patch; `tests/test_workflow.py` hunk at 4284–4288.
-- `.ai/tasks.md` T011–T014, `.ai/handoff.md`, `.ai/state.md`, `.ai/reviews/current.md` (round 1), `.ai/reviews/dispositions.md`.
+Checkout: clean before and after review. No files written; no network or MCP integrations invoked.
 
-## Validation observed/run
+## Scope and validation
 
-- **Host evidence:** `.ai/local/validation.json` reports **PASS**, exit 0, `unchanged: true`, `2026-10-09T14:05:06Z`, `head` = `eae2a10`. Its log reads `Ran 547 tests in 344.1s (8 shards, 547 collected)` / `OK`. HEAD `6700246` changes only `.ai/run-log.md` and `.ai/state.md`, both excluded from the validation fingerprint, so the evidence covers HEAD's validated content.
-- Test count moved 541 → 547 since round 1: +2 pty tests (T011), +1 legacy-with-error (T012), +1 non-runner predicate (T013); the remaining +2 are subtests/cases I did not attribute individually. The T013 run-log entry records one gate run at 546/547 with the T014 flake as the single failure, then 547 OK after T014.
-- I ran no commands (no shell) and did not rerun the tests.
+Inspected repository instructions, spec, plan, tasks, state, handoff, existing review structure, plan-review dispositions, relevant documentation, Git history, the full change range, affected source and regression tests.
 
-Limitations:
-- No shell: the TUI tests' claim "fails on the old code" is from the run log, not reproduced here; I verified by reading that the old code path (`selected = None` then `min(None, …)`) is exactly what the new tests drive.
-- T014's acceptance criterion (10 consecutive runs of the test alone) was not executed by the implementing session (shell allowlist); the run log records this. The fix is a widened string match, so its correctness follows from the two messages at `ai-run:184` and `common.sh:208` both containing `run time limit` case-insensitively.
-- I did not re-read the bodies of the ~60 `test_observation_*` tests nor the shell callers again; nothing in the since-last-review diff touches them.
+Validation observed:
 
-## Requirement assessment
+- `.ai/local/validation.json` reports PASS, exit 0, unchanged content, at `2026-10-10T10:37:13Z`.
+- Its log reports **609 tests passed in 350.5 seconds**, across eight shards.
+- `python3 -B scripts/lib/workflow.py stamp verify` passed against the current checkout. Changes after the recorded validation revision affect only excluded bookkeeping files.
 
-- **M1 → T011 (TUI survives empty ↔ non-empty):** fixed. `interface` now clamps `selected = max(min(selected, len(runs) - 1), 0)` (`dashboard.py:644`), so it is always an int (0 when empty); only `shown` (`:645`) is `None` for the empty state and is what `layout`/`draw` receive, keeping their contract. The refresh branch (`:660–663`) leaves `selected` an int when `current` is `None`. Key handlers that index `runs` stay guarded (`:651–656`). `test_dashboard_render_curses_runs_appear_and_disappear` starts on an empty state root, registers a checkout while the loop runs, waits for the title through the 2 s auto-refresh, unlinks the registry entry, presses `r`, waits for the empty text, quits and asserts exit 0 and no `Traceback`; `..._all_toggle_with_only_old_runs` covers `a` with a 25 h old finished run (empty → shown → empty). Both drive the exact `None → min()` path that crashed before.
-- **N1 → T012 (legacy checkout with `last-error`):** fixed. `position` returns `(None, 'unknown')` whenever there is no usable observation, before the `needs_you` test (`:388–389`); `finished` is still tested first but needs a `done` record, so it cannot apply. `marker_text`'s unknown branch appends `· ⛔ <last_error>` in style `stopped` (`:429–430`); `compact_card` emits the same marker line for `unknown` mode (`:511–513`). Status stays `needs_you` (unchanged `inspect`). The recorded `stage=none` stop still reaches `(None, 'stopped')` → "⛔ stopped before Plan check" (`:390–391`, `:425`), and `test_dashboard_render_stop_at_start` (`:646`) and the writer-to-renderer `start` case (`:676`) still assert that wording. `test_dashboard_render_legacy_checkout_with_last_error` covers no record and a record with an unknown stage, at 140 and 80 columns via `COLUMNS` (honoured by `shutil.get_terminal_size`, inherited by `run_cli`), and `needs_you` in `--json`.
-- **N2 → T013 (editors naming a runner script):** fixed. Dashboard-only `is_runner` (`:28–39`): `argv[0]` basename is a runner, or is `bash`/`sh` and the first non-option argument's basename is a runner. Every runner script starts with `#!/usr/bin/env bash`, so a running runner's argv is `bash <path> …`; `ai-pipeline` execs `ai-recover` (`ai-pipeline:158`) and runs `ai-run` by path (`:262`, `:306`, `:486`), and the watchdog hands `systemd-run` the script path (`watchdog.py:315`), all of which go through the shebang and land on `bash <script>`. Used in both `discover` (`:142`) and the marker check in `liveness` (`:177`). `watchdog.py` is untouched (`files.txt`). Empty cmdlines (kernel threads) and the trailing empty element from the `\0` split are handled (`:31`, `:38`). The regression test covers `vim`, `less`, `git diff` (not discovered, `gone` when registered) and `bash <script> --approved` / bare script (discovered, `alive`); the real-process test now spawns a `#!/usr/bin/env bash` script with a trailing `:` so bash does not exec-optimise `sleep` away, which keeps argv as `bash <link>` like a real runner.
-- **T014 (pre-existing flake):** test-only, as required. The limit can be hit in `ai_deps` (`common.sh:208`, "… not run: run time limit reached.") or later (`ai-run:184`); the test now matches `run time limit` case-insensitively and keeps the no-outcome-rows and no-mock-invocation assertions, so a run that starts a session still fails it.
-- **Records:** tasks T011–T014 DONE with results (T011/T012/T014 result sections are empty in `tasks.md` but the run log carries the evidence); handoff names the four new tests under "Covered by automated tests" and adds the empty-start and `vim` manual check; state `ready_for_review`, 14 tasks complete.
+Checks run during this review:
+
+- Shell syntax checks: 13 scripts/templates passed.
+- Python AST parsing: all three affected helper modules passed.
+- Test discovery: 609 tests collected.
+- Eleven pure dashboard renderer test bodies passed; filesystem fixture setup was deliberately omitted.
+- Current queue validation passed; counts are 11 DONE of 11 tasks.
+- In-memory reproductions confirmed both findings below.
+
+The full `./scripts/ai-check` suite was not rerun because it creates validation records and temporary test checkouts, which this read-only review does not permit. The reproductions exercise actual helper logic, but are not complete shell integration runs.
 
 ## BLOCKER findings
 
-None found.
+None found in the inspected scope.
 
 ## MAJOR findings
 
-None found.
+### M1 — DONE-task preservation ignores uncommitted completed tasks
+
+**Location:** `scripts/lib/workflow.py:2522`; callers at `scripts/ai-run:130`, `scripts/ai-run:284` and `scripts/ai-run:311`.
+
+**Requirement:** DB-04/T011 requires every task DONE when planning starts to retain its identical block. Planning explicitly permits uncommitted plan records. README.md:144 promises this protection for tasks DONE when the session starts.
+
+**Problem:** Both preservation checks use the committed HEAD queue as their baseline. `plan_keeps_done` reads `git show START:.ai/tasks.md` and returns immediately when that committed version has no DONE tasks. It never captures DONE tasks present only in the working tree at session entry.
+
+**Evidence:** Using the repository’s valid task fixture and the actual helper with in-memory Git/file inputs:
+
+1. Committed HEAD contains TODO T001.
+2. The working queue contains DONE T001 before planning.
+3. The pre-session preservation check passes.
+4. The session replaces that queue with valid TODO T002, removing T001.
+5. The post-session preservation check and final `tasks check` both pass.
+
+Changing only `.ai/tasks.md` also satisfies the planning scope check. Consequently, this path can announce “Plan ready” after losing a completed task and its results.
+
+Existing preservation tests commit their DONE-task baseline before invoking planning, so they miss this case.
+
+**Impact:** An allowed planning revision can silently discard completed-task records, contradicting T011’s central integrity guarantee. This is introduced by the new planning mode.
+
+**Recommended direction:** Capture the working queue before starting the session in a host-controlled baseline, and compare its DONE blocks after the session. Retain any committed-baseline protection that is still needed. Add integration coverage for uncommitted DONE tasks with and without `--revision`.
 
 ## MINOR findings
 
-None found.
+### N1 — Upgrading repeats an already-announced watchdog stall
+
+**Location:** `scripts/lib/watchdog.py:447`, `scripts/lib/watchdog.py:468`; coverage at `tests/test_workflow.py:745`.
+
+**Requirement:** FL-21 preserves notification deduplication and compatibility with older watchdog records.
+
+**Problem:** An old record containing `active: ["stalled"]` but no `stall_seen_ns` loses its active incident on the first upgraded probe. The next confirming probe treats the unchanged stall as fresh and announces it again.
+
+**Evidence:** Executing the actual incident/state-transition statements in memory produced:
+
+- First upgraded probe: `fresh=[]`, `active=[]`, new `stall_seen_ns`.
+- Probe ten minutes later, with the same stall: `fresh=["stalled"]`.
+
+The subsequent notification branch therefore sends another STOPPED notification. With diagnosis enabled, it can also repeat diagnosis for the same incident.
+
+This was previously identified as plan-review finding P18. No disposition for it is recorded, and it remains reproducible. The compatibility test checks only an older record with an empty active list.
+
+**Impact:** One duplicate alarm per still-stalled checkout during upgrade, contrary to the notification-preservation requirement. This regression comes from the new confirmation logic.
+
+**Recommended direction:** When the stall condition still holds and the previous active list already contains `stalled`, preserve it as confirmed. Clear it when the condition clears. Test an older record with an already-active stall across multiple upgraded probes.
 
 ## Missing test coverage
 
-Checklist items checked (Python tooling; no database, tenant or role surface):
-- **4, stale async results:** the TUI loop is synchronous; the only state carried across refreshes is `selected`, `expanded` and `offset`, and `selected` is now re-clamped at the top of every iteration (`dashboard.py:644`), so a run list that shrinks between refreshes cannot leave an out-of-range index. Checked.
-- **5, refresh wiring:** registry add/remove and `a` are both covered by the new pty tests; the auto-refresh path (`getch` → `-1`) is what the first test relies on. Checked.
-- **8, data hidden from views:** `position` now reports `unknown` for every record-less run, including `crashed` and `running` legacy runs, which is the same result those statuses had before via `index is None`; `needs_you`/`crashed` are still never hidden. Checked.
-- **1, 2, 3, 6, 7, 9, 10:** not touched by this round.
+- Working-tree DONE tasks absent from the committed baseline: removal, status changes and result-text changes.
+- Older watchdog records with an already-announced active stall.
+- Real Claude permission matching and actual systemd scheduling remain dependent on the documented human checks.
 
-Gaps (not counted):
-- The pty tests depend on curses emitting the whole target string on a redraw. `fixture_runs` documents the trick (a name sharing no character with its neighbours); the two new tests use the same name and the empty-state phrase, which shares no run of identical characters with the card title at the same columns, so ncurses' inline-cost rule will emit it whole. Two green gate runs agree. Noted as the one flake risk if the empty-state text or the header is ever changed.
-- `spawn` now leaves an orphaned `sleep 120` per subtest when `process.kill` kills bash (two per gate run). Harmless, but a `trap`/`exec`-free cleanup or killing the process group would be tidier.
-- `ProcSource.start_ns` still has no guard for a `stat` without `btime` (round 1 note, unchanged; real `/proc/stat` always has it).
+The accepted plan-review work is substantially present: explicit session-option detection, long-run budget tests, raw DONE-block comparison including fenced content, corrected executable-permission assertions, and final-audit task ordering. M1 exposes a remaining baseline gap in the DONE-preservation fix.
 
 ## Security concerns
 
-None new.
-- The runner predicate only reads process argv already read by `ProcSource.process`; it narrows which processes count, so it cannot make the dashboard trust more than before.
-- `marker_text` now prints `run['last_error']` on one more path; that value is already the sanitised first line (`inspect`, `:292`), so no new agent-controlled text reaches the terminal unsanitised.
-- No gate file, `.ai/bin`, `.ai/prompts` or `.ai/validate` is in `files.txt`.
+No additional demonstrated security finding in the inspected changes.
+
+Planning supplies no Bash tool, and post-session scope/queue checks follow gate verification. The changed-gate test checks that an altered helper is not executed. Lock rejection avoids `ai_die`, preserving the owner’s error and notification records.
+
+The documented `chmod +x` prefix rule cannot constrain paths to the checkout. Its prompt restriction and required human permission check remain relevant; offline string assertions do not prove real CLI enforcement.
 
 ## Architecture concerns
 
-None. The dashboard-only `is_runner` replaces the `watchdog` import and leaves the watchdog's orphan semantics unchanged, as the task prescribes; `position` keeps the "box is the observation's stage" rule and only reorders the record-less case ahead of the status check.
+The changes reuse existing scripts and standard-library helpers without adding dependencies. The planning mode and dashboard stage fit the existing workflow structure.
+
+M1 requires the preservation baseline to represent the queue the session actually receives. N1 requires migration to preserve already-confirmed incident state.
+
+No separate pre-existing defect is counted in this report.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Open `ai-dashboard` in tmux with no pipeline running, then start `ai-pipeline --approved` in another checkout: the card appears within about 2 s and the dashboard stays up (handoff "Needs you" item 2).
-- With only old finished runs present, press `a` twice: runs appear, then the empty state returns, no exit.
-- Open `vim scripts/ai-run` in `~/Projects/agents` while the dashboard runs: that checkout must not appear as running.
-- A project whose `.ai/bin` is not yet upgraded and whose last run died: the card reads "stage unknown (older toolkit) · ⛔ <error>", not "stopped before Plan check".
-- The look-and-feel check from handoff item 1 (two runs, keys, resize across 120 columns, `q`).
+- Verify a real planning session’s permissions, notifications, dashboard transitions and uncommitted output in a scratch project.
+- Verify allowed `chmod +x` and denied alternate modes with the real Claude CLI.
+- Verify timer scheduling after installation and upgrade with systemd.
+- Verify relaunch during recovery names the owner and preserves the original stop reason.
+- Complete the handoff’s pending vault flow-chart, gate and timer-update steps before merging.
 
 ### Covered by automated tests
 
-- Empty ↔ non-empty run list in the live loop, auto-refresh and `r`/`a`: `test_dashboard_render_curses_runs_appear_and_disappear`, `test_dashboard_render_curses_all_toggle_with_only_old_runs`.
-- Legacy and malformed-record checkouts with a `last-error` at 140 and 80 columns and `needs_you` in JSON: `test_dashboard_render_legacy_checkout_with_last_error`; the recorded stop at start keeps its wording: `test_dashboard_render_stop_at_start`, `test_dashboard_render_writer_to_renderer_stops_and_overlays`.
-- Editors, pagers and git naming a runner script are not runners; `bash <script>` and a bare script are; a real bash-shebang process is alive: `test_dashboard_liveness_ignores_non_runner_processes`, `test_dashboard_liveness_real_pipeline_and_recover`.
-- Time-limit stop without a session, either message: `test_outcome_no_time_left_logs_nothing` (T014).
-- Full suite: 547 tests OK per host evidence at `eae2a10` (fingerprint unchanged at HEAD).
+- Existing regression groups cover invalid queues, session budgets, lock rejection, stall confirmation, planning outcomes, gate changes, dashboard stages and committed DONE-block preservation.
+- Add shell integration tests for M1 using an uncommitted DONE task at session entry.
+- Add watchdog integration coverage for N1 asserting no repeated notification or diagnosis for an already-active legacy stall.
 
-Review approval does not constitute human acceptance.
+Reviewing does not constitute human acceptance.
