@@ -776,3 +776,83 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 
+
+## T012 — Planning keeps DONE tasks that exist only in the working tree (review round 1 M1)
+Status: TODO
+Dependencies: T011
+Model: opus
+
+### Goal
+A task DONE in the working-tree `.ai/tasks.md` when `ai-run --plan` starts (committed or not)
+keeps its identical block after the session; otherwise the run stops with
+`Planning: DONE task T00x was changed or removed`, with or without `--revision`.
+
+### Implementation notes
+- Today `plan-keeps-done START` (`scripts/lib/workflow.py` `plan_keeps_done`) reads only
+  `git show START:.ai/tasks.md`, and `scripts/ai-run` calls it with HEAD before the session
+  (~130) and with `$since` after it (~311). Planning allows uncommitted plan records, so DONE
+  tasks present only in the working tree at entry are not protected.
+- Before the session, the host copies the working-tree queue to a host-controlled baseline the
+  planner cannot edit (outside the plan allowlist: e.g. a `mktemp` file outside the checkout or
+  under the host binding dir, removed on exit), and parses it there so a malformed heading still
+  stops before a session is spent. After the session, compare DONE blocks of BOTH the committed
+  START queue and the captured working-tree baseline against the working tree (union of DONE IDs;
+  each must match the block from the baseline that had it DONE). Suggested CLI:
+  `plan-keeps-done START [--baseline FILE]`; keep the existing no-queue / no-DONE behaviour.
+- Same raw-block comparison as T011 (heading + raw lines, trailing blank lines ignored).
+- README planning paragraph and `docs/workflow.md` plan stage: "DONE when the session starts
+  (committed or not)". Handoff: add the new test group under "Covered by automated tests".
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py (or the plan-session test
+module), tests/mock mode for planning, README.md, docs/workflow.md, .ai/handoff.md
+
+### Acceptance criteria
+- Regression tests `test_plan_keeps_done_uncommitted_*`: committed HEAD has TODO T001, working
+  tree has DONE T001 at session entry; a planning session that removes it, flips its status, or
+  changes its result text stops with `Planning: DONE task T001 was changed or removed`, one ⛔,
+  file left as written — both with and without `--revision`.
+- An uncommitted DONE task kept identical completes normally (`planned` record).
+- Existing `test_plan_keeps_done_*` and `test_plan_session_revision_*` still pass unchanged.
+- The baseline file is not inside the planner's Edit/Write allowlist and is cleaned up.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k plan_keeps_done` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k plan_session` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+
+
+## T013 — Watchdog keeps an already-announced legacy stall active (review round 1 N1)
+Status: TODO
+Dependencies: T004
+Model: opus
+
+### Goal
+Upgrading the watchdog never repeats a STOPPED notification (or diagnosis) for a stall an
+older record already announced (`active` contains `stalled`, no `stall_seen_ns`).
+
+### Implementation notes
+- `scripts/lib/watchdog.py` ~447: when the stall condition holds and `previous['active']`
+  already contains `stalled`, keep `incidents['stalled']` (confirmed) regardless of
+  `stall_seen_ns`, and record `stall_seen_ns`; clear it as today when the condition clears.
+- `docs/workflow.md` `stall_seen_ns` sentence: mention the legacy active-stall case.
+  Handoff: name the new test under "Covered by automated tests".
+
+### Likely affected modules
+scripts/lib/watchdog.py, tests/test_workflow.py, docs/workflow.md, .ai/handoff.md
+
+### Acceptance criteria
+- Regression test `test_watchdog_confirm_legacy_active_stall`: an old record
+  `{"active": ["stalled"], "notified_at_ns": …}` with the stall still present; two probes
+  (immediately and ≥ 5 min later, `--diagnose`) send no notification and start no diagnosis;
+  after the stall clears and returns, it is announced again only after confirmation.
+- Existing `test_watchdog_confirm_*` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k watchdog_confirm` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms.
+
+### Result / notes
+

@@ -147,6 +147,10 @@ completes with 3 tasks).
 - No CI workflow change needed.
 
 ## Next action
-Runner: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
+Review round 1 (2026-10-13) accepted M1 → T012 (uncommitted DONE tasks protected during
+planning) and N1 → T013 (legacy active stall not re-announced); see
+`.ai/reviews/dispositions.md`. Runner: implement T012 and T013, then request another review.
+
+Earlier: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
 T009, the audit, depends on T010 and T011 since round 3 and runs last). Human afterwards: the
 checks under "Needs you", the gate/vault/timer todos, and the PR review.
