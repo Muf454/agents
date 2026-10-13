@@ -1,36 +1,46 @@
-<!-- Host evidence: HEAD e8eb6c8c561a47656b740c91f8609ef24783efbf; merge-base 744827a5212847d9734d197559321ca1c7f042cc; saved 2026-10-13T05:44:27Z. -->
+<!-- Host evidence: HEAD 9d3e9be2a0e52a975c280e7868406798d146740e; merge-base 744827a5212847d9734d197559321ca1c7f042cc; saved 2026-10-13T06:27:34Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED. The requested features are implemented and the validation evidence is current, but planning can silently remove an uncommitted DONE task. The watchdog also repeats an already-announced stall after upgrading.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
+Overall verdict: PASS WITH MINOR FINDINGS. The accepted previous-round findings are fixed. No BLOCKER or MAJOR finding remains in the inspected scope; two localized issues remain.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `e8eb6c8c561a47656b740c91f8609ef24783efbf`
+Reviewed HEAD: `9d3e9be2a0e52a975c280e7868406798d146740e`
 
 Supplied base and merge-base: `744827a5212847d9734d197559321ca1c7f042cc`
 
-Checkout: clean before and after review. No files written; no network or MCP integrations invoked.
+Checkout was clean before and after review. No files were written; no network or MCP integrations were invoked.
 
 ## Scope and validation
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, existing review structure, plan-review dispositions, relevant documentation, Git history, the full change range, affected source and regression tests.
+Inspected AGENTS.md, the spec, plan, tasks, state, handoff, review dispositions, relevant documentation, Git history, the full supplied diff, changes since `e8eb6c8`, and affected source and tests.
 
-Validation observed:
+Validation evidence observed:
 
-- `.ai/local/validation.json` reports PASS, exit 0, unchanged content, at `2026-10-10T10:37:13Z`.
-- Its log reports **609 tests passed in 350.5 seconds**, across eight shards.
-- `python3 -B scripts/lib/workflow.py stamp verify` passed against the current checkout. Changes after the recorded validation revision affect only excluded bookkeeping files.
+- `.ai/local/validation.json`: PASS, exit 0, unchanged content, timestamp `2026-10-13T06:20:04Z`.
+- Referenced log: **619 tests passed in 355.1 seconds**, across eight shards.
+- `python3 -B scripts/lib/workflow.py stamp verify` passed against the reviewed checkout. Changes after the recorded validation revision affect only excluded state/run-log bookkeeping.
 
-Checks run during this review:
+Checks run:
 
-- Shell syntax checks: 13 scripts/templates passed.
-- Python AST parsing: all three affected helper modules passed.
-- Test discovery: 609 tests collected.
-- Eleven pure dashboard renderer test bodies passed; filesystem fixture setup was deliberately omitted.
-- Current queue validation passed; counts are 11 DONE of 11 tasks.
-- In-memory reproductions confirmed both findings below.
+- Shell syntax: 13 files passed.
+- Python AST parsing: three affected helper modules passed.
+- Test discovery: 619 tests collected.
+- Thirteen pure renderer test bodies passed with the suite’s UTC setting retained; filesystem fixture setup was omitted.
+- Three sanitization tests passed.
+- Current task queue validation passed: 13 DONE of 13 tasks.
+- Seven in-memory cases exercised the actual DONE-preservation helper.
+- Actual watchdog transition statements were exercised in memory for legacy deduplication, clearing, reconfirmation and planning suppression.
+- A read-only process-launch reproduction confirmed N2.
+- `git diff --check` reported an extra EOF blank line in `.ai/tasks.md:872`.
 
-The full `./scripts/ai-check` suite was not rerun because it creates validation records and temporary test checkouts, which this read-only review does not permit. The reproductions exercise actual helper logic, but are not complete shell integration runs.
+The full `./scripts/ai-check` suite was not rerun because it writes validation records and temporary test checkouts. The isolated helper checks do not substitute for shell integration tests.
+
+## Previous-round verification
+
+**M1 — fixed by T012.** The host captures the working queue before planning and supplies that baseline to the post-session preservation check. The helper protects the union of committed and working-tree DONE tasks. In-memory checks rejected removal, status changes, result edits and fenced-content edits; unchanged blocks passed. The added integration tests cover both revision-flag variants and baseline cleanup.
+
+**N1 — fixed by T013.** An unchanged legacy record with `active: ["stalled"]` remains confirmed without becoming fresh. The checked transitions preserved deduplication, cleared the incident when appropriate, and required confirmation when it returned. The added regression test also asserts no repeated notification or diagnosis.
 
 ## BLOCKER findings
 
@@ -38,91 +48,78 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M1 — DONE-task preservation ignores uncommitted completed tasks
-
-**Location:** `scripts/lib/workflow.py:2522`; callers at `scripts/ai-run:130`, `scripts/ai-run:284` and `scripts/ai-run:311`.
-
-**Requirement:** DB-04/T011 requires every task DONE when planning starts to retain its identical block. Planning explicitly permits uncommitted plan records. README.md:144 promises this protection for tasks DONE when the session starts.
-
-**Problem:** Both preservation checks use the committed HEAD queue as their baseline. `plan_keeps_done` reads `git show START:.ai/tasks.md` and returns immediately when that committed version has no DONE tasks. It never captures DONE tasks present only in the working tree at session entry.
-
-**Evidence:** Using the repository’s valid task fixture and the actual helper with in-memory Git/file inputs:
-
-1. Committed HEAD contains TODO T001.
-2. The working queue contains DONE T001 before planning.
-3. The pre-session preservation check passes.
-4. The session replaces that queue with valid TODO T002, removing T001.
-5. The post-session preservation check and final `tasks check` both pass.
-
-Changing only `.ai/tasks.md` also satisfies the planning scope check. Consequently, this path can announce “Plan ready” after losing a completed task and its results.
-
-Existing preservation tests commit their DONE-task baseline before invoking planning, so they miss this case.
-
-**Impact:** An allowed planning revision can silently discard completed-task records, contradicting T011’s central integrity guarantee. This is introduced by the new planning mode.
-
-**Recommended direction:** Capture the working queue before starting the session in a host-controlled baseline, and compare its DONE blocks after the session. Retain any committed-baseline protection that is still needed. Add integration coverage for uncommitted DONE tasks with and without `--revision`.
+None found in the inspected scope.
 
 ## MINOR findings
 
-### N1 — Upgrading repeats an already-announced watchdog stall
+### N2 — Accepted large planning objectives cannot reach Claude
 
-**Location:** `scripts/lib/watchdog.py:447`, `scripts/lib/watchdog.py:468`; coverage at `tests/test_workflow.py:745`.
+**Location:** `scripts/ai-run:54`, `scripts/ai-run:297`, `scripts/ai-run:263`.
 
-**Requirement:** FL-21 preserves notification deduplication and compatibility with older watchdog records.
+**Requirement:** DB-04’s planning input contract accepts a regular prompt file up to 200 KB.
 
-**Problem:** An old record containing `active: ["stalled"]` but no `stall_seen_ns` loses its active incident on the first upgraded probe. The next confirming probe treats the unchanged stall as fresh and announces it again.
+**Problem:** The file check accepts 204,800 bytes, but the complete objective, planning template and contract are passed as one command-line argument. Linux rejects sufficiently large individual arguments before the command starts.
 
-**Evidence:** Executing the actual incident/state-transition statements in memory produced:
+**Evidence:** On this machine, launching `timeout` with a 102,400-byte argument succeeded; the same launch with a 153,600-byte argument raised `OSError: [Errno 7] Argument list too long`. A 150 KiB ASCII objective passes the file-size check and necessarily produces an even larger assembled prompt.
 
-- First upgraded probe: `fresh=[]`, `active=[]`, new `stall_seen_ns`.
-- Probe ten minutes later, with the same stall: `fresh=["stalled"]`.
+**Impact:** Some inputs within the advertised limit stop before Claude runs. Existing planning tests use small objectives and miss this boundary.
 
-The subsequent notification branch therefore sends another STOPPED notification. With diagnosis enabled, it can also repeat diagnosis for the same incident.
+**Recommended direction:** Use a supported stdin/file transport for the assembled prompt, or validate its final encoded size and document a smaller supported limit. Add a shell integration test with a large objective within the advertised range.
 
-This was previously identified as plan-review finding P18. No disposition for it is recorded, and it remains reproducible. The compatibility test checks only an older record with an empty active list.
+The shared argument transport predates this change; the new planning mode’s accepted input range exposes the gap.
 
-**Impact:** One duplicate alarm per still-stalled checkout during upgrade, contrary to the notification-preservation requirement. This regression comes from the new confirmation logic.
+### N3 — README misstates how older observation records render
 
-**Recommended direction:** When the stall condition still holds and the previous active list already contains `stalled`, preserve it as confirmed. Clear it when the condition clears. Test an older record with an already-active stall across multiple upgraded probes.
+**Location:** `README.md:614`.
 
-## Missing test coverage
+**Requirement:** DB-04 says every observation whose stage is not `planning` ticks Plan; only absent or unusable observations leave it unticked.
 
-- Working-tree DONE tasks absent from the committed baseline: removal, status changes and result-text changes.
-- Older watchdog records with an already-announced active stall.
-- Real Claude permission matching and actual systemd scheduling remain dependent on the documented human checks.
+**Problem:** README groups “an old record” with missing records and says Plan remains unticked with “stage unknown”. Older valid records at `build`, for example, tick Plan.
 
-The accepted plan-review work is substantially present: explicit session-option detection, long-run budget tests, raw DONE-block comparison including fenced content, corrected executable-permission assertions, and final-audit task ordering. M1 exposes a remaining baseline gap in the DONE-preservation fix.
+**Evidence:** The renderer’s preceding-box rule ticks Plan for a build observation. `tests/test_dashboard.py:874` explicitly covers an older build record and expects the Plan box to be done. The pure build-renderer checks passed during this review.
+
+**Impact:** Upgrade documentation gives users the wrong expectation for existing dashboard cards.
+
+**Recommended direction:** Distinguish older valid observation records from checkouts with no usable observation record.
+
+## Missing coverage
+
+- Large accepted objectives and assembled prompt-size boundaries, as described in N2.
+- Live Claude permission enforcement and real systemd scheduling remain dependent on human checks.
+
+The previous gaps concerning uncommitted DONE tasks and already-active legacy stalls now have relevant regression coverage.
 
 ## Security concerns
 
 No additional demonstrated security finding in the inspected changes.
 
-Planning supplies no Bash tool, and post-session scope/queue checks follow gate verification. The changed-gate test checks that an altered helper is not executed. Lock rejection avoids `ai_die`, preserving the owner’s error and notification records.
+Planning exposes no Bash tool and restricts Edit/Write to the six plan records. Post-session checks follow gate verification; the gate-change regression checks that an altered helper is not executed. Lock rejection preserves the owner’s records.
 
-The documented `chmod +x` prefix rule cannot constrain paths to the checkout. Its prompt restriction and required human permission check remain relevant; offline string assertions do not prove real CLI enforcement.
+The documented `chmod +x` prefix rule cannot constrain paths to the checkout. Offline assertions verify the template, not real CLI enforcement.
 
 ## Architecture concerns
 
-The changes reuse existing scripts and standard-library helpers without adding dependencies. The planning mode and dashboard stage fit the existing workflow structure.
+The implementation reuses existing scripts and standard-library helpers without adding dependencies. The new planning stage fits the observation and dashboard structure.
 
-M1 requires the preservation baseline to represent the queue the session actually receives. N1 requires migration to preserve already-confirmed incident state.
-
-No separate pre-existing defect is counted in this report.
+N2 concerns the prompt transport boundary. No separate pre-existing defect is counted.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Verify a real planning session’s permissions, notifications, dashboard transitions and uncommitted output in a scratch project.
+- Verify a real planning session’s permissions, notifications, dashboard transitions and uncommitted output in a scratch checkout.
 - Verify allowed `chmod +x` and denied alternate modes with the real Claude CLI.
-- Verify timer scheduling after installation and upgrade with systemd.
-- Verify relaunch during recovery names the owner and preserves the original stop reason.
+- Verify timer scheduling after installation/upgrade and relaunch behavior during recovery.
 - Complete the handoff’s pending vault flow-chart, gate and timer-update steps before merging.
 
 ### Covered by automated tests
 
-- Existing regression groups cover invalid queues, session budgets, lock rejection, stall confirmation, planning outcomes, gate changes, dashboard stages and committed DONE-block preservation.
-- Add shell integration tests for M1 using an uncommitted DONE task at session entry.
-- Add watchdog integration coverage for N1 asserting no repeated notification or diagnosis for an already-active legacy stall.
+- Queue rejection and recovery escalation.
+- Default and explicit session budgets, including runs beyond session 16.
+- Lock-owner hints and preservation of existing records.
+- Stall confirmation and legacy deduplication.
+- Planning outcomes, gate changes and DONE-block preservation.
+- Dashboard stages, widths and legacy records.
+- Add the large-objective regression described in N2.
 
 Reviewing does not constitute human acceptance.
