@@ -354,7 +354,7 @@ command, timeout and last 3000 chars of stdout/stderr. 4 `test_test_harness_time
 
 
 ## T004 — Parallel runner: per-test timings and balanced batches (FL-23, part 2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -418,6 +418,35 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `tests/run_parallel.py`: `make_batches(ids, workers)` deals sorted IDs into
+`min(len, workers × 6)` interleaved batches; a `Dispatcher` runs `min(workers, batches)` threads
+pulling a `queue.Queue`, shared results/busy times/running children under one lock; on
+KeyboardInterrupt or a worker exception it terminates every running child (start checked under
+the lock, so none is missed), joins all threads and re-raises. Python ≥ 3.12 batches run with
+`--durations 0`; `durations(output)` parses the last "Slowest test durations" block, ignoring
+unparsable lines. Report: 15 slowest, `Test time: … across N workers; worker busy: min–max s`.
+Failing batches list their test IDs. Changed summary: `(<b> batches on <w> workers, <n> collected)`
+and `failing batches:`; updated assertions in `test_parallel_runner_all_pass_from_repo_root_and_unrelated_cwd`
+and `test_parallel_runner_failing_test_prints_traceback` (now also asserts the failing ID is listed).
+New tests: `test_parallel_runner_reports_slowest_tests_and_worker_time`,
+`_interleaves_batches_of_adjacent_slow_tests`, `_durations_parse_tolerates_format_drift`; count
+mismatch and import error stay covered by the existing `_crashed_shard_fails_with_count_mismatch`
+and `_import_error_fails`. `DocsConsistencyTest.REQUIRED`: `round-robin into ai_test_workers shards`
+→ `interleaved batches pulled by ai_test_workers workers` (README + docs/workflow.md rewritten;
+module docstring too). Targeted: parallel 13 OK, Docs 3 OK.
+Baseline (this machine, 16 CPUs, 8 workers, Python 3.14.7): gate `Ran 648 tests in 381.8s (48 batches
+on 8 workers, 648 collected)`; `Test time: 2841.7 s`; worker busy 331.7–381.8 s. 15 slowest (s):
+session_budget_end_to_end_runs_past_session_16 29.4, extra_fix_round_clean_review_after_it_opens_a_ready_pr
+29.3, extra_fix_round_crash_after_reservation_resumes_it_once 26.9, observation_pipeline_extra_fix_round_detail
+26.3, observation_runner_triage_in_a_pipeline_keeps_the_pipeline_detail 26.1,
+extra_fix_round_falling_counts_get_one_round_then_draft 26.1, convergence_pipeline_requires_the_line_from_round_three
+25.7, session_budget_end_to_end_explicit_16_stops 25.0, extra_fix_round_trend_history_boundaries 24.4,
+convergence_interrupted_round_three_resumes_through_ai_run_with_the_same_round 23.1,
+disputed_findings_mixed_triage_rechecks_then_fixes_and_survives_clean_review_and_restart 21.9,
+recovery_is_bounded_per_run 21.0, supervised_plan_resume_round_three_crash_runs_on_the_escalation_model 20.7,
+disputes_lifecycle_new_dispute_on_later_branch_drafts_and_lists_only_it 20.6,
+extra_fix_round_flat_counts_and_imitated_subjects_draft 20.1 (all `test_workflow.ToolkitTest`).
+Gate: `.ai/bin/ai-check` PASS.
 
 
 ## T005 — Cheaper fixture I/O: no git fsync, temp dirs on tmpfs (FL-23, part 3)

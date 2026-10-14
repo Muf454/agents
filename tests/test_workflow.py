@@ -21,7 +21,7 @@ SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
 MEDIUM_TIMEOUT = 60 * TIMEOUT_SCALE
 PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
-# 17 mock sessions in one ai-run (about 5 s each in parallel shards); CI runs on a 2-core runner
+# 17 mock sessions in one ai-run (about 5 s each in parallel batches); CI runs on a 2-core runner
 # without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
 LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE
 
@@ -8452,7 +8452,7 @@ class ParallelRunnerTest(unittest.TestCase):
         for cwd in (ROOT, self.elsewhere):
             result = self.runner('--start-dir', str(self.suite), cwd=cwd)
             self.assertIn('Ran 3 tests', result.stdout)
-            self.assertIn('2 shards, 3 collected', result.stdout)
+            self.assertIn('3 batches on 2 workers, 3 collected', result.stdout)
             self.assertNotIn('ModuleNotFoundError', result.stdout)
         relative = self.runner('--start-dir', 'suite', cwd=self.base)
         self.assertIn('Ran 3 tests', relative.stdout)
@@ -8463,8 +8463,60 @@ class ParallelRunnerTest(unittest.TestCase):
         result = self.runner('--start-dir', str(self.suite), expected=1)
         self.assertIn('Traceback', result.stdout)
         self.assertIn('distinctive failure', result.stdout)
-        self.assertIn('FAILED (failing shards:', result.stdout)
+        self.assertIn('FAILED (failing batches:', result.stdout)
         self.assertNotIn('count mismatch', result.stdout)
+        # The failing batch is named by its test IDs, not by a number only.
+        self.assertRegex(result.stdout, r'Tests in this batch:\n(?:  \S+\n)*  test_one\.Sample\.test_b\n')
+
+    def test_parallel_runner_reports_slowest_tests_and_worker_time(self):
+        body = ''.join(f'    def test_slow{n}(self): __import__("time").sleep(0.3)\n' for n in range(3))
+        body += ''.join(f'    def test_fast{n}(self): pass\n' for n in range(9))
+        self.write('test_one.py', body)
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertIn('Ran 12 tests', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+        self.assertRegex(result.stdout, r'Test time: .* across 2 workers; worker busy: [\d.]+–[\d.]+ s')
+        if sys.version_info < (3, 12):
+            self.skipTest('unittest --durations needs Python 3.12+')
+        listed = re.findall(r'^ +[\d.]+s  (\S+)', result.stdout, re.M)
+        self.assertEqual(sorted(listed[:3]), ['test_slow0', 'test_slow1', 'test_slow2'], result.stdout)
+        self.assertGreaterEqual(float(re.search(r'Test time: ([\d.]+) s', result.stdout).group(1)), 0.85)
+
+    def test_parallel_runner_interleaves_batches_of_adjacent_slow_tests(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        for count, workers in ((4, 2), (12, 2), (50, 3), (700, 8), (5, 1)):
+            ids = [f'mod.Class.test_{n:04d}' for n in range(count)]
+            batches = run_parallel.make_batches(ids, workers)
+            with self.subTest(count=count, workers=workers):
+                self.assertEqual(sorted(sum(batches, [])), ids)
+                self.assertEqual(len(batches), min(count, workers * run_parallel.BATCHES_PER_WORKER))
+                where = {test_id: number for number, batch in enumerate(batches) for test_id in batch}
+                for first, second in zip(ids, ids[1:]):
+                    self.assertNotEqual(where[first], where[second], (first, second))
+        self.write('test_one.py', ''.join(f'    def test_sleep{n}(self): __import__("time").sleep(1)\n'
+                                          for n in range(4)))
+        started = time.monotonic()
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertLess(time.monotonic() - started, 3.5 * TIMEOUT_SCALE, result.stdout)
+        self.assertIn('Ran 4 tests', result.stdout)
+        self.assertIn('4 batches on 2 workers', result.stdout)
+
+    def test_parallel_runner_durations_parse_tolerates_format_drift(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        output = ('0.900s     test_noise (outside.the.block)\n'
+                  'Slowest test durations\n' + '-' * 70 + '\n'
+                  '0.302s     test_a (m.C.test_a)\n'
+                  'garbled line\n'
+                  '\x1b[1m1.5s test_b (m.C.test_b)\x1b[0m\n'
+                  '\n(durations < 0.001s were hidden; use -v to show these durations)\n'
+                  'Ran 3 tests in 1.9s\n\nOK\n')
+        self.assertEqual(run_parallel.durations(output),
+                         [(0.302, 'test_a (m.C.test_a)'), (1.5, 'test_b (m.C.test_b)')])
+        self.assertEqual(run_parallel.durations('Ran 1 test in 0.1s\n\nOK\n'), [])
 
     def colour_env(self, **colours):
         for name in ('NO_COLOR', 'FORCE_COLOR', 'PYTHON_COLORS'):
@@ -8604,7 +8656,7 @@ class DocsConsistencyTest(unittest.TestCase):
         'needs you',
         'covered by automated tests',
         'context only',
-        'round-robin into `ai_test_workers` shards',
+        'interleaved batches pulled by `ai_test_workers` workers',
         'convergence',
         'convergence: <text>',
     )

@@ -45,11 +45,13 @@ root with Bash error propagation and GNU timeout (default 1800 seconds;
 non-watch tests. Tests may write ignored build/cache artifacts. Nonignored project
 changes during the gate cause a failure, even if the command itself exits zero.
 
-Gate speed (FL-11): test suites can run in parallel shards. A stdlib-only runner
-`tests/run_parallel.py` discovers every test ID, splits them round-robin into
-`AI_TEST_WORKERS` shards (default `min(8, cpu count)`), and runs each shard with
-`python3 -m unittest`. It exits non-zero when a shard fails, crashes, collects zero
-tests, or when the shards ran a different number of tests than it collected. Shards run
+Gate speed (FL-11, FL-23): test suites can run in parallel. A stdlib-only runner
+`tests/run_parallel.py` discovers every test ID, deals the sorted IDs into interleaved
+batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six batches per
+worker), and runs each batch with `python3 -m unittest`. It exits non-zero when a batch
+fails (its test IDs are listed), crashes, collects zero tests, or when the batches ran a
+different number of tests than it collected. On Python 3.12+ it reports the 15 slowest
+tests, the summed test time and each worker's busy time. Batches run
 without colour whatever the caller's `FORCE_COLOR`/`NO_COLOR`/`PYTHON_COLORS`, and the
 summary parser strips ANSI escapes.
 Switching `.ai/validate` to the parallel runner is a gate change that a human approves.

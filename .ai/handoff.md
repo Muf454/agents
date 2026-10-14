@@ -7,6 +7,9 @@ an unrepairable queue stops with `Planning: / Plan revision stage: task queue is
 T011 DONE (2026-10-15): `workflow.py revision-queue-repair`, called by `ai-run --revise-plan`
 and `ai-pipeline` before their queue checks, repairs an interrupted revision's uncommitted
 out-of-order queue so the resume records the revision without a second session.
+T003 DONE: scaled test timeouts (`tests/timeouts.py`). T004 DONE (2026-10-15):
+`tests/run_parallel.py` runs interleaved batches (6 per worker) from a shared queue and prints
+the 15 slowest tests, the summed test time and the worker busy range (Python 3.12+).
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
@@ -29,7 +32,7 @@ Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004–T006 record the suite timings (baseline and after).
+T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after).
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
@@ -59,7 +62,7 @@ description in the chart).
 ### Needs you
 1. CI time: on this PR's GitHub Actions run, the self-check finishes well under 10 minutes
    (and green). Compare with PR #27's ~24 min; note the runner's CPU count from the log
-   (`Ran … (N workers …)` line and the slowest-tests list).
+   (`Ran … (B batches on N workers, …)` line, `Test time:` and the slowest-tests list).
 2. A real supervised plan revision that adds a prerequisite task at the end
    (e.g. a scratch project, `AI_SUPERVISE=1`, a plan review with one MAJOR finding): the run
    continues with `Task queue reordered` in the log and no ⛔; the committed queue has the new

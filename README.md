@@ -811,20 +811,28 @@ project before trusting long unattended execution.
 ## Running the tests
 
 ```bash
-python3 tests/run_parallel.py                 # parallel shards, works from any directory
+python3 tests/run_parallel.py                 # parallel batches, works from any directory
 AI_TEST_WORKERS=4 python3 tests/run_parallel.py
 python3 tests/run_parallel.py --collect-only  # print the number of tests only
 python3 -m unittest discover -s tests         # serial, what the gate runs today
 python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 ```
 
-`tests/run_parallel.py` discovers the same tests as the serial command and splits them
-round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
-runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
-crashes, when it collects no tests, or when the shards ran a different number of tests than
-it collected. Shards always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
+`tests/run_parallel.py` discovers the same tests as the serial command and deals the sorted
+IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the CPU count, at
+most 8; six batches per worker, so neighbouring and often similarly slow tests land in
+different batches and no worker idles while another works through a slow cluster). Each
+batch runs as `python3 -m unittest` in its own process. The runner fails when a batch fails
+or crashes (listing that batch's test IDs), when it collects no tests, or when the batches
+ran a different number of tests than it collected. Batches always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
 `PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
 approves.
+
+Every run ends with a timing report before the `Ran N tests …` line: on Python 3.12+ the
+batches run with `--durations 0` and the runner lists the 15 slowest tests with their
+seconds, then `Test time: <sum> s across <workers> workers; worker busy: <min>–<max> s`
+(the busy range shows how evenly the batches spread). Older Pythons get the busy range
+only. Duration lines that do not parse are ignored.
 
 Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
 when set (a number greater than 0, otherwise the tests stop with an error), else 2 when
