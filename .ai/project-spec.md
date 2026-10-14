@@ -61,9 +61,14 @@ never authorizes), gate files are never edited by a pipeline session.
     ID, a self-dependency or cycle (`dependency cycle: T003 -> T005 -> T003`), a non-task `## `
     section between two tasks when a move is needed. Atomic replace.
   - Called by the host only on the planning paths: `ai-run --plan` (after `plan-keeps-done`,
-    before `tasks check`) and `ai-run --revise-plan` (before its `tasks check`, which covers the
-    "dispositions already complete" resume too). Not by `ai-pipeline`'s pre-review queue check,
-    `ai-run` implementation or `ai-review`.
+    before `tasks check`) and `ai-run --revise-plan` (after the session, before its `tasks
+    check`). Revision recovery: an interrupted revision's uncommitted queue is rejected by
+    earlier checks (ai-pipeline ~416, ai-run ~138 and ~338, `plan-dispositions-check`), so a
+    guarded helper `revision-queue-repair` runs before them in ai-pipeline (plan review on) and
+    `ai-run --revise-plan`; it repairs only an uncommitted queue whose dirty files are plan
+    revision records, whose HEAD queue is valid without DONE tasks, for a verified plan review
+    not yet revised (T011). A committed out-of-order queue is still rejected by
+    `ai-pipeline`'s queue check; no reorder in `ai-run` implementation or `ai-review`.
   - A queue the host cannot repair, or that is still invalid after the reorder, stops
     `--revise-plan` through `ai_die "Plan revision stage: task queue is invalid: <error>"` and
     `--plan` through `ai_die "Planning: task queue is invalid: <error>"`. `Plan revision stage`
@@ -77,10 +82,12 @@ never authorizes), gate files are never edited by a pipeline session.
     defaults to 2. A timed-out command fails with its captured partial output.
   - `tests/run_parallel.py` reports the slowest tests and per-worker time, and balances work
     dynamically (many small interleaved batches pulled by `AI_TEST_WORKERS` workers) instead of
-    fixed shards; it still fails on a count mismatch.
+    fixed shards; it still fails on a count mismatch. The docs and `DocsConsistencyTest`
+    describe the batches, not shards.
   - Fixture repositories and test temp files avoid needless disk syncs (git `core.fsync`
-    off in fixtures; test temp dirs on tmpfs when available), and the slowest tests are made
-    cheaper without weakening any assertion. Target: the whole suite well under 10 minutes on a
+    off in fixtures; test temp dirs on tmpfs when available AND a probe script executes there,
+    else the default temp dir), and the slowest tests are made cheaper without weakening any
+    assertion (every existing test ID kept; new tests may raise the count). Target: the whole suite well under 10 minutes on a
     4-CPU GitHub runner; verified by the human on the PR's CI run.
 - **DB-05.** Runner processes whose environment contains `AI_DASHBOARD_IGNORE=1` are not used
   for discovery (read from `/proc/<pid>/environ`, bounded; unreadable → not ignored). The
@@ -92,7 +99,8 @@ never authorizes), gate files are never edited by a pipeline session.
   authoritative). CI state is not fetched (no network).
 - **DB-03.** `ai-dashboard --wait [--since CURSOR] [--timeout S] [--interval S]` blocks until
   a run appears or changes status, stage or observation state, or gets a new notification
-  line, then prints `{state_root, cursor, timed_out: false, runs: [changed runs]}` and exits
+  line (detected from the log's file version and raw last line, not the sanitised, truncated
+  display text, so identical or same-prefix lines are still seen), then prints `{state_root, cursor, timed_out: false, runs: [changed runs]}` and exits
   0; on timeout prints the same with `timed_out: true`, `runs: []` and exits 1; an invalid
   cursor is a usage error (exit 2). `--since` compares against the previous call's cursor at
   once, so nothing is lost between calls. Read-only like the rest of the dashboard.
@@ -103,7 +111,7 @@ never authorizes), gate files are never edited by a pipeline session.
 ## Non-goals
 No change to `.ai/bin`, `.ai/prompts`, `.ai/validate`, `.ai/permissions.allow`,
 `.claude/settings.json` or `.github/workflows/*` (human steps in the handoff). No reorder in
-ai-pipeline's own queue check or in implementation sessions. No rewriting of prose
+ai-pipeline's own queue check of a committed queue or in implementation sessions. No rewriting of prose
 dependencies. No CI status in the dashboard. No dashboard actions or daemon.
 
 ## Acceptance

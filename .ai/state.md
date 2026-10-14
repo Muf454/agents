@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: fix/flow-batch-3
-Phase: implementing
+Phase: planning
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 10
-Last validation: not run for this batch
+Tasks remaining: 11
+Last validation: not run
 Blocked: no
-Next action: Implement T001 (`tasks reorder`), then the queue in order (T001–T010).
-Last updated: 2026-10-14T00:00:00Z
+Next action: Review the revised plan (ai-review --plan)
+Last updated: 2026-10-14T21:14:14Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

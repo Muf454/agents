@@ -113,9 +113,11 @@ error, and recovery escalates without rerunning.
   `reorder_out=$(ai_helper tasks reorder 2>&1) || ai_die "Plan revision stage: task queue is
   invalid: ${reorder_out#Error: }"`, print `$reorder_out` when non-empty, then
   `queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || ai_die "Plan revision stage: task
-  queue is invalid: ${queue_error#Error: }"`. It sits after the `if/else` (~366–415), so the
-  "dispositions already complete" resume path repairs a queue an older run left behind too.
-  The following `revision_scope` already allows `.ai/tasks.md`; check that the host revision
+  queue is invalid: ${queue_error#Error: }"`. It sits after the `if/else` (~366–415) and
+  repairs what the session just wrote. It does NOT cover an interrupted revision: an
+  uncommitted out-of-order queue is rejected long before this line (ai-pipeline:416, ai-run:138,
+  `tasks untouched` at ai-run:338, `plan-dispositions-check` → `tasks()` at workflow.py:2426);
+  that recovery path is T011. The following `revision_scope` already allows `.ai/tasks.md`; check that the host revision
   commit stages `.ai/tasks.md` (the reordered file must be in it) and fix it if not.
 - `scripts/ai-run` `--plan` branch: after `plan-keeps-done "$since" --baseline …` (~320) and
   before `tasks check` (~322): the same reorder with `ai_die "Planning: task queue is invalid:
@@ -142,6 +144,10 @@ error, and recovery escalates without rerunning.
   host record") gain "host reorders the queue (dependencies first); cycle / unknown ID / prose →
   ⛔"; the recovery hard-rules box notes "queue invalid after a revision"; bump `updated:`.
   Hub `agents.md` Log: one dated line.
+- `.ai/handoff.md` "## Flow chart": replace the first line `Flow unchanged so far …` with
+  `Flow chart updated: …` (what T002 changed), keep the pending T011 note below it (or
+  `Flow chart updated` plus a PENDING line if the vault edit was denied).
+  `test_pr_body_flow_this_repo_declares_the_flow_chart` must keep passing.
 
 ### Likely affected modules
 scripts/ai-run, templates/.ai/prompts/plan.md, templates/.ai/prompts/plan-revision.md,
@@ -158,10 +164,6 @@ tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md and ag
     `Plan revision stage: task queue is invalid` and `dependency cycle`, exactly one ⛔
     notification, `recover-calls` absent (no Claude recovery decision), exactly one revision
     session (no rerun), no implementation session;
-  - the resume path: an interrupted revision whose dispositions are complete and whose
-    uncommitted queue is out of order (crash after the session, as in the existing
-    `test_supervised_plan_resume_session_crash_*`, with `revise-accept-prereq`), resumed by
-    `ai-recover`: completes without a second revision session and with the repaired order;
   - `ai-run --plan` with `plan-out-of-order`: exit 0, `planned` record, T002 before T001 in the
     working tree, nothing committed; with the cycle `plan-bad-queue`: exit 1, `Planning: task
     queue is invalid`, `dependency cycle`, file left as written, one ⛔;
@@ -172,12 +174,88 @@ tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md and ag
   - the revision prompt contains `placed before the first task that depends on them`.
 - `test_plan_session_invalid_queue_stops_and_keeps_the_file` updated as in the notes; all other
   existing tests pass unchanged.
-- The vault flow chart and hub Log are updated (or the denial is recorded).
+- The vault flow chart and hub Log are updated (or the denial is recorded); the handoff's
+  "## Flow chart" first line reads `Flow chart updated`.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k queue_repair` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k plan_session` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k supervised_plan` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T011 — Revision recovery repairs the interrupted revision's queue before any queue check (FL-24, part 3)
+Status: TODO
+Dependencies: T002
+Model: opus
+
+### Goal
+A plan revision that crashed after its session wrote an out-of-order (repairable) queue resumes
+through `ai-recover` or a human rerun without a second revision session, while every committed
+or non-revision queue keeps today's rejections.
+
+### Implementation notes
+- Why: an uncommitted out-of-order queue is rejected before T002's post-session reorder is
+  reached: `ai-pipeline` ~416 (`tasks check` → `Task queue is invalid` → `stop`, ai-recover
+  escalates at ~139), ai-run ~138 (`tasks check` for every non-plan mode), ai-run ~338
+  (`tasks untouched` calls `tasks()` and dies with the misleading "a task is already DONE"),
+  and the "dispositions complete" test at ~366 (`plan-dispositions-check` → `tasks()` at
+  workflow.py ~2426 fails, so the run falls into the dirty-records rejection at ~371–376).
+- One helper decides, in `scripts/lib/workflow.py`: `revision-queue-repair` (no arguments).
+  It reorders (T001's `tasks_reorder`, same messages) ONLY when all of these hold, else it
+  does nothing and exits 0 (the existing checks then reject as today):
+  1. `.ai/tasks.md` differs from HEAD's (uncommitted change);
+  2. `plan-revision-scope HEAD` passes (only plan revision records dirty, untracked included);
+  3. HEAD's queue parses with `tasks()` rules (committed queue valid) and has no DONE task;
+  4. the current plan review is verified (`verified_plan_review`) and `plan-revisions revised`
+     says not yet revised (an interrupted revision of THIS report).
+  A repair failure (cycle, unknown ID, prose) exits 1 with the T001 message. Prints T001's
+  `Task queue reordered …` line on a move.
+- Callers (before any queue check, after the gate/branch checks already there):
+  - `scripts/ai-pipeline` right before ~415–419, only when `plan_review == yes`:
+    `repair_out=$(ai_helper revision-queue-repair 2>&1) || { printf 'Plan revision stage: task
+    queue is invalid: %s\n' "${repair_out#Error: }" > .ai/local/last-error; stop 'plan
+    revision'; }`, print `$repair_out` when non-empty. (`Plan revision stage` is always-escalate
+    in ai-recover ~138.)
+  - `scripts/ai-run` before ~138 when `revise_plan == yes`: the same helper with
+    `ai_die "Plan revision stage: task queue is invalid: …"`. Then ~138, ~338 and ~366 see the
+    repaired queue and the "dispositions already complete" path records the revision without a
+    new session; the host revision commit stages `.ai/tasks.md` (T002 checked that).
+- Unchanged: the no-DONE rule (condition 3 plus `tasks untouched` ~338), `tasks check` on
+  every path, ai-pipeline's rejection of a COMMITTED out-of-order queue (FL-18), implementation
+  and review paths (no repair).
+- Docs: README and `docs/workflow.md` (plan revision recovery: the host repairs an interrupted
+  revision's queue first); vault `agents-flow.md` recovery box gains "interrupted revision: host
+  repairs the queue first", `updated:` bumped, hub Log line; handoff "## Flow chart" keeps
+  `Flow chart updated` and drops the T011 pending note.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md,
+docs/workflow.md, vault agents-flow.md and agents.md (Log)
+
+### Acceptance criteria
+- Tests named `test_queue_recovery_*` in tests/test_workflow.py:
+  - crash after the session (as `test_supervised_plan_resume_session_crash_*`, with
+    `MOCK_REVISION_CRASH='after'` and `MOCK_CLAUDE='revise-accept-prereq'`), resumed by
+    `ai-recover` (watchdog path) and by a human rerun: `assert_resumed_once()` holds (one
+    revision record, exactly one revision session, re-review clean, all tasks DONE), the
+    committed queue lists the new task before T001, `recovery_calls()` empty;
+  - the same crash with `revise-accept-cycle`: exit 1, `last-error` contains `Plan revision
+    stage: task queue is invalid` and `dependency cycle`, one ⛔, no second revision session,
+    `recover-calls` absent;
+  - helper unit cases (no-op, exit 0, file untouched): queue committed out of order (FL-18
+    rejection still comes from ai-pipeline: `test_queue_check_*` unchanged), a dirty file outside
+    the plan records, a DONE task in HEAD's queue, the current review already revised;
+  - `ai-run --revise-plan` with a committed DONE task still dies with `a task is already DONE`.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k queue_recovery` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k supervised_plan_resume` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k queue_check` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
@@ -242,7 +320,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ## T004 — Parallel runner: per-test timings and balanced batches (FL-23, part 2)
 Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 Every gate run shows where the time goes, and no worker sits idle while another works through
@@ -267,9 +345,20 @@ a cluster of slow tests.
 - Record a baseline in the result: the gate's `Ran … in …`, the test-time sum and the 15
   slowest tests on this machine (with its CPU count). T005/T006 compare against it.
 - README (self-check section): one paragraph on the timing report. Flow unchanged.
+- The shard description changes with the architecture: README ~813, `docs/workflow.md` ~49
+  and the module docstring of `tests/run_parallel.py` (~5) say "round-robin into
+  `AI_TEST_WORKERS` shards"; rewrite all three to the batch queue (e.g. "interleaved batches
+  pulled by `AI_TEST_WORKERS` workers") and change the matching `DocsConsistencyTest.REQUIRED`
+  phrase (tests/test_workflow.py ~8291) to the new wording, present in both docs. This is an
+  intentional test change: name it in the result.
+- Model opus: the dispatcher is concurrent (worker threads pulling a shared queue, results and
+  timings collected across threads, interrupt/cleanup of running children): use a
+  `queue.Queue` or a lock for shared state, join every thread, and on KeyboardInterrupt or a
+  worker exception terminate the running batch processes before exiting.
 
 ### Likely affected modules
-tests/run_parallel.py, tests/test_workflow.py (its run_parallel tests, ~8153), README.md
+tests/run_parallel.py, tests/test_workflow.py (its run_parallel tests, ~8153, and
+`DocsConsistencyTest.REQUIRED` ~8291), README.md, docs/workflow.md
 
 ### Acceptance criteria
 - Tests named `test_parallel_runner_*` (next to the existing run_parallel tests, which use a
@@ -284,9 +373,12 @@ tests/run_parallel.py, tests/test_workflow.py (its run_parallel tests, ~8153), R
   - a failing test: exit 1, its ID in the output; a count mismatch still fails;
   - an import error in a module still fails at discovery.
 - Existing run_parallel tests pass (any updated summary assertion named in the result).
+- No document says "round-robin into `AI_TEST_WORKERS` shards" any more; `DocsConsistencyTest`
+  passes with the new phrase (the changed REQUIRED entry named in the result).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k parallel` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
@@ -313,6 +405,16 @@ Fixture repositories stop paying for disk syncs and disk-backed temp files on ru
   'ai-tests-', dir='/dev/shm')`, pass it as `TMPDIR` to every batch, and remove it after the
   run (also on failure/KeyboardInterrupt); print `Temp dir: <path> (tmpfs)` once. Otherwise
   nothing changes. `AI_TEST_TMPFS=0` disables it.
+- Execution probe (fixtures exec mock agents and installed toolkit scripts from their temp
+  dirs, so a writable `noexec` mount would break them): after `mkdtemp`, write a two-line
+  `#!/bin/sh` script into it, `os.chmod(path, 0o700)` (Python, not the `chmod` command), run it
+  directly with `subprocess.run([path], timeout=…)` and require exit 0 and its expected stdout;
+  `ST_NOEXEC` in `os.statvfs(...).f_flag` → fail without trying. On any failure (OSError,
+  PermissionError, non-zero, timeout) remove the directory and fall back to the default temp
+  dir, printing `Temp dir: default (/dev/shm not executable)`. Structure it as
+  `choose_temp_dir(candidate, probe=exec_probe)` so the fallback is unit-testable; the candidate
+  defaults to `/dev/shm` (a test-only override `AI_TEST_TMPFS_DIR` is allowed if it keeps the
+  tests deterministic; document it as test-only).
 - Measure: gate run time and test-time sum vs T004's baseline if T004 is DONE (else the plain
   `Ran … in …` before and after), recorded in the result with the machine's CPU count. Locally
   `/tmp` may already be tmpfs, so a small local gain is expected; say so.
@@ -330,6 +432,12 @@ tests/test_workflow.py, tests/run_parallel.py, README.md
     with `/dev/shm` available (skip with a reason otherwise) the path is under `/dev/shm/ai-
     tests-` and the directory is gone after the run; with `AI_TEST_TMPFS=0` or an explicit
     `TMPDIR` the path is the given/default one;
+  - the same generated suite also writes an executable `#!/bin/sh` script into
+    `tempfile.gettempdir()` (`os.chmod` 0o700) and runs it directly: it succeeds in the
+    selected directory (integration check that the chosen dir allows execution);
+  - `choose_temp_dir` with a probe that fails (fake probe returning False, and one raising
+    `PermissionError`) and with a statvfs reporting `ST_NOEXEC`: returns the default temp dir
+    and the created candidate directory no longer exists;
   - a source scan finds no `core.fsync` in `scripts/` or `templates/`.
 - All existing tests pass unchanged; the result records the before/after timings.
 
@@ -366,8 +474,11 @@ runner, by removing repeated work in the slowest tests, never by testing less.
   3. redundant helper processes in hot script paths (the same `ai_helper` query several times
      in a row with nothing in between): behaviour-preserving only, every existing test
      unchanged.
-- Hard constraints: same test count (the run_parallel count check), no assertion removed or
-  weakened, no test skipped, no `__pycache__`/bytecode written under any `.ai/bin` (part of the
+- Hard constraints: every existing test ID still exists and keeps its assertions (compare the
+  discovered ID list before and after: no ID removed or renamed); new tests (e.g.
+  `test_fixture_cache_*`) may raise the count, documented in the result; collected and executed
+  counts stay equal (the run_parallel count check); no assertion removed or weakened, no test
+  skipped, no `__pycache__`/bytecode written under any `.ai/bin` (part of the
   gate digest: `dashboard.py` sets `sys.dont_write_bytecode` for this reason), no
   change to `.ai/validate`.
 - Record in the result: before/after `Ran … in …`, test-time sum, slowest 15, CPU count, and
@@ -383,7 +494,8 @@ tests/test_workflow.py, possibly scripts/ai-pipeline, scripts/ai-run, scripts/li
   shows the measurements, what was tried and why the rest is out of reach without weakening
   tests (then the task is still DONE if the measured top hot spots were addressed; say so
   plainly).
-- `Collected` test count unchanged; every existing test passes; no `.ai/bin/**/__pycache__`
+- Every test ID discovered before the task is still discovered (the result lists the before and
+  after counts and any added IDs); collected equals executed; every existing test passes; no `.ai/bin/**/__pycache__`
   appears in any fixture (add `test_fixture_cache_*` tests for a fixture cache if one is added:
   a cached fixture is independent per test — a test that writes to its project does not
   affect the next one).
@@ -521,8 +633,17 @@ notification) with one command, and never misses an event between two waits.
 - `scripts/lib/dashboard.py` `main` (~680–699): `--wait` (exclusive with `--once`; implies JSON
   output), `--since CURSOR`, `--timeout SECONDS` (default 3600, > 0), `--interval SECONDS`
   (default 2, ≥ 0.1); `--since`/`--timeout`/`--interval` without `--wait` → usage error.
-- `fingerprint(run)` → `[status, stage, observation state or None, last event ts, sha256 of the
-  last event message truncated to 16 hex]`; keys by `run['checkout']`. Snapshots use
+- Notification identity, independent of display formatting (`events_of` sanitises and cuts
+  messages to 300 characters, so two notifications sharing a prefix and timestamp, or two
+  identical lines, look the same): `events_of` also returns a `notifications_mark`: 16 hex of
+  sha256 over the log's `st_ino`, `st_size`, `st_mtime_ns` (from the same `fstat` as the
+  bounded read) and the RAW bytes of the last complete line of the bounded tail (not
+  `text_field`). The log is append-only, so every new line changes `st_size`; a rewrite changes
+  the inode or size. `inspect` stores it in the run dict under `notifications_mark` (`None`
+  without a log); every printer (`--json`, `--once`, TUI) drops the key, so existing goldens
+  are unchanged; only `--wait` uses it.
+- `fingerprint(run)` → `[status, stage, observation state or None, notifications_mark]`; keys
+  by `run['checkout']`. Snapshots use
   `snapshot(all_runs=True)` (the 24 h hiding must not look like a change).
 - Cursor: `base64.urlsafe_b64encode(json.dumps({checkout: fingerprint}, sort_keys=True))`
   without padding; decoding errors, non-dict or wrong shapes → `parser.error` (exit 2).
@@ -549,6 +670,11 @@ scripts/lib/dashboard.py, tests/test_dashboard.py, README.md, docs/workflow.md
     stage, `timed_out` false, `cursor` present;
   - a new notification line alone → change; a tasks.md edit alone (mtime only) → no change,
     `--timeout 1` → exit 1, `timed_out` true, `runs` [];
+  - with status and stage unchanged: a second notification whose message shares the first
+    300 displayed characters and the same `ts` → change; the same line appended again
+    (identical bytes, same second) → change; plus a unit case that `notifications_mark` differs
+    in both situations while `events` are equal, and that `--json` output has no
+    `notifications_mark` key;
   - `--since <cursor from a previous call>` after a change made between the calls returns
     at once (exit 0, that run); with an unchanged state it waits until the timeout;
   - a new checkout appearing (registered) → reported; a removed one → not reported;
@@ -566,7 +692,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009
+Dependencies: T001, T002, T011, T003, T004, T005, T006, T007, T008, T009
 Model: haiku
 
 ### Goal
@@ -575,7 +701,7 @@ does; the human knows which CI, vault and gate steps remain.
 
 ### Implementation notes
 - Check each sentence the tasks added (README, `docs/workflow.md`) against the code once:
-  `ai-task reorder` and the host reorder (T001/T002), test timeouts and `CI` scale (T003), the
+  `ai-task reorder`, the host reorder and the revision-recovery repair (T001/T002/T011), test timeouts and `CI` scale (T003), the
   timing report and batches (T004), tmpfs temp dir and `AI_TEST_TMPFS` (T005),
   `AI_DASHBOARD_IGNORE` (T007), `pr`/`reviews` (T008), `--wait` (T009). Fix contradictions; no
   new behaviour.
@@ -595,7 +721,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   `AI_DASHBOARD_IGNORE`, `--wait` and `reviews`; `docs/workflow.md` mentions the host reorder
   after planning and plan revision.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names `test_queue_reorder_*`, `test_queue_repair_*`,
+- The handoff names `test_queue_reorder_*`, `test_queue_repair_*`, `test_queue_recovery_*`,
   `test_test_harness_timeouts_*`, `test_parallel_runner_*`, `test_fixture_io_*`,
   `test_dashboard_ignore_*`, `test_dashboard_pr_review_*` and `test_dashboard_wait_*` (and
   `test_fixture_cache_*` if T006 added it) under "Covered by automated tests", and every group

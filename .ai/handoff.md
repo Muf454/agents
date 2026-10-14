@@ -7,6 +7,9 @@ Nothing yet. Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #
   block text never changed; cycles, unknown IDs and prose in `Dependencies:` rejected), run by
   the host after `ai-run --plan` and `ai-run --revise-plan`; an unrepairable queue stops with
   `Plan revision stage: task queue is invalid: …`, which recovery escalates at once.
+- T011 FL-24: an interrupted revision's uncommitted out-of-order queue is repaired before the
+  pipeline's and ai-run's queue checks (guarded `revision-queue-repair`), so recovery resumes
+  without a second revision session.
 - T003–T006 FL-23: pipeline-running test commands (`ai-recover` included) get the pipeline
   timeout; every test bound scaled (`AI_TEST_TIMEOUT_SCALE`, default 2 under `CI=true`);
   run_parallel timing report and balanced batches; no git fsync in fixtures and test temp dirs
@@ -35,12 +38,14 @@ None yet for this batch. T004–T006 record the suite timings (baseline and afte
 - The fixture marker is `AI_DASHBOARD_IGNORE=1` (environment), not a temp-path rule.
 
 ## Flow chart
-Flow chart: T002 changes the flow and updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
+Flow unchanged so far (no task of this batch is DONE yet).
+Pending: T002 changes the flow and updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
 in the same task (Plan box and plan-revision path: "host reorders the queue (dependencies
 first); cycle / unknown ID / prose → ⛔"; recovery hard rules: "queue invalid after a
-revision"; `updated:` bumped; hub Log line). If the vault edit is denied, the task lists it
-here as PENDING. T003–T009: flow unchanged (unless a task notes a dashboard description in the
-chart).
+revision"; `updated:` bumped; hub Log line), and replaces the first line above with
+`Flow chart updated` (T011 adds the revision-recovery repair to the same boxes). If the vault
+edit is denied, the task lists it here as PENDING. T003–T009: flow unchanged (unless a task
+notes a dashboard description in the chart).
 
 ## Manual testing for the human
 
@@ -60,7 +65,7 @@ chart).
 
 ### Covered by automated tests
 Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_queue_repair_*`
-(T002), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
+(T002), `test_queue_recovery_*` (T011), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
 `test_fixture_io_*` (T005), `test_fixture_cache_*` (T006, if added),
 `test_dashboard_ignore_*` (T007), `test_dashboard_pr_review_*` (T008),
 `test_dashboard_wait_*` (T009).
@@ -80,5 +85,5 @@ Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_qu
   them).
 
 ## Next action
-Implement T001–T010 in queue order. Human afterwards: the checks under "Needs you", the merge
+Implement T001–T011 in queue order (T011 sits after T002; T010 runs last). Human afterwards: the checks under "Needs you", the merge
 order and the PR review.
