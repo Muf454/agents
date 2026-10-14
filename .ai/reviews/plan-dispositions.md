@@ -76,3 +76,10 @@ Plan review HEAD: c497b45fc76289b60061b7f233b4013016de40ca
 | P15 | accepted | Verified: `ai_lock` (scripts/lib/common.sh:243–246) rejects with `ai_die 'Another runner/reviewer owns this checkout.'` today, and T007 does not depend on T003 (tasks.md T007 `Dependencies: T001, T006`), so a T007 test asserting T003's hint or "no `last-error`" would fail while T003 is TODO or BLOCKED. Fix in T007 (still TODO): the lock case asserts only exit 1, the stable prefix `Another runner/reviewer owns this checkout` and that no session ran; hint and `last-error` guarantees stay T003's `test_lock_owner_*`. | T007 |
 
 Convergence: no design task added; no area repeats with BLOCKER/MAJOR findings (round 1: T010 timing, T011 missing; round 2: T010 timing again, closed by `LONG_RUN_TIMEOUT` and not re-raised in round 3; round 3: T005's test conflict and T009's dependencies are first findings in their areas). The only area touched three rounds running is the `plan-keeps-done` comparison (P1 MAJOR, then P9 and P13 MINOR), so instead of a third per-symptom exception T011's rule is now one whole-block definition (raw text, fenced lines included, trailing blanks stripped) that subsumes P9 and P13; T011 is itself still TODO and remains the single task for that area.
+
+## Plan review round 1 (report b10d3effb81f5e4901823a93a014d058f0e38cc8bba35e36c8276b4e1fe11ddb)
+
+Plan review HEAD: 12d3545e994cf14afeb7eeb8c95f09f87eaa1f20
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
