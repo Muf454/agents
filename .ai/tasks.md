@@ -525,7 +525,7 @@ locally: before (T004) 381.8 s wall, test time 2841.7 s; after 393.7 s wall, tes
 
 
 ## T006 — Make the slowest tests cheaper (FL-23, part 4)
-Status: TODO
+Status: BLOCKED
 Dependencies: T004, T005
 Model: sonnet
 
@@ -581,6 +581,22 @@ Targeted: `python3 -m unittest discover -s tests -k fixture_cache` (only if a ca
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+BLOCKED, no source change made. The task requires profiling the slowest tests before changing
+anything, and the session's permissions deny the commands needed for that: `python3 -I
+/tmp/t6time.py` (an ad-hoc timing script) and `python3 -m cProfile -s tottime -m unittest
+discover -s tests -k <test>` were both refused ("Permission to use Bash has been denied ...
+don't ask mode"). Only `python3 -m unittest discover -s tests -k ...` is allowed.
+What was measured with allowed commands (16 CPUs):
+- `-k setup_dry_run_preservation` (three `setup-project` runs): 0.221 s. A single fixture setup
+  is therefore well under 0.1 s, so candidate 1 (fixture cache) cannot account for the
+  25-29 s tests; it is not supported by the measurement and was not built.
+- `-k extra_fix_round_clean_review_after_it_opens_a_ready_pr` (with the above): 25.6 s. The
+  test is `ready()` + `add_origin()` + one `ai-pipeline` run with 3 fix rounds, so the time is
+  inside the pipeline (gate runs, triage, mock CLI processes), not in test setup.
+Needed from the human: either allow a profiling command (e.g. `python3 -m cProfile`, or a
+`PATH` shim for `python3`/`git`/`bash`) for the runner, or run the profile and name the
+dominant cost; then T006 can target candidates 2/3 (pipeline stages or repeated `ai_helper`
+queries). Baseline numbers remain T004's (Ran 648 tests in 381.8 s, Test time 2841.7 s).
 
 
 ## T007 — Dashboard ignores test fixture runners (DB-05)
