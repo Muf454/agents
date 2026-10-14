@@ -16,8 +16,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
 BOUND = 5 * TIMEOUT_SCALE
+COMMAND_TIMEOUT = 30 * TIMEOUT_SCALE
+WORKER_TIMEOUT = 120 * TIMEOUT_SCALE
 GIT = ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
        '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main']
 
@@ -56,7 +59,7 @@ class ObservationWriterTest(unittest.TestCase):
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(HELPER), *args], cwd=cwd or self.checkout,
                                 env=env or self.env, capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, timeout=timeout or 30 * TIMEOUT_SCALE)
+                                stdin=subprocess.DEVNULL, timeout=timeout or COMMAND_TIMEOUT)
         result.elapsed = time.monotonic() - started
         return result
 
@@ -130,7 +133,7 @@ class ObservationWriterTest(unittest.TestCase):
     def test_observation_writer_pid_and_branch(self):
         command = f'{sys.executable} {HELPER} observe step build; echo $$'
         result = subprocess.run(['bash', '-c', command], cwd=self.checkout, env=self.env,
-                                capture_output=True, text=True, timeout=30 * TIMEOUT_SCALE)
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record()
         self.assertEqual(record['pid'], int(result.stdout.strip()))
@@ -415,7 +418,7 @@ class ObservationWriterTest(unittest.TestCase):
         workers = [subprocess.Popen([sys.executable, '-c', script, str(HELPER), str(self.checkout), name],
                                     stderr=subprocess.PIPE, text=True) for name in ('a', 'b')]
         for worker in workers:
-            _, stderr = worker.communicate(timeout=120 * TIMEOUT_SCALE)
+            _, stderr = worker.communicate(timeout=WORKER_TIMEOUT)
             self.assertEqual((worker.returncode, stderr), (0, ''))
         messages = [entry['message'] for entry in self.log_lines()]
         self.assertEqual(sorted(messages), sorted(f'{name} {n}' for name in 'ab' for n in range(100)))

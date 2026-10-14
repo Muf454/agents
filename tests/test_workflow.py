@@ -14,13 +14,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
 # Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
-# slower than a workstation). AI_TEST_TIMEOUT_SCALE stretches both on slow machines.
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+# slower than a workstation). AI_TEST_TIMEOUT_SCALE (or CI=true) stretches every bound; see timeouts.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
+SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
+MEDIUM_TIMEOUT = 60 * TIMEOUT_SCALE
 PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
 # 17 mock sessions in one ai-run (about 5 s each in parallel shards); CI runs on a 2-core runner
 # without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
 LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE
+
+
+def command_timeout(name):
+    # ai-recover execs the resumed pipeline in the same process, so it needs the pipeline bound too
+    # (PR #27 run 38356827946 timed out at 25 s in test_supervised_plan_resume_*_watchdog).
+    return PIPELINE_TIMEOUT if name in ('ai-pipeline', 'ai-recover') else COMMAND_TIMEOUT
 
 
 def task(task_id, status='TODO', dependencies='none'):
@@ -632,8 +641,15 @@ class ToolkitTest(unittest.TestCase):
                         AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
     def run_cmd(self, command, expected=0, env=None, timeout=COMMAND_TIMEOUT):
-        result = subprocess.run(command, cwd=self.project, env=env or self.env,
-                                capture_output=True, text=True, timeout=timeout)
+        try:
+            result = subprocess.run(command, cwd=self.project, env=env or self.env,
+                                    capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            def tail(data):
+                data = data.decode(errors='replace') if isinstance(data, bytes) else data or ''
+                return data[-3000:]
+            self.fail(f'command timed out after {timeout} s: {command}\n'
+                      f'--- stdout (tail) ---\n{tail(error.stdout)}\n--- stderr (tail) ---\n{tail(error.stderr)}')
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -757,9 +773,9 @@ class ToolkitTest(unittest.TestCase):
         observation.unlink()
         os.mkfifo(observation)
         command = [str(self.project / '.ai/bin/ai-watchdog')]
-        self.run_cmd(command, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1200)), timeout=10)
+        self.run_cmd(command, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1200)), timeout=SHORT_TIMEOUT)
         self.assertIn('stall_seen_ns', self.watchdog_state())
-        self.run_cmd(command, expected=1, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1800)), timeout=10)
+        self.run_cmd(command, expected=1, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1800)), timeout=SHORT_TIMEOUT)
         self.assertIn('killed runner?', self.notifications())
 
     def test_watchdog_confirm_legacy_active_stall(self):
@@ -950,8 +966,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         host = self.base / 'host-bin'
         if not host.exists():
             shutil.copytree(self.project / '.ai/bin', host)
+        # --recover runs the resumed pipeline through the mock systemd-run
         return self.run_cmd([str(host / 'ai-watchdog'), str(self.project), *args], expected=expected,
-                            env=dict(self.env, **env))
+                            env=dict(self.env, **env),
+                            timeout=PIPELINE_TIMEOUT if '--recover' in args else COMMAND_TIMEOUT)
 
     def approve_run(self):
         digest = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
@@ -1282,7 +1300,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             self.watchdog('--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude', expected=1)
-            first.communicate(timeout=15)
+            first.communicate(timeout=SHORT_TIMEOUT * 1.5)
             self.assertEqual(first.returncode, 1)
         finally:
             if first.poll() is None:
@@ -1302,7 +1320,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def tool(self, name, *args, expected=0, timeout=None, **env):
         if timeout is None:
-            timeout = PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT
+            timeout = command_timeout(name)
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
                             env=dict(self.env, **env), timeout=timeout)
 
@@ -3687,7 +3705,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             fake.chmod(0o755)
             for cwd, killed in ((self.base, False), (self.project, True)):
                 result = subprocess.run([str(fake), str(self.project), code], cwd=cwd,
-                                        capture_output=True, text=True, timeout=25)
+                                        capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
                 self.assertEqual(result.returncode == -9, killed, (name, cwd, result.stdout + result.stderr))
                 self.assertEqual('survived' in result.stdout, not killed)
 
@@ -4190,7 +4208,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 break
             time.sleep(0.05)
         recover.terminate()
-        out = recover.communicate(timeout=60)[0].decode()
+        out = recover.communicate(timeout=MEDIUM_TIMEOUT)[0].decode()
         self.assertEqual(self.notifications().count('⛔') - before, 1, out + self.notifications())
         self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
         self.assertFalse(marker.exists())
@@ -5115,7 +5133,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         self.fail('the session never started')
                     runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
                     (local / 'mock-release').touch()
-                    runner.communicate(timeout=20)
+                    runner.communicate(timeout=SHORT_TIMEOUT * 2)
                 finally:
                     if runner.poll() is None:
                         os.killpg(runner.pid, signal.SIGKILL)
@@ -5666,8 +5684,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.fail(f'lock owner {name} did not start')
 
     def rejected(self, name, *args):
-        """Run a tool that must be refused by the lock: exit 1 within 10 s."""
-        return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=1, timeout=10)
+        """Run a tool that must be refused by the lock: exit 1 within SHORT_TIMEOUT (10 s unscaled)."""
+        return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=1, timeout=SHORT_TIMEOUT)
 
     def test_lock_owner_recovery_hint_changes_nothing(self):
         self.ready()
@@ -5754,12 +5772,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         target.write_text(f'{owner.pid}\n')
         hint = ['bash', '-c', 'source "$1"; ai_lock_owner_hint', '_',
                 str(self.project / '.ai/bin/lib/common.sh')]
-        self.assertIn(f'(PID {owner.pid})', self.run_cmd(hint, timeout=10).stdout)
+        self.assertIn(f'(PID {owner.pid})', self.run_cmd(hint, timeout=SHORT_TIMEOUT).stdout)
         for label, plant in (('symlink', lambda: marker.symlink_to(target)),
                              ('fifo', lambda: os.mkfifo(marker))):
             marker.unlink()
             plant()
-            self.assertEqual(self.run_cmd(hint, timeout=10).stdout, '.', label)
+            self.assertEqual(self.run_cmd(hint, timeout=SHORT_TIMEOUT).stdout, '.', label)
 
     def test_lock_owner_quiet_recovery_rejection_unchanged(self):
         self.ready()
@@ -8423,7 +8441,7 @@ class ParallelRunnerTest(unittest.TestCase):
         if workers is not None:
             env['AI_TEST_WORKERS'] = workers
         result = subprocess.run([sys.executable, str(self.RUNNER), *args], cwd=cwd or ROOT, env=env,
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=PIPELINE_TIMEOUT)
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -8510,6 +8528,51 @@ class ParallelRunnerTest(unittest.TestCase):
         expected = unittest.TestLoader().discover(str(ROOT / 'tests')).countTestCases()
         result = self.runner('--collect-only', cwd=self.elsewhere)
         self.assertEqual(result.stdout.strip(), f'Collected {expected} tests')
+
+
+class TestHarnessTimeoutsTest(unittest.TestCase):
+    def scale(self, **env):
+        base = {k: v for k, v in os.environ.items() if k not in ('CI', 'AI_TEST_TIMEOUT_SCALE')}
+        return subprocess.run([sys.executable, '-I', '-c',
+                               'import sys; sys.path.insert(0, sys.argv[1]); import timeouts; print(timeouts.TIMEOUT_SCALE)',
+                               str(ROOT / 'tests')],
+                              env=dict(base, **env), capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+
+    def test_test_harness_timeouts_pipeline_commands_get_the_pipeline_bound(self):
+        for name in ('ai-pipeline', 'ai-recover'):
+            self.assertEqual(command_timeout(name), PIPELINE_TIMEOUT, name)
+        self.assertEqual(command_timeout('ai-check'), COMMAND_TIMEOUT)
+        self.assertGreater(PIPELINE_TIMEOUT, COMMAND_TIMEOUT)
+
+    def test_test_harness_timeouts_scale_rule(self):
+        for env, expected in (({}, 1.0), ({'CI': 'true'}, 2.0), ({'CI': 'false'}, 1.0),
+                              ({'AI_TEST_TIMEOUT_SCALE': '3'}, 3.0),
+                              ({'CI': 'true', 'AI_TEST_TIMEOUT_SCALE': '3'}, 3.0)):
+            with self.subTest(env=env):
+                result = self.scale(**env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(float(result.stdout), expected)
+        for bad in ('0', 'x', '-1'):
+            with self.subTest(bad=bad):
+                result = self.scale(AI_TEST_TIMEOUT_SCALE=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('AI_TEST_TIMEOUT_SCALE', result.stderr)
+
+    def test_test_harness_timeouts_no_literal_timeout_numbers(self):
+        for name in ('test_workflow.py', 'test_dashboard.py', 'test_observation.py'):
+            source = (ROOT / 'tests' / name).read_text()
+            self.assertNotRegex(source, r'timeout\s*=\s*\d', name)
+
+    def test_test_harness_timeouts_timed_out_command_shows_its_output(self):
+        case = ToolkitTest('run_cmd')
+        case.project = ROOT
+        case.env = dict(os.environ)
+        bound = 1  # deliberately tiny and unscaled: the command must time out
+        with self.assertRaises(AssertionError) as caught:
+            case.run_cmd(['bash', '-c', 'echo started; sleep 30'], timeout=bound)
+        message = str(caught.exception)
+        self.assertIn('started', message)
+        self.assertIn(f'timed out after {bound} s', message)
 
 
 class DocsConsistencyTest(unittest.TestCase):

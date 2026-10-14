@@ -291,7 +291,7 @@ docs/workflow.md (plan revision recovery). Vault: agents-flow.md recovery box + 
 
 
 ## T003 — Test timeouts: pipeline commands get the pipeline timeout, every bound is scaled (FL-23, part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -344,6 +344,13 @@ Targeted: `python3 -m unittest discover -s tests -k supervised_plan_resume` (mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. New `tests/timeouts.py` (scale: `AI_TEST_TIMEOUT_SCALE` > 0 else error, `CI=true` → 2, else 1)
+imported by the three test modules; `command_timeout(name)` gives `ai-pipeline` and `ai-recover`
+`PIPELINE_TIMEOUT`, `host_watchdog('--recover')` too; every literal `timeout=<n>` replaced by
+scaled constants (`SHORT_/MEDIUM_/COMMAND_/PIPELINE_/WORKER_TIMEOUT`); `run_cmd` fails with the
+command, timeout and last 3000 chars of stdout/stderr. 4 `test_test_harness_timeouts_*` tests;
+`supervised_plan_resume` (28) OK; `.ai/bin/ai-check`: 645 tests OK. README test section updated
+(`docs/workflow.md` does not describe test timeouts).
 
 
 ## T004 — Parallel runner: per-test timings and balanced batches (FL-23, part 2)

@@ -21,8 +21,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / 'scripts/lib'
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
 BOUND = 5 * TIMEOUT_SCALE
+COMMAND_TIMEOUT = 30 * TIMEOUT_SCALE
 CLOCK_TICKS = os.sysconf('SC_CLK_TCK')
 BTIME = 1_700_000_000
 
@@ -260,7 +262,7 @@ class DashboardTest(unittest.TestCase):
                 '    fds = view["checkout_fds"](checkout)\n'
                 '    print(checkout, view["liveness"](fds[2], runners))\n')
         result = subprocess.run([sys.executable, '-c', code, str(lib / 'dashboard.py')],
-                                capture_output=True, text=True, timeout=30 * TIMEOUT_SCALE)
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f'{checkout} alive\n')
         self.assertEqual(listing(), before)

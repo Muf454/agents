@@ -826,6 +826,13 @@ it collected. Shards always run without colour (whatever `FORCE_COLOR`, `NO_COLO
 `PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
 approves.
 
+Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
+when set (a number greater than 0, otherwise the tests stop with an error), else 2 when
+`CI=true` (GitHub's runners are several times slower than a workstation), else 1.
+`ai-pipeline` and `ai-recover` (which execs the resumed pipeline) run under the longer
+pipeline timeout. A command that times out fails with its command line and the tail of its
+output.
+
 ## Deliberately manual for now
 
 Requirements/critical decisions, approval of scope and permissions, acceptance,
