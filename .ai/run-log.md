@@ -270,3 +270,4 @@
 | 2026-10-13T06:27:41Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/27 | PASS | e39161b | Human acceptance and merge remain |
 | 2026-10-14T21:14:14Z | runner | plan-revision | plan revised (round 1): accepted 7, rejected 0, needs-human 0 | n/a | 5306926 | Plan review runs again |
 | 2026-10-14T21:40:00Z | claude | T001 | DONE: `tasks reorder` / `ai-task reorder` (stable dependency order, rejects cycles/unknown/prose) | PASS (ai-check, 624 tests) | see git log | |
+| 2026-10-14T21:32:02Z | runner | T001 | completed | PASS | 8c848ea | Claude checkpointed; continuing queue |
