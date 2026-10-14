@@ -413,6 +413,15 @@ plan_decision_check
 # AI_SUPERVISE_PLAN_ROUNDS per run) and every revision a fresh review on a clean checkout.
 # An invalid queue stops here, review on or off: nothing downstream can use it.
 queue_stage='plan review'; [[ "$plan_review" == yes ]] || queue_stage=implementation
+# An interrupted revision's uncommitted out-of-order queue is repaired first (the helper
+# decides); a committed out-of-order queue still stops below.
+if [[ "$plan_review" == yes ]]; then
+  repair_out=$(ai_helper revision-queue-repair 2>&1) || {
+    printf 'Plan revision stage: task queue is invalid: %s\n' "${repair_out#Error: }" > .ai/local/last-error
+    stop 'plan revision'
+  }
+  [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
+fi
 queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || {
   printf 'Task queue is invalid: %s\n' "${queue_error#Error: }" > .ai/local/last-error
   stop "$queue_stage"

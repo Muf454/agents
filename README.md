@@ -280,7 +280,9 @@ tmux new -s my-app-ai
    when a revision leaves its scope. The host reorders the queue after each revision, so a
    new task appended after the tasks that depend on it still runs first; a cycle, unknown ID
    or prose in `Dependencies:` stops at once (`Plan revision stage: task queue is invalid`,
-   no recovery attempt). From review round `AI_SUPERVISE_ESCALATE_ROUND` the
+   no recovery attempt). A revision interrupted after its session wrote such a queue (crash,
+   restart) resumes the same way: the host repairs the uncommitted queue before any queue
+   check and records the revision without a second session. From review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass
    `--skip-plan-review` (on every rerun) to proceed anyway. A question a revision recorded

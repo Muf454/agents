@@ -135,6 +135,13 @@ else
   # workflow records).
   [[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
     ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+  # An interrupted revision's uncommitted queue is repaired as its session's would have been
+  # (the helper decides; a committed or non-revision queue is left to the checks).
+  if [[ "$revise_plan" == yes ]]; then
+    repair_out=$(ai_helper revision-queue-repair 2>&1) || \
+      ai_die "Plan revision stage: task queue is invalid: ${repair_out#Error: }"
+    [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
+  fi
   ai_helper tasks check
 fi
 # Authoritative baseline stays in shell memory, not an agent-editable file.

@@ -203,7 +203,7 @@ flow chart and hub Log updated.
 
 
 ## T011 — Revision recovery repairs the interrupted revision's queue before any queue check (FL-24, part 3)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: opus
 
@@ -274,6 +274,20 @@ Targeted: `python3 -m unittest discover -s tests -k queue_check` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-15. `workflow.py revision-queue-repair` (`revision_queue_repair`; `tasks()` takes
+optional text to parse HEAD's queue) reorders only under the four conditions; any condition
+error is a no-op. Callers: `ai-run` before its `tasks check` when `--revise-plan`, `ai-pipeline`
+before its queue check when the plan review is on (`stop 'plan revision'`, last-error `Plan
+revision stage: task queue is invalid: …`). Tests (10): `test_queue_recovery_session_crash_human_rerun`,
+`_session_crash_watchdog`, `_cycle_escalates_without_a_second_session`, `_helper_repairs_an_interrupted_revision`,
+`_helper_cycle_fails_with_the_reorder_message`, `_helper_leaves_a_committed_queue`,
+`_helper_ignores_a_dirty_file_outside_the_records`, `_helper_ignores_a_done_task_at_head`,
+`_helper_ignores_an_already_revised_review`, `_revise_plan_with_a_done_task_still_stops`.
+With both callers disabled, the three crash tests fail (checked), so they exercise the fix.
+Targeted: queue_recovery 10 OK, supervised_plan_resume 28 OK, queue_check 7 OK.
+Gate: `.ai/bin/ai-check` PASS, 641 tests. Docs: README (plan revision paragraph),
+docs/workflow.md (plan revision recovery). Vault: agents-flow.md recovery box + bullet,
+`updated: 2026-10-15`; hub Log line.
 
 
 ## T003 — Test timeouts: pipeline commands get the pipeline timeout, every bound is scaled (FL-23, part 1)

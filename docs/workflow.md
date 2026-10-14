@@ -383,6 +383,15 @@ invalid queue stops with `Task queue is invalid: …` and recovery always escala
 `ai-task reorder` (`workflow.py tasks reorder`) repairs a queue whose tasks depend on later
 tasks: stable depth-first order, task text unchanged, nothing written when already ordered;
 cycles, unknown IDs and prose in `Dependencies:` are rejected.
+Plan revision recovery: the host repairs an interrupted revision's queue first.
+`workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
+is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
+when it differs from HEAD's, only plan revision records are dirty (`plan-revision-scope HEAD`),
+HEAD's queue is valid with no DONE task, and the verified current plan review has no revision
+record yet; otherwise it does nothing and the checks reject as before (a committed out-of-order
+queue still stops here). A repair failure stops with `Plan revision stage: task queue is
+invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
+`plan-dispositions-check`, so a complete section is recorded without a new session.
 Stages, each resumable by rerunning: plan review (only while no task is DONE;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the

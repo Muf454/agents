@@ -422,8 +422,8 @@ def task_blocks(text):
     return blocks
 
 
-def tasks():
-    blocks = task_blocks(Path('.ai/tasks.md').read_text())
+def tasks(text=None):
+    blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
         fail('Duplicate task IDs.')
@@ -2743,6 +2743,28 @@ def plan_revisions(arguments):
         print(record['round'], record['accepted'], record['rejected'], record['needs_human'])
 
 
+def revision_queue_repair(arguments):
+    """Reorder the uncommitted queue of an interrupted plan revision (as `tasks reorder`) before
+    any queue check, only when: .ai/tasks.md differs from HEAD's, only plan revision records are
+    dirty, HEAD's queue is valid with no DONE task, and the verified current plan review is not
+    revised yet. Otherwise do nothing: the usual checks reject the queue as before."""
+    if arguments:
+        fail('Usage: revision-queue-repair')
+    path = Path('.ai/tasks.md')
+    committed = committed_file('HEAD', str(path))
+    if not path.is_file() or path.read_text() == committed:
+        return
+    try:
+        records_scope('HEAD', PLAN_REVISION_RECORDS, 'Plan revision')
+        before = tasks(committed)
+        record, verified, _ = plan_revision_lookup()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        return
+    if not before or any(task['status'] == 'DONE' for task in before) or not verified or record:
+        return
+    tasks_reorder()
+
+
 def plan_stage_verify(start, digest):
     """stage-verify for an open plan-revision stage: 'committed' once a host revision record
     for this plan review names a commit in START..HEAD (the record carries the outcome, so
@@ -3756,6 +3778,8 @@ def main():
         plan_keeps_done(arguments)
     elif command == 'plan-revisions':
         plan_revisions(arguments)
+    elif command == 'revision-queue-repair':
+        revision_queue_repair(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':

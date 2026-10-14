@@ -4,6 +4,9 @@
 T001 DONE (2026-10-14): `workflow.py tasks reorder` and `ai-task reorder`. T002 DONE
 (2026-10-14): `ai-run --plan` and `ai-run --revise-plan` run the reorder before `tasks check`;
 an unrepairable queue stops with `Planning: / Plan revision stage: task queue is invalid`.
+T011 DONE (2026-10-15): `workflow.py revision-queue-repair`, called by `ai-run --revise-plan`
+and `ai-pipeline` before their queue checks, repairs an interrupted revision's uncommitted
+out-of-order queue so the resume records the revision without a second session.
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
@@ -26,7 +29,7 @@ Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T004–T006 record the suite timings (baseline and after).
+T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004–T006 record the suite timings (baseline and after).
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
@@ -46,8 +49,9 @@ box and the revision node ("Scripts: host reorders the queue (dependencies first
 host record"), the plan stop ("queue cycle / unknown ID / prose"), the recovery hard-rules box
 ("also queue invalid after a revision"), a "Host queue repair" bullet; `updated:` 2026-10-14;
 hub Log line.
-Pending: T011 adds the revision-recovery repair ("interrupted revision: host repairs the queue
-first") to the recovery box. T003–T009: flow unchanged (unless a task notes a dashboard
+Flow chart updated (T011, 2026-10-15): recovery box "interrupted revision: host repairs the
+queue first" and an "Interrupted revision with an out-of-order queue" bullet; `updated:`
+2026-10-15; hub Log line. T003–T009: flow unchanged (unless a task notes a dashboard
 description in the chart).
 
 ## Manual testing for the human

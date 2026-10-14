@@ -2630,9 +2630,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 file.write_text(original)
         self.helper('plan-revision-scope', start)
 
-    def revise_ready(self, findings='P1|Gap in tests'):
+    def revise_ready(self, findings='P1|Gap in tests', queue=None):
         """A MAJOR plan review recorded by hand; returns HEAD (the revision's START)."""
-        self.ready()
+        self.ready(queue)
         self.plan_round(findings, 1)
         return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
 
@@ -3585,6 +3585,95 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('placed before the first task that depends on them', prompt)
         self.assertIn('placed before the first task that depends on them',
                       (ROOT / 'templates/.ai/prompts/plan-revision.md').read_text().replace('\n  ', ' '))
+
+    # ---------------------------------------------------------------- interrupted revision queue (FL-24)
+    def queue_recovery_crash(self, mode):
+        """A revision session wrote an out-of-order queue, then the machine died before the host's checks."""
+        self.ready()
+        self.crash_supervised(MOCK_REVISION_CRASH='after', MOCK_CLAUDE=mode)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+
+    def assert_queue_recovered(self, result):
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assert_resumed_once()
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        self.assertEqual(self.queue_ids(self.run_cmd(['git', 'show', f'{revision}:.ai/tasks.md']).stdout), ['T002', 'T001'])
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_queue_recovery_session_crash_human_rerun(self):
+        self.queue_recovery_crash('revise-accept-prereq')
+        self.assert_queue_recovered(self.resume('human', MOCK_CLAUDE='revise-accept-prereq'))
+
+    def test_queue_recovery_session_crash_watchdog(self):
+        self.queue_recovery_crash('revise-accept-prereq')
+        self.assert_queue_recovered(self.resume('watchdog', MOCK_CLAUDE='revise-accept-prereq'))
+
+    def test_queue_recovery_cycle_escalates_without_a_second_session(self):
+        self.queue_recovery_crash('revise-accept-cycle')
+        self.resume('watchdog', expected=1, MOCK_CLAUDE='revise-accept-cycle')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage: task queue is invalid', error)
+        self.assertIn('dependency cycle', error)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertFalse((self.base / 'recover-calls').exists())
+
+    def out_of_order(self, *extra):
+        """The working-tree queue an interrupted revision left: T001 now depends on the appended T002."""
+        queue = self.project / '.ai/tasks.md'
+        text = queue.read_text().replace('Dependencies: none', 'Dependencies: T002', 1)
+        queue.write_text(text.rstrip('\n') + '\n\n' + ''.join(extra or (task('T002'),)))
+        return queue.read_text()
+
+    def assert_repair_noop(self, queue):
+        result = self.helper('revision-queue-repair')
+        self.assertEqual(result.stdout, '')
+        self.assertEqual((self.project / '.ai/tasks.md').read_text(), queue)
+
+    def test_queue_recovery_helper_repairs_an_interrupted_revision(self):
+        self.revise_ready()
+        self.out_of_order()
+        result = self.helper('revision-queue-repair')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        self.helper('tasks', 'check')
+        self.assert_repair_noop((self.project / '.ai/tasks.md').read_text())  # nothing left to move
+
+    def test_queue_recovery_helper_cycle_fails_with_the_reorder_message(self):
+        self.revise_ready()
+        queue = self.out_of_order(task('T002', dependencies='T001'))
+        self.assertIn('dependency cycle', self.helper('revision-queue-repair', expected=1).stderr)
+        self.assertEqual((self.project / '.ai/tasks.md').read_text(), queue)
+
+    def test_queue_recovery_helper_leaves_a_committed_queue(self):
+        self.revise_ready()
+        queue = self.out_of_order()
+        self.commit('out-of-order queue')
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_a_dirty_file_outside_the_records(self):
+        self.revise_ready()
+        queue = self.out_of_order()
+        (self.project / 'src.txt').write_text('not a plan record\n')
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_a_done_task_at_head(self):
+        self.revise_ready(queue=task('T001', 'DONE') + task('T002'))
+        queue = task('T001', 'DONE') + task('T002', dependencies='T003') + task('T003')
+        (self.project / '.ai/tasks.md').write_text(queue)
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_an_already_revised_review(self):
+        start = self.revise_ready()
+        self.revise('--since', start)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assert_repair_noop(self.out_of_order(task('T003')))
+
+    def test_queue_recovery_revise_plan_with_a_done_task_still_stops(self):
+        start = self.revise_ready(queue=task('T001', 'DONE') + task('T002'))
+        self.assertIn('a task is already DONE', self.revise('--since', start, expected=1).stderr)
 
     # ---------------------------------------------------------------- supervised plan resume (T007)
     def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):

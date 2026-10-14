@@ -273,3 +273,4 @@
 | 2026-10-14T21:32:02Z | runner | T001 | completed | PASS | 8c848ea | Claude checkpointed; continuing queue |
 | 2026-10-14T22:10:00Z | claude | T002 | DONE: host `tasks reorder` after `ai-run --plan` and `--revise-plan`; unrepairable queue → `… task queue is invalid` (escalated) | PASS (ai-check, 631 tests) | see git log | vault flow chart and hub Log updated |
 | 2026-10-14T21:56:29Z | runner | T002 | completed | PASS | 83da3a9 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:00Z | claude | T011 | DONE: `revision-queue-repair` before ai-run's and ai-pipeline's queue checks; interrupted revision resumes without a second session | PASS (ai-check, 641 tests) | see git log | vault flow chart and hub Log updated |
