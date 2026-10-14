@@ -834,6 +834,14 @@ seconds, then `Test time: <sum> s across <workers> workers; worker busy: <min>â€
 (the busy range shows how evenly the batches spread). Older Pythons get the busy range
 only. Duration lines that do not parse are ignored.
 
+Fixture I/O is kept cheap: test fixture repositories run git with `core.fsync=none` and
+`gc.auto=0` (test harness only; the toolkit scripts never set them), and when the caller sets
+no `TMPDIR` and `/dev/shm` is a writable tmpfs with 1 GiB free, `run_parallel.py` gives every
+batch a temp directory there (`Temp dir: /dev/shm/ai-tests-â€¦ (tmpfs)`, removed after the run).
+The directory is probed by running a script from it; a `noexec` mount falls back to the
+default temp dir. `AI_TEST_TMPFS=0` turns it off (`AI_TEST_TMPFS_DIR` replaces `/dev/shm`, for
+the tests only).
+
 Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
 when set (a number greater than 0, otherwise the tests stop with an error), else 2 when
 `CI=true` (GitHub's runners are several times slower than a workstation), else 1.

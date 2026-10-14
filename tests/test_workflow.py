@@ -1,4 +1,6 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
+import contextlib
+import io
 import json
 import os
 import re
@@ -24,6 +26,23 @@ PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
 # 17 mock sessions in one ai-run (about 5 s each in parallel batches); CI runs on a 2-core runner
 # without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
 LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE
+
+
+def git_fixture_env(base=None):
+    """Environment for fixture repositories: no user/system git config, and no fsync or
+    background gc (short-lived repos gain nothing from them; disk syncs are slow on CI).
+    An outer GIT_CONFIG_COUNT entry list is kept and extended."""
+    env = dict(os.environ if base is None else base, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    try:
+        count = max(int(env.get('GIT_CONFIG_COUNT', '0')), 0)
+    except ValueError:
+        count = 0
+    for key, value in (('core.fsync', 'none'), ('gc.auto', '0')):
+        env[f'GIT_CONFIG_KEY_{count}'] = key
+        env[f'GIT_CONFIG_VALUE_{count}'] = value
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
 
 
 def command_timeout(name):
@@ -607,7 +626,7 @@ class ToolkitTest(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.project = self.base / 'project with spaces'
         self.project.mkdir()
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        self.env = git_fixture_env()
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
                      'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                      'AI_SUPERVISE_ESCALATE_MODEL'):
@@ -8305,7 +8324,7 @@ class ReviewHistoryTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='ai-review-history-')
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        self.env = git_fixture_env()
         for command in (['init', '-q', '-b', 'main'], ['config', 'user.name', 'T'],
                         ['config', 'user.email', 't@example.invalid'], ['config', 'commit.gpgsign', 'false']):
             self.git(*command)
@@ -8625,6 +8644,133 @@ class TestHarnessTimeoutsTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn('started', message)
         self.assertIn(f'timed out after {bound} s', message)
+
+
+class FixtureIoTest(unittest.TestCase):
+    """FL-23: fixtures skip git syncs and run_parallel puts batch temp files on tmpfs."""
+
+    RUNNER = ROOT / 'tests/run_parallel.py'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ai-fixture-io-')
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+
+    def git_config(self, env, name):
+        result = subprocess.run(['git', 'config', '--get', name], cwd=self.base, env=env,
+                                capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+        return result.stdout.strip()
+
+    def test_fixture_io_git_config_disables_fsync_and_gc(self):
+        case = ToolkitTest('run_cmd')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        for name, expected in (('core.fsync', 'none'), ('gc.auto', '0')):
+            result = subprocess.run(['git', 'config', '--get', name], cwd=case.project, env=case.env,
+                                    capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+            self.assertEqual(result.stdout.strip(), expected, name)
+
+    def test_fixture_io_git_config_keeps_an_outer_config_count(self):
+        outer = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'user.signingkey', 'GIT_CONFIG_VALUE_0': 'x'}
+        env = git_fixture_env(dict(os.environ, **outer))
+        self.assertEqual(env['GIT_CONFIG_COUNT'], '3')
+        for name, expected in (('user.signingkey', 'x'), ('core.fsync', 'none'), ('gc.auto', '0')):
+            self.assertEqual(self.git_config(env, name), expected, name)
+
+    def suite(self):
+        suite = self.base / 'suite'
+        suite.mkdir(exist_ok=True)
+        (suite / 'test_tmp.py').write_text(
+            'import os, stat, subprocess, tempfile, unittest\n\n\n'
+            'class Sample(unittest.TestCase):\n'
+            '    def test_tmp(self):\n'
+            '        directory = tempfile.gettempdir()\n'
+            '        script = os.path.join(directory, "run-me.sh")\n'
+            '        with open(script, "w") as handle:\n'
+            '            handle.write("#!/bin/sh\\necho ran-here\\n")\n'
+            '        os.chmod(script, 0o700)\n'
+            '        out = subprocess.run([script], capture_output=True, text=True)\n'
+            '        with open(os.environ["TMP_REPORT"], "w") as handle:\n'
+            '            handle.write(directory + "\\n" + out.stdout.strip() + "\\n" + str(out.returncode))\n')
+        return suite
+
+    def run_suite(self, **env):
+        report = self.base / 'report.txt'
+        base = {k: v for k, v in os.environ.items()
+                if k not in ('TMPDIR', 'AI_TEST_TMPFS', 'AI_TEST_TMPFS_DIR', 'PYTHONPATH')}
+        base.update(AI_TEST_WORKERS='1', TMP_REPORT=str(report))
+        base.update(env)
+        result = subprocess.run([sys.executable, str(self.RUNNER), '--start-dir', str(self.suite())],
+                                cwd=ROOT, env=base, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=PIPELINE_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        directory, ran, code = report.read_text().split('\n')
+        self.assertEqual((ran, code), ('ran-here', '0'), result.stdout)
+        return result, directory
+
+    def shm_usable(self):
+        shm = '/dev/shm'
+        if not (os.path.isdir(shm) and os.access(shm, os.W_OK | os.X_OK)):
+            return False
+        stats = os.statvfs(shm)
+        return stats.f_bavail * stats.f_frsize >= (1 << 30) and not stats.f_flag & os.ST_NOEXEC
+
+    def test_fixture_io_batches_use_tmpfs_and_remove_it(self):
+        if not self.shm_usable():
+            self.skipTest('/dev/shm is not a writable, executable directory with 1 GiB free')
+        result, directory = self.run_suite()
+        self.assertTrue(directory.startswith('/dev/shm/ai-tests-'), directory)
+        self.assertIn(f'Temp dir: {directory} (tmpfs)', result.stdout)
+        self.assertFalse(os.path.exists(directory))
+
+    def test_fixture_io_tmpfs_can_be_disabled_or_overridden_by_tmpdir(self):
+        result, directory = self.run_suite(AI_TEST_TMPFS='0')
+        self.assertFalse(directory.startswith('/dev/shm/ai-tests-'), directory)
+        self.assertNotIn('Temp dir:', result.stdout)
+        given = self.base / 'given'
+        given.mkdir()
+        result, directory = self.run_suite(TMPDIR=str(given))
+        self.assertEqual(Path(directory).resolve(), given.resolve())
+        self.assertNotIn('Temp dir:', result.stdout)
+
+    def test_fixture_io_unusable_candidate_falls_back_and_is_removed(self):
+        import run_parallel
+        candidate = self.base / 'candidate'
+        candidate.mkdir()
+
+        class Stats:
+            f_bavail, f_frsize, f_flag = 1 << 30, 4096, 0
+
+        class NoExec(Stats):
+            f_flag = os.ST_NOEXEC
+
+        def raising(directory):
+            raise PermissionError(directory)
+
+        for label, probe, statvfs in (('probe false', lambda directory: False, lambda path: Stats()),
+                                      ('probe raises', raising, lambda path: Stats()),
+                                      ('noexec mount', lambda directory: True, lambda path: NoExec())):
+            with self.subTest(label), contextlib.redirect_stdout(io.StringIO()) as shown:
+                self.assertIsNone(run_parallel.choose_temp_dir(candidate, probe=probe, statvfs=statvfs))
+                self.assertEqual(list(candidate.iterdir()), [])
+                self.assertIn('Temp dir: default', shown.getvalue())
+        with self.subTest('usable'):
+            chosen = run_parallel.choose_temp_dir(candidate, probe=lambda directory: True, statvfs=lambda path: Stats())
+            self.assertEqual(Path(chosen).parent, candidate)
+            self.assertTrue(Path(chosen).name.startswith('ai-tests-'))
+        with self.subTest('too little space'):
+            Stats.f_bavail = 1
+            self.assertIsNone(run_parallel.choose_temp_dir(candidate, probe=lambda directory: True,
+                                                           statvfs=lambda path: Stats()))
+        self.assertTrue(run_parallel.exec_probe(self.base))
+
+    def test_fixture_io_toolkit_does_not_set_core_fsync(self):
+        for folder in ('scripts', 'templates'):
+            for path in (ROOT / folder).rglob('*'):
+                if path.is_file() and '__pycache__' not in path.parts:
+                    self.assertNotIn('core.fsync', path.read_text(errors='ignore'), str(path))
 
 
 class DocsConsistencyTest(unittest.TestCase):

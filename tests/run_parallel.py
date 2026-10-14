@@ -6,15 +6,19 @@ IDs into interleaved batches pulled by AI_TEST_WORKERS workers (default min(8, C
 and runs each batch as `python3 -m unittest <ids...>` in its own process. Exits 1 when a
 batch fails or crashes, when nothing was collected, or when the batches ran a different
 number of tests than were collected. On Python 3.12+ it also reports the slowest tests and
-how busy each worker was.
+how busy each worker was. When the caller sets no TMPDIR and /dev/shm is a writable,
+executable tmpfs with 1 GiB free, the batches get a temporary directory there (removed after
+the run); AI_TEST_TMPFS=0 turns that off.
 """
 import argparse
 import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -40,6 +44,52 @@ def worker_count():
     if value < 1:
         sys.exit(f'run_parallel: AI_TEST_WORKERS must be a positive integer, got {raw!r}')
     return value
+
+
+TMPFS_MIN_FREE = 1 << 30
+PROBE_TIMEOUT = 30
+
+
+def exec_probe(directory):
+    """True when a script written into `directory` can be executed directly (a writable
+    mount may be noexec, and fixtures run mock agents and toolkit scripts from their temp dirs)."""
+    script = Path(directory) / 'probe.sh'
+    try:
+        script.write_text('#!/bin/sh\necho probe-ok\n')
+        os.chmod(script, 0o700)
+        result = subprocess.run([str(script)], capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == 'probe-ok'
+
+
+def choose_temp_dir(candidate, probe=exec_probe, statvfs=os.statvfs):
+    """Return a fresh `ai-tests-*` directory under `candidate` (a tmpfs such as /dev/shm) for
+    the batches' TMPDIR, or None to keep the default temp dir. Needs a writable candidate with
+    1 GiB free; a candidate that cannot run scripts is removed again and reported."""
+    candidate = str(candidate)
+    if not os.path.isdir(candidate) or not os.access(candidate, os.W_OK | os.X_OK):
+        return None
+    try:
+        stats = statvfs(candidate)
+    except OSError:
+        return None
+    if stats.f_bavail * stats.f_frsize < TMPFS_MIN_FREE:
+        return None
+    created = None
+    usable = False
+    if not stats.f_flag & os.ST_NOEXEC:
+        try:
+            created = tempfile.mkdtemp(prefix='ai-tests-', dir=candidate)
+            usable = bool(probe(created))
+        except (OSError, subprocess.SubprocessError):
+            usable = False
+    if usable:
+        return created
+    if created:
+        shutil.rmtree(created, ignore_errors=True)
+    print(f'Temp dir: default ({candidate} not executable)')
+    return None
 
 
 def flatten(suite):
@@ -105,8 +155,9 @@ class Dispatcher:
     """Worker threads pull batches from a shared queue; each batch is one child process.
     Stopping (interrupt or a worker error) terminates every running child."""
 
-    def __init__(self, batches, workers, start_dir):
+    def __init__(self, batches, workers, start_dir, tmpdir=None):
         self.batches = batches
+        self.tmpdir = tmpdir
         self.workers = min(workers, len(batches))
         self.start_dir = start_dir
         self.pending = queue.Queue()
@@ -128,6 +179,8 @@ class Dispatcher:
         env['PYTHON_COLORS'] = '0'
         # Discovery IDs (test_workflow.X.test_y) only import with the start directory on the path.
         env['PYTHONPATH'] = os.pathsep.join(filter(None, (str(self.start_dir), env.get('PYTHONPATH'))))
+        if self.tmpdir:
+            env['TMPDIR'] = self.tmpdir
         return env
 
     def run_batch(self, ids):
@@ -229,10 +282,20 @@ def main():
         print(f'run_parallel: no tests collected in {start_dir}')
         return 1
     batches = make_batches(ids, workers)
-    dispatcher = Dispatcher(batches, workers, start_dir)
-    started = time.monotonic()
-    results = dispatcher.run()
-    elapsed = time.monotonic() - started
+    tmpdir = None
+    if not os.environ.get('TMPDIR') and os.environ.get('AI_TEST_TMPFS', '1') != '0':
+        # AI_TEST_TMPFS_DIR is test-only: it points the candidate somewhere other than /dev/shm.
+        tmpdir = choose_temp_dir(os.environ.get('AI_TEST_TMPFS_DIR') or '/dev/shm')
+        if tmpdir:
+            print(f'Temp dir: {tmpdir} (tmpfs)')
+    try:
+        dispatcher = Dispatcher(batches, workers, start_dir, tmpdir)
+        started = time.monotonic()
+        results = dispatcher.run()
+        elapsed = time.monotonic() - started
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     failed, total, timings = [], 0, []
     for number, (returncode, ran, status, output, found) in enumerate(results, 1):

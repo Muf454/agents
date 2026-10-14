@@ -10,6 +10,8 @@ out-of-order queue so the resume records the revision without a second session.
 T003 DONE: scaled test timeouts (`tests/timeouts.py`). T004 DONE (2026-10-15):
 `tests/run_parallel.py` runs interleaved batches (6 per worker) from a shared queue and prints
 the 15 slowest tests, the summed test time and the worker busy range (Python 3.12+).
+T005 DONE (2026-10-15): fixture git has `core.fsync=none`/`gc.auto=0`; `run_parallel.py` uses an
+exec-probed `/dev/shm/ai-tests-*` TMPDIR (`AI_TEST_TMPFS=0` off; test-only `AI_TEST_TMPFS_DIR`).
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,

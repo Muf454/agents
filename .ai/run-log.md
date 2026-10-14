@@ -279,3 +279,4 @@
 | 2026-10-14T22:42:02Z | runner | T003 | completed | PASS | 3379d65 | Claude checkpointed; continuing queue |
 | 2026-10-14T22:52Z | claude (opus) | T004 | DONE: run_parallel interleaved batches (6/worker) on a thread work queue, children terminated on interrupt/error, slowest-15 + test time + worker busy report, failing batch lists its IDs | parallel 13 OK, Docs 3 OK; ai-check PASS (648 tests, 381.8 s, test time 2841.7 s, 16 CPUs) | see git log | REQUIRED docs phrase and two summary assertions changed (named in result) |
 | 2026-10-14T22:58:29Z | runner | T004 | completed | PASS | 7d1ae34 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:10Z | claude (sonnet) | T005 | DONE: fixtures run git with core.fsync=none, gc.auto=0; run_parallel gives batches an exec-probed /dev/shm TMPDIR (AI_TEST_TMPFS=0 off); README | fixture_io 6 OK; ai-check PASS (654 tests, 393.7 s, test time 2813.6 s, 16 CPUs, /tmp already tmpfs) | see git log | flow unchanged |

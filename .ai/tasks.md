@@ -450,7 +450,7 @@ Gate: `.ai/bin/ai-check` PASS.
 
 
 ## T005 — Cheaper fixture I/O: no git fsync, temp dirs on tmpfs (FL-23, part 3)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -511,6 +511,17 @@ Targeted: `python3 -m unittest discover -s tests -k fixture_io` (must say `Ran N
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `git_fixture_env()` (tests/test_workflow.py) gives `ToolkitTest` and `ReviewHistoryTest`
+fixtures `core.fsync=none` and `gc.auto=0` via `GIT_CONFIG_COUNT/KEY/VALUE`, appended after any
+outer entries; toolkit scripts untouched. `tests/run_parallel.py`: `choose_temp_dir(candidate,
+probe=exec_probe, statvfs=os.statvfs)` returns a `/dev/shm/ai-tests-*` TMPDIR (writable, ≥ 1 GiB
+free, not `ST_NOEXEC`, script probe passes) or None for the default (prints `Temp dir: default
+(… not executable)` and removes the directory); the batches get it as `TMPDIR`, it is removed in
+a `finally`; `AI_TEST_TMPFS=0` disables, an explicit `TMPDIR` wins, `AI_TEST_TMPFS_DIR` is
+test-only. README paragraph added. `test_fixture_io_*` (6 tests) pass; `.ai/bin/ai-check`: 654
+tests OK. Timings on 16 CPUs (8 workers), where /tmp is already tmpfs, so no gain is expected
+locally: before (T004) 381.8 s wall, test time 2841.7 s; after 393.7 s wall, test time 2813.6 s
+(noise). The gain is for GitHub runners with a disk-backed /tmp and fsync (check in CI).
 
 
 ## T006 — Make the slowest tests cheaper (FL-23, part 4)
