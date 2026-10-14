@@ -155,7 +155,15 @@ if 'REVISION CONTRACT' in prompt:
         else:
             text = tasks_file.read_text()
             new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
-            tasks_file.write_text(text.rstrip('\n') + '\n\n' + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id))
+            new_task = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+            if mode in ('revise-accept-prereq', 'revise-accept-cycle'):
+                # The new task is a prerequisite of the first task, appended after it (the cycle
+                # variant also makes the new task depend on that first task).
+                first = re.search(r'^## (T\d+)', text, re.M).group(1)
+                text = re.sub(r'^Dependencies: .*$', f'Dependencies: {new_id}', text, count=1, flags=re.M)
+                if mode == 'revise-accept-cycle':
+                    new_task = new_task.replace('Dependencies: none', f'Dependencies: {first}')
+            tasks_file.write_text(text.rstrip('\n') + '\n\n' + new_task)
             rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
     if os.environ.get('MOCK_CONVERGENCE'):
         rows += os.environ['MOCK_CONVERGENCE'] + '\n'
@@ -188,9 +196,10 @@ if 'PLANNING CONTRACT' in prompt:
         sys.exit(0)
     template = open(os.environ['MOCK_TASK_TEMPLATE']).read()
     if mode in ('plan-revision-ok', 'plan-revision-drops-done', 'plan-revision-removes-done',
-                'plan-revision-edits-done'):
+                'plan-revision-edits-done', 'plan-revision-prereq'):
         # A revision of the queue: append a TODO task; the drop variant flips DONE to TODO, the
-        # remove variant deletes the first DONE block, the edit variant changes its result text.
+        # remove variant deletes the first DONE block, the edit variant changes its result text,
+        # the prereq variant makes the first TODO task depend on the appended task.
         queue = pathlib.Path('.ai/tasks.md').read_text()
         if mode == 'plan-revision-drops-done':
             queue = queue.replace('Status: DONE', 'Status: TODO', 1)
@@ -200,12 +209,16 @@ if 'PLANNING CONTRACT' in prompt:
         if mode == 'plan-revision-edits-done':
             queue = done_block.sub(lambda m: m.group(0).replace('Pending.', 'Passed.'), queue, count=1)
         new_id = 'T%03d' % (max(map(int, re.findall(r'^## T(\d+)', queue, re.M)), default=0) + 1)
+        if mode == 'plan-revision-prereq':
+            queue = re.sub(r'(^Status: TODO\nDependencies: ).*$', r'\g<1>' + new_id, queue, count=1, flags=re.M)
         pathlib.Path('.ai/tasks.md').write_text(queue.rstrip('\n') + '\n\n' + template.replace('TXXX', new_id))
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
-    if mode == 'plan-bad-queue':
+    if mode in ('plan-out-of-order', 'plan-bad-queue'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
+    if mode == 'plan-bad-queue':
+        second = second.replace('Dependencies: none', 'Dependencies: T001')
     pathlib.Path('.ai/tasks.md').write_text('# Task queue\n\n' + first + second)
     with open('.ai/project-spec.md', 'a') as f: f.write('\nObjective from the planning session.\n')
     if mode == 'plan-outside':
@@ -2892,7 +2905,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.plan_ready()
         result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
         self.assert_plan_stopped(result, 'task queue is invalid')
-        self.assertIn('T001: dependencies must exist earlier in the queue: T002', result.stderr)
+        self.assertIn('dependency cycle', result.stderr)
         self.assertIn('Dependencies: T002', (self.project / '.ai/tasks.md').read_text())
 
     def test_plan_session_outside_the_plan_records_stops(self):
@@ -3498,6 +3511,80 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.plan_calls(), 3)
         self.assertEqual(self.implementation_calls(), 0)
         self.assertTrue(self.open_stage().startswith('plan-revision '))
+
+    # ---------------------------------------------------------------- host queue repair (FL-24)
+    def queue_ids(self, text):
+        return re.findall(r'^## (T\d+)', text, re.M)
+
+    def test_queue_repair_revision_prerequisite_is_reordered_and_runs(self):
+        self.ready()
+        result = self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-prereq')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('⛔', self.notifications())
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        committed = self.run_cmd(['git', 'show', f'{revision}:.ai/tasks.md']).stdout
+        self.assertEqual(self.queue_ids(committed), ['T002', 'T001'])
+        self.assertIn('Dependencies: T002', committed)
+        self.helper('tasks', 'complete')
+
+    def test_queue_repair_revision_cycle_escalates_without_rerun(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major-once',
+                        MOCK_CLAUDE='revise-accept-cycle')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage: task queue is invalid', error)
+        self.assertIn('dependency cycle', error)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.revision_commits(), 0)
+
+    def test_queue_repair_planning_session_reorders_without_committing(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-out-of-order')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state']), ('planning', 'done'))
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertIn('rejects cycles, unknown IDs and prose', self.plan_prompt())
+
+    def test_queue_repair_planning_cycle_stops_and_keeps_the_file(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        self.assert_plan_stopped(result, 'Planning: task queue is invalid')
+        self.assertIn('dependency cycle', result.stderr)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T002'])
+        self.assertIn('Dependencies: T002', queue)
+
+    def test_queue_repair_planning_revision_keeps_done_tasks(self):
+        self.done_queue_ready()
+        done = task('T001', 'DONE').rstrip('\n')
+        result = self.plan('--revision', MOCK_CLAUDE='plan-revision-prereq')
+        self.assertIn('Task queue reordered (dependencies first): T001 T003 T002', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T003', 'T002'])
+        self.assertIn(done, queue)
+        self.helper('tasks', 'check')
+
+    def test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Task queue is invalid:', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+
+    def test_queue_repair_revision_prompt_places_new_tasks_first(self):
+        start = self.revise_ready()
+        self.revise('--since', start)
+        prompt = (self.base / 'revision-prompts.log').read_text()
+        self.assertIn('placed before the first task that depends on them', prompt)
+        self.assertIn('placed before the first task that depends on them',
+                      (ROOT / 'templates/.ai/prompts/plan-revision.md').read_text().replace('\n  ', ' '))
 
     # ---------------------------------------------------------------- supervised plan resume (T007)
     def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):

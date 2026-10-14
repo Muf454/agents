@@ -298,9 +298,10 @@ if [[ -n "$plan_file" ]]; then
   prompt+=$'\n\nPLANNING CONTRACT: Write the plan for the objective above. You may Edit/Write only '
   prompt+='.ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/state.md, .ai/handoff.md and '
   prompt+='.ai/reviews/dispositions.md. You have no shell. Do not commit and do not implement anything. '
-  prompt+='After you finish, the host validates .ai/tasks.md with the same rules as .ai/bin/ai-task check: '
-  prompt+='dependencies only on earlier tasks, exactly one Status: and one Dependencies: line per task, and '
-  prompt+='the required sections.'
+  prompt+='After you finish, the host reorders .ai/tasks.md into dependency order (each task placed after '
+  prompt+='the tasks it depends on; it rejects cycles, unknown IDs and prose in Dependencies:) and validates '
+  prompt+='it with the same rules as .ai/bin/ai-task check: exactly one Status: and one Dependencies: line '
+  prompt+='per task, and the required sections.'
   prompt+=' Keep every DONE task block exactly as it is (status, text and results); the host stops '
   prompt+='the run when a DONE task was changed or removed.'
   if [[ "$plan_revision" == yes ]]; then
@@ -319,6 +320,10 @@ if [[ -n "$plan_file" ]]; then
   plan_scope "$since"
   keep_error=$(ai_helper plan-keeps-done "$since" --baseline "$plan_baseline" 2>&1 >/dev/null) || \
     ai_die "Planning: ${keep_error#Error: }"
+  # Dependencies first; the reorder keeps every block's text, so DONE tasks stay as checked.
+  reorder_out=$(ai_helper tasks reorder 2>&1) || \
+    ai_die "Planning: task queue is invalid: ${reorder_out#Error: }"
+  [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
   queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'
@@ -391,8 +396,10 @@ if [[ "$revise_plan" == yes ]]; then
     prompt=$(cat .ai/prompts/plan-revision.md)
     prompt+=$'\n\nREVISION CONTRACT: This is plan review round '"$revision_round"'. Evaluate .ai/reviews/plan.md '
     prompt+='(read-only: never edit it). Fill ONLY the last section of .ai/reviews/plan-dispositions.md, headed "'
-    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (append new '
-    prompt+='TODO tasks with new IDs to .ai/tasks.md and reference them), rejected (concrete evidence) or '
+    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (add new '
+    prompt+='TODO tasks with new IDs to .ai/tasks.md, placed before the first task that depends on them (the '
+    prompt+='host reorders the queue into dependency order and rejects cycles, unknown IDs and prose in '
+    prompt+='Dependencies:), and reference them), rejected (concrete evidence) or '
     prompt+='needs-human (only for a decision only the human can make; the question in the Evidence column). '
     prompt+='Keep the header, the "Plan review HEAD:" line and everything above the section unchanged. You may '
     prompt+='edit only .ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/reviews/plan-dispositions.md '
@@ -415,7 +422,13 @@ if [[ "$revise_plan" == yes ]]; then
   fi
   [[ "$(sha256sum .ai/reviews/plan.md | cut -d' ' -f1)" == "$plan_report" ]] || \
     ai_die 'A Claude session modified .ai/reviews/plan.md; inspect and restore the plan review.'
-  ai_helper tasks check
+  # A prerequisite added after its dependents is repaired here (committed with the revision);
+  # a cycle, unknown ID or prose stops: ai-recover always escalates "Plan revision stage".
+  reorder_out=$(ai_helper tasks reorder 2>&1) || \
+    ai_die "Plan revision stage: task queue is invalid: ${reorder_out#Error: }"
+  [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
+  queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
   revision_scope 'Plan revision stage: '
   counts=$(ai_helper plan-dispositions-check "${check_args[@]}" 2>&1) || \
     ai_die "Plan revision incomplete: ${counts#Error: }"

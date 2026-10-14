@@ -102,7 +102,7 @@ rules are mirrored in `queue_segments`, not shared). `ai-task reorder` takes no 
 
 
 ## T002 — The host repairs the queue after planning and plan revision; an unrepairable queue escalates at once (FL-24, part 2)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -189,6 +189,17 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `scripts/ai-run`: `tasks reorder` (output printed, failure → `Planning: task queue is
+invalid: …` / `Plan revision stage: task queue is invalid: …`) before `tasks check` on the
+`--plan` and `--revise-plan` paths; the revision commit already stages `.ai/tasks.md`. Planning
+and revision contracts plus templates `plan.md`/`plan-revision.md` describe the host reorder.
+ai-recover and the pipeline's `stop 'plan revision'` needed no change (last-error keeps the
+ai-run message). Mock modes `revise-accept-prereq`, `revise-accept-cycle`, `plan-out-of-order`,
+`plan-revision-prereq`; `plan-bad-queue` is now a T001↔T002 cycle and
+`test_plan_session_invalid_queue_stops_and_keeps_the_file` asserts `dependency cycle`. 7
+`test_queue_repair_*` tests pass; `plan_session`/`supervised_plan`/`flow_this_repo`/`queue_check`/
+`revise_plan` (67) pass; `.ai/bin/ai-check`: 631 tests OK. README, docs/workflow.md, vault
+flow chart and hub Log updated.
 
 
 ## T011 — Revision recovery repairs the interrupted revision's queue before any queue check (FL-24, part 3)

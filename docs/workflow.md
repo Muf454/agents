@@ -247,7 +247,9 @@ task DONE when the session starts, committed or not, i.e. DONE in START's `.ai/t
 the baseline copy, keeps its raw block; a task DONE in both must match the baseline block;
 fenced lines included and trailing blank lines ignored;
 unconditional, so a forgotten `--revision` cannot bypass it: `Planning: DONE task T00x was
-changed or removed`), and `tasks check`
+changed or removed`), `tasks reorder` (a task placed before one it depends on is moved after it,
+block text unchanged, `Task queue reordered (dependencies first): …` printed; a cycle, unknown
+ID or prose in `Dependencies:` stops with `Planning: task queue is invalid: …`) and `tasks check`
 (`Planning: task queue is invalid: …` with the same text as `ai-task check`). Success records
 `observe planned "<N> tasks"`, notifies `📝 Plan ready` and exits 0. Any stop after the start
 records `observe stop plan <first line of last-error>` and one ⛔ notification, unless the gate
@@ -301,8 +303,12 @@ plus the host `REVISION CONTRACT` (round, section header, editable files, the Co
 from round 3, "do not commit") and `PREVIOUS PLAN ROUNDS`; git context the session cannot fetch
 itself (plan history, recent diffs of the plan records) is written to the ignored
 `.ai/local/revision-context/` and removed afterwards. Afterwards the host checks that
-`plan.md` and the gate are byte-identical, the scope, `tasks check` and `plan-dispositions-check
---fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
+`plan.md` and the gate are byte-identical, `tasks reorder` (the contract tells the session to
+place new tasks before the first task that depends on them; the host repairs a prerequisite
+appended after its dependents, and the reordered queue goes into the revision commit), `tasks
+check` (either failure stops with `Plan revision stage: task queue is invalid: …`, which
+`ai-recover` escalates at once: no recovery session, no second revision), the scope and
+`plan-dispositions-check --fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
 needs-human h`) and the state line, `git add` of the plan revision records, `git commit
 --allow-empty -m 'chore(ai): record plan revision'`, the gate check, and ONE host record
 `plan-revisions record BASE HEAD --accepted a --rejected r --needs-human h` (bounded questions on
@@ -601,8 +607,8 @@ whose `stage-verify` says `committed` is cleared first, so the run continues onc
 answer has a new plan review (the stage would be foreign to it); an unreadable revision store
 (exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
 denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
-`Triage stage`, `Plan revision stage`, `supervision limit reached`, `needs your decision`,
-and the review base that moved past the branch, whose full recorded reason is printed to
+`Triage stage`, `Plan revision stage` (including a queue the host could not reorder after a
+revision), `supervision limit reached`, `needs your decision`, and the review base that moved past the branch, whose full recorded reason is printed to
 stderr before the escalation summary);
 an EXIT trap guarantees one final ⛔ on unexpected exits; with an open triage or plan-revision
 stage for the branch (also after a watchdog crash recovery) it never commits anything: changes

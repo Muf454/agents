@@ -136,8 +136,10 @@ write `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/state.m
 `.ai/handoff.md` and `.ai/reviews/dispositions.md`: no shell and no project allowlist, so
 `--approved` is not needed. The run starts from a feature branch with no uncommitted changes
 outside those records, registers the checkout for `ai-dashboard` (stage `planning` from the
-first second, `📝 PLANNING` notification), then checks that only the plan records changed and
-that `.ai/tasks.md` passes `ai-task check`. On success the record says `planned` with the task
+first second, `📝 PLANNING` notification), then checks that only the plan records changed,
+reorders `.ai/tasks.md` so every task comes after its dependencies (`ai-task reorder`; a cycle,
+unknown ID or prose in `Dependencies:` stops with `Planning: task queue is invalid`) and checks
+that it passes `ai-task check`. On success the record says `planned` with the task
 count and `📝 Plan ready` is sent; otherwise the run stops with the reason (⛔, record `stopped`)
 and leaves the session's edits as written. It never commits: review the plan, commit it, then
 start `ai-pipeline --approved`. `--revision` tells the session an earlier plan exists (keep DONE
@@ -275,7 +277,10 @@ tmux new -s my-app-ai
    the plan reviewed again with the earlier rounds as context. It stops for you when a
    revision asks you a question (`plan review needs your decision`, also after a crash),
    after `AI_SUPERVISE_PLAN_ROUNDS` revisions in one run (`supervision limit reached`) or
-   when a revision leaves its scope; from review round `AI_SUPERVISE_ESCALATE_ROUND` the
+   when a revision leaves its scope. The host reorders the queue after each revision, so a
+   new task appended after the tasks that depend on it still runs first; a cycle, unknown ID
+   or prose in `Dependencies:` stops at once (`Plan revision stage: task queue is invalid`,
+   no recovery attempt). From review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass
    `--skip-plan-review` (on every rerun) to proceed anyway. A question a revision recorded

@@ -8,9 +8,11 @@ Read CLAUDE.md, `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, th
 and the plan review. For every BLOCKER and MAJOR finding, check it against the plan and the
 actual source yourself and decide:
 
-- accepted: the plan really has the gap. Revise the spec/plan as needed and append new TODO
-  tasks with new IDs (never reuse IDs) to `.ai/tasks.md` that close it; reference them in
-  the Task column.
+- accepted: the plan really has the gap. Revise the spec/plan as needed and add new TODO
+  tasks with new IDs (never reuse IDs) to `.ai/tasks.md` that close it, placed before the
+  first task that depends on them; reference them in the Task column. The runner reorders
+  the queue into dependency order and stops on cycles, unknown IDs or prose in
+  `Dependencies:`.
 - rejected: the finding is wrong or out of scope. Give concrete evidence (file and line,
   plan section, or the decision that covers it). A rejected finding is judged again by the
   next plan review on that evidence.

@@ -271,3 +271,4 @@
 | 2026-10-14T21:14:14Z | runner | plan-revision | plan revised (round 1): accepted 7, rejected 0, needs-human 0 | n/a | 5306926 | Plan review runs again |
 | 2026-10-14T21:40:00Z | claude | T001 | DONE: `tasks reorder` / `ai-task reorder` (stable dependency order, rejects cycles/unknown/prose) | PASS (ai-check, 624 tests) | see git log | |
 | 2026-10-14T21:32:02Z | runner | T001 | completed | PASS | 8c848ea | Claude checkpointed; continuing queue |
+| 2026-10-14T22:10:00Z | claude | T002 | DONE: host `tasks reorder` after `ai-run --plan` and `--revise-plan`; unrepairable queue → `… task queue is invalid` (escalated) | PASS (ai-check, 631 tests) | see git log | vault flow chart and hub Log updated |
