@@ -276,3 +276,4 @@
 | 2026-10-15T00:00Z | claude | T011 | DONE: `revision-queue-repair` before ai-run's and ai-pipeline's queue checks; interrupted revision resumes without a second session | PASS (ai-check, 641 tests) | see git log | vault flow chart and hub Log updated |
 | 2026-10-14T22:20:01Z | runner | T011 | completed | PASS | c01ef22 | Claude checkpointed; continuing queue |
 | 2026-10-15T01:00Z | claude (sonnet) | T003 | DONE: shared `tests/timeouts.py` scale (`CI=true` → 2), `ai-recover` gets PIPELINE_TIMEOUT, literal timeouts scaled, `run_cmd` timeout shows output | targeted 4 + 28 OK; ai-check OK (645 tests) | see git log | README updated |
+| 2026-10-14T22:42:02Z | runner | T003 | completed | PASS | 3379d65 | Claude checkpointed; continuing queue |
