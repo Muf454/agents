@@ -278,3 +278,4 @@
 | 2026-10-15T01:00Z | claude (sonnet) | T003 | DONE: shared `tests/timeouts.py` scale (`CI=true` → 2), `ai-recover` gets PIPELINE_TIMEOUT, literal timeouts scaled, `run_cmd` timeout shows output | targeted 4 + 28 OK; ai-check OK (645 tests) | see git log | README updated |
 | 2026-10-14T22:42:02Z | runner | T003 | completed | PASS | 3379d65 | Claude checkpointed; continuing queue |
 | 2026-10-14T22:52Z | claude (opus) | T004 | DONE: run_parallel interleaved batches (6/worker) on a thread work queue, children terminated on interrupt/error, slowest-15 + test time + worker busy report, failing batch lists its IDs | parallel 13 OK, Docs 3 OK; ai-check PASS (648 tests, 381.8 s, test time 2841.7 s, 16 CPUs) | see git log | REQUIRED docs phrase and two summary assertions changed (named in result) |
+| 2026-10-14T22:58:29Z | runner | T004 | completed | PASS | 7d1ae34 | Claude checkpointed; continuing queue |
