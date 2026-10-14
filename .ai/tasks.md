@@ -22,7 +22,7 @@ full gate to the host's post-task `ai-check`. Tests with time bounds run in para
 No new executable file in this batch (this run's allowlist cannot `chmod +x`).
 
 ## T001 — `tasks reorder`: stable dependency order for the task queue (FL-24, part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -95,6 +95,10 @@ Targeted: `python3 -m unittest discover -s tests -k queue_check` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `tasks_reorder()` + `queue_segments()` in scripts/lib/workflow.py, dispatched before `tasks()`;
+`ai-task reorder`; README and docs/workflow.md lines. `test_queue_reorder_*` (5 tests) and
+`test_queue_check_*` (7) pass; `.ai/bin/ai-check`: 624 tests OK. `task_blocks` untouched (its
+rules are mirrored in `queue_segments`, not shared). `ai-task reorder` takes no lock (`set` takes none).
 
 
 ## T002 — The host repairs the queue after planning and plan revision; an unrepairable queue escalates at once (FL-24, part 2)

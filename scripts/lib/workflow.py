@@ -462,7 +462,97 @@ def tasks():
     return blocks
 
 
+def queue_segments(text):
+    """Split the queue into ('pre'|'task'|'section', key, lines) segments, same heading and fence rules as task_blocks."""
+    segments = [('pre', '', [])]
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence and line.startswith('## '):
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading:
+                segments.append(('task', heading.group(1), []))
+            else:
+                segments.append(('section', line.strip(), []))
+        segments[-1][2].append(line)
+    return segments
+
+
+def tasks_reorder():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    blocks = task_blocks(text)
+    ids = [task['id'] for task in blocks]
+    if len(ids) != len(set(ids)):
+        fail('Duplicate task IDs.')
+    deps = {}
+    for task in blocks:
+        values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith('Dependencies:')]
+        if len(values) != 1:
+            fail(f"{task['id']}: expected exactly one Dependencies: line")
+        value = values[0]
+        if value != 'none' and not re.fullmatch(r'T\d{3,}(\s*,\s*T\d{3,})*', value):
+            fail(f'{task["id"]}: Dependencies: must be "none" or task IDs separated by commas, found "{value}"')
+        listed = [] if value == 'none' else [x.strip() for x in value.split(',')]
+        for dep in listed:
+            if dep not in ids:
+                fail(f"{task['id']}: dependency {dep} is not a task in the queue")
+        if len(listed) != len(set(listed)):
+            fail(f"{task['id']}: duplicate dependencies")
+        deps[task['id']] = sorted(listed, key=ids.index)
+    order, state, stack = [], {}, []
+
+    def visit(task_id):
+        if state.get(task_id) == 'done':
+            return
+        if state.get(task_id) == 'active':
+            cycle = stack[stack.index(task_id):] + [task_id]
+            fail('dependency cycle: ' + ' -> '.join(cycle))
+        state[task_id] = 'active'
+        stack.append(task_id)
+        for dep in deps[task_id]:
+            visit(dep)
+        stack.pop()
+        state[task_id] = 'done'
+        order.append(task_id)
+
+    for task_id in ids:
+        visit(task_id)
+    if order == ids:
+        return
+    segments = queue_segments(text)
+    last = max(index for index, segment in enumerate(segments) if segment[0] == 'task')
+    for segment in segments[:last]:
+        if segment[0] == 'section':
+            fail(f'cannot reorder: section "{segment[1]}" sits between tasks')
+    by_id = {key: lines for kind, key, lines in segments if kind == 'task'}
+    out = [line for line in segments[0][2]]
+    for position, task_id in enumerate(order):
+        lines = list(by_id[task_id])
+        if position < len(order) - 1 or last < len(segments) - 1:
+            if not lines[-1].endswith('\n'):
+                lines[-1] += '\n'
+            if lines[-1].strip():
+                lines.append('\n')
+        out.extend(lines)
+    for segment in segments[last + 1:]:
+        out.extend(segment[2])
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue reordered (dependencies first): ' + ' '.join(order))
+
+
 def task_command(arguments):
+    if arguments[0] == 'reorder':
+        tasks_reorder()
+        return
     blocks = tasks()
     action = arguments[0]
     if action == 'check':

@@ -2131,6 +2131,83 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('dependencies must exist earlier in the queue: T002', result.stderr)
         self.assertEqual(queue.read_text(), before)
 
+    def night_queue(self):
+        fence = '```\n## T009 — not a heading\n```\n\n'
+        return ('# Task queue\n\nPreamble text.\n\n' + task('T001', dependencies='T011') + task('T002')
+                + task('T003', status='DONE') + task('T004') + task('T005', dependencies='T014')
+                + task('T011').replace('Pending.\n', 'Pending.\n' + fence)
+                + task('T014') + '## Notes\nTrailer text.\n')
+
+    def queue_blocks(self, text):
+        blocks = {}
+        for part in re.split(r'(?m)^(?=## T(?!009)\d{3} — )', text)[1:]:
+            blocks[part[3:7]] = part.split('## Notes')[0].rstrip('\n')
+        return blocks
+
+    def test_queue_reorder_night_case(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        original = self.night_queue()
+        queue.write_text(original)
+        self.helper('tasks', 'check', expected=1)
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): '
+                         'T011 T001 T002 T003 T004 T014 T005')
+        self.helper('tasks', 'check')
+        text = queue.read_text()
+        self.assertEqual(re.findall(r'(?m)^## (T(?!009)\d{3}) — ', text),
+                         ['T011', 'T001', 'T002', 'T003', 'T004', 'T014', 'T005'])
+        self.assertEqual(self.queue_blocks(text), self.queue_blocks(original))
+        self.assertTrue(text.startswith('# Task queue\n\nPreamble text.\n\n'))
+        self.assertTrue(text.endswith('## Notes\nTrailer text.\n'))
+        self.assertIn('## T009 — not a heading', self.queue_blocks(text)['T011'])
+
+    def test_queue_reorder_valid_queue_is_untouched(self):
+        self.ready(task('T001') + task('T002', dependencies='T001'))
+        queue = self.project / '.ai/tasks.md'
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_queue_reorder_keeps_done_tasks(self):
+        self.ready(task('T001', dependencies='T003') + task('T002', status='DONE') + task('T003'))
+        self.helper('tasks', 'reorder')
+        self.helper('plan-keeps-done', 'HEAD')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    def test_queue_reorder_rejects_what_it_cannot_repair(self):
+        two = task('T001').replace('Dependencies: none\n', 'Dependencies: none\nDependencies: none\n')
+        cases = [
+            (task('T001', dependencies='T002') + task('T002', dependencies='T001'),
+             'dependency cycle: T001 -> T002 -> T001'),
+            (task('T001', dependencies='T001'), 'dependency cycle: T001 -> T001'),
+            (task('T001', dependencies='T009'), 'T001: dependency T009 is not a task in the queue'),
+            (task('T001') + task('T002', dependencies='T001 (after the API lands)'),
+             'T002: Dependencies: must be "none" or task IDs'),
+            (task('T001') + task('T002') + task('T003', dependencies='T001 and T002'),
+             'T003: Dependencies: must be "none" or task IDs'),
+            (two, 'T001: expected exactly one Dependencies: line'),
+            (task('T001') + task('T001'), 'Duplicate task IDs.'),
+            (task('T001', dependencies='T002') + '## Notes\nx\n\n' + task('T002'),
+             'cannot reorder: section "## Notes" sits between tasks'),
+        ]
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        for text, message in cases:
+            queue.write_text(text)
+            result = self.helper('tasks', 'reorder', expected=1)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(queue.read_text(), text)
+
+    def test_queue_reorder_command(self):
+        self.ready()
+        (self.project / '.ai/tasks.md').write_text(self.night_queue())
+        result = self.tool('ai-task', 'reorder')
+        self.assertIn('Task queue reordered (dependencies first): T011 T001', result.stdout)
+        self.tool('ai-task', 'check')
+
     def test_queue_check_empty_template_queue_fails(self):
         self.setup_project()
         result = self.tool('ai-task', 'check', expected=1)

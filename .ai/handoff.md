@@ -1,7 +1,8 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet. Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
+T001 DONE (2026-10-14): `workflow.py tasks reorder` and `ai-task reorder`, not yet wired into
+ai-run (T002). Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
   block text never changed; cycles, unknown IDs and prose in `Dependencies:` rejected), run by
@@ -23,7 +24,7 @@ Nothing yet. Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-None yet for this batch. T004–T006 record the suite timings (baseline and after).
+T001: `.ai/bin/ai-check` passed (624 tests). T004–T006 record the suite timings (baseline and after).
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and

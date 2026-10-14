@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID> | ai-task check
+# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID> | ai-task check | ai-task reorder
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 ai_root
 case "${1:-}" in
@@ -12,5 +12,8 @@ case "${1:-}" in
          ai_helper tasks check || exit 1
          read -r done total < <(ai_helper tasks counts)
          echo "Task queue OK: $total tasks, $done DONE" ;;
-  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID> | ai-task check' >&2; exit 2 ;;
+  reorder) [[ $# -eq 1 ]] || { echo 'Usage: ai-task reorder' >&2; exit 2; }
+           # Rewrites .ai/tasks.md so dependencies come first; a valid queue is left untouched.
+           ai_helper tasks reorder ;;
+  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
 esac

@@ -158,7 +158,9 @@ Before leaving an implementation session unattended:
    hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
-   check and stops on an invalid queue).
+   check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
+   task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
+   prose in `Dependencies:`.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write
