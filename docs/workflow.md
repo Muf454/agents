@@ -917,6 +917,11 @@ The dashboard only reads these records, and the process table through `/proc` (`
 It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
 semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
 dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+Discovery skips a runner process whose environment (`/proc/<pid>/environ`, one bounded
+non-blocking read of a regular file, at most 256 KiB) contains exactly `AI_DASHBOARD_IGNORE=1`;
+an unreadable environment is not skipped, and a registered checkout is listed regardless. The
+toolkit's workflow tests set it on every fixture runner; it reaches resumed pipelines because
+`ai-recover` keeps it and the watchdog forwards every `AI_*` variable to the recovery it starts.
 
 `AI_DASHBOARD_PROC` (process-table root) and `AI_DASHBOARD_ROOT` (only checkouts under this
 absolute path) are test-only variables that make the dashboard tests deterministic; they are

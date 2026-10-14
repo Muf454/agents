@@ -12,6 +12,9 @@ T003 DONE: scaled test timeouts (`tests/timeouts.py`). T004 DONE (2026-10-15):
 the 15 slowest tests, the summed test time and the worker busy range (Python 3.12+).
 T005 DONE (2026-10-15): fixture git has `core.fsync=none`/`gc.auto=0`; `run_parallel.py` uses an
 exec-probed `/dev/shm/ai-tests-*` TMPDIR (`AI_TEST_TMPFS=0` off; test-only `AI_TEST_TMPFS_DIR`).
+T006 BLOCKED (profiling commands denied; see the task). T007 DONE (2026-10-15): dashboard
+discovery skips a runner whose `/proc/<pid>/environ` holds `AI_DASHBOARD_IGNORE=1` (bounded,
+non-blocking regular-file read; registered checkouts still listed); `ToolkitTest` sets it.
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
@@ -34,7 +37,7 @@ Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after).
+T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after). T007: passed, `Ran 667 tests in 371.4s`.
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
@@ -70,7 +73,8 @@ description in the chart).
    continues with `Task queue reordered` in the log and no ⛔; the committed queue has the new
    task before its dependent.
 3. While the agents test suite runs (`bash .ai/validate` in one tmux window), `ai-dashboard`
-   in another shows no `/tmp/ai-toolkit-test-*` cards.
+   in another shows no `ai-toolkit-test-*` cards (under `/dev/shm/ai-tests-*` or `/tmp`); your
+   real pipelines are still listed.
 4. `ai-dashboard --json` on a checkout with an open PR shows its URL and the last plan/code
    review counts; `ai-dashboard --wait --timeout 600` returns when a running pipeline moves
    to its next stage, and `--since <cursor>` loses nothing between two calls.
@@ -79,7 +83,10 @@ description in the chart).
 Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_queue_repair_*`
 (T002), `test_queue_recovery_*` (T011), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
 `test_fixture_io_*` (T005), `test_fixture_cache_*` (T006, if added),
-`test_dashboard_ignore_*` (T007), `test_dashboard_pr_review_*` (T008),
+`test_dashboard_ignore_*` (T007: `test_dashboard_ignore_marked_runner_unless_registered`,
+`test_dashboard_ignore_other_environments_are_discovered`, `test_dashboard_ignore_environ_reader`,
+`test_dashboard_ignore_real_processes`, `test_dashboard_ignore_fixture_pipeline_is_hidden`; the
+watchdog forwarding it in `test_watchdog_recover_starts_ai_recover_after_a_crash`), `test_dashboard_pr_review_*` (T008),
 `test_dashboard_wait_*` (T009).
 
 ## Human todos

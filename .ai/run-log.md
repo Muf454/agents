@@ -282,3 +282,4 @@
 | 2026-10-15T00:10Z | claude (sonnet) | T005 | DONE: fixtures run git with core.fsync=none, gc.auto=0; run_parallel gives batches an exec-probed /dev/shm TMPDIR (AI_TEST_TMPFS=0 off); README | fixture_io 6 OK; ai-check PASS (654 tests, 393.7 s, test time 2813.6 s, 16 CPUs, /tmp already tmpfs) | see git log | flow unchanged |
 | 2026-10-14T23:13:15Z | runner | T005 | completed | PASS | f2a8d19 | Claude checkpointed; continuing queue |
 | 2026-10-14T23:14:27Z | runner | T006 | blocked; try next independent task | not complete | 694c9f4 | See task result |
+| 2026-10-15T00:00Z | claude (opus) | T007 | DONE: dashboard discovery skips runners whose /proc environ has AI_DASHBOARD_IGNORE=1 (bounded regular-file read); ToolkitTest sets it; survives ai-recover and watchdog recovery | dashboard_ignore 13 OK, dashboard 89 OK; ai-check PASS (667 tests) | see git log | README, docs/workflow.md; flow unchanged |

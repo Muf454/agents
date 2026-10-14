@@ -40,14 +40,14 @@ dash = load_dashboard()
 
 
 class FakeProc:
-    """A fixture process tree: `stat` with btime plus `<pid>/{stat,cmdline,cwd}` entries."""
+    """A fixture process tree: `stat` with btime plus `<pid>/{stat,cmdline,cwd,environ}` entries."""
 
     def __init__(self, root):
         self.root = root
         root.mkdir()
         (root / 'stat').write_text(f'cpu 1 2 3 4\nbtime {BTIME}\nprocesses 9\n')
 
-    def add(self, pid, args, cwd, started=None, state='S', stat=True):
+    def add(self, pid, args, cwd, started=None, state='S', stat=True, environ=None):
         entry = self.root / str(pid)
         entry.mkdir()
         started = time.time() - 60 if started is None else started
@@ -57,6 +57,8 @@ class FakeProc:
             (entry / 'stat').write_text(f'{pid} (odd) name) {state} ' + ' '.join(fields) + '\n')
         (entry / 'cmdline').write_bytes(b'\0'.join(os.fsencode(arg) for arg in args) + b'\0')
         os.symlink(str(cwd), entry / 'cwd')
+        if environ is not None:
+            (entry / 'environ').write_bytes(b'\0'.join(os.fsencode(item) for item in environ) + b'\0')
         return entry
 
 
@@ -101,16 +103,20 @@ class DashboardTest(unittest.TestCase):
         runners = dict(dash.discover(source)).get(str(checkout), [])
         return dash.liveness(self.local_fd(checkout), runners, source)
 
-    def spawn(self, name, checkout):
-        """A real process named NAME (a symlink to a sleeping script) working in CHECKOUT."""
+    def spawn(self, name, checkout, env=None):
+        """A real process named NAME (a symlink to a sleeping script) working in CHECKOUT, with
+        ENV, else this environment without the dashboard ignore marker (discovery must see it)."""
+        if env is None:
+            env = {key: value for key, value in os.environ.items() if key != 'AI_DASHBOARD_IGNORE'}
         bin_dir = self.base / 'bin'
         bin_dir.mkdir(exist_ok=True)
         script = bin_dir / 'runner.sh'
         script.write_text('#!/usr/bin/env bash\nsleep 120\n:\n')  # argv is `bash <link>`, as for the real runners
         script.chmod(0o755)
         link = bin_dir / name
+        link.unlink(missing_ok=True)
         link.symlink_to(script)
-        process = subprocess.Popen([str(link)], cwd=checkout, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen([str(link)], cwd=checkout, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
@@ -267,6 +273,73 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(result.stdout, f'{checkout} alive\n')
         self.assertEqual(listing(), before)
         self.assertFalse((lib / '__pycache__').exists())
+
+    def test_dashboard_ignore_marked_runner_unless_registered(self):
+        checkout = self.checkout('fixture')
+        self.proc.add(4242, ['bash', '/opt/x/.ai/bin/ai-pipeline'], checkout,
+                      environ=['HOME=/x', 'AI_DASHBOARD_IGNORE=1'])
+        self.mark(checkout, 4242)
+        self.assertEqual(dash.discover(), [])
+        self.assertEqual(dash.snapshot()['runs'], [])
+        self.register('fixture.json', checkout)
+        self.assertEqual(dash.discover(), [(str(checkout), [])])
+        run, = dash.snapshot()['runs']
+        self.assertEqual((run['checkout'], run['liveness'], run['status']), (str(checkout), 'alive', 'running'))
+
+    def test_dashboard_ignore_other_environments_are_discovered(self):
+        oversized = ['AI_DASHBOARD_IGNORE=1', 'X=' + 'x' * dash.ENVIRON_LIMIT]
+        cases = (('zero', ['AI_DASHBOARD_IGNORE=0']), ('prefixed', ['XAI_DASHBOARD_IGNORE=1']),
+                 ('suffixed', ['AI_DASHBOARD_IGNORE=1 ']), ('missing', None),
+                 ('unreadable', ['AI_DASHBOARD_IGNORE=1']), ('fifo', None),
+                 ('directory', None), ('oversized', oversized))
+        for pid, (case, environ) in enumerate(cases, 5000):
+            with self.subTest(case=case):
+                checkout = self.checkout(case)
+                entry = self.proc.add(pid, ['bash', '/opt/x/.ai/bin/ai-run'], checkout, environ=environ)
+                if case == 'unreadable':
+                    (entry / 'environ').chmod(0)
+                    if os.access(entry / 'environ', os.R_OK):
+                        self.skipTest('running as root: mode 000 is still readable')
+                elif case == 'fifo':
+                    os.mkfifo(entry / 'environ')
+                elif case == 'directory':
+                    (entry / 'environ').mkdir()
+                started = time.monotonic()
+                self.assertEqual([found for found, _ in dict(dash.discover())[str(checkout)]], [pid])
+                self.assertLess(time.monotonic() - started, BOUND)
+
+    def test_dashboard_ignore_environ_reader(self):
+        source = dash.ProcSource()
+        self.proc.add(1, ['ai-run'], self.base, environ=['A=1', 'B=x=y'])
+        self.assertEqual(source.environ(1), {b'A=1', b'B=x=y'})
+        self.assertIsNone(source.environ(2))
+        entry = self.proc.add(3, ['ai-run'], self.base)
+        os.symlink(self.proc.root / '1/environ', entry / 'environ')
+        self.assertIsNone(source.environ(3))
+        exact = self.proc.add(4, ['ai-run'], self.base)
+        (exact / 'environ').write_bytes(b'A=1\0' + b'x' * (dash.ENVIRON_LIMIT - 4))
+        self.assertEqual(source.environ(4), {b'A=1', b'x' * (dash.ENVIRON_LIMIT - 4)})
+        (exact / 'environ').write_bytes(b'A=1\0' + b'x' * (dash.ENVIRON_LIMIT - 3))
+        self.assertIsNone(source.environ(4))
+
+    def test_dashboard_ignore_real_processes(self):
+        real = dash.ProcSource('/proc')
+        if real.environ(os.getpid()) is None:
+            self.skipTest('/proc/<pid>/environ is not readable here')
+        hidden = self.checkout('hidden')
+        shown = self.checkout('shown')
+        environment = {key: value for key, value in os.environ.items() if key != 'AI_DASHBOARD_IGNORE'}
+        ignored = self.spawn('ai-pipeline', hidden, dict(environment, AI_DASHBOARD_IGNORE='1'))
+        listed = self.spawn('ai-pipeline', shown)
+        for process in (ignored, listed):
+            for _ in range(200):  # until the exec: environ is the parent's copy before it
+                if (real.process(process.pid) or ((),))[0][1:2] == [os.fsencode(self.base / 'bin/ai-pipeline')]:
+                    break
+                time.sleep(0.01)
+        self.assertIn(b'AI_DASHBOARD_IGNORE=1', real.environ(ignored.pid))
+        found = dict(dash.discover(real))
+        self.assertNotIn(str(hidden), found)
+        self.assertEqual([pid for pid, _ in found[str(shown)]], [listed.pid])
 
 
 class DashboardSanitizeTest(unittest.TestCase):

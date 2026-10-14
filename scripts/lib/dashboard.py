@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -23,6 +24,9 @@ RUNNER_NAMES = ('ai-run', 'ai-pipeline', 'ai-recover')
 PIPELINE_NAMES = ('ai-pipeline', 'ai-recover')
 SHELLS = ('bash', 'sh')
 FROM_ENVIRONMENT = object()
+# A runner started with this in its environment (the toolkit's own test fixtures) is not listed.
+IGNORE_ENV = b'AI_DASHBOARD_IGNORE=1'
+ENVIRON_LIMIT = 256 * 1024
 
 
 def is_runner(args, names=RUNNER_NAMES):
@@ -70,6 +74,29 @@ class ProcSource:
             return os.readlink(self.root / str(pid) / 'cwd')
         except OSError:
             return None
+
+    def environ(self, pid):
+        """The set of `KEY=VALUE` entries of a process environment, or None when it cannot be
+        read (another user's process, a race, a fixture FIFO or directory, > ENVIRON_LIMIT)."""
+        try:
+            fd = os.open(self.root / str(pid) / 'environ',
+                         os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            data = b''
+            while len(data) <= ENVIRON_LIMIT:
+                chunk = os.read(fd, ENVIRON_LIMIT + 1 - len(data))
+                if not chunk:
+                    return set(data.split(b'\0')) - {b''}
+                data += chunk
+            return None
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
 
     def start_ns(self, ticks):
         """Process start (stat field 22, clock ticks since boot) as epoch ns."""
@@ -122,7 +149,8 @@ def inside(path, base):
 def discover(source=None, only_under=FROM_ENVIRONMENT):
     """[(checkout, [(pid, start ticks), ...])] for every registered checkout and every checkout
     a live runner works in, deduplicated by realpath; ONLY_UNDER (`AI_DASHBOARD_ROOT`, test
-    only) keeps just the checkouts inside it."""
+    only) keeps just the checkouts inside it. A runner whose environment has IGNORE_ENV is
+    skipped (an unreadable environment is not); a registered checkout is listed regardless."""
     source = source or ProcSource()
     if only_under is FROM_ENVIRONMENT:
         only_under = os.environ.get('AI_DASHBOARD_ROOT') or None
@@ -140,6 +168,8 @@ def discover(source=None, only_under=FROM_ENVIRONMENT):
     for pid in source.pids():
         found = source.process(pid)
         if not found or not is_runner(found[0]):
+            continue
+        if IGNORE_ENV in (source.environ(pid) or ()):
             continue
         cwd = source.cwd(pid)
         if not has_ai(cwd):

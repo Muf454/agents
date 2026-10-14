@@ -1,5 +1,6 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
@@ -652,6 +654,8 @@ class ToolkitTest(unittest.TestCase):
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
         self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
+        # ai-dashboard on the host lists only real pipelines, not these fixture runners.
+        self.env['AI_DASHBOARD_IGNORE'] = '1'
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
@@ -1019,6 +1023,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         launched = (self.base / 'systemd-run.log').read_text()
         self.assertIn('--user --collect --quiet --service-type=exec', launched)
         self.assertIn('--setenv=AI_STATE_DIR=', launched)
+        self.assertIn('--setenv=AI_DASHBOARD_IGNORE=1 ', launched)  # a resumed fixture stays hidden
         self.assertNotIn('AI_WATCHDOG_NOW', launched)
         self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage crash', launched)
         self.assertIn('killed', (self.project / '.ai/local/last-error').read_text())
@@ -4242,6 +4247,56 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Started without those settings (as a detached service would be), it uses the approved ones.
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
+
+    def held_and_hidden(self, command, **env):
+        """Start COMMAND with a session held in MOCK_CLAUDE=hold; once it holds, the host dashboard
+        (real /proc, this fixture's base) lists nothing, though a reader blind to the marker would.
+        Returns (runner, session pid); the caller releases or kills them."""
+        local = self.project / '.ai/local'
+        for name in ('mock-session.pid', 'mock-release'):
+            (local / name).unlink(missing_ok=True)
+        runner = subprocess.Popen(command, cwd=self.project, env=dict(self.env, MOCK_CLAUDE='hold', **env),
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            deadline = time.monotonic() + PIPELINE_TIMEOUT
+            while not ((local / 'mock-session.pid').exists() and (local / 'mock-session.pid').read_text()):
+                if runner.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the session never started')
+                time.sleep(0.05)
+            session = int((local / 'mock-session.pid').read_text())
+            self.assertIn(b'AI_DASHBOARD_IGNORE=1', Path(f'/proc/{session}/environ').read_bytes().split(b'\0'))
+            spec = importlib.util.spec_from_file_location('dashboard_view', ROOT / 'scripts/lib/dashboard.py')
+            dashboard = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(dashboard)
+
+            class Blind(dashboard.ProcSource):
+                def environ(self, pid):
+                    return None
+
+            with mock.patch.dict(os.environ, {'AI_DASHBOARD_ROOT': str(self.base), 'AI_DASHBOARD_PROC': '/proc',
+                                              'AI_STATE_DIR': str(self.base / 'dashboard-state')}):
+                self.assertEqual(dashboard.snapshot()['runs'], [])
+                self.assertIn(os.path.realpath(self.project),
+                              [run['checkout'] for run in dashboard.snapshot(source=Blind())['runs']])
+            return runner, session
+        except BaseException:
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.communicate()
+            raise
+
+    def test_dashboard_ignore_fixture_pipeline_is_hidden(self):
+        self.ready()
+        runner, _ = self.held_and_hidden([str(self.project / '.ai/bin/ai-pipeline'), '--approved', '--base', 'main',
+                                          '--no-pr'], AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        (self.project / '.ai/local/mock-release').touch()
+        output = runner.communicate(timeout=PIPELINE_TIMEOUT)[0].decode(errors='replace')
+        self.assertEqual(runner.returncode, 1, output)
+        # The same for the pipeline ai-recover resumes in its own process (what the watchdog starts).
+        runner, session = self.held_and_hidden([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
+                                               MOCK_RECOVER='rerun')
+        os.killpg(runner.pid, signal.SIGKILL)
+        os.kill(session, signal.SIGKILL)  # GNU timeout runs the session in its own process group
+        runner.communicate()
 
     def test_resume_ignores_user_config_the_approved_run_did_not_have(self):
         self.ready()

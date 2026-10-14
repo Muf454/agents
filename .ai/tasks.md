@@ -600,7 +600,7 @@ queries). Baseline numbers remain T004's (Ran 648 tests in 381.8 s, Test time 28
 
 
 ## T007 — Dashboard ignores test fixture runners (DB-05)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -656,7 +656,28 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+DONE 2026-10-15 (opus). `ProcSource.environ(pid)` opens `<root>/<pid>/environ` with
+`O_NONBLOCK|O_NOFOLLOW|O_NOCTTY`, requires `S_ISREG` via `fstat`, reads at most 256 KiB
+(`ENVIRON_LIMIT`; more → None) and returns the set of entries, None on any OSError. `discover`
+skips a runner whose environ contains exactly `IGNORE_ENV` (`AI_DASHBOARD_IGNORE=1`); registered
+checkouts are still listed. `ToolkitTest.setUp` sets `AI_DASHBOARD_IGNORE=1`; no script change was
+needed: ai-recover's `unset` list, `ai_supervise_settings` and the manifest restore (RUN_SETTINGS)
+leave it alone, the resume is an `exec env VAR=…` (inherits), no `env -i` anywhere, and the
+watchdog's `forwarded_env` passes every `AI_*` variable (asserted in
+`test_watchdog_recover_starts_ai_recover_after_a_crash`). `spawn` in tests/test_dashboard.py strips
+the marker from its default environment so its real processes stay unmarked; `FakeProc.add` has
+`environ=`. README "Watch all pipelines" and docs/workflow.md dashboard paragraph updated; flow
+chart does not describe discovery (unchanged).
+Tests: `test_dashboard_ignore_marked_runner_unless_registered`,
+`test_dashboard_ignore_other_environments_are_discovered` (=0, XAI_, trailing space, missing,
+mode 000, FIFO and directory within BOUND, > 256 KiB), `test_dashboard_ignore_environ_reader`
+(symlink refused, exact limit), `test_dashboard_ignore_real_processes` (real `/proc`, marked hidden,
+unmarked listed), and in test_workflow `test_dashboard_ignore_fixture_pipeline_is_hidden` (held
+`ai-pipeline` session and an `ai-recover`-resumed one: environ has the marker, `snapshot()` with
+real `/proc` lists nothing, a marker-blind ProcSource lists the checkout). Mutation check: with
+`IGNORE_ENV` changed, 7 of the 13 targeted tests fail.
+Validation: `-k dashboard_ignore` Ran 13 tests OK; `-k dashboard` Ran 89 tests OK;
+`.ai/bin/ai-check` PASS (`Ran 667 tests in 371.4s`, 48 batches on 8 workers).
 
 ## T008 — PR URL and last plan/code review counts in `--json` and the details view (DB-02)
 Status: TODO

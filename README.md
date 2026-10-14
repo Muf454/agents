@@ -641,6 +641,8 @@ alive now, one card per checkout:
 - Run it with the same `AI_STATE_DIR` or `XDG_STATE_HOME` as the pipelines and the
   watchdog timer: it only lists the registry of that state root. The default is
   `~/.local/state/ai-toolkit`.
+- A runner started with `AI_DASHBOARD_IGNORE=1` in its environment is not listed unless its
+  checkout is registered; the toolkit's own test suite sets it so its fixture runs stay hidden.
 - Keep it in tmux beside your runs: `tmux new -s dash ai-dashboard`.
 
 The dashboard is read-only and advisory. It writes no file, takes no lock and changes no
