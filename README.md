@@ -644,6 +644,16 @@ alive now, one card per checkout:
   review report's single `Finding counts:` line (`head` is the short reviewed commit), or
   `null` when the report is missing, unreadable or ambiguous. Informational only; the
   details view (Enter) shows `pr:` and `reviews:` lines.
+- `ai-dashboard --wait` blocks until a run changes (status, stage, observation state or a new
+  notification line; edits to `tasks.md` alone do not count) and prints JSON
+  `{state_root, cursor, timed_out, runs}` with only the changed runs; a checkout that
+  appeared since the baseline counts, one that vanished does not, and runs hidden by the 24 h
+  rule are still watched. `--timeout SECONDS` (default 3600), `--interval SECONDS` (default 2,
+  at least 0.1). Exit 0 on a change, 1 on timeout (`timed_out: true`), 130 on Ctrl-C, 2 on a
+  usage error. Pass the printed cursor back with `--since` so nothing between two calls is
+  lost (a change made in between returns at once):
+  `cursor=$(ai-dashboard --wait | jq -r .cursor); …; ai-dashboard --wait --since "$cursor"`.
+  `--wait` cannot be combined with `--once`; it writes nothing.
 - Run it with the same `AI_STATE_DIR` or `XDG_STATE_HOME` as the pipelines and the
   watchdog timer: it only lists the registry of that state root. The default is
   `~/.local/state/ai-toolkit`.

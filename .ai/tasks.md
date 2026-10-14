@@ -737,7 +737,7 @@ docs/workflow.md updated. `dashboard_pr_review` 5 OK, `dashboard` 94 OK; ai-chec
 
 
 ## T009 — `ai-dashboard --wait`: block until a run changes, print the changed runs (DB-03)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -804,6 +804,13 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `fingerprint`, `encode_cursor`/`decode_cursor`, `wait_for_change` and the `--wait` flags in
+scripts/lib/dashboard.py; `events_of` returns `(events, mark)`, `inspect` stores
+`notifications_mark`, `snapshot(marks=True)` keeps it (otherwise dropped, goldens unchanged). The mark
+hashes inode, size, mtime_ns and the last line of the bounded tail (decoded text, not raw bytes;
+size and mtime_ns cover appends of identical lines). `test_dashboard_wait_*` (7 tests) pass;
+`.ai/bin/ai-check`: 679 tests OK. Tests write observation.json directly rather than via
+`workflow.py observe`. Vault flow chart not checked (flow unchanged; no vault access in this session).
 
 
 ## T010 — Docs, handoff and final audit for the batch

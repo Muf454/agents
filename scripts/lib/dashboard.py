@@ -2,6 +2,9 @@
 terminal text. Nothing here writes a file: checkouts are read only through workflow.py's pinned,
 bounded readers, processes only through a ProcSource (`/proc` or a test fixture tree)."""
 import argparse
+import base64
+import binascii
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -262,11 +265,13 @@ def observation_of(local_fd, seen):
 
 
 def events_of(local_fd, seen):
-    """The last EVENT_COUNT notification lines as {'ts', 'message'}; malformed lines skipped."""
+    """(events, mark): the last EVENT_COUNT notification lines as {'ts', 'message'} (malformed
+    lines skipped) and 16 hex that change whenever the log is appended to or rewritten, even when
+    the displayed events look the same. The mark is None without a log."""
     record = read_record(local_fd, 'notifications.log', NOTIFICATIONS_LIMIT, tail=True) \
         if local_fd is not None else None
     if record is None:
-        return []
+        return [], None
     seen.append(record[1].st_mtime)
     events = []
     for line in record[0].splitlines():
@@ -276,7 +281,11 @@ def events_of(local_fd, seen):
             continue
         if isinstance(data, dict) and isinstance(data.get('message'), str):
             events.append({'ts': text_field(data.get('ts'), 40), 'message': text_field(data['message'], 300)})
-    return events[-EVENT_COUNT:]
+    info = record[1]
+    lines = record[0].splitlines()
+    last = lines[-1] if lines else ''
+    digest = hashlib.sha256(f'{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{last}'.encode('utf-8', 'replace'))
+    return events[-EVENT_COUNT:], digest.hexdigest()[:16]
 
 
 def tasks_of(ai_fd, seen):
@@ -341,7 +350,7 @@ def inspect(checkout, runners, now, source=None):
     records cannot be read safely comes back with status `unknown`."""
     run = {'project': text_field(os.path.basename(checkout.rstrip('/')) or checkout, 80),
            'checkout': text_field(checkout, 300), 'branch': 'unknown', 'liveness': 'gone',
-           'observation': None, 'events': [], 'last_error': '', 'tasks': None, 'pr': '',
+           'observation': None, 'events': [], 'notifications_mark': None, 'last_error': '', 'tasks': None, 'pr': '',
            'reviews': {'plan': None, 'code': None}, 'status': 'unknown',
            'stage': 'unknown', 'since': '', 'updated': 0.0}
     fds = checkout_fds(checkout)
@@ -355,7 +364,7 @@ def inspect(checkout, runners, now, source=None):
         observation = observation_of(local_fd, seen)
         observed = seen[0] if observation else 0.0
         run['observation'] = observation
-        run['events'] = events_of(local_fd, seen)
+        run['events'], run['notifications_mark'] = events_of(local_fd, seen)
         run['tasks'] = tasks_of(ai_fd, seen)
         run['pr'] = pr_of(ai_fd)
         run['reviews'] = reviews_of(ai_fd)
@@ -383,7 +392,7 @@ def inspect(checkout, runners, now, source=None):
         close_fds(root_fd, ai_fd, local_fd)
 
 
-def snapshot(all_runs=False, now=None, source=None):
+def snapshot(all_runs=False, now=None, source=None, marks=False):
     """{'state_root', 'runs'}: needs_you, crashed, live, planned, finished, idle, then newest
     first. Old (> 24 h) planned, finished and idle runs are hidden unless ALL_RUNS."""
     now = time.time() if now is None else now
@@ -393,6 +402,9 @@ def snapshot(all_runs=False, now=None, source=None):
         runs = [run for run in runs
                 if run['status'] not in ('planned', 'finished', 'idle') or now - run['updated'] <= HIDE_AFTER]
     runs.sort(key=lambda run: (RANK[run['status']], -run['updated']))
+    if not marks:
+        for run in runs:
+            run.pop('notifications_mark', None)
     return {'state_root': str(state_root()), 'runs': runs}
 
 
@@ -757,12 +769,85 @@ def interface(screen, all_runs):
             selected = paths.index(current) if current in paths else selected
 
 
+def fingerprint(run):
+    observation = run['observation']
+    return [run['status'], run['stage'], observation['state'] if observation else None,
+            run.get('notifications_mark')]
+
+
+def fingerprints(runs):
+    return {run['checkout']: fingerprint(run) for run in runs}
+
+
+def encode_cursor(prints):
+    raw = json.dumps(prints, sort_keys=True).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+
+
+def decode_cursor(text):
+    """The {checkout: fingerprint} map of a cursor, or None when it is not one."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(text + '=' * (-len(text) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    if not isinstance(data, dict) or not all(
+            isinstance(value, list) and len(value) == 4 for value in data.values()):
+        return None
+    return data
+
+
+def wait_for_change(baseline, timeout, interval, source=None):
+    """(payload, changed): polls until a checkout is new to BASELINE or its fingerprint differs.
+    BASELINE None means the first snapshot. Checkouts that disappeared are not reported."""
+    deadline = time.monotonic() + timeout
+    while True:
+        data = snapshot(all_runs=True, source=source, marks=True)
+        prints = fingerprints(data['runs'])
+        if baseline is None:
+            baseline = prints
+        changed = [run for run in data['runs'] if baseline.get(run['checkout']) != prints[run['checkout']]]
+        timed_out = not changed and time.monotonic() >= deadline
+        if changed or timed_out:
+            for run in changed:
+                run.pop('notifications_mark', None)
+            return {'state_root': data['state_root'], 'cursor': encode_cursor(prints),
+                    'timed_out': timed_out, 'runs': changed}, bool(changed)
+        time.sleep(max(0.0, min(interval, deadline - time.monotonic())))
+
+
 def main(arguments=None):
     parser = argparse.ArgumentParser(prog='ai-dashboard', description='Watch all pipelines on this machine.')
     parser.add_argument('--once', action='store_true', help='print the text view once and exit')
     parser.add_argument('--json', action='store_true', help='print the snapshot as JSON and exit')
     parser.add_argument('--all', action='store_true', help='also show old finished and idle runs')
+    parser.add_argument('--wait', action='store_true',
+                        help='block until a run changes, print the changed runs as JSON (exit 1 on timeout)')
+    parser.add_argument('--since', metavar='CURSOR', help='with --wait: the cursor of a previous call')
+    parser.add_argument('--timeout', type=float, metavar='SECONDS', help='with --wait: give up after this (3600)')
+    parser.add_argument('--interval', type=float, metavar='SECONDS', help='with --wait: poll period (2)')
     args = parser.parse_args(arguments)
+    if args.wait:
+        if args.once:
+            parser.error('--wait cannot be combined with --once')
+        timeout = 3600.0 if args.timeout is None else args.timeout
+        interval = 2.0 if args.interval is None else args.interval
+        if not timeout > 0:
+            parser.error('--timeout must be greater than 0')
+        if not interval >= 0.1:
+            parser.error('--interval must be at least 0.1')
+        baseline = None
+        if args.since is not None:
+            baseline = decode_cursor(args.since)
+            if baseline is None:
+                parser.error('--since is not a cursor printed by ai-dashboard --wait')
+        try:
+            payload, changed = wait_for_change(baseline, timeout, interval)
+        except KeyboardInterrupt:
+            return 130
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if changed else 1
+    if args.since is not None or args.timeout is not None or args.interval is not None:
+        parser.error('--since, --timeout and --interval need --wait')
     if args.json:
         print(json.dumps(snapshot(args.all), ensure_ascii=False, indent=2))
     elif args.once or not (sys.stdin.isatty() and sys.stdout.isatty()):

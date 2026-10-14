@@ -896,6 +896,10 @@ reviewer/model/mode.
 
 ## Observation records and the dashboard
 
+`ai-dashboard --wait [--since CURSOR]` polls the same read-only snapshot and returns the runs
+whose fingerprint (status, stage, observation state, a hash of the notification log's inode,
+size, mtime and last line) differs from the baseline cursor; it writes nothing.
+
 `ai-dashboard` (`scripts/lib/dashboard.py`) shows each pipeline's current flow stage. The
 inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agent-writable):
 `observation.json` holds the stage (`planning`, `plan_review`, `plan_revision`, `setup`,

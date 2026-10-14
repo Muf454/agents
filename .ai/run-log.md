@@ -285,3 +285,4 @@
 | 2026-10-15T00:00Z | claude (opus) | T007 | DONE: dashboard discovery skips runners whose /proc environ has AI_DASHBOARD_IGNORE=1 (bounded regular-file read); ToolkitTest sets it; survives ai-recover and watchdog recovery | dashboard_ignore 13 OK, dashboard 89 OK; ai-check PASS (667 tests) | see git log | README, docs/workflow.md; flow unchanged |
 | 2026-10-14T23:33:05Z | runner | T007 | completed | PASS | 8443b04 | Claude checkpointed; continuing queue |
 | 2026-10-14T23:47:14Z | runner | T008 | completed | PASS | 2cbd111 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:30Z | claude (sonnet) | T009 | DONE: `ai-dashboard --wait/--since/--timeout/--interval`; fingerprint + cursor, notifications_mark from events_of (dropped from all printers) | dashboard_wait 7 OK; ai-check PASS (679 tests) | see git log | README, docs/workflow.md; flow unchanged |

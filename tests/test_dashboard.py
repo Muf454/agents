@@ -493,6 +493,120 @@ class SnapshotTest(DashboardTest):
             self.assertEqual(run['pr'], '')
             self.assertEqual(run['reviews'], {'plan': None, 'code': None})
 
+    # --wait (T009)
+
+    def wait_cli(self, *options, expected=0):
+        result = self.run_cli('--wait', '--interval', '0.1', *options, expected=expected)
+        return json.loads(result.stdout)
+
+    def start_wait(self, *options):
+        process = subprocess.Popen([sys.executable, '-B', str(LIB / 'dashboard.py'), '--wait', '--interval', '0.1',
+                                    '--timeout', str(20 * TIMEOUT_SCALE), *options], cwd=self.base,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.addCleanup(process.communicate)
+        time.sleep(1 * TIMEOUT_SCALE)
+        self.assertIsNone(process.poll())
+        return process
+
+    def finish_wait(self, process, expected=0):
+        out, err = process.communicate(timeout=BOUND * 3)
+        self.assertEqual(process.returncode, expected, out + err)
+        return json.loads(out)
+
+    def observe(self, checkout, stage):
+        path = checkout / '.ai/local/observation.json'
+        record = json.loads(path.read_text())
+        record['stage'] = stage
+        path.write_text(json.dumps(record))
+
+    def notify(self, checkout, message, ts='2026-10-09T10:00:00Z'):
+        with open(checkout / '.ai/local/notifications.log', 'a') as log:
+            log.write(json.dumps({'ts': ts, 'message': message}) + '\n')
+
+    def test_dashboard_wait_stage_change_reports_only_that_run(self):
+        first = self.plant('one', 'build')
+        self.plant('two', 'build')
+        process = self.start_wait()
+        self.observe(first, 'checks')
+        data = self.finish_wait(process)
+        self.assertEqual([run['project'] for run in data['runs']], ['one'])
+        self.assertEqual(data['runs'][0]['stage'], 'checks')
+        self.assertFalse(data['timed_out'])
+        self.assertTrue(data['cursor'])
+        self.assertNotIn('notifications_mark', data['runs'][0])
+
+    def test_dashboard_wait_notification_changes_but_tasks_edit_does_not(self):
+        checkout = self.plant('one', 'build')
+        process = self.start_wait()
+        self.notify(checkout, 'hello')
+        self.assertEqual([run['project'] for run in self.finish_wait(process)['runs']], ['one'])
+        process = subprocess.Popen([sys.executable, '-B', str(LIB / 'dashboard.py'), '--wait', '--interval', '0.1',
+                                    '--timeout', '2'], cwd=self.base, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.addCleanup(process.communicate)
+        time.sleep(0.5 * TIMEOUT_SCALE)
+        (checkout / '.ai/tasks.md').write_text('# Tasks\n\n## T001 — x\nStatus: DONE\n')
+        data = self.finish_wait(process, expected=1)
+        self.assertTrue(data['timed_out'])
+        self.assertEqual(data['runs'], [])
+
+    def test_dashboard_wait_lookalike_notifications_change(self):
+        checkout = self.plant('one', 'build')
+        long = 'x' * 400
+        self.notify(checkout, long + 'a')
+        before = self.inspect_run(checkout)
+        first = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.notify(checkout, long + 'b')
+        after = self.inspect_run(checkout)
+        self.assertEqual(before['events'][-1], after['events'][-1])
+        self.assertNotEqual(before['notifications_mark'], after['notifications_mark'])
+        data = self.wait_cli('--since', first, '--timeout', '5')
+        self.assertEqual([run['project'] for run in data['runs']], ['one'])
+        # the same line again, same second: identical bytes still change the mark
+        mid = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.notify(checkout, long + 'b')
+        again = self.inspect_run(checkout)
+        self.assertEqual(after['events'][-1], again['events'][-1])
+        self.assertNotEqual(after['notifications_mark'], again['notifications_mark'])
+        self.assertEqual(len(self.wait_cli('--since', mid, '--timeout', '5')['runs']), 1)
+        self.assertNotIn('notifications_mark', next(iter(self.runs().values())))
+
+    def test_dashboard_wait_since_cursor(self):
+        checkout = self.plant('one', 'build')
+        cursor = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        data = self.wait_cli('--since', cursor, '--timeout', '0.3', expected=1)
+        self.assertTrue(data['timed_out'])
+        self.observe(checkout, 'review')
+        data = self.wait_cli('--since', cursor, '--timeout', '5')
+        self.assertEqual(data['runs'][0]['stage'], 'review')
+
+    def test_dashboard_wait_new_checkout_reported_removed_not(self):
+        self.plant('one', 'build')
+        self.plant('two', 'build')
+        cursor = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.plant('three', 'build')
+        data = self.wait_cli('--since', cursor, '--timeout', '5')
+        self.assertEqual([run['project'] for run in data['runs']], ['three'])
+        cursor = data['cursor']
+        (self.state / 'pipelines' / 'two.json').unlink()
+        data = self.wait_cli('--since', cursor, '--timeout', '0.5', expected=1)
+        self.assertTrue(data['timed_out'])
+
+    def test_dashboard_wait_usage_errors(self):
+        for options in (('--wait', '--since', 'garbage'), ('--since', 'abc'), ('--wait', '--once'),
+                        ('--wait', '--timeout', '0'), ('--timeout', '5'), ('--interval', '1'),
+                        ('--wait', '--interval', '0.01')):
+            self.run_cli(*options, expected=2)
+
+    def test_dashboard_wait_reports_a_hidden_old_run(self):
+        checkout = self.plant('old', 'pr', 'done', age=3 * 86400)
+        self.assertEqual(self.runs(), {})
+        process = self.start_wait()
+        self.observe(checkout, 'review')
+        self.assertEqual([run['project'] for run in self.finish_wait(process)['runs']], ['old'])
+
     def test_dashboard_snapshot_empty_state_names_state_root(self):
         data = json.loads(self.run_cli('--json').stdout)
         self.assertEqual(data, {'state_root': str(self.state), 'runs': []})
