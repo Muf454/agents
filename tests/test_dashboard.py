@@ -422,6 +422,77 @@ class SnapshotTest(DashboardTest):
         data = json.loads(self.run_cli('--json', *options).stdout)
         return {run['project']: run for run in data['runs']}
 
+    def inspect_run(self, checkout):
+        return dash.inspect(str(checkout), [], time.time())
+
+    def report(self, counts=((0, 1, 2),), head='abc1234def'):
+        text = f'<!-- Host evidence: HEAD {head}; merge-base {head}; saved now. -->\n\n' if head else ''
+        return text + ''.join(f'Finding counts: BLOCKER={b} MAJOR={m} MINOR={n}\n' for b, m, n in counts)
+
+    def test_dashboard_pr_review_url_sources(self):
+        url = 'https://github.com/o/r/pull/27'
+        checkout = self.plant('pr')
+        self.assertEqual(self.inspect_run(checkout)['pr'], '')
+        (checkout / '.ai/run-log.md').write_text(
+            f'- pull request ready: https://github.com/o/r/pull/3\n- pull request ready: {url}\n- other\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], url)
+        (checkout / '.ai/state.md').write_text(
+            'Next action: Human: test and merge the pull request https://github.com/o/r/pull/99\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], 'https://github.com/o/r/pull/99')
+        (checkout / '.ai/state.md').write_text(
+            f'Next action: merge \x1b[31m{url}\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], url)
+        self.assertNotIn('\x1b', json.dumps(self.inspect_run(checkout)))
+
+    def test_dashboard_pr_review_counts_and_heads(self):
+        checkout = self.plant('rev')
+        reviews = checkout / '.ai/reviews'
+        reviews.mkdir()
+        (reviews / 'plan.md').write_text(self.report(((0, 1, 2),), head='1234567890'))
+        (reviews / 'current.md').write_text(self.report(((3, 0, 4),)))
+        run = self.inspect_run(checkout)
+        self.assertEqual(run['reviews']['plan'], {'blocker': 0, 'major': 1, 'minor': 2, 'head': '1234567'})
+        self.assertEqual(run['reviews']['code'], {'blocker': 3, 'major': 0, 'minor': 4, 'head': 'abc1234'})
+        (reviews / 'plan.md').write_text(self.report(((0, 1, 2), (1, 1, 1))))
+        (reviews / 'current.md').write_text('no counts here\n')
+        run = self.inspect_run(checkout)
+        self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+        self.assertEqual(run['branch'], 'main')
+        self.assertEqual(run['tasks']['total'], 3)
+        (reviews / 'plan.md').write_text(self.report(head=''))
+        self.assertEqual(self.inspect_run(checkout)['reviews']['plan'],
+                         {'blocker': 0, 'major': 1, 'minor': 2, 'head': ''})
+
+    def test_dashboard_pr_review_unsafe_entries(self):
+        fifo = self.plant('fifo')
+        os.mkfifo(fifo / '.ai/reviews')
+        start = time.time()
+        run = self.inspect_run(fifo)
+        self.assertLess(time.time() - start, BOUND)
+        self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+        self.assertEqual(run['branch'], 'main')
+        link = self.plant('link')
+        real = self.base / 'elsewhere'
+        real.mkdir()
+        (real / 'plan.md').write_text(self.report())
+        os.symlink(real, link / '.ai/reviews')
+        self.assertEqual(self.inspect_run(link)['reviews'], {'plan': None, 'code': None})
+        files = self.plant('files')
+        (files / '.ai/reviews').mkdir()
+        os.mkfifo(files / '.ai/reviews/plan.md')
+        os.symlink(real / 'plan.md', files / '.ai/reviews/current.md')
+        self.assertEqual(self.inspect_run(files)['reviews'], {'plan': None, 'code': None})
+
+    def test_dashboard_pr_review_json_every_run(self):
+        self.plant('good', 'build')
+        (self.base / 'bad').mkdir()
+        self.register('bad.json', self.base / 'bad')
+        runs = self.runs()
+        self.assertTrue(runs)
+        for run in runs.values():
+            self.assertEqual(run['pr'], '')
+            self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+
     def test_dashboard_snapshot_empty_state_names_state_root(self):
         data = json.loads(self.run_cli('--json').stdout)
         self.assertEqual(data, {'state_root': str(self.state), 'runs': []})
@@ -605,7 +676,7 @@ class SnapshotTest(DashboardTest):
 
 
 def fake_run(stage='build', state='active', status='running', detail='T003 · sonnet · 12m', note='',
-             tasks=(2, 7), last_error='', observed=True, events=None):
+             tasks=(2, 7), last_error='', observed=True, events=None, pr='', reviews=None):
     """A snapshot run dict, as `inspect` would return it."""
     if events is None:
         events = [{'ts': '2026-10-09T10:00:00Z', 'message': '🔁 Round 2'}]
@@ -613,6 +684,7 @@ def fake_run(stage='build', state='active', status='running', detail='T003 · so
     return {'project': 'demo', 'checkout': '/x/demo', 'branch': 'feature/x', 'liveness': 'alive',
             'observation': observation if observed else None, 'events': events, 'last_error': last_error,
             'tasks': {'done': tasks[0], 'total': tasks[1], 'current': ''} if tasks else None,
+            'pr': pr, 'reviews': reviews or {'plan': None, 'code': None},
             'status': status, 'stage': stage if observed else 'unknown', 'since': '', 'updated': 0.0}
 
 
@@ -980,6 +1052,21 @@ class RenderTest(DashboardTest):
         shown = [line for line in lines if line.startswith('  10:00 m')]
         self.assertEqual([line[8:] for line in shown], ['m11'] + [f'm{n}' for n in range(4, 12)])
         self.assertIn('  path: /x/demo', lines)
+
+    def test_dashboard_pr_review_expanded_lines(self):
+        expanded = frozenset({'/x/demo'})
+        lines = plain(self.view(fake_run(), expanded=expanded))
+        self.assertNotIn('  pr:', ' '.join(line[:5] for line in lines))
+        self.assertIn('  reviews: none yet', lines)
+        reviews = {'plan': {'blocker': 0, 'major': 1, 'minor': 2, 'head': 'abc1234'},
+                   'code': {'blocker': 3, 'major': 0, 'minor': 0, 'head': ''}}
+        lines = plain(self.view(fake_run(pr='https://github.com/o/r/pull/27', reviews=reviews),
+                                expanded=expanded))
+        self.assertIn('  pr: https://github.com/o/r/pull/27', lines)
+        self.assertIn('  reviews: plan B0 M1 m2 @abc1234 · code B3 M0 m0', lines)
+        reviews['plan'] = None
+        lines = plain(self.view(fake_run(reviews=reviews), expanded=expanded))
+        self.assertIn('  reviews: code B3 M0 m0', lines)
 
     def pty_run(self, argv, rows=30, columns=140):
         """Start ARGV on a pty of the given size; returns (pid, master fd)."""

@@ -83,6 +83,7 @@ description in the chart).
 Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_queue_repair_*`
 (T002), `test_queue_recovery_*` (T011), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
 `test_fixture_io_*` (T005), `test_fixture_cache_*` (T006, if added),
+`test_dashboard_pr_review_*` (T008: `_url_sources`, `_counts_and_heads`, `_unsafe_entries`, `_json_every_run`, `_expanded_lines`),
 `test_dashboard_ignore_*` (T007: `test_dashboard_ignore_marked_runner_unless_registered`,
 `test_dashboard_ignore_other_environments_are_discovered`, `test_dashboard_ignore_environ_reader`,
 `test_dashboard_ignore_real_processes`, `test_dashboard_ignore_fixture_pipeline_is_hidden`; the

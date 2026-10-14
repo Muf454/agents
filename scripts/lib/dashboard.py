@@ -16,7 +16,7 @@ import unicodedata
 # No __pycache__: .ai/bin is part of the approved gate digest.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workflow import (BOX_KEYS, DIR_FLAGS, NOTIFICATIONS_LIMIT, OBSERVATION_LIMIT,  # noqa: E402
+from workflow import (BOX_KEYS, COUNTS, DIR_FLAGS, NOTIFICATIONS_LIMIT, OBSERVATION_LIMIT,  # noqa: E402
                       OBSERVATION_STATES, SMALL_LIMIT, TASKS_LIMIT, checkout_fds, close_fds,
                       git_branch, read_record, state_root, task_blocks)
 
@@ -294,12 +294,55 @@ def tasks_of(ai_fd, seen):
             'current': text_field(current, 120)}
 
 
+PR_URL = re.compile(r'''https://[^\s<>"']+/pull/\d+''')
+PR_LOGGED = re.compile(r'''pull request ready: (https://[^\s<>"']+/pull/\d+)''')
+REVIEW_HEAD = re.compile(r'Host evidence: HEAD ([0-9a-f]{7,40});')
+
+
+def pr_of(ai_fd):
+    """The pull request URL: the one in state.md's `Next action:` line, else the last
+    `pull request ready:` run-log line, else ''."""
+    record = read_record(ai_fd, 'state.md', TASKS_LIMIT)
+    for line in (record[0].splitlines() if record else ()):
+        if line.startswith('Next action:'):
+            found = PR_URL.search(line)
+            if found:
+                return text_field(found[0], 300)
+    record = read_record(ai_fd, 'run-log.md', TASKS_LIMIT, tail=True)
+    found = PR_LOGGED.findall(record[0]) if record else []
+    return text_field(found[-1], 300) if found else ''
+
+
+def reviews_of(ai_fd):
+    """{'plan', 'code'}: each {'blocker', 'major', 'minor', 'head'} from the report's single counts
+    line, or None. Informational only: not verified against the host binding (the pipeline stays
+    authoritative)."""
+    result = {'plan': None, 'code': None}
+    try:
+        directory = os.open('reviews', DIR_FLAGS, dir_fd=ai_fd)
+    except OSError:
+        return result
+    try:
+        for key, name in (('plan', 'plan.md'), ('code', 'current.md')):
+            record = read_record(directory, name, TASKS_LIMIT)
+            counts = COUNTS.findall(record[0]) if record else []
+            if len(counts) != 1:
+                continue
+            head = REVIEW_HEAD.search(record[0])
+            result[key] = {'blocker': int(counts[0][0]), 'major': int(counts[0][1]),
+                           'minor': int(counts[0][2]), 'head': head[1][:7] if head else ''}
+    finally:
+        close_fds(directory)
+    return result
+
+
 def inspect(checkout, runners, now, source=None):
     """One checkout as a plain dict; every checkout-derived string is sanitised. A checkout whose
     records cannot be read safely comes back with status `unknown`."""
     run = {'project': text_field(os.path.basename(checkout.rstrip('/')) or checkout, 80),
            'checkout': text_field(checkout, 300), 'branch': 'unknown', 'liveness': 'gone',
-           'observation': None, 'events': [], 'last_error': '', 'tasks': None, 'status': 'unknown',
+           'observation': None, 'events': [], 'last_error': '', 'tasks': None, 'pr': '',
+           'reviews': {'plan': None, 'code': None}, 'status': 'unknown',
            'stage': 'unknown', 'since': '', 'updated': 0.0}
     fds = checkout_fds(checkout)
     if fds is None:
@@ -314,6 +357,8 @@ def inspect(checkout, runners, now, source=None):
         run['observation'] = observation
         run['events'] = events_of(local_fd, seen)
         run['tasks'] = tasks_of(ai_fd, seen)
+        run['pr'] = pr_of(ai_fd)
+        run['reviews'] = reviews_of(ai_fd)
         error = read_record(local_fd, 'last-error', SMALL_LIMIT) if local_fd is not None else None
         errored = bool(error and error[1].st_mtime > observed)
         if error:
@@ -571,6 +616,11 @@ def event_line(run):
 
 def expanded_lines(run):
     lines = [[(f"  path: {run['checkout']}", 'dim')]]
+    if run['pr']:
+        lines.append([(f"  pr: {run['pr']}", 'dim')])
+    sides = [f"{side} B{r['blocker']} M{r['major']} m{r['minor']}" + (f" @{r['head']}" if r['head'] else '')
+             for side, r in run['reviews'].items() if r]
+    lines.append([(f"  reviews: {' · '.join(sides) if sides else 'none yet'}", 'dim')])
     if run['last_error']:
         lines.append([(f"  error: {run['last_error']}", 'stopped')])
     if run['tasks'] and run['tasks']['current']:

@@ -638,6 +638,12 @@ alive now, one card per checkout:
   `--json` prints the snapshot (`state_root` and the runs) for other tools. `--all` shows
   finished or idle runs older than 24 hours; by default they are hidden, while crashed and
   needs-you runs are never hidden.
+- Each run in `--json` also carries `pr` (the pull request URL from `.ai/state.md`'s
+  `Next action:` line, else the last `pull request ready:` run-log line, else `''`) and
+  `reviews`: `{'plan': …, 'code': …}`, each `{'blocker', 'major', 'minor', 'head'}` from the
+  review report's single `Finding counts:` line (`head` is the short reviewed commit), or
+  `null` when the report is missing, unreadable or ambiguous. Informational only; the
+  details view (Enter) shows `pr:` and `reviews:` lines.
 - Run it with the same `AI_STATE_DIR` or `XDG_STATE_HOME` as the pipelines and the
   watchdog timer: it only lists the registry of that state root. The default is
   `~/.local/state/ai-toolkit`.

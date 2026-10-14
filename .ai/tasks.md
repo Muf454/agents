@@ -680,7 +680,7 @@ Validation: `-k dashboard_ignore` Ran 13 tests OK; `-k dashboard` Ran 89 tests O
 `.ai/bin/ai-check` PASS (`Ran 667 tests in 371.4s`, 48 batches on 8 workers).
 
 ## T008 — PR URL and last plan/code review counts in `--json` and the details view (DB-02)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -731,6 +731,9 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+dashboard.py `pr_of`/`reviews_of` (pinned fds, bounded no-follow reads, empty values on any failure);
+`pr`/`reviews` always in the run dict; expanded view adds `pr:`/`reviews:`. README and
+docs/workflow.md updated. `dashboard_pr_review` 5 OK, `dashboard` 94 OK; ai-check PASS (672 tests).
 
 
 ## T009 — `ai-dashboard --wait`: block until a run changes, print the changed runs (DB-03)

@@ -917,6 +917,11 @@ The dashboard only reads these records, and the process table through `/proc` (`
 It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
 semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
 dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+Each run also reports `pr` (URL from state.md's `Next action:` line or the last `pull request
+ready:` run-log line) and `reviews` (`plan`/`code` finding counts and short reviewed HEAD from
+`.ai/reviews/plan.md` and `current.md`, `null` unless exactly one counts line is found), read
+through the same pinned, bounded readers. They are not checked against the host binding: the
+pipeline stays authoritative.
 Discovery skips a runner process whose environment (`/proc/<pid>/environ`, one bounded
 non-blocking read of a regular file, at most 256 KiB) contains exactly `AI_DASHBOARD_IGNORE=1`;
 an unreadable environment is not skipped, and a registered checkout is listed regardless. The
