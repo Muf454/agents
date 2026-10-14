@@ -1,169 +1,84 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet. Branch `fix/night-stops` (from master 744827a, after the dashboard #25) plans
-the night-stop fixes and the plan stage (2026-10-09, Claude planning session):
-- T001 FL-18: `ai-task check`; the pipeline validates the queue before the plan review and
-  stops with the queue error (ai-recover escalates it).
-- T002 FL-19: default session budget `max(16, unfinished tasks + 2)`.
-- T003 FL-19: a relaunch rejected by the checkout lock names the owner (auto-recovery or a
-  pipeline, with its PID) and no longer overwrites `last-error`.
-- T004 FL-21: watchdog timer `OnActiveSec=2min` (no immediate probe after install) and a
-  confirmed `stalled` incident (second sighting ≥ 5 min later); planning is never stalled.
-- T005 FL-22: `Bash(chmod +x *)` in the runner permission TEMPLATE and a runner prompt rule.
-- T006–T008 DB-04: `ai-run --plan PROMPT_FILE [--model M] [--revision]` (headless planning
-  session, plan-records-only allowlist, registered, `planning`/`planned` records, host queue
-  check), and a ninth dashboard box **Plan** before Plan check.
-- T011 (done): host check `plan-keeps-done START` before and after every planning session;
-  a task DONE at START that is changed or removed stops the run (`Planning: DONE task T00x
-  was changed or removed`), with or without `--revision`.
-- T012 (done, review M1): the check also covers tasks DONE only in the working tree at entry
-  (uncommitted): the host copies the queue to a `mktemp` baseline outside the checkout before
-  the session and runs `plan-keeps-done START --baseline <copy>` after it; removed on exit.
-- T013 (done, review N1): a stall an older watchdog record already lists as active (no
-  `stall_seen_ns`) stays confirmed after the upgrade: no repeated ⛔ or diagnosis.
-- T009 (done): README dashboard section now describes nine boxes (Plan first, `planned`,
-  old records, `─` layout); docs/workflow.md observation schema lists the stages; audit of
-  all test groups, `OnActiveSec`, `Session budget`, `chmod +x` wording found them present.
+Nothing yet. Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
+5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
+- T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
+  block text never changed; cycles, unknown IDs and prose in `Dependencies:` rejected), run by
+  the host after `ai-run --plan` and `ai-run --revise-plan`; an unrepairable queue stops with
+  `Plan revision stage: task queue is invalid: …`, which recovery escalates at once.
+- T003–T006 FL-23: pipeline-running test commands (`ai-recover` included) get the pipeline
+  timeout; every test bound scaled (`AI_TEST_TIMEOUT_SCALE`, default 2 under `CI=true`);
+  run_parallel timing report and balanced batches; no git fsync in fixtures and test temp dirs
+  on tmpfs; the slowest tests made cheaper (measured).
+- T007 DB-05: the dashboard ignores runners started with `AI_DASHBOARD_IGNORE=1` (set by the
+  test harness).
+- T008 DB-02: `pr` and `reviews` (plan/code finding counts) in `ai-dashboard --json` and the
+  details view.
+- T009 DB-03: `ai-dashboard --wait [--since CURSOR] [--timeout S]`.
+- T010: docs/handoff audit.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001 done (2026-10-10): `.ai/bin/ai-check` PASS, 554 tests; `test_queue_check_*` (7) cover
-`ai-task check`, the plan-review and `--skip-plan-review` stops, recover escalation and the
-plan prompt.
-
-T002 done (2026-10-10): `.ai/bin/ai-check` PASS, 559 tests; `test_session_budget_*` (5) cover
-the 22/16/21 budgets, `--sessions 1` and the triage/revise-plan runs.
-
-T003 done (2026-10-10): `.ai/bin/ai-check` PASS, 565 tests; `test_lock_owner_*` (6) cover the
-auto-recovery/pipeline hints, unknown owners, ai-run/ai-review, the symlink/FIFO guard and the
-unchanged quiet ai-recover rejection. A symlinked marker is refused earlier by `ai_root`.
-
-T004 done (2026-10-10): `.ai/bin/ai-check` PASS, 571 tests; `test_watchdog_confirm_*` (6)
-cover the `OnActiveSec` unit, the silent install-then-start probe, the confirmed killed runner
-(once), the immediate dead-marker crash, the planning exemption (FIFO ignored) and old/invalid
-dedupe records. Six diagnosis/notification tests now seed an old sighting
-(`watchdog_stalled`) instead of relying on the immediate stall.
-
-T005 done (2026-10-10): `.ai/bin/ai-check` PASS, 574 tests; `test_permissions_chmod_*` (3)
-cover the template line (exactly `+x`), the install and ai-run `--allowedTools`, and the runner
-prompt rule (also after an upgrade). The runner and triage prompts share the section, so both
-got the bullet.
-
-T006 done (2026-10-10): `.ai/bin/ai-check` PASS, 579 tests; `test_observation_writer_plan_*` (5)
-cover the `planning` step/`planned`/stop-label records, the 15-line `plan-allowlist` and
-`plan-scope`, and a dashboard snapshot with a `planning` record.
-
-T007 done (2026-10-10): `.ai/bin/ai-check` PASS, 587 tests; `test_plan_session_*` (8) cover
-`ai-run --plan`: tools/allowlist/model/prompt, the `planning` → `planned` records, registry,
-📝 notifications, no commit, `--revision`/`--model`/`--session-timeout`, prompt-file paths, the
-invalid-queue/out-of-scope/gate-change/error stops, the refusals and the usage-limit pause.
-
-T008 done (2026-10-10): `.ai/bin/ai-check` PASS, 597 tests; `test_dashboard_plan_*` (9) cover
-the running-planning and running-build goldens at 140/120/119/60, nine boxes at 120 without
-truncation (widths 40–200), `planned` (JSON, ordering, 📝 line, 24 h hiding), a stopped Plan,
-a pipeline start record, old/legacy records, a live `ai-run --plan` and the Triage re-check box.
-
-T010 done (2026-10-10): `.ai/bin/ai-check` PASS, 599 tests; `test_session_budget_end_to_end_*`
-(2) run 17 mock sessions under `LONG_RUN_TIMEOUT` (budget 19, `Iteration 17/19`; `--sessions 16`
-stops at the limit).
+None yet for this batch. T004–T006 record the suite timings (baseline and after).
 
 ## Assumptions
-- DB-04 is a mode of `ai-run` (`--plan`), not a new `scripts/ai-plan`: this run's frozen
-  allowlist cannot `chmod +x` a new script (FL-22 fixes the template only), and the mode
-  reuses ai-run's session, lock, gate and exit handling. `--plan` does not need `--approved`.
-- Planner allowlist: Read/Glob/Grep + Edit/Write of `.ai/project-spec.md`,
-  `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/state.md`, `.ai/handoff.md`,
-  `.ai/reviews/dispositions.md`; no Bash. Headless planners get the queue check from the
-  host; interactive ones run `.ai/bin/ai-task check`.
-- Session default `+2` slack; fix-round tasks are covered because each ai-run call
-  recomputes the budget.
-- Stall confirmation window 5 minutes; a markerless killed runner is reported one timer
-  period later (~10 min); a crash with a marker stays immediate.
-- `planned` is a new dashboard status (sorted after live runs, hidden after 24 h like
-  finished); the header counts are unchanged.
-- The Plan box is ✓ for every observation whose stage is not `planning` (a pipeline's start
-  record included); without an observation it stays unticked ("stage unknown"), never failed.
+- Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
+  plan-revision paths (ai-pipeline's own queue check still stops on a committed out-of-order
+  queue).
+- Reorder is depth first (prerequisites pulled up before their first dependent), like mission
+  control's `reorder-queue.py`; a valid queue is left untouched.
+- `CI=true` defaults the test timeout scale to 2; an explicit `AI_TEST_TIMEOUT_SCALE` wins.
+- DB-02 counts are read from the reports, not verified against the host binding (the reviewed
+  HEAD is shown); no CI status (no network).
+- DB-03 exit codes: 0 change, 1 timeout, 2 usage/cursor error; polling every 2 s by default.
+- The fixture marker is `AI_DASHBOARD_IGNORE=1` (environment), not a temp-path rule.
 
 ## Flow chart
-Flow chart updated: PENDING, not done by this run (sessions do not edit the vault). Mission
-control / Zack: apply to `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (and its
-`updated:`) before merging:
-- Big picture: a first stage **Plan** (Claude, `ai-run --plan PROMPT_FILE`, plan records
-  only, never commits) → human/mission control commits → `ai-pipeline --approved`.
-  Applied by T007 (2026-10-10): the plan box names `ai-run --plan` and the notification
-  table has a 📝 PLANNING / Plan ready row; the other bullets are still pending.
-  T011 (2026-10-10) added "DONE tasks kept unchanged" to the plan box.
-- Plan review step: the queue is validated first (`ai-task check` rules); an invalid queue
-  stops at the plan review ("Task queue is invalid"), recovery always escalates it.
-- Implementation: default session budget `max(16, unfinished tasks + 2)`.
-- Recovery: a relaunch while auto-recovery holds the lock is rejected with the owner and
-  PID and changes nothing.
-- Watchdog: first probe 2 min after the timer starts (boot or install); "nothing is
-  running" (stalled) needs two sightings ≥ 5 min apart; crash with a marker unchanged.
-- Dashboard note: nine boxes, Plan first; `planned` status.
+Flow chart: T002 changes the flow and updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
+in the same task (Plan box and plan-revision path: "host reorders the queue (dependencies
+first); cycle / unknown ID / prose → ⛔"; recovery hard rules: "queue invalid after a
+revision"; `updated:` bumped; hub Log line). If the vault edit is denied, the task lists it
+here as PENDING. T003–T009: flow unchanged (unless a task notes a dashboard description in the
+chart).
 
 ## Manual testing for the human
 
 ### Needs you
-1. After the gate line below is added: in a test project, a real runner task that creates a
-   script runs `chmod +x <script>` without a permission denial, and a session attempt like
-   `chmod 777 x` is denied (Claude Code's matcher cannot be tested offline).
-2. Real planning session: in a scratch worktree run
-   `.ai/bin/ai-run --plan /tmp/objective.md` (after `setup-project --upgrade --apply`) with
-   `ai-dashboard` open in another tmux window. Expected: the card appears at once with the
-   Plan box active (orange), `📝 PLANNING` and later `📝 Plan ready` notifications, the plan
-   files changed but not committed, the card then shows ✓ Plan and `📝 <n> tasks`; after you
-   commit and start `ai-pipeline --approved`, Plan stays ✓ and Plan check becomes active.
-3. Watchdog on real systemd: reinstall a checkout's timer
-   (`.ai/bin/ai-watchdog --install-timer --diagnose --recover`) with `Phase: implementing`
-   and no pipeline, then start a pipeline within 2 minutes. Expected: no ⛔ notification;
-   `systemctl --user list-timers` shows the next run about 2 minutes after install.
-4. Relaunch during recovery: start `ai-pipeline` while an in-pipeline recovery is deciding.
-   Expected: the message names `ai-recover` with a PID that `kill` would stop, and
-   `.ai/local/last-error` still holds the original stop reason afterwards. (A recovery
-   started by the watchdog timer gets the plain message without a hint: documented limit.)
+1. CI time: on this PR's GitHub Actions run, the self-check finishes well under 10 minutes
+   (and green). Compare with PR #27's ~24 min; note the runner's CPU count from the log
+   (`Ran … (N workers …)` line and the slowest-tests list).
+2. A real supervised plan revision that adds a prerequisite task at the end
+   (e.g. a scratch project, `AI_SUPERVISE=1`, a plan review with one MAJOR finding): the run
+   continues with `Task queue reordered` in the log and no ⛔; the committed queue has the new
+   task before its dependent.
+3. While the agents test suite runs (`bash .ai/validate` in one tmux window), `ai-dashboard`
+   in another shows no `/tmp/ai-toolkit-test-*` cards.
+4. `ai-dashboard --json` on a checkout with an open PR shows its URL and the last plan/code
+   review counts; `ai-dashboard --wait --timeout 600` returns when a running pipeline moves
+   to its next stage, and `--since <cursor>` loses nothing between two calls.
 
 ### Covered by automated tests
-Filled in by the tasks (T009 checks it): `test_queue_check_*`, `test_session_budget_*`,
-`test_lock_owner_*`, `test_watchdog_confirm_*` (timer unit, install-then-start silence,
-killed runner confirmed once, dead marker immediate, planning exemption, dedupe record
-versions; `test_watchdog_confirm_legacy_active_stall` (T013): an old `{"active": ["stalled"]}`
-record with the stall present sends nothing and starts no diagnosis on two `--diagnose` probes
-6 min apart; after it clears and returns it is announced once, only after confirmation),
-`test_permissions_chmod_*`,
-`test_observation_writer_plan_*`, `test_plan_session_*` (`ai-run --plan`: allowlist without
-Bash, no commit, `planning`/`planned`/stopped records, one ⛔ per stop, refusals before any
-session, usage-limit pause on Plan), `test_dashboard_plan_*`,
-`test_session_budget_end_to_end_*` (T010), `test_plan_keeps_done_*` (unchanged DONE block
-passes, removed/flipped/result-changed/fenced-line change fails naming the ID, no queue or no
-DONE task at START passes, trailing blank lines ignored, `lines` unchanged by `raw`) and
-`test_plan_session_revision_*` (T011: malformed START heading runs no session; a dropped
-DONE task stops with or without `--revision`, one ⛔, file left as written; keeping it
-completes with 3 tasks), `test_plan_keeps_done_uncommitted_*` (T012: committed TODO T001,
-uncommitted DONE T001 at entry; a status flip, removal or result edit stops with
-`Planning: DONE task T001 was changed or removed`, one ⛔, file left as written, with and
-without `--revision`; kept identical completes with `planned`; the baseline file is removed;
-helper-level baseline union, baseline-wins, missing baseline and malformed baseline).
+Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_queue_repair_*`
+(T002), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
+`test_fixture_io_*` (T005), `test_fixture_cache_*` (T006, if added),
+`test_dashboard_ignore_*` (T007), `test_dashboard_pr_review_*` (T008),
+`test_dashboard_wait_*` (T009).
 
 ## Human todos
-- Gate (this repo, before a run that needs it): add `Bash(chmod +x *)` to
-  `.ai/permissions.allow` and reapprove; not needed by this batch (no new executable).
-- Other projects: add the same line to each `.ai/permissions.allow` by hand
-  (`setup-project --upgrade` never changes it), and run `setup-project --upgrade --apply` so
-  `.ai/bin` and `.ai/prompts` (runner and plan prompts) get the changes.
-- Reinstall every watchdog timer after merging (`ai-watchdog --install-timer --diagnose
-  --recover`): the timer runs a host copy and the old unit still has `OnBootSec`.
-- Vault: apply the flow-chart changes above; backlog FL-18/19/21/22 and DB-04 status lines;
-  hub Log line.
-- No CI workflow change needed.
+- Merge order: PR #27 (`fix/night-stops`) first; then rebase or retarget this branch's PR onto
+  master.
+- Optional CI workflow change (gate file `.github/workflows/self-check.yml`, yours to edit):
+  set `env: AI_TEST_TIMEOUT_SCALE` only if 2 (the `CI=true` default) proves wrong; you may
+  lower `timeout-minutes` from 40 once the run time is confirmed.
+- Other projects: `setup-project --upgrade --apply` so `.ai/bin` and `.ai/prompts` get the
+  reorder, the revision prompt sentence and the dashboard changes.
+- Mission control: retire `~/Projects/wt/plans/sessions/reorder-queue.py` after this merges
+  (use `ai-task reorder`; it rejects prose dependencies instead of rewriting them), and switch
+  its watcher to `ai-dashboard --wait`.
+- Vault: backlog status lines for FL-23, FL-24, DB-02, DB-03, DB-05 (sessions do not tick
+  them).
 
 ## Next action
-Review round 1 (2026-10-13) accepted M1 → T012 (uncommitted DONE tasks protected during
-planning) and N1 → T013 (legacy active stall not re-announced); see
-`.ai/reviews/dispositions.md`. T012 done (2026-10-13, ai-check PASS, 618 tests). T013 done
-(2026-10-13, ai-check PASS, 619 tests). Next: another independent review.
-
-Earlier: implement T001–T011 in dependency order (T010/T011 added by plan review round 1;
-T009, the audit, depends on T010 and T011 since round 3 and runs last). Human afterwards: the
-checks under "Needs you", the gate/vault/timer todos, and the PR review.
+Implement T001–T010 in queue order. Human afterwards: the checks under "Needs you", the merge
+order and the PR review.
