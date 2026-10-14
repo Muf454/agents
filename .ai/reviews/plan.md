@@ -1,34 +1,78 @@
-<!-- Plan review of plan digest 3ff6f4f8d0119cbae7ba7aaa2bd2f0284721818ec2c798553c661f133290aae4; HEAD e48a186e0ed3e91436a5af9c02b66f35765ae2ff; saved 2026-10-10T05:31:41Z. -->
+<!-- Plan review of plan digest 0ba144a3003df6ee8c93e3d4298c40816cc9050e50f5333967d585f7a208f715; HEAD d511650392b90a5f2f8afe67c5f87e210dfc3bdf; saved 2026-10-14T21:10:20Z. -->
 
-> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+# Plan review
 
-# Plan review — round 4 (Claude, independent reviewer)
+Scope: HEAD `d511650392b90a5f2f8afe67c5f87e210dfc3bdf`.
 
-Reviewed at HEAD e48a186: `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, the round-3 dispositions, and the source and tests the tasks touch (`scripts/ai-run`, `scripts/ai-pipeline`, `scripts/ai-recover`, `scripts/ai-review`, `scripts/ai-task`, `scripts/lib/common.sh`, `scripts/lib/workflow.py`, `scripts/lib/watchdog.py`, `scripts/lib/dashboard.py`, `tests/test_workflow.py`, `tests/test_observation.py`, `tests/test_dashboard.py`, `tests/run_parallel.py`, `templates/.ai/permissions.allow`, `templates/.ai/tasks.md`, `templates/.ai/prompts/plan.md`, `templates/.ai/prompts/runner.md`, `.ai/validate`).
-
-Overall verdict: the round-3 findings are answered in the current files. P12: T005 now names `test_permissions_template_excludes_network_installs_and_writers` (`tests/test_workflow.py:1369-1379`, `chmod` at :1372) and the exact replacement assertion, and the plan's Risks list it. P14: T009 depends on T001–T008, T010 and T011 and is physically last in the queue (`.ai/tasks.md:668`), so `tasks next` (`workflow.py:471-476`) picks T010 and T011 first and `tasks()`'s "earlier in the queue" rule (`workflow.py:442`) is satisfied. P13 and P15 are covered (raw-slice comparison in T011; prefix-only lock assertion in T007). I re-traced the code assumptions behind every task: the `stop` label mapping for the T001 stops (`STOP_LABELS` at `workflow.py:3102-3115`: `plan review` → `plan_review`, `implementation` → `build`), the ai-recover escalation patterns (`ai-recover:135-141`), `ai_lock` and what runs before it in ai-pipeline/ai-run/ai-review (nothing writes to the checkout before the lock; traps are installed after it), `claude_session`'s post-session `ai_guard_verify` and `on_exit`'s `gate_ok` guard for the T007 `plan-gate` case, `pipeline_register`, `records_scope`, `committed_file`, the `plan-revision-allowlist` output format T006 mirrors, the watchdog's `stalled` rule and the three `save` sites, and the 17-session loop arithmetic for T010. They hold. No BLOCKER or MAJOR remains; three MINOR precision items follow.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=3
+Overall verdict: Revise the plan before unattended implementation.
+Finding counts: BLOCKER=0 MAJOR=5 MINOR=2
 
 ## BLOCKER findings
+
 None.
 
 ## MAJOR findings
-None.
+
+- P1: Revision recovery validates the queue before reaching the proposed repair.
+  **Location:** `.ai/tasks.md:111`; `scripts/ai-run:338`, `scripts/ai-run:366`; `scripts/lib/workflow.py:2426`.
+
+  T002 places reorder after the revision-session/completed-dispositions branch. However, the earlier `tasks untouched` invokes `tasks()`, which rejects out-of-order dependencies. The completed-dispositions check also invokes `tasks()`. An interrupted revision with the repairable queue described in T002 therefore cannot reach the repair hook. Bypassing only the first check would still make the dispositions appear incomplete and encounter the dirty-record rejection.
+
+  **Concrete plan change:** Restructure revision recovery so repair occurs before these queue-dependent decisions, after the applicable scope and provenance checks. Preserve the no-DONE restriction, status checks and committed-queue rejection outside revision recovery. Keep the planned crash/resume test and require it to demonstrate no second revision session.
+
+- P2: Automatic tmpfs selection can put executable fixtures on a `noexec` filesystem.
+  **Location:** `.ai/tasks.md:311`; `tests/test_workflow.py:602`, `tests/test_workflow.py:631`, `tests/test_workflow.py:1293`.
+
+  T005 selects `/dev/shm` using writability and free space. A writable `noexec` mount satisfies those conditions, but fixtures directly execute mock agents and installed toolkit scripts from their temporary directories. Those executions fail with permission errors. The proposed temp-path test only exercises Python file I/O and would miss this incompatibility.
+
+  **Concrete plan change:** Require execution capability before selecting the temporary filesystem, with fallback and cleanup when execution is denied. Add deterministic coverage for that fallback and an integration check that directly executes a fixture script from the selected directory.
+
+- P3: The wait fingerprint can miss distinct notifications.
+  **Location:** `.ai/tasks.md:524`; `scripts/lib/dashboard.py:248`; `.ai/project-spec.md:93`.
+
+  T009 hashes the last event’s displayed message. `events_of()` sanitizes and truncates messages to 300 characters before returning them. Distinct notifications sharing that prefix and timestamp therefore produce identical fingerprints. I reproduced this in memory with two different messages. Repeated identical lines in one second also collide, as the plan acknowledges, despite the requirement that a new notification line triggers a change.
+
+  **Concrete plan change:** Track notification identity using bounded raw content and file-version metadata, or a persistent notification revision, independently of display formatting. Test distinct messages with identical displayed prefixes and repeated identical notifications while status and stage remain unchanged.
+
+- P4: The concurrent scheduler task uses the wrong model.
+  **Location:** `.ai/tasks.md:245`, `.ai/tasks.md:252`.
+
+  T004 explicitly changes concurrent work dispatch from fixed shards to batches consumed by worker threads, but specifies `Model: sonnet`. This falls under the required `opus` classification for concurrency work.
+
+  **Concrete plan change:** Set T004 to `opus`, or split concurrent scheduling into an `opus` task and retain ordinary reporting/documentation work separately.
+
+- P5: A known gate failure is deferred until the final task.
+  **Location:** `.ai/handoff.md:37`; `.ai/tasks.md:585`; `tests/test_workflow.py:7210`.
+
+  The current handoff starts its flow section with `Flow chart: T002 changes…`. The existing test requires `Flow chart updated` or `Flow unchanged` immediately below the heading. The current text deterministically fails that assertion. T010 repairs the declaration only after every implementation task, although every task must pass the full gate.
+
+  This is a baseline problem present at the reviewed HEAD, rather than a future script regression.
+
+  **Concrete plan change:** Repair the declaration before the first implementation gate, recording the current flow truthfully and retaining pending work below it. Update it when T002 actually changes the flow; leave the final audit in T010.
 
 ## MINOR findings
-- P16: The plan text contradicts the queue it describes (demonstrated). `.ai/current-plan.md:91-92` ("`tasks next` runs it last although it sits before them in the file"), `.ai/tasks.md:687-689` ("so `tasks next` runs them first") and the round-3 disposition ("queue order unchanged") all say T009 stays before T010/T011, but `.ai/tasks.md` now has T010 at :556, T011 at :598 and T009 at :668. That move was necessary: `tasks()` rejects a dependency on a later task (`workflow.py:442`, "dependencies must exist earlier in the queue"), so the order the text describes would make the whole queue invalid and the pipeline's own `tasks check` would stop the run. Also `.ai/current-plan.md:30` still says "chmod +x (T005, opus)" while the task is `Model: sonnet` (round-1 P3), and the `## T009` heading at `.ai/tasks.md:668` follows T011's `### Result / notes` with no blank line. Plan change: reword both passages to "T009 is last in the file and depends on T010 and T011", fix the T005 model wording in the plan, add the blank line, so a later revision session does not "restore" an order that cannot pass `ai-task check`.
-- P17: T008 names the one-column joiner but not the three places that must change together (suspected, from the renderer code). `wide_card` inserts `'──'` on the middle row and `'  '` on the top and bottom rows (`dashboard.py:469`), while `box_rows` advances the marker column with `x += inner + 4` (`dashboard.py:458`); the marker line (`place(column, …)`, :473-479) uses that `x`, so changing only :469 misaligns every `✓`/marker under its box at 120 columns, and a golden test written against the misaligned output would freeze the defect. The worst-case width assertion in `test_dashboard_render_worst_case_row_is_not_truncated` (`tests/test_dashboard.py:611-612`) encodes seven two-column joiners (`+ 14 + 2`) and still passes with nine boxes, so it would silently go stale. `snapshot()`'s hide filter (`dashboard.py:318-319`) lists `('finished', 'idle')` and must gain `planned` for the "hidden after 24 h" acceptance bullet. Plan change: in T008's notes list these four edit sites explicitly (joiner and padding at :469, box advance at :458, hide filter at :318, the test arithmetic at :611-612 becoming nine labels and `+ 8 + 2`), and add to the acceptance that at 120 columns each `✓` sits under its box's left border on the golden output.
-- P18: T004's confirmation drops an already-announced stall and re-announces it once after the upgrade (demonstrated by trace). `fresh = set(incidents) - set(previous['active'])` and `record['active'] = sorted(incidents)` (`watchdog.py:439-440`): the first probe of the new version on a checkout whose previous-version `watchdog.json` already holds `stalled` in `active` records `stall_seen_ns` and emits no `stalled` incident, so `active` loses the key; the probe ≥ 5 min later puts it back as `fresh` and sends a second ⛔ for the same stall. Plan change: when the condition holds and `stalled` is already in `previous['active']`, treat the stall as confirmed at once (keep the incident, so it is not `fresh`, no new notification); add the case to the T004 acceptance ("a previous-version record with `stalled` active: no second notification across two probes").
 
-## Missing coverage
-Checked against the plan (checklist items 1, 4, 5 and 10 apply to this toolkit change; 2, 3 and 6–9 are database/tenant items that do not apply):
-- Lock order (1): T003 changes only the rejection branch of `ai_lock` (`common.sh:243-246`); the pipeline↔recover exec handover on fd 9 (`common.sh:239-241`, `ai-recover:31`) is untouched. I confirmed nothing in ai-pipeline writes to the checkout before `ai_lock` at :78 (marker at :83, `ai_observe start` at :85, `rm -f last-error` at :80), ai-run installs its EXIT trap at :131 after the lock at :78, and ai-review locks at :57 with no trap before it, so the "writes nothing" acceptance is achievable. The T003 tests cover owner `ai-recover`, owner `ai-pipeline`, no marker, dead PID, non-runner, FIFO and symlink markers with `addCleanup`. Covered.
-- Stale or racing records (4): T007's `plan-gate` case is consistent with `on_exit` (`ai-run:111-129`: `gate_ok=no` skips `ai_observe`, `ai_notify_log` skips itself on `AI_GATE_BROKEN`, `common.sh:185-188`). T004 writes `stall_seen_ns` at all three `save` sites (`watchdog.py:444, 463, 482`); the upgrade race is P18. Covered apart from P18.
-- Refresh wiring (5): T006 keeps the renderer accepting a `planning` record (`observation_of` accepts any `BOX_KEYS` stage, `dashboard.py:206, 227`; `position()` returns `(None, 'unknown')` for a stage without a box, :392-393) until T008 draws it; T008 tests writer-to-renderer for active, stopped, done and the pipeline `start` record. No test references `BOX_KEYS` directly (grep), so T006's "exclude `planning` there" clause is moot. Covered.
-- Irreversible operations (10): planning never commits or reverts (T007), DONE tasks are protected on raw text (T011), the rejected locker writes nothing (T003). T010's two 17-session runs: `run_parallel.py` has no per-shard timeout and the loop arithmetic gives `Iteration 17/19` then completion, and `Session limit reached` at iteration 17 with `--sessions 16` before `Iteration` is printed (`ai-run:467, 478`). Covered.
+- P6: Documentation tests still require the obsolete shard description.
+  **Location:** `.ai/tasks.md:269`; `tests/test_workflow.py:8291`.
 
-## Security concerns
-- The planning allowlist (T006/T007) mirrors `plan_revision_allowlist` (`workflow.py:2475-2478`) plus `Write`, no Bash; the host checks (`ai_guard_verify`, `plan-scope`, `plan-keeps-done`, `tasks check`) run after the gate is verified. The only agent-written input reaching a host decision is `.ai/tasks.md`, which is validated. Acceptable.
-- T003 reads `pipeline.active` only as a regular non-symlink file (≤ 32 bytes, digits) and `/proc/PID/cmdline`; the hint is cosmetic and no agent-writable file changes the lock decision. The round-1 rejection of reading `observation.json`'s `pid` (P6) still holds for that reason.
-- T005 widens the runner template with a prefix rule that cannot bound the path; the plan states the limit, keeps this repo's copy a human gate step, and now fixes the existing test correctly (keeps `Bash(chmod *)`, numeric modes and `-R` forbidden).
-- Models: T003, T004, T007 and T011 (locking, watchdog state, the new session mode, DONE-task integrity) are `opus`; T001, T002, T005, T006, T008, T010 are features and tests on `sonnet`; T009 is docs plus audit on `sonnet`. Every task has a `Model:` line and none is mis-tiered.
+  `DocsConsistencyTest.REQUIRED` requires both documentation files to contain “round-robin into `AI_TEST_WORKERS` shards.” T004 changes that architecture, but explicitly permits updates only to tests asserting runner summaries. Keeping the old wording leaves contradictory documentation; replacing it breaks the existing consistency assertion.
+
+  **Concrete plan change:** Include the consistency-test contract and both documentation descriptions in T004, and name that intentional test change in its result.
+
+- P7: T006’s unchanged-count criterion conflicts with adding cache regression tests.
+  **Location:** `.ai/tasks.md:369`, `.ai/tasks.md:386`.
+
+  T006 requires the collected count to remain unchanged while also requiring new `test_fixture_cache_*` tests if caching is introduced. The runner’s count check compares discovery with execution within one invocation; it does not establish that existing tests were preserved.
+
+  **Concrete plan change:** Require preservation of existing test IDs and assertions, allow documented count increases for new coverage, and retain equality between collected and executed counts.
+
+## Validation observed and limitations
+
+- Read the repository instructions, spec, plan, tasks, state, handoff, relevant documentation, source, tests and validation entry point.
+- Confirmed HEAD and a clean working tree.
+- Shell syntax checks: 13 files checked, zero failures.
+- Documentation consistency tests: three passed.
+- Read-only probes confirmed the premature revision queue rejection, invalid handoff declaration and notification-display collision.
+- Full `./scripts/ai-check`, fixture integration tests, tmpfs execution and CI timing measurements were not run because they require filesystem writes. No `.ai/local/validation.json` was present.
+
+The reviewed plan preserves human control of merge and deployment and specifies bounded dashboard readers. The findings above concern recovery, event detection, validation sequencing and task contracts; this review is not human acceptance.
