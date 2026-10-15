@@ -303,3 +303,4 @@
 | 2026-10-15T07:43:36Z | runner | T014 | completed | PASS | 35f312c | Claude checkpointed; continuing queue |
 | 2026-10-15T07:55Z | claude (sonnet) | T015 | DONE: `queue_segments` classifies headings like `task_blocks` (`##<TAB>T001 — …` reorders, no KeyError; review N6) | queue_reorder+repair 15 OK; ai-check PASS (686 tests) | see git log | flow unchanged |
 | 2026-10-15T07:56:23Z | runner | T015 | completed | PASS | 6ba6e29 | Claude checkpointed; continuing queue |
+| 2026-10-15T08:02:12Z | runner | none | queue complete; ready for independent review | PASS | 26fb3ee | Human acceptance remains |
