@@ -6,7 +6,8 @@ IDs into interleaved batches pulled by AI_TEST_WORKERS workers (default min(8, C
 and runs each batch as `python3 -m unittest <ids...>` in its own process. Exits 1 when a
 batch fails or crashes, when nothing was collected, or when the batches ran a different
 number of tests than were collected. On Python 3.12+ it also reports the slowest tests and
-how busy each worker was. When the caller sets no TMPDIR and /dev/shm is a writable,
+how busy each worker was. Each batch runs in its own process group; an interrupt, SIGTERM or
+a crashed worker terminates every running group, so subprocesses the tests started go too. When the caller sets no TMPDIR and /dev/shm is a writable,
 executable tmpfs with 1 GiB free, the batches get a temporary directory there (removed after
 the run); AI_TEST_TMPFS=0 turns that off.
 """
@@ -16,6 +17,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,10 @@ BATCHES_PER_WORKER = 6
 TIMINGS = sys.version_info >= (3, 12)
 SLOWEST_SHOWN = 15
 TERMINATE_GRACE = 5
+# After a stop, how often a batch's reader checks, and how long it waits for EOF on a pipe
+# that a process outside the batch's process group (one that started its own session) holds.
+DRAIN_POLL = 0.5
+DRAIN_GRACE = 2 * TERMINATE_GRACE
 
 
 def worker_count():
@@ -151,9 +157,18 @@ def durations(output):
     return found
 
 
+def signal_group(process, signum):
+    """Signal the process group a batch leads (pgid == its pid: start_new_session); a group
+    that is already gone is fine."""
+    try:
+        os.killpg(process.pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 class Dispatcher:
-    """Worker threads pull batches from a shared queue; each batch is one child process.
-    Stopping (interrupt or a worker error) terminates every running child."""
+    """Worker threads pull batches from a shared queue; each batch is one child process in its
+    own process group. Stopping (interrupt or a worker error) terminates every running group."""
 
     def __init__(self, batches, workers, start_dir, tmpdir=None):
         self.batches = batches
@@ -165,6 +180,7 @@ class Dispatcher:
             self.pending.put((number, batch))
         self.lock = threading.Lock()
         self.stopping = threading.Event()
+        self.stopped_at = None
         self.running = set()
         self.results = {}
         self.busy = [0.0] * self.workers
@@ -189,17 +205,33 @@ class Dispatcher:
             # Checked under the lock: stop() cannot miss a child started after it ran.
             if self.stopping.is_set():
                 return None
+            # Its own session/process group, so stop() reaches the subprocesses its tests start.
             process = subprocess.Popen(command, cwd=ROOT, env=self.env(), stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, errors='replace')
+                                       text=True, errors='replace', start_new_session=True)
             self.running.add(process)
         try:
-            output, _ = process.communicate()
+            output = self.drain(process)
         finally:
             with self.lock:
                 self.running.discard(process)
         ran, status = summary(output)
         return process.returncode, ran, status, output, durations(output)
+
+    def drain(self, process):
+        """Read the batch's output until EOF. Unbounded while the run goes on (the per-test
+        timeouts own that); after stop() it gives up DRAIN_GRACE later, when a process that
+        left the batch's group still holds the pipe."""
+        while True:
+            try:
+                return process.communicate(timeout=DRAIN_POLL)[0]
+            except subprocess.TimeoutExpired:
+                if self.stopped_at is None or time.monotonic() - self.stopped_at < DRAIN_GRACE:
+                    continue
+            process.kill()
+            process.stdout.close()
+            process.wait()
+            return ''
 
     def work(self, index):
         while not self.stopping.is_set():
@@ -224,14 +256,20 @@ class Dispatcher:
     def stop(self):
         with self.lock:
             self.stopping.set()
+            if self.stopped_at is None:
+                self.stopped_at = time.monotonic()
             children = list(self.running)
         for process in children:
-            process.terminate()
+            signal_group(process, signal.SIGTERM)
+        deadline = time.monotonic() + TERMINATE_GRACE
         for process in children:
             try:
-                process.wait(timeout=TERMINATE_GRACE)
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                process.kill()
+                pass
+        # Also descendants that ignored SIGTERM or outlived their batch process.
+        for process in children:
+            signal_group(process, signal.SIGKILL)
 
     def run(self):
         threads = [threading.Thread(target=self.work, args=(index,), daemon=True)
@@ -263,6 +301,10 @@ def timing_report(timings, busy, workers):
           f'worker busy: {min(busy):.1f}–{max(busy):.1f} s')
 
 
+def terminated(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Run the unittest suite in parallel batches.')
     parser.add_argument('--start-dir', default=str(ROOT / 'tests'),
@@ -288,6 +330,9 @@ def main():
         tmpdir = choose_temp_dir(os.environ.get('AI_TEST_TMPFS_DIR') or '/dev/shm')
         if tmpdir:
             print(f'Temp dir: {tmpdir} (tmpfs)')
+    # The batches are outside this process group, so a group-wide SIGTERM (ai-check's
+    # `timeout`) misses them: turn it into an exception that makes run() stop them.
+    signal.signal(signal.SIGTERM, terminated)
     try:
         dispatcher = Dispatcher(batches, workers, start_dir, tmpdir)
         started = time.monotonic()

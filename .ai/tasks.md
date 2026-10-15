@@ -886,7 +886,7 @@ Validation: `-k dashboard_pr_review` Ran 6 tests OK; `.ai/bin/ai-check` OK (Ran 
 
 
 ## T014 — Parallel runner: stopping a batch terminates its whole process tree (review M3)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -930,7 +930,25 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+DONE 2026-10-15 (Claude, opus). `tests/run_parallel.py`: batches start with
+`start_new_session=True`; `stop()` sends SIGTERM to every running batch's process group, waits
+up to `TERMINATE_GRACE` in total, then SIGKILLs the groups (`signal_group` tolerates
+`ProcessLookupError`/`PermissionError`). New `drain()` reads with `communicate(timeout=0.5)` in a
+loop: unbounded while running, but `DRAIN_GRACE` (10 s) after a stop it kills/closes/reaps a
+batch whose pipe is still held (a descendant that started its own session). The start-under-lock
+invariant is unchanged. Extra (found while implementing): batches are no longer in the runner's
+process group, so ai-check's group-wide `timeout` SIGTERM would miss them; `main()` now turns
+SIGTERM into `SystemExit(143)` so `run()` stops the batches. Module docstring updated; README and
+docs/workflow.md do not describe stop behaviour, so unchanged.
+Tests: `test_parallel_runner_worker_error_kills_batch_descendants`,
+`test_parallel_runner_interrupt_kills_batch_descendants` (patched `Thread.join` raises
+KeyboardInterrupt in `run()`), `test_parallel_runner_sigterm_kills_batch_descendants`; the
+sleeper's PID is SIGKILLed in cleanup. Mutation check: with `start_new_session=False` all three
+fail ("sleeper … survived the stop"). Targeted: `-k parallel_runner` Ran 16 tests OK (4.3 s).
+Gate: `.ai/bin/ai-check` PASS, `Ran 685 tests in 345.9s (48 batches on 8 workers)`.
+Limitation: SIGKILL of a group after its leader was reaped could in theory hit a reused PGID
+(needs PID wraparound within the stop); a descendant that called `setsid` itself still escapes
+the kill (its pipe is abandoned after `DRAIN_GRACE`).
 
 ## T015 — Queue reorder recognises task headings with any whitespace after `##` (review N6)
 Status: TODO

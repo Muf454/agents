@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -8517,6 +8518,9 @@ class ParallelRunnerTest(unittest.TestCase):
     """FL-11: tests/run_parallel.py shards the suite without changing what is tested."""
 
     RUNNER = ROOT / 'tests/run_parallel.py'
+    # How long a stop may take: well under the sleepers' LONG_RUN_TIMEOUT, with room for
+    # stop()'s TERMINATE_GRACE (5 s) on top.
+    STOP_BOUND = SHORT_TIMEOUT + 10
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='ai-parallel-test-')
@@ -8677,6 +8681,123 @@ class ParallelRunnerTest(unittest.TestCase):
         expected = unittest.TestLoader().discover(str(ROOT / 'tests')).countTestCases()
         result = self.runner('--collect-only', cwd=self.elsewhere)
         self.assertEqual(result.stdout.strip(), f'Collected {expected} tests')
+
+    # Review M3: a stopped batch must take the subprocesses its tests started with it, or one
+    # holding the batch's output pipe keeps the dispatcher waiting.
+    def write_sleeper(self):
+        """A batch whose test starts a long sleep that inherits the batch's stdout, publishes
+        its PID and waits for it."""
+        self.pidfile = self.base / 'sleeper.pid'
+        self.addCleanup(self.kill_sleeper)
+        self.write('test_sleeper.py',
+                   '    def test_sleep(self):\n'
+                   '        import subprocess\n'
+                   f'        child = subprocess.Popen(["sleep", "{int(LONG_RUN_TIMEOUT)}"])\n'
+                   f'        path = {str(self.pidfile)!r}\n'
+                   '        open(path + ".tmp", "w").write(str(child.pid))\n'
+                   '        os.replace(path + ".tmp", path)\n'
+                   '        child.wait()\n')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+
+    def sleeper_pid(self):
+        deadline = time.monotonic() + MEDIUM_TIMEOUT
+        while not self.pidfile.exists():
+            if time.monotonic() > deadline:
+                raise AssertionError('the sleeper test never started')
+            time.sleep(0.05)
+        return int(self.pidfile.read_text())
+
+    def sleeper_gone(self, pid):
+        """True once the PID is gone or a zombie waiting for its new parent to reap it."""
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            try:
+                if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                    return True
+            except (OSError, IndexError):
+                pass
+            time.sleep(0.05)
+        return False
+
+    def kill_sleeper(self):
+        try:
+            os.kill(int(self.pidfile.read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+    def run_dispatcher(self, dispatcher):
+        """Run the dispatcher on a named thread (so a regression fails instead of hanging the
+        suite); return (finished, the exception it raised)."""
+        outcome = {}
+
+        def target():
+            try:
+                dispatcher.run()
+            except BaseException as error:
+                outcome['error'] = error
+        thread = threading.Thread(target=target, name='dispatcher-run', daemon=True)
+        thread.start()
+        pid = self.sleeper_pid()
+        thread.join(self.STOP_BOUND)
+        return not thread.is_alive(), outcome.get('error'), pid
+
+    def dispatcher(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        self.write_sleeper()
+        batches = [['test_sleeper.Sample.test_sleep'], ['test_other.Sample.test_a']]
+        return run_parallel, run_parallel.Dispatcher(batches, 2, self.suite)
+
+    def test_parallel_runner_worker_error_kills_batch_descendants(self):
+        run_parallel, dispatcher = self.dispatcher()
+        real_popen = subprocess.Popen
+
+        def popen(command, *args, **kwargs):
+            if 'test_other.Sample.test_a' in command:
+                self.sleeper_pid()  # fail only once the other batch has its subprocess
+                raise OSError('injected launch failure')
+            return real_popen(command, *args, **kwargs)
+        with mock.patch.object(run_parallel.subprocess, 'Popen', popen):
+            finished, error, pid = self.run_dispatcher(dispatcher)
+        self.assertTrue(finished, 'Dispatcher.run() still blocked after the worker error')
+        self.assertIsInstance(error, OSError)
+        self.assertIn('injected launch failure', str(error))
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the stop')
+
+    def test_parallel_runner_interrupt_kills_batch_descendants(self):
+        run_parallel, dispatcher = self.dispatcher()
+        real_join = threading.Thread.join
+        interrupted = []
+
+        def join(thread, timeout=None):
+            if threading.current_thread().name == 'dispatcher-run' and not interrupted:
+                interrupted.append(True)
+                self.sleeper_pid()
+                raise KeyboardInterrupt
+            return real_join(thread, timeout)
+        with mock.patch.object(threading.Thread, 'join', join):
+            finished, error, pid = self.run_dispatcher(dispatcher)
+        self.assertTrue(finished, 'Dispatcher.run() still blocked after the interrupt')
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the stop')
+
+    def test_parallel_runner_sigterm_kills_batch_descendants(self):
+        # ai-check's `timeout` signals its own process group, which no longer holds the batches.
+        self.write_sleeper()
+        process = subprocess.Popen([sys.executable, str(self.RUNNER), '--start-dir', str(self.suite)],
+                                   cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(process.kill)
+        pid = self.sleeper_pid()
+        process.terminate()
+        output, _ = process.communicate(timeout=self.STOP_BOUND)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the SIGTERM')
 
 
 class TestHarnessTimeoutsTest(unittest.TestCase):

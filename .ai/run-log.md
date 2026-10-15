@@ -299,3 +299,4 @@
 | 2026-10-15T07:16:45Z | runner | T013 | completed | PASS | 2f67891 | Claude checkpointed; continuing queue |
 | 2026-10-15T07:22:54Z | runner | none | queue complete; ready for independent review | PASS | afb2aeb | Human acceptance remains |
 | 2026-10-15T07:27:20Z | runner | triage | review triaged into dispositions/tasks | n/a | c99e77d | Fix tasks run next |
+| 2026-10-15T07:38Z | claude (opus) | T014 | DONE: run_parallel batches in own process groups; stop/interrupt/SIGTERM kill the groups; bounded drain after stop (review M3) | parallel_runner 16 OK; ai-check PASS (685 tests) | see git log | vault hub Log; flow unchanged |
