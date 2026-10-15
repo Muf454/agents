@@ -2,14 +2,14 @@
 
 Project: agents
 Branch: fix/flow-batch-3
-Phase: ready_for_review
+Phase: fixing_review
 Current task: none
 Last completed task: T013
 Tasks complete: 12
-Tasks remaining: 0
+Tasks remaining: 2
 Last validation: PASS at 2026-10-15T07:22:54Z
 Blocked: no
-Next action: Run independent Codex review, then human testing
+Next action: Implement T014 (review M3), then T015 (review N6)
 Last updated: 2026-10-15T07:22:54Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

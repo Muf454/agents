@@ -884,3 +884,84 @@ BLOCKER in current.md → `reviews.code` None, plan intact, via `inspect`, `snap
 and `--json --all`, other run listed). docs/workflow.md dashboard paragraph updated.
 Validation: `-k dashboard_pr_review` Ran 6 tests OK; `.ai/bin/ai-check` OK (Ran 682 tests in 369.5s).
 
+
+## T014 — Parallel runner: stopping a batch terminates its whole process tree (review M3)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+When a worker fails or the run is interrupted, the dispatcher terminates every running batch
+including the subprocesses its tests started, and `Dispatcher.run()` returns (re-raising the
+original error) within a bounded time instead of hanging on a pipe a descendant still holds.
+
+### Implementation notes
+- `tests/run_parallel.py` `run_batch` (~192): start each batch in its own session/process group
+  (`start_new_session=True` on POSIX; the gate runs on Linux/macOS).
+- `stop()` (~224): signal the group (`os.killpg(process.pid, SIGTERM)`), wait up to
+  `TERMINATE_GRACE`, then `SIGKILL` the group; tolerate `ProcessLookupError`/`PermissionError`
+  for groups already gone. Reap the direct child.
+- `communicate()` must not block forever after a stop: after the group kill, either the pipe
+  reaches EOF (all holders killed) or bound it (e.g. `communicate(timeout=…)` in a loop that
+  checks `self.stopping`, then close the pipe). Keep the normal (non-stopped) path unbounded
+  as now: the per-test timeouts own that.
+- Joins in `run()` (~242–247) stay; they must now terminate because workers return.
+- Concurrency: keep the existing "start checked under the lock" invariant; no child may be
+  started after `stop()` collected `running`.
+- Module docstring / README self-check paragraph: one sentence that a stopped batch's process
+  group is terminated, only if they already describe stop behaviour.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py (run_parallel tests ~8546–8680)
+
+### Acceptance criteria
+- New `test_parallel_runner_worker_error_kills_batch_descendants`: a `Dispatcher` with 2 workers
+  where batch 1 runs a test that starts a long sleeping subprocess inheriting stdout (writes its
+  PID to a temp file) and the second launch raises an injected `OSError` (e.g. patch `Popen` to
+  fail on the second call); `run()` raises that `OSError` within a scaled bound (well under the
+  sleeper's duration) and the sleeper PID is gone afterwards. Clean up the PID in `tearDown`
+  regardless of outcome.
+- New `test_parallel_runner_interrupt_kills_batch_descendants`: same sleeper, `stop()` (or a
+  simulated KeyboardInterrupt in `run()`) → `run()` returns/raises within the bound, sleeper gone.
+- Existing `test_parallel_runner_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T015 — Queue reorder recognises task headings with any whitespace after `##` (review N6)
+Status: TODO
+Dependencies: T010
+Model: sonnet
+
+### Goal
+`queue_segments()` classifies headings exactly like `task_blocks()`, so a queue the validator
+accepts (e.g. `##<TAB>T001 — …`) is reordered instead of crashing with `KeyError`.
+
+### Implementation notes
+- `scripts/lib/workflow.py` `queue_segments` (~477): test the task-heading regex
+  `^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$` first, then treat any other `^##\s` line as a `section`
+  (instead of the literal `line.startswith('## ')` gate). Prefer one shared compiled heading
+  regex used by `task_blocks()`, `queue_segments()` and the ~2894 copy if that is a trivial
+  change; no other behaviour change.
+- Ensure a `###` line is still not a section (`^##\s` does not match `###`).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- New `test_queue_reorder_tab_after_hashes`: `##\tT001 — …` (Dependencies: T002) then
+  `## T002 — …` (none) → `tasks_reorder()` writes `T002` before `T001`, no exception, and the
+  result passes the existing queue validator; the T001 heading line is byte-identical.
+- Existing `test_queue_reorder_*` and `test_queue_repair_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k queue_reorder` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+

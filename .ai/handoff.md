@@ -119,6 +119,8 @@ Each group below is a name prefix; `python3 -m unittest discover -s tests -k <gr
   them).
 
 ## Next action
-T001–T005 and T007–T013 are DONE (T006 deferred, see Human todos). Next: another independent
-review. Human afterwards: the checks under
+T001–T005 and T007–T013 are DONE (T006 deferred, see Human todos). Review round 2 triaged
+(`.ai/reviews/dispositions.md`): M3 accepted → T014 (dispatcher kills batch process trees),
+N6 accepted → T015 (tab after `##` in reorder). Next: implement T014, T015, then another
+independent review. Human afterwards: the checks under
 "Needs you", the merge order and the PR review.
