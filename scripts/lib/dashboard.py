@@ -305,7 +305,8 @@ def tasks_of(ai_fd, seen):
 
 PR_URL = re.compile(r'''https://[^\s<>"']+/pull/\d+''')
 PR_LOGGED = re.compile(r'''pull request ready: (https://[^\s<>"']+/pull/\d+)''')
-REVIEW_HEAD = re.compile(r'Host evidence: HEAD ([0-9a-f]{7,40});')
+REVIEW_HEAD = re.compile(r'(?:Host evidence: |Plan review of plan digest [0-9a-f]{64}; )HEAD ([0-9a-f]{7,40});')
+COUNT_DIGITS = 6
 
 
 def pr_of(ai_fd):
@@ -335,11 +336,15 @@ def reviews_of(ai_fd):
         for key, name in (('plan', 'plan.md'), ('code', 'current.md')):
             record = read_record(directory, name, TASKS_LIMIT)
             counts = COUNTS.findall(record[0]) if record else []
-            if len(counts) != 1:
+            if len(counts) != 1 or any(len(count) > COUNT_DIGITS for count in counts[0]):
+                continue
+            try:
+                blocker, major, minor = (int(count) for count in counts[0])
+            except ValueError:
                 continue
             head = REVIEW_HEAD.search(record[0])
-            result[key] = {'blocker': int(counts[0][0]), 'major': int(counts[0][1]),
-                           'minor': int(counts[0][2]), 'head': head[1][:7] if head else ''}
+            result[key] = {'blocker': blocker, 'major': major, 'minor': minor,
+                           'head': head[1][:7] if head else ''}
     finally:
         close_fds(directory)
     return result

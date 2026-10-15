@@ -448,7 +448,9 @@ class SnapshotTest(DashboardTest):
         checkout = self.plant('rev')
         reviews = checkout / '.ai/reviews'
         reviews.mkdir()
-        (reviews / 'plan.md').write_text(self.report(((0, 1, 2),), head='1234567890'))
+        (reviews / 'plan.md').write_text(
+            f'<!-- Plan review of plan digest {"e" * 64}; HEAD 1234567890; saved now. -->\n\n'
+            'Finding counts: BLOCKER=0 MAJOR=1 MINOR=2\n')
         (reviews / 'current.md').write_text(self.report(((3, 0, 4),)))
         run = self.inspect_run(checkout)
         self.assertEqual(run['reviews']['plan'], {'blocker': 0, 'major': 1, 'minor': 2, 'head': '1234567'})
@@ -462,6 +464,22 @@ class SnapshotTest(DashboardTest):
         (reviews / 'plan.md').write_text(self.report(head=''))
         self.assertEqual(self.inspect_run(checkout)['reviews']['plan'],
                          {'blocker': 0, 'major': 1, 'minor': 2, 'head': ''})
+
+    def test_dashboard_pr_review_oversized_count(self):
+        checkout = self.plant('huge')
+        (checkout / '.ai/reviews').mkdir()
+        (checkout / '.ai/reviews/plan.md').write_text(self.report(((0, 1, 2),)))
+        (checkout / '.ai/reviews/current.md').write_text(
+            f'Finding counts: BLOCKER={"9" * 5000} MAJOR=0 MINOR=0\n')
+        self.plant('other', 'build')
+        for run in (dash.inspect(str(checkout), [], time.time()),
+                    next(run for run in dash.snapshot(all_runs=True)['runs'] if run['project'] == 'huge')):
+            self.assertIsNone(run['reviews']['code'])
+            self.assertEqual(run['reviews']['plan'], {'blocker': 0, 'major': 1, 'minor': 2, 'head': 'abc1234'})
+        runs = self.runs('--all')
+        self.assertIsNone(runs['huge']['reviews']['code'])
+        self.assertEqual(runs['huge']['reviews']['plan']['minor'], 2)
+        self.assertEqual(runs['other']['branch'], 'main')
 
     def test_dashboard_pr_review_unsafe_entries(self):
         fifo = self.plant('fifo')

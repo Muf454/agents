@@ -925,7 +925,9 @@ semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the m
 dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
 Each run also reports `pr` (URL from state.md's `Next action:` line or the last `pull request
 ready:` run-log line) and `reviews` (`plan`/`code` finding counts and short reviewed HEAD from
-`.ai/reviews/plan.md` and `current.md`, `null` unless exactly one counts line is found), read
+`.ai/reviews/plan.md` and `current.md`, from the `Plan review of plan digest …; HEAD …;` or
+`Host evidence: HEAD …;` header; `null` unless exactly one counts line with counts of at most six
+digits is found, so a malformed report never stops the dashboard), read
 through the same pinned, bounded readers. They are not checked against the host binding: the
 pipeline stays authoritative.
 Discovery skips a runner process whose environment (`/proc/<pid>/environ`, one bounded

@@ -842,7 +842,7 @@ OK (Ran 681 tests in 395.7s). `docs/workflow.md` notes the preamble rule. No she
 
 
 ## T013 — Dashboard review reader: plan-report HEAD and malformed counts (review N4, N5)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -875,5 +875,12 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_pr_review` (must s
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+2026-10-15 (claude, opus): `REVIEW_HEAD` matches both `Host evidence: HEAD …;` and
+`Plan review of plan digest <sha256>; HEAD …;`. `reviews_of` skips a side whose count group
+exceeds `COUNT_DIGITS` (6) and catches `ValueError` (that side `None`; the shared `COUNTS` regex in
+workflow.py is unchanged). `test_dashboard_pr_review_counts_and_heads` now writes the genuine plan
+header and asserts head `1234567`; new `test_dashboard_pr_review_oversized_count` (5,000-digit
+BLOCKER in current.md → `reviews.code` None, plan intact, via `inspect`, `snapshot(all_runs=True)`
+and `--json --all`, other run listed). docs/workflow.md dashboard paragraph updated.
+Validation: `-k dashboard_pr_review` Ran 6 tests OK; `.ai/bin/ai-check` OK (Ran 682 tests in 369.5s).
 
