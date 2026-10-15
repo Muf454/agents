@@ -288,3 +288,4 @@
 | 2026-10-15T00:30Z | claude (sonnet) | T009 | DONE: `ai-dashboard --wait/--since/--timeout/--interval`; fingerprint + cursor, notifications_mark from events_of (dropped from all printers) | dashboard_wait 7 OK; ai-check PASS (679 tests) | see git log | README, docs/workflow.md; flow unchanged |
 | 2026-10-15T00:01:13Z | runner | T009 | completed | PASS | e79d58f | Claude checkpointed; continuing queue |
 | 2026-10-15T00:01:14Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | 9da5511 | No merge or deployment performed |
+| 2026-10-15T06:30Z | mission control (claude) | T006 | removed from the queue at Zack's request (BLOCKED: runner may not profile); kept in the vault backlog as FL-23 follow-up; T010 no longer depends on it | n/a | (this commit) | pipeline restart follows |

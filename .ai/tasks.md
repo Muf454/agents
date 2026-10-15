@@ -524,81 +524,6 @@ locally: before (T004) 381.8 s wall, test time 2841.7 s; after 393.7 s wall, tes
 (noise). The gain is for GitHub runners with a disk-backed /tmp and fsync (check in CI).
 
 
-## T006 — Make the slowest tests cheaper (FL-23, part 4)
-Status: BLOCKED
-Dependencies: T004, T005
-Model: sonnet
-
-### Goal
-Cut the suite's total test time substantially so it runs well under 10 minutes on a 4-CPU
-runner, by removing repeated work in the slowest tests, never by testing less.
-
-### Implementation notes
-- Start from the gate's slowest-15 list and test-time sum (T004). Profile the top entries
-  (e.g. count processes per test: wrap `python3`/`git`/`bash` invocations through a counting
-  `PATH` shim in a scratch run, or `python3 -m cProfile` on a single test) and record what
-  dominates in the result before changing anything.
-- Candidates, in order of expected value; do only what the measurement supports:
-  1. fixture setup repeated per test (`setup_project` + bootstrap commit + `ready()`): build it
-     once per test class/process into a cache dir (`setUpClass` or a module-level cache keyed
-     by the toolkit source digest) and `shutil.copytree(symlinks=True)` it per test (git
-     repos copy fine); tests that inspect setup itself keep the real path;
-  2. supervised/pipeline tests that run more pipeline stages than their assertions need
-     (e.g. a full implementation after the plan-revision assertions): stop them earlier only
-     where the asserted behaviour is fully covered before that point and the test's name/goal
-     does not include the later stages; list every such change in the result;
-  3. redundant helper processes in hot script paths (the same `ai_helper` query several times
-     in a row with nothing in between): behaviour-preserving only, every existing test
-     unchanged.
-- Hard constraints: every existing test ID still exists and keeps its assertions (compare the
-  discovered ID list before and after: no ID removed or renamed); new tests (e.g.
-  `test_fixture_cache_*`) may raise the count, documented in the result; collected and executed
-  counts stay equal (the run_parallel count check); no assertion removed or weakened, no test
-  skipped, no `__pycache__`/bytecode written under any `.ai/bin` (part of the
-  gate digest: `dashboard.py` sets `sys.dont_write_bytecode` for this reason), no
-  change to `.ai/validate`.
-- Record in the result: before/after `Ran … in …`, test-time sum, slowest 15, CPU count, and
-  an estimate for 4 CPUs (test-time sum / 4 × the CI slowdown observed in PR #27: ~1300 s
-  shards vs ~6 min locally). Flow unchanged.
-
-### Likely affected modules
-tests/test_workflow.py, possibly scripts/ai-pipeline, scripts/ai-run, scripts/lib/workflow.py
-(behaviour-preserving only)
-
-### Acceptance criteria
-- The test-time sum reported by the gate is at least 30% below T004's baseline, or the result
-  shows the measurements, what was tried and why the rest is out of reach without weakening
-  tests (then the task is still DONE if the measured top hot spots were addressed; say so
-  plainly).
-- Every test ID discovered before the task is still discovered (the result lists the before and
-  after counts and any added IDs); collected equals executed; every existing test passes; no `.ai/bin/**/__pycache__`
-  appears in any fixture (add `test_fixture_cache_*` tests for a fixture cache if one is added:
-  a cached fixture is independent per test — a test that writes to its project does not
-  affect the next one).
-
-### Validation
-Targeted: `python3 -m unittest discover -s tests -k fixture_cache` (only if a cache was added; must say `Ran N tests`, N ≥ 1).
-Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
-
-### Result / notes
-BLOCKED, no source change made. The task requires profiling the slowest tests before changing
-anything, and the session's permissions deny the commands needed for that: `python3 -I
-/tmp/t6time.py` (an ad-hoc timing script) and `python3 -m cProfile -s tottime -m unittest
-discover -s tests -k <test>` were both refused ("Permission to use Bash has been denied ...
-don't ask mode"). Only `python3 -m unittest discover -s tests -k ...` is allowed.
-What was measured with allowed commands (16 CPUs):
-- `-k setup_dry_run_preservation` (three `setup-project` runs): 0.221 s. A single fixture setup
-  is therefore well under 0.1 s, so candidate 1 (fixture cache) cannot account for the
-  25-29 s tests; it is not supported by the measurement and was not built.
-- `-k extra_fix_round_clean_review_after_it_opens_a_ready_pr` (with the above): 25.6 s. The
-  test is `ready()` + `add_origin()` + one `ai-pipeline` run with 3 fix rounds, so the time is
-  inside the pipeline (gate runs, triage, mock CLI processes), not in test setup.
-Needed from the human: either allow a profiling command (e.g. `python3 -m cProfile`, or a
-`PATH` shim for `python3`/`git`/`bash`) for the runner, or run the profile and name the
-dominant cost; then T006 can target candidates 2/3 (pipeline stages or repeated `ai_helper`
-queries). Baseline numbers remain T004's (Ran 648 tests in 381.8 s, Test time 2841.7 s).
-
-
 ## T007 — Dashboard ignores test fixture runners (DB-05)
 Status: DONE
 Dependencies: none
@@ -815,7 +740,7 @@ size and mtime_ns cover appends of identical lines). `test_dashboard_wait_*` (7 
 
 ## T010 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T011, T003, T004, T005, T006, T007, T008, T009
+Dependencies: T001, T002, T011, T003, T004, T005, T007, T008, T009
 Model: haiku
 
 ### Goal
@@ -823,6 +748,8 @@ README, `docs/workflow.md`, the vault flow chart and the handoff describe what t
 does; the human knows which CI, vault and gate steps remain.
 
 ### Implementation notes
+T006 (FL-23 part 4, make the slowest tests cheaper) was removed from this batch by Zack on 2026-10-15 after it was BLOCKED (the runner may not run profiling commands); its notes and measurements are in the vault backlog (FL-23, follow-up). Record it as deferred in the handoff and docs.
+
 - Check each sentence the tasks added (README, `docs/workflow.md`) against the code once:
   `ai-task reorder`, the host reorder and the revision-recovery repair (T001/T002/T011), test timeouts and `CI` scale (T003), the
   timing report and batches (T004), tmpfs temp dir and `AI_TEST_TMPFS` (T005),
