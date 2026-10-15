@@ -951,7 +951,7 @@ Limitation: SIGKILL of a group after its leader was reaped could in theory hit a
 the kill (its pipe is abandoned after `DRAIN_GRACE`).
 
 ## T015 — Queue reorder recognises task headings with any whitespace after `##` (review N6)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: sonnet
 
@@ -981,5 +981,8 @@ Targeted: `python3 -m unittest discover -s tests -k queue_reorder` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+`queue_segments()` now tests the task-heading regex first and treats any other `^##\s` line as a
+section, so it classifies headings like `task_blocks()` (`###` still not a section). Added
+`test_queue_reorder_tab_after_hashes`. Targeted `-k queue_reorder -k queue_repair`: 15 OK;
+`.ai/bin/ai-check` PASS (686 tests, 348.0 s). Did not merge the three regex copies (not trivial).
 

@@ -2270,6 +2270,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text), ['T002', 'T001'])
         self.helper('tasks', 'check')
 
+    def test_queue_reorder_tab_after_hashes(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        first = task('T001', dependencies='T002').replace('## T001', '##\tT001', 1)
+        queue.write_text(first + task('T002'))
+        self.helper('tasks', 'check', expected=1)
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): T002 T001')
+        text = queue.read_text()
+        self.assertIn('\n##\tT001 — ', text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith('##\t')],
+                         [line for line in first.splitlines() if line.startswith('##\t')])
+        self.assertLess(text.index('## T002 — '), text.index('##\tT001 — '))
+        self.helper('tasks', 'check')
+
     def test_queue_reorder_command(self):
         self.ready()
         (self.project / '.ai/tasks.md').write_text(self.night_queue())

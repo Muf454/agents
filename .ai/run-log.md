@@ -301,3 +301,4 @@
 | 2026-10-15T07:27:20Z | runner | triage | review triaged into dispositions/tasks | n/a | c99e77d | Fix tasks run next |
 | 2026-10-15T07:38Z | claude (opus) | T014 | DONE: run_parallel batches in own process groups; stop/interrupt/SIGTERM kill the groups; bounded drain after stop (review M3) | parallel_runner 16 OK; ai-check PASS (685 tests) | see git log | vault hub Log; flow unchanged |
 | 2026-10-15T07:43:36Z | runner | T014 | completed | PASS | 35f312c | Claude checkpointed; continuing queue |
+| 2026-10-15T07:55Z | claude (sonnet) | T015 | DONE: `queue_segments` classifies headings like `task_blocks` (`##<TAB>T001 — …` reorders, no KeyError; review N6) | queue_reorder+repair 15 OK; ai-check PASS (686 tests) | see git log | flow unchanged |

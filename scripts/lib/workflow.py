@@ -474,11 +474,11 @@ def queue_segments(text):
                 fence = value
             elif value[0] == fence[0] and len(value) >= len(fence):
                 fence = None
-        elif not fence and line.startswith('## '):
+        elif not fence:
             heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
             if heading:
                 segments.append(('task', heading.group(1), []))
-            else:
+            elif re.match(r'^##\s', line):
                 segments.append(('section', line.strip(), []))
         segments[-1][2].append(line)
     return segments
