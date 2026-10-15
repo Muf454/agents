@@ -292,3 +292,4 @@
 | 2026-10-15T06:30Z | mission control (claude) | T006 | removed from the queue at Zack's request (BLOCKED: runner may not profile); kept in the vault backlog as FL-23 follow-up; T010 no longer depends on it | n/a | (this commit) | pipeline restart follows |
 | 2026-10-15T06:34:53Z | runner | T010 | completed | PASS | 09410ee | Claude checkpointed; continuing queue |
 | 2026-10-15T06:41:30Z | runner | none | queue complete; ready for independent review | PASS | 1699c97 | Human acceptance remains |
+| 2026-10-15T06:47:53Z | runner | triage | review triaged into dispositions/tasks | n/a | 63b8408 | Fix tasks run next |
