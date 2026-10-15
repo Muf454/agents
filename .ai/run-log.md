@@ -296,3 +296,4 @@
 | 2026-10-15T07:05Z | claude (opus) | T012 | DONE: `tasks reorder` keeps `## ` sections before the first task as preamble; only a section between tasks blocks (review M2) | queue_reorder 6 OK, queue_repair 8 OK; ai-check PASS (681 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |
 | 2026-10-15T07:03:09Z | runner | T012 | completed | PASS | bb7d82e | Claude checkpointed; continuing queue |
 | 2026-10-15T07:20Z | claude (opus) | T013 | DONE: dashboard review reader parses genuine plan-report HEAD; counts over 6 digits → that side null (review N4, N5) | dashboard_pr_review 6 OK; ai-check PASS (682 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |
+| 2026-10-15T07:16:45Z | runner | T013 | completed | PASS | 2f67891 | Claude checkpointed; continuing queue |
