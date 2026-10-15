@@ -245,11 +245,12 @@ if 'PLANNING CONTRACT' in prompt:
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
-    if mode in ('plan-out-of-order', 'plan-bad-queue'):
+    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
     if mode == 'plan-bad-queue':
         second = second.replace('Dependencies: none', 'Dependencies: T001')
-    pathlib.Path('.ai/tasks.md').write_text('# Task queue\n\n' + first + second)
+    preamble = '## Context\nKeep this intro.\n\n' if mode == 'plan-preamble-section' else ''
+    pathlib.Path('.ai/tasks.md').write_text('# Task queue\n\n' + preamble + first + second)
     with open('.ai/project-spec.md', 'a') as f: f.write('\nObjective from the planning session.\n')
     if mode == 'plan-outside':
         pathlib.Path('src.txt').write_text('not allowed in planning\n')
@@ -2256,6 +2257,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertIn(message, result.stderr)
             self.assertEqual(queue.read_text(), text)
 
+    def test_queue_reorder_preamble_sections_are_kept(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        preamble = '# Queue\n\n## Context\nKeep this intro.\n\n'
+        queue.write_text(preamble + task('T001', dependencies='T002') + task('T002'))
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): T002 T001')
+        text = queue.read_text()
+        self.assertTrue(text.startswith(preamble + '## T002 — '))
+        self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text), ['T002', 'T001'])
+        self.helper('tasks', 'check')
+
     def test_queue_reorder_command(self):
         self.ready()
         (self.project / '.ai/tasks.md').write_text(self.night_queue())
@@ -3594,6 +3607,16 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((after['stage'], after['state']), ('planning', 'done'))
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
         self.assertIn('rejects cycles, unknown IDs and prose', self.plan_prompt())
+
+    def test_queue_repair_planning_preamble_section_reorders(self):
+        self.plan_ready()
+        result = self.plan(MOCK_CLAUDE='plan-preamble-section')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertTrue(queue.startswith('# Task queue\n\n## Context\nKeep this intro.\n\n## T002 — '))
+        self.assertEqual(self.queue_ids(queue), ['T002', 'T001'])
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state']), ('planning', 'done'))
 
     def test_queue_repair_planning_cycle_stops_and_keeps_the_file(self):
         self.plan_ready()

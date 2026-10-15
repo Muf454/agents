@@ -293,3 +293,4 @@
 | 2026-10-15T06:34:53Z | runner | T010 | completed | PASS | 09410ee | Claude checkpointed; continuing queue |
 | 2026-10-15T06:41:30Z | runner | none | queue complete; ready for independent review | PASS | 1699c97 | Human acceptance remains |
 | 2026-10-15T06:47:53Z | runner | triage | review triaged into dispositions/tasks | n/a | 63b8408 | Fix tasks run next |
+| 2026-10-15T07:05Z | claude (opus) | T012 | DONE: `tasks reorder` keeps `## ` sections before the first task as preamble; only a section between tasks blocks (review M2) | queue_reorder 6 OK, queue_repair 8 OK; ai-check PASS (681 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |

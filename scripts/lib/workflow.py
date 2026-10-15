@@ -527,12 +527,14 @@ def tasks_reorder():
     if order == ids:
         return
     segments = queue_segments(text)
-    last = max(index for index, segment in enumerate(segments) if segment[0] == 'task')
-    for segment in segments[:last]:
+    positions = [index for index, segment in enumerate(segments) if segment[0] == 'task']
+    first, last = positions[0], positions[-1]
+    for segment in segments[first:last]:
         if segment[0] == 'section':
             fail(f'cannot reorder: section "{segment[1]}" sits between tasks')
     by_id = {key: lines for kind, key, lines in segments if kind == 'task'}
-    out = [line for line in segments[0][2]]
+    # Everything before the first task (including ordinary ## sections) is the preamble, kept as is.
+    out = [line for segment in segments[:first] for line in segment[2]]
     for position, task_id in enumerate(order):
         lines = list(by_id[task_id])
         if position < len(order) - 1 or last < len(segments) - 1:

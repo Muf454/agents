@@ -794,7 +794,7 @@ DONE (2026-10-15). Evidence:
 
 
 ## T012 — Queue reorder keeps non-task sections before the first task as preamble (review M2)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -830,6 +830,15 @@ Targeted: `python3 -m unittest discover -s tests -k queue_repair` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-15 (claude, opus): `tasks_reorder` now takes the first and last task segments; every
+segment before the first task (the `pre` text and any `## ` sections) is written back unchanged as
+the preamble, and only a `section` strictly between the first and last task is rejected (same
+error text). New `test_queue_reorder_preamble_sections_are_kept` (preamble `# Queue` + `## Context`
+byte-identical, order `T002 T001`) and `test_queue_repair_planning_preamble_section_reorders`
+(mock `plan-preamble-section`: `ai-run --plan` repairs a queue with a `## Context` preamble);
+`test_queue_reorder_rejects_what_it_cannot_repair` unchanged and passing (`## Notes` between
+tasks). `-k queue_reorder`: Ran 6 tests OK; `-k queue_repair`: Ran 8 tests OK; `.ai/bin/ai-check`
+OK (Ran 681 tests in 395.7s). `docs/workflow.md` notes the preamble rule. No shell changes.
 
 
 ## T013 — Dashboard review reader: plan-report HEAD and malformed counts (review N4, N5)

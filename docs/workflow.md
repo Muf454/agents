@@ -384,7 +384,9 @@ Before the plan review (review on or off) the queue is validated like `ai-task c
 invalid queue stops with `Task queue is invalid: …` and recovery always escalates it.
 `ai-task reorder` (`workflow.py tasks reorder`) repairs a queue whose tasks depend on later
 tasks: stable depth-first order, task text unchanged, nothing written when already ordered;
-cycles, unknown IDs and prose in `Dependencies:` are rejected.
+cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before the first task
+(including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
+`## ` section between two tasks blocks reordering.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only

@@ -16,6 +16,8 @@ T006 removed from the batch (BLOCKED: the runner may not run profiling commands)
 the vault backlog as the FL-23 follow-up; no test was changed for it. T007 DONE (2026-10-15): dashboard
 discovery skips a runner whose `/proc/<pid>/environ` holds `AI_DASHBOARD_IGNORE=1` (bounded,
 non-blocking regular-file read; registered checkouts still listed); `ToolkitTest` sets it.
+T012 DONE (2026-10-15, review M2): `tasks reorder` keeps ordinary `## ` sections before the first
+task as preamble; only a section between two tasks blocks reordering.
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
 - T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
@@ -39,7 +41,7 @@ See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
 T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after). T007: passed, `Ran 667 tests in 371.4s`. T009: passed (679 tests). T010: see the task result
-(final gate run after the docs audit).
+(final gate run after the docs audit). T012: passed (681 tests).
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
@@ -84,6 +86,8 @@ description in the chart).
 ### Covered by automated tests
 Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its tests.
 - `test_queue_reorder_*` (T001), `test_queue_repair_*` (T002), `test_queue_recovery_*` (T011).
+  A `## Context` section before the first task is kept (T012):
+  `test_queue_reorder_preamble_sections_are_kept`, `test_queue_repair_planning_preamble_section_reorders`.
 - `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004), `test_fixture_io_*` (T005).
   `test_fixture_cache_*` (T006) was not added: T006 is deferred.
 - `test_dashboard_ignore_*` (T007): `test_dashboard_ignore_marked_runner_unless_registered`,
@@ -112,6 +116,6 @@ Each group below is a name prefix; `python3 -m unittest discover -s tests -k <gr
   them).
 
 ## Next action
-T001–T005 and T007–T011 are DONE (T006 deferred, see Human todos). The queue is complete once T010
-is checkpointed; the phase then moves to `ready_for_review`. Human afterwards: the checks under
+T001–T005 and T007–T012 are DONE (T006 deferred, see Human todos). Review fix T013 (N4, N5) is
+next; then another independent review. Human afterwards: the checks under
 "Needs you", the merge order and the PR review.
