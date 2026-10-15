@@ -298,3 +298,4 @@
 | 2026-10-15T07:20Z | claude (opus) | T013 | DONE: dashboard review reader parses genuine plan-report HEAD; counts over 6 digits → that side null (review N4, N5) | dashboard_pr_review 6 OK; ai-check PASS (682 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |
 | 2026-10-15T07:16:45Z | runner | T013 | completed | PASS | 2f67891 | Claude checkpointed; continuing queue |
 | 2026-10-15T07:22:54Z | runner | none | queue complete; ready for independent review | PASS | afb2aeb | Human acceptance remains |
+| 2026-10-15T07:27:20Z | runner | triage | review triaged into dispositions/tasks | n/a | c99e77d | Fix tasks run next |

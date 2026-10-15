@@ -9,8 +9,8 @@ Tasks complete: 12
 Tasks remaining: 2
 Last validation: PASS at 2026-10-15T07:22:54Z
 Blocked: no
-Next action: Implement T014 (review M3), then T015 (review N6)
-Last updated: 2026-10-15T07:22:54Z
+Next action: Run the fix tasks, then review again
+Last updated: 2026-10-15T07:27:20Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
