@@ -792,3 +792,79 @@ DONE (2026-10-15). Evidence:
 - Vault: `agents-flow.md` already reflects T002 and T011 (the plan box, revision node, plan stop, recovery box); the dashboard tasks (T007–T009) left the flow unchanged. Hub Log line appended. No checkboxes ticked.
 - Limitation: the CI run, the supervised plan revision and the dashboard checks under "Needs you" are not exercised here (no network, no real runs).
 
+
+## T012 — Queue reorder keeps non-task sections before the first task as preamble (review M2)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+A queue with ordinary `## ` sections (e.g. `## Context`) before its first task is reordered
+like one without them; only a non-task section between two tasks blocks reordering.
+
+### Implementation notes
+- `scripts/lib/workflow.py` `tasks_reorder` (~527–545): find the first and the last `task`
+  segment. Everything before the first task (the `pre` segment and any `section` segments) is
+  the preamble, written back unchanged; reject only `section` segments strictly between the
+  first and last task (same error text). Everything after the last task stays as now.
+- Consider sharing the heading/fence classification between `task_blocks()` and
+  `queue_segments()` only if trivial; no behaviour change beyond the fix.
+- `revision-queue-repair` (T011) and the host reorder in `ai-run` (T002) call the same
+  function; no shell changes expected.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- New `test_queue_reorder_preamble_sections_are_kept`: a queue with `# Queue`, `## Context`
+  text, then `T001 (Dependencies: T002)`, `T002 (none)` becomes `T002 T001`; the preamble,
+  including `## Context` and its text, is byte-identical and still before the first task.
+- `test_queue_reorder_rejects_what_it_cannot_repair` still rejects a section between tasks.
+- New `test_queue_repair_planning_preamble_section_reorders` (or equivalent planning/revision
+  path test) shows the host repair succeeds with a preamble section.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k queue_reorder` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k queue_repair` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T013 — Dashboard review reader: plan-report HEAD and malformed counts (review N4, N5)
+Status: TODO
+Dependencies: T010
+Model: opus
+
+### Goal
+`reviews.plan.head` shows the HEAD of genuine plan reports, and a malformed count line yields
+`None` for that side instead of crashing the dashboard.
+
+### Implementation notes
+- `scripts/lib/dashboard.py` `REVIEW_HEAD` (~308): also match the plan header written by
+  `publish_plan_review()` (`workflow.py` ~2174:
+  `<!-- Plan review of plan digest <sha256>; HEAD <sha>; saved … -->`), e.g. one regex for
+  `(?:Host evidence: |Plan review of plan digest [0-9a-f]{64}; )HEAD ([0-9a-f]{7,40});`.
+- `reviews_of` (~340): bound each count (e.g. reject groups longer than 6 digits) and catch
+  `ValueError`, leaving that side `None`; the other side and other runs are unaffected.
+- Fix `test_dashboard_pr_review_counts_and_heads` to use the real plan header format.
+
+### Likely affected modules
+scripts/lib/dashboard.py, tests/test_dashboard.py
+
+### Acceptance criteria
+- `test_dashboard_pr_review_counts_and_heads` writes plan.md with a genuine
+  `Plan review of plan digest …; HEAD …;` header and asserts its short head.
+- New `test_dashboard_pr_review_oversized_count`: a current.md counts line with a
+  5,000-digit BLOCKER value → `reviews.code` is `None`, `reviews.plan` and other runs in
+  `snapshot()`/`--json` intact, no exception.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k dashboard_pr_review` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
