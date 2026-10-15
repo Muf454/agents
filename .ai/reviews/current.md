@@ -1,46 +1,41 @@
-<!-- Host evidence: HEAD 9d3e9be2a0e52a975c280e7868406798d146740e; merge-base 744827a5212847d9734d197559321ca1c7f042cc; saved 2026-10-13T06:27:34Z. -->
+<!-- Host evidence: HEAD e36de5797c8a74888f98eed29e70735e7208fd1d; merge-base 5894c2b23e0fc29fe3ab225a2bda707889967f91; saved 2026-10-15T06:46:54Z. -->
 
 # Independent review
 
-Overall verdict: PASS WITH MINOR FINDINGS. The accepted previous-round findings are fixed. No BLOCKER or MAJOR finding remains in the inspected scope; two localized issues remain.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Overall verdict: CHANGES REQUIRED. Queue repair rejects a supported preamble layout; two dashboard parsing defects also remain.
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
 
-Reviewed HEAD: `9d3e9be2a0e52a975c280e7868406798d146740e`
+Reviewed HEAD: `e36de5797c8a74888f98eed29e70735e7208fd1d`
 
-Supplied base and merge-base: `744827a5212847d9734d197559321ca1c7f042cc`
+Supplied base and merge-base: `5894c2b23e0fc29fe3ab225a2bda707889967f91`
 
-Checkout was clean before and after review. No files were written; no network or MCP integrations were invoked.
+Checkout was clean. No files were written; no network or MCP integrations were invoked.
 
 ## Scope and validation
 
-Inspected AGENTS.md, the spec, plan, tasks, state, handoff, review dispositions, relevant documentation, Git history, the full supplied diff, changes since `e8eb6c8`, and affected source and tests.
+Inspected repository instructions, spec, plan, tasks, state, handoff, plan reviews/dispositions, relevant documentation, Git history, the supplied diff, and affected source/tests. Also inspected the vault flow chart and relevant hub Log entries: the chart contains the T002/T011 changes and `updated: 2026-10-15`.
 
-Validation evidence observed:
+Validation observed:
 
-- `.ai/local/validation.json`: PASS, exit 0, unchanged content, timestamp `2026-10-13T06:20:04Z`.
-- Referenced log: **619 tests passed in 355.1 seconds**, across eight shards.
-- `python3 -B scripts/lib/workflow.py stamp verify` passed against the reviewed checkout. Changes after the recorded validation revision affect only excluded state/run-log bookkeeping.
+- `.ai/local/validation.json`: PASS, exit 0, timestamp `2026-10-15T06:41:30Z`.
+- Referenced log: **679 tests passed in 396.1 seconds**, using 48 batches on eight workers.
+- `python3 -B scripts/lib/workflow.py stamp verify` passed against the reviewed checkout.
+- Changes after the recorded validation revision affect only excluded state/run-log bookkeeping.
 
 Checks run:
 
 - Shell syntax: 13 files passed.
-- Python AST parsing: three affected helper modules passed.
-- Test discovery: 619 tests collected.
-- Thirteen pure renderer test bodies passed with the suite’s UTC setting retained; filesystem fixture setup was omitted.
-- Three sanitization tests passed.
-- Current task queue validation passed: 13 DONE of 13 tasks.
-- Seven in-memory cases exercised the actual DONE-preservation helper.
-- Actual watchdog transition statements were exercised in memory for legacy deduplication, clearing, reconfirmation and planning suppression.
-- A read-only process-launch reproduction confirmed N2.
-- `git diff --check` reported an extra EOF blank line in `.ai/tasks.md:872`.
+- Python AST parsing: seven changed files passed.
+- Current task queue validation passed.
+- Test discovery collected 679 tests.
+- No existing test methods were removed or renamed.
+- Six documentation/sanitization tests passed.
+- Three pure renderer/parser test bodies passed with filesystem setup omitted.
+- In-memory checks covered batch partitioning, timeout scaling, cursor round-trip, wait change/timeout behavior, and identical-content notification replacement.
+- Read-only reproductions confirmed the findings below.
+- `git diff --check` passed.
 
-The full `./scripts/ai-check` suite was not rerun because it writes validation records and temporary test checkouts. The isolated helper checks do not substitute for shell integration tests.
-
-## Previous-round verification
-
-**M1 — fixed by T012.** The host captures the working queue before planning and supplies that baseline to the post-session preservation check. The helper protects the union of committed and working-tree DONE tasks. In-memory checks rejected removal, status changes, result edits and fenced-content edits; unchanged blocks passed. The added integration tests cover both revision-flag variants and baseline cleanup.
-
-**N1 — fixed by T013.** An unchanged legacy record with `active: ["stalled"]` remains confirmed without becoming fresh. The checked transitions preserved deduplication, cleared the incident when appropriate, and required confirmation when it returned. The added regression test also asserts no repeated notification or diagnosis.
+The full `./scripts/ai-check` was not rerun because it writes validation records and fixture checkouts. The four-CPU CI performance target remains unverified.
 
 ## BLOCKER findings
 
@@ -48,78 +43,111 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-None found in the inspected scope.
+### M2 — Queue repair rejects non-task headings in the preamble
+
+**Location:** `scripts/lib/workflow.py:531`, `scripts/lib/workflow.py:535`.
+
+**Requirement:** FL-24/T001 defines the preamble as everything before the first task heading. Only a non-task `## ` section **between two tasks** should prevent reordering.
+
+**Problem:** The rejection scans every segment before the last task, including preamble sections. Reconstruction also retains only the initial `pre` segment.
+
+**Evidence:** Running the actual reorder function against an in-memory queue containing:
+
+```markdown
+# Queue
+
+## Context
+Keep this intro.
+
+## T001 — ...
+Dependencies: T002
+...
+## T002 — ...
+Dependencies: none
+...
+```
+
+raises `cannot reorder: section "## Context" sits between tasks`, without writing. The otherwise identical queue without `## Context` successfully becomes `T002 T001`.
+
+**Impact:** A repairable queue with ordinary introductory Markdown sections stops planning or revision. Revision recovery then escalates to the human, defeating FL-24 for this supported layout.
+
+**Recommended direction:** Identify the first and last task segments. Preserve everything before the first task as the preamble, and reject non-task sections only between those boundaries. Add helper and planning/revision regression coverage.
 
 ## MINOR findings
 
-### N2 — Accepted large planning objectives cannot reach Claude
+### N4 — Real plan-review reports always lose their reviewed HEAD
 
-**Location:** `scripts/ai-run:54`, `scripts/ai-run:297`, `scripts/ai-run:263`.
+**Location:** `scripts/lib/dashboard.py:308`, `scripts/lib/dashboard.py:340`.
 
-**Requirement:** DB-04’s planning input contract accepts a regular prompt file up to 200 KB.
+**Requirement:** DB-02/T008 requires the short reviewed HEAD for both plan and code reports, so users can identify stale results.
 
-**Problem:** The file check accepts 204,800 bytes, but the complete objective, planning template and contract are passed as one command-line argument. Linux rejects sufficiently large individual arguments before the command starts.
+**Problem:** `REVIEW_HEAD` recognizes only `Host evidence: HEAD …;`. Actual plan reports use `Plan review of plan digest …; HEAD …;`, as produced by `publish_plan_review()`.
 
-**Evidence:** On this machine, launching `timeout` with a 102,400-byte argument succeeded; the same launch with a 153,600-byte argument raised `OSError: [Errno 7] Argument list too long`. A 150 KiB ASCII objective passes the file-size check and necessarily produces an even larger assembled prompt.
+**Evidence:** Reading this checkout’s actual reports through `reviews_of()` returned:
 
-**Impact:** Some inputs within the advertised limit stop before Claude runs. Existing planning tests use small objectives and miss this boundary.
+```json
+{"plan":{"blocker":0,"major":0,"minor":2,"head":""}}
+```
 
-**Recommended direction:** Use a supported stdin/file transport for the assembled prompt, or validate its final encoded size and document a smaller supported limit. Add a shell integration test with a large objective within the advertised range.
+The plan report’s header contains HEAD `e5e68b0b75e0ed3812d63ba0fec5049b9a121652`. The added test fabricates a code-review header for the plan report, hiding the mismatch.
 
-The shared argument transport predates this change; the new planning mode’s accepted input range exposes the gap.
+**Impact:** JSON and expanded details omit the reviewed revision for genuine plan reviews.
 
-### N3 — README misstates how older observation records render
+**Recommended direction:** Parse both real header formats and use a genuine plan-report header in the regression test.
 
-**Location:** `README.md:614`.
+### N5 — A malformed finding count can crash the entire dashboard
 
-**Requirement:** DB-04 says every observation whose stage is not `planning` ticks Plan; only absent or unusable observations leave it unticked.
+**Location:** `scripts/lib/dashboard.py:341`.
 
-**Problem:** README groups “an old record” with missing records and says Plan remains unticked with “stage unknown”. Older valid records at `build`, for example, tick Plan.
+**Requirement:** T008 explicitly requires unreadable or malformed review data to produce empty values, never an exception.
 
-**Evidence:** The renderer’s preceding-box rule ticks Plan for a build observation. `tests/test_dashboard.py:874` explicitly covers an older build record and expects the Plan box to be done. The pure build-renderer checks passed during this review.
+**Problem:** Finding-count conversion uses unchecked `int()` calls. The bounded reader permits count strings longer than Python’s integer-conversion limit.
 
-**Impact:** Upgrade documentation gives users the wrong expectation for existing dashboard cards.
+**Evidence:** Supplying the actual reader function with one counts line whose `BLOCKER` value contains 5,000 digits raises:
 
-**Recommended direction:** Distinguish older valid observation records from checkouts with no usable observation record.
+```text
+ValueError: Exceeds the limit (4300 digits) for integer string conversion
+```
+
+This exception propagates through `inspect()` and `snapshot()`.
+
+**Impact:** One malformed agent-writable report prevents the dashboard from showing every checkout, including during `--wait`.
+
+**Recommended direction:** Bound numeric fields and handle conversion failures per report, returning `None` for the malformed side. Test that other runs remain available.
 
 ## Missing coverage
 
-- Large accepted objectives and assembled prompt-size boundaries, as described in N2.
-- Live Claude permission enforcement and real systemd scheduling remain dependent on human checks.
-
-The previous gaps concerning uncommitted DONE tasks and already-active legacy stalls now have relevant regression coverage.
+- Preamble sections before reordered tasks.
+- Genuine plan-report headers and oversized numeric counts.
+- Dispatcher interruption and worker-launch failure cleanup, previously suggested by plan finding P9.
+- Notification retention rollover through the real writer, previously suggested by P8. The in-memory replacement check does not replace that integration test.
+- Some new dashboard tests pass literal CLI timeout values, outside the named/scaled timeout convention.
 
 ## Security concerns
 
-No additional demonstrated security finding in the inspected changes.
-
-Planning exposes no Bash tool and restricts Edit/Write to the six plan records. Post-session checks follow gate verification; the gate-change regression checks that an altered helper is not executed. Lock rejection preserves the owner’s records.
-
-The documented `chmod +x` prefix rule cannot constrain paths to the checkout. Offline assertions verify the template, not real CLI enforcement.
+N5 is an availability defect in the advisory dashboard reader. The inspected additions otherwise retain pinned, bounded, no-follow readers and keep review counts informational. No additional demonstrated authorization or security defect was found.
 
 ## Architecture concerns
 
-The implementation reuses existing scripts and standard-library helpers without adding dependencies. The new planning stage fits the observation and dashboard structure.
+The changes retain standard-library dependencies and existing host authority boundaries. Queue parsing is duplicated between `task_blocks()` and `queue_segments()`; shared classification rules would reduce drift.
 
-N2 concerns the prompt transport boundary. No separate pre-existing defect is counted.
+Accepted plan concerns about early recovery repair, executable tmpfs probing, and notification identity have corresponding implementation and regression coverage.
+
+T006 was explicitly deferred in commit `cb69048`; it is not counted as missing implementation. The older code-review artifact concerns a different range; its pre-existing findings are separate from this report’s introduced defects.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Verify a real planning session’s permissions, notifications, dashboard transitions and uncommitted output in a scratch checkout.
-- Verify allowed `chmod +x` and denied alternate modes with the real Claude CLI.
-- Verify timer scheduling after installation/upgrade and relaunch behavior during recovery.
-- Complete the handoff’s pending vault flow-chart, gate and timer-update steps before merging.
+- Confirm the PR’s self-check passes well under ten minutes on the intended four-CPU runner.
+- Exercise a real supervised revision and crash/resume in a scratch project.
+- Confirm fixture pipelines stay hidden while real pipelines remain visible.
+- Check dashboard review details and cursor-based waiting on live runs.
 
 ### Covered by automated tests
 
-- Queue rejection and recovery escalation.
-- Default and explicit session budgets, including runs beyond session 16.
-- Lock-owner hints and preservation of existing records.
-- Stall confirmation and legacy deduplication.
-- Planning outcomes, gate changes and DONE-block preservation.
-- Dashboard stages, widths and legacy records.
-- Add the large-objective regression described in N2.
+- Existing coverage addresses queue ordering, cycles, DONE preservation, revision recovery, environment filtering, review counts, and wait transitions.
+- Add the regressions described in M2, N4 and N5.
+- Add deterministic dispatcher cleanup and notification-retention tests.
 
 Reviewing does not constitute human acceptance.
