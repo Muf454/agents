@@ -739,7 +739,7 @@ size and mtime_ns cover appends of identical lines). `test_dashboard_wait_*` (7 
 
 
 ## T010 — Docs, handoff and final audit for the batch
-Status: TODO
+Status: DONE
 Dependencies: T001, T002, T011, T003, T004, T005, T007, T008, T009
 Model: haiku
 
@@ -783,4 +783,12 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE (2026-10-15). Evidence:
+- `-k Docs`: Ran 3 tests, OK. `-k flow_this_repo`: Ran 1 test, OK.
+- `.ai/bin/ai-check`: PASS, `Ran 679 tests in 390.8s (48 batches on 8 workers, 679 collected)`, test time 2816.8 s.
+- Every test group named in the handoff exists (grep of `tests/test_workflow.py` and `tests/test_dashboard.py`).
+- README and `docs/workflow.md` checked against the code for the listed features; the only edit was a re-wrapped README paragraph (no new behaviour).
+- Handoff: T006 recorded as deferred (no `test_fixture_cache_*` group); "Needs you" item 3 names both fixture temp prefixes; "Next action" updated; Human todos gained the FL-23 follow-up.
+- Vault: `agents-flow.md` already reflects T002 and T011 (the plan box, revision node, plan stop, recovery box); the dashboard tasks (T007–T009) left the flow unchanged. Hub Log line appended. No checkboxes ticked.
+- Limitation: the CI run, the supervised plan revision and the dashboard checks under "Needs you" are not exercised here (no network, no real runs).
 

@@ -843,8 +843,8 @@ different batches and no worker idles while another works through a slow cluster
 batch runs as `python3 -m unittest` in its own process. The runner fails when a batch fails
 or crashes (listing that batch's test IDs), when it collects no tests, or when the batches
 ran a different number of tests than it collected. Batches always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
-`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
-approves.
+`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching
+`.ai/validate` to the parallel runner is a gate change that a human approves.
 
 Every run ends with a timing report before the `Ran N tests …` line: on Python 3.12+ the
 batches run with `--durations 0` and the runner lists the 15 slowest tests with their

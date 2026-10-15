@@ -12,7 +12,8 @@ T003 DONE: scaled test timeouts (`tests/timeouts.py`). T004 DONE (2026-10-15):
 the 15 slowest tests, the summed test time and the worker busy range (Python 3.12+).
 T005 DONE (2026-10-15): fixture git has `core.fsync=none`/`gc.auto=0`; `run_parallel.py` uses an
 exec-probed `/dev/shm/ai-tests-*` TMPDIR (`AI_TEST_TMPFS=0` off; test-only `AI_TEST_TMPFS_DIR`).
-T006 BLOCKED (profiling commands denied; see the task). T007 DONE (2026-10-15): dashboard
+T006 removed from the batch (BLOCKED: the runner may not run profiling commands) and deferred to
+the vault backlog as the FL-23 follow-up; no test was changed for it. T007 DONE (2026-10-15): dashboard
 discovery skips a runner whose `/proc/<pid>/environ` holds `AI_DASHBOARD_IGNORE=1` (bounded,
 non-blocking regular-file read; registered checkouts still listed); `ToolkitTest` sets it.
 Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
@@ -37,7 +38,8 @@ Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after). T007: passed, `Ran 667 tests in 371.4s`.
+T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after). T007: passed, `Ran 667 tests in 371.4s`. T009: passed (679 tests). T010: see the task result
+(final gate run after the docs audit).
 
 ## Assumptions
 - Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
@@ -73,24 +75,29 @@ description in the chart).
    continues with `Task queue reordered` in the log and no ⛔; the committed queue has the new
    task before its dependent.
 3. While the agents test suite runs (`bash .ai/validate` in one tmux window), `ai-dashboard`
-   in another shows no `ai-toolkit-test-*` cards (under `/dev/shm/ai-tests-*` or `/tmp`); your
-   real pipelines are still listed.
+   in another shows no fixture cards (`ai-toolkit-test-*` in the default temp dir, or
+   `ai-tests-*` under `/dev/shm`); your real pipelines are still listed.
 4. `ai-dashboard --json` on a checkout with an open PR shows its URL and the last plan/code
    review counts; `ai-dashboard --wait --timeout 600` returns when a running pipeline moves
    to its next stage, and `--since <cursor>` loses nothing between two calls.
 
 ### Covered by automated tests
-Filled in by the tasks (T010 checks it): `test_queue_reorder_*` (T001), `test_queue_repair_*`
-(T002), `test_queue_recovery_*` (T011), `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004),
-`test_fixture_io_*` (T005), `test_fixture_cache_*` (T006, if added),
-`test_dashboard_pr_review_*` (T008: `_url_sources`, `_counts_and_heads`, `_unsafe_entries`, `_json_every_run`, `_expanded_lines`),
-`test_dashboard_ignore_*` (T007: `test_dashboard_ignore_marked_runner_unless_registered`,
-`test_dashboard_ignore_other_environments_are_discovered`, `test_dashboard_ignore_environ_reader`,
-`test_dashboard_ignore_real_processes`, `test_dashboard_ignore_fixture_pipeline_is_hidden`; the
-watchdog forwarding it in `test_watchdog_recover_starts_ai_recover_after_a_crash`), `test_dashboard_pr_review_*` (T008),
-`test_dashboard_wait_*` (T009).
+Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its tests.
+- `test_queue_reorder_*` (T001), `test_queue_repair_*` (T002), `test_queue_recovery_*` (T011).
+- `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004), `test_fixture_io_*` (T005).
+  `test_fixture_cache_*` (T006) was not added: T006 is deferred.
+- `test_dashboard_ignore_*` (T007): `test_dashboard_ignore_marked_runner_unless_registered`,
+  `test_dashboard_ignore_other_environments_are_discovered`, `test_dashboard_ignore_environ_reader`,
+  `test_dashboard_ignore_real_processes`, `test_dashboard_ignore_fixture_pipeline_is_hidden`; the
+  watchdog forwarding it is in `test_watchdog_recover_starts_ai_recover_after_a_crash`.
+- `test_dashboard_pr_review_*` (T008): `_url_sources`, `_counts_and_heads`, `_unsafe_entries`,
+  `_json_every_run`, `_expanded_lines`.
+- `test_dashboard_wait_*` (T009).
 
 ## Human todos
+- Deferred FL-23 follow-up (T006, cheaper slowest tests): profiling needs commands the runner may
+  not run; the notes and measurements are in the vault backlog (FL-23). Decide whether to run it
+  by hand or as a supervised task.
 - Merge order: PR #27 (`fix/night-stops`) first; then rebase or retarget this branch's PR onto
   master.
 - Optional CI workflow change (gate file `.github/workflows/self-check.yml`, yours to edit):
@@ -105,5 +112,6 @@ watchdog forwarding it in `test_watchdog_recover_starts_ai_recover_after_a_crash
   them).
 
 ## Next action
-Implement T001–T011 in queue order (T011 sits after T002; T010 runs last). Human afterwards: the checks under "Needs you", the merge
-order and the PR review.
+T001–T005 and T007–T011 are DONE (T006 deferred, see Human todos). The queue is complete once T010
+is checkpointed; the phase then moves to `ready_for_review`. Human afterwards: the checks under
+"Needs you", the merge order and the PR review.
