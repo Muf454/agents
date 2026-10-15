@@ -287,3 +287,4 @@
 | 2026-10-14T23:47:14Z | runner | T008 | completed | PASS | 2cbd111 | Claude checkpointed; continuing queue |
 | 2026-10-15T00:30Z | claude (sonnet) | T009 | DONE: `ai-dashboard --wait/--since/--timeout/--interval`; fingerprint + cursor, notifications_mark from events_of (dropped from all printers) | dashboard_wait 7 OK; ai-check PASS (679 tests) | see git log | README, docs/workflow.md; flow unchanged |
 | 2026-10-15T00:01:13Z | runner | T009 | completed | PASS | e79d58f | Claude checkpointed; continuing queue |
+| 2026-10-15T00:01:14Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | 9da5511 | No merge or deployment performed |
