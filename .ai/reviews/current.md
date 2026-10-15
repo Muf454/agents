@@ -1,41 +1,37 @@
-<!-- Host evidence: HEAD e36de5797c8a74888f98eed29e70735e7208fd1d; merge-base 5894c2b23e0fc29fe3ab225a2bda707889967f91; saved 2026-10-15T06:46:54Z. -->
+<!-- Host evidence: HEAD c9d092bf5eab8ad3c4398292651afc5fd784f77c; merge-base 5894c2b23e0fc29fe3ab225a2bda707889967f91; saved 2026-10-15T07:26:02Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED. Queue repair rejects a supported preamble layout; two dashboard parsing defects also remain.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
+Overall verdict: CHANGES REQUIRED. Previous findings are fixed; dispatcher cleanup and a queue-parser edge case remain.
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
 
-Reviewed HEAD: `e36de5797c8a74888f98eed29e70735e7208fd1d`
+Reviewed HEAD: `c9d092bf5eab8ad3c4398292651afc5fd784f77c`
 
-Supplied base and merge-base: `5894c2b23e0fc29fe3ab225a2bda707889967f91`
-
-Checkout was clean. No files were written; no network or MCP integrations were invoked.
+Supplied base and verified merge-base: `5894c2b23e0fc29fe3ab225a2bda707889967f91`
 
 ## Scope and validation
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, plan reviews/dispositions, relevant documentation, Git history, the supplied diff, and affected source/tests. Also inspected the vault flow chart and relevant hub Log entries: the chart contains the T002/T011 changes and `updated: 2026-10-15`.
+Inspected repository instructions, spec, plan, tasks, state, handoff, review dispositions, relevant documentation, full scoped diff, changes since round 1, and affected source/tests. Verified the vault flow chart contains the planning/recovery changes and `updated: 2026-10-15`.
+
+The checkout was clean. No files were written, and no network or MCP integrations were invoked.
 
 Validation observed:
 
-- `.ai/local/validation.json`: PASS, exit 0, timestamp `2026-10-15T06:41:30Z`.
-- Referenced log: **679 tests passed in 396.1 seconds**, using 48 batches on eight workers.
-- `python3 -B scripts/lib/workflow.py stamp verify` passed against the reviewed checkout.
-- Changes after the recorded validation revision affect only excluded state/run-log bookkeeping.
+- `.ai/local/validation.json`: PASS at `2026-10-15T07:22:54Z`, recorded at `afb2aeb`.
+- Referenced log: **682 tests passed in 368.1 seconds**, using 48 batches on eight workers.
+- `workflow.py stamp verify` confirms the fingerprint matches this checkout. Subsequent changes affect only excluded state/run-log bookkeeping.
 
 Checks run:
 
-- Shell syntax: 13 files passed.
+- Current queue validation and discovery of 682 tests.
+- Shell syntax checks: 13 files passed.
 - Python AST parsing: seven changed files passed.
-- Current task queue validation passed.
-- Test discovery collected 679 tests.
+- Six documentation consistency and sanitization tests passed.
 - No existing test methods were removed or renamed.
-- Six documentation/sanitization tests passed.
-- Three pure renderer/parser test bodies passed with filesystem setup omitted.
-- In-memory checks covered batch partitioning, timeout scaling, cursor round-trip, wait change/timeout behavior, and identical-content notification replacement.
-- Read-only reproductions confirmed the findings below.
+- Read-only checks verified previous fixes, batch partitioning, timeout scaling, cursor round-trip, wait change/timeout behavior, and both findings below.
 - `git diff --check` passed.
 
-The full `./scripts/ai-check` was not rerun because it writes validation records and fixture checkouts. The four-CPU CI performance target remains unverified.
+The full `./scripts/ai-check` was not rerun because it writes validation records and fixture checkouts. Four-CPU CI performance remains unverified.
 
 ## BLOCKER findings
 
@@ -43,111 +39,92 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M2 — Queue repair rejects non-task headings in the preamble
+### M3 — Dispatcher cleanup can hang while a test subprocess survives
 
-**Location:** `scripts/lib/workflow.py:531`, `scripts/lib/workflow.py:535`.
+**Location:** `tests/run_parallel.py:192`, `tests/run_parallel.py:224`, `tests/run_parallel.py:247`.
 
-**Requirement:** FL-24/T001 defines the preamble as everything before the first task heading. Only a non-task `## ` section **between two tasks** should prevent reordering.
+**Requirement:** T004 explicitly requires terminating running batches and joining every worker after interruption or a worker exception.
 
-**Problem:** The rejection scans every segment before the last task, including preamble sections. Reconstruction also retains only the initial `pre` segment.
+**Problem:** Batches start without process isolation, and `stop()` terminates only their immediate Python processes. A subprocess launched by a test survives. If it inherited the batch’s output pipe, `communicate()` continues waiting for EOF, and the dispatcher’s unbounded thread joins cannot finish.
 
-**Evidence:** Running the actual reorder function against an in-memory queue containing:
+**Evidence:** A read-only reproduction used the actual dispatcher with two workers:
 
-```markdown
-# Queue
+1. The first batch launched a sleeping subprocess that inherited stdout.
+2. The second worker’s launch raised an injected `OSError`.
+3. Cleanup terminated the first batch with exit `-15`, but its subprocess remained alive and `Dispatcher.run()` remained blocked.
+4. Killing that subprocess released the pipe; the dispatcher then exited with the original launch error.
 
-## Context
-Keep this intro.
+All reproduction processes were cleaned up.
 
-## T001 — ...
-Dependencies: T002
-...
-## T002 — ...
-Dependencies: none
-...
-```
+**Impact:** A worker failure can leave fixture commands running and stall the self-check until those descendants exit or an external timeout intervenes.
 
-raises `cannot reorder: section "## Context" sits between tasks`, without writing. The otherwise identical queue without `## Context` successfully becomes `T002 T001`.
+**Recommended direction:** Give each batch its own process group/session and terminate its process tree, with bounded escalation and reaping. Add deterministic worker-launch-failure and interruption tests while another batch has an active subprocess.
 
-**Impact:** A repairable queue with ordinary introductory Markdown sections stops planning or revision. Revision recovery then escalates to the human, defeating FL-24 for this supported layout.
-
-**Recommended direction:** Identify the first and last task segments. Preserve everything before the first task as the preamble, and reject non-task sections only between those boundaries. Add helper and planning/revision regression coverage.
+**Baseline distinction:** The previous runner also lacked descendant cleanup. This finding is an unmet requirement of the new T004 dispatcher, rather than a claim that the base runner handled this safely.
 
 ## MINOR findings
 
-### N4 — Real plan-review reports always lose their reviewed HEAD
+### N6 — Reorder crashes on tab-separated headings accepted by the task validator
 
-**Location:** `scripts/lib/dashboard.py:308`, `scripts/lib/dashboard.py:340`.
+**Location:** `scripts/lib/workflow.py:477`, `scripts/lib/workflow.py:539`.
 
-**Requirement:** DB-02/T008 requires the short reviewed HEAD for both plan and code reports, so users can identify stale results.
+**Requirement:** T001 requires queue segmentation to use the same heading and fence rules as `task_blocks()`.
 
-**Problem:** `REVIEW_HEAD` recognizes only `Host evidence: HEAD …;`. Actual plan reports use `Plan review of plan digest …; HEAD …;`, as produced by `publish_plan_review()`.
+**Problem:** `task_blocks()` recognizes headings with `^##\s+…`, including a tab after `##`. `queue_segments()` first requires the literal prefix `## `, so it omits those task boundaries. Reconstruction subsequently indexes a missing task ID.
 
-**Evidence:** Reading this checkout’s actual reports through `reviews_of()` returned:
-
-```json
-{"plan":{"blocker":0,"major":0,"minor":2,"head":""}}
-```
-
-The plan report’s header contains HEAD `e5e68b0b75e0ed3812d63ba0fec5049b9a121652`. The added test fabricates a code-review header for the plan report, hiding the mismatch.
-
-**Impact:** JSON and expanded details omit the reviewed revision for genuine plan reviews.
-
-**Recommended direction:** Parse both real header formats and use a genuine plan-report header in the regression test.
-
-### N5 — A malformed finding count can crash the entire dashboard
-
-**Location:** `scripts/lib/dashboard.py:341`.
-
-**Requirement:** T008 explicitly requires unreadable or malformed review data to produce empty values, never an exception.
-
-**Problem:** Finding-count conversion uses unchecked `int()` calls. The bounded reader permits count strings longer than Python’s integer-conversion limit.
-
-**Evidence:** Supplying the actual reader function with one counts line whose `BLOCKER` value contains 5,000 digits raises:
+**Evidence:** With otherwise valid task blocks:
 
 ```text
-ValueError: Exceeds the limit (4300 digits) for integer string conversion
+##<TAB>T001 — Verify T001
+Dependencies: T002
+…
+## T002 — Verify T002
+Dependencies: none
+…
 ```
 
-This exception propagates through `inspect()` and `snapshot()`.
+`task_blocks()` recognizes both IDs, but `tasks_reorder()` raises `KeyError: 'T001'` without writing. Manually placing T002 first makes the existing `tasks()` validator pass.
 
-**Impact:** One malformed agent-writable report prevents the dashboard from showing every checkout, including during `--wait`.
+**Impact:** Automatic repair stops planning/revision for a supported heading layout and produces a traceback instead of repairing the queue.
 
-**Recommended direction:** Bound numeric fields and handle conversion failures per report, returning `None` for the malformed side. Test that other runs remain available.
+**Recommended direction:** Share heading classification or recognize task headings before applying the literal non-task-section check. Add a tab-separated-heading regression.
+
+## Previous findings re-evaluated
+
+- **M2 fixed:** Introductory `## Context` sections are preserved, and the reordered queue validates.
+- **N4 fixed:** The actual plan report now yields reviewed HEAD `e5e68b0`.
+- **N5 fixed:** A simulated 5,000-digit count returns `None` for that report while preserving the other report.
+
+T006 was explicitly deferred in commit `cb69048`; it is not counted as missing implementation.
 
 ## Missing coverage
 
-- Preamble sections before reordered tasks.
-- Genuine plan-report headers and oversized numeric counts.
-- Dispatcher interruption and worker-launch failure cleanup, previously suggested by plan finding P9.
-- Notification retention rollover through the real writer, previously suggested by P8. The in-memory replacement check does not replace that integration test.
-- Some new dashboard tests pass literal CLI timeout values, outside the named/scaled timeout convention.
+- Dispatcher failure/interruption with active test subprocesses, as demonstrated in M3.
+- Heading syntax parity between the validator and reorder parser.
+- Notification retention rollover through the real `notify-log` writer; current wait tests append directly.
+- Some new wait tests use literal CLI timeouts outside the stated scaling convention.
 
 ## Security concerns
 
-N5 is an availability defect in the advisory dashboard reader. The inspected additions otherwise retain pinned, bounded, no-follow readers and keep review counts informational. No additional demonstrated authorization or security defect was found.
+M3 affects process cleanup and availability. The inspected dashboard additions retain bounded, pinned, no-follow readers and keep review counts advisory. No additional demonstrated authorization defect was found.
 
 ## Architecture concerns
 
-The changes retain standard-library dependencies and existing host authority boundaries. Queue parsing is duplicated between `task_blocks()` and `queue_segments()`; shared classification rules would reduce drift.
-
-Accepted plan concerns about early recovery repair, executable tmpfs probing, and notification identity have corresponding implementation and regression coverage.
-
-T006 was explicitly deferred in commit `cb69048`; it is not counted as missing implementation. The older code-review artifact concerns a different range; its pre-existing findings are separate from this report’s introduced defects.
+Dependencies remain minimal, and host authority boundaries are preserved. Duplicate queue parsing rules have now produced the concrete divergence in N6; shared classification would reduce further drift.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Confirm the PR’s self-check passes well under ten minutes on the intended four-CPU runner.
-- Exercise a real supervised revision and crash/resume in a scratch project.
+- Confirm the self-check passes well under ten minutes on the intended four-CPU CI runner.
+- Exercise a supervised plan revision and crash/resume in a scratch project.
 - Confirm fixture pipelines stay hidden while real pipelines remain visible.
-- Check dashboard review details and cursor-based waiting on live runs.
+- Check dashboard review details and cursor-based waiting during live runs.
 
 ### Covered by automated tests
 
-- Existing coverage addresses queue ordering, cycles, DONE preservation, revision recovery, environment filtering, review counts, and wait transitions.
-- Add the regressions described in M2, N4 and N5.
-- Add deterministic dispatcher cleanup and notification-retention tests.
+- Existing coverage addresses ordering, cycles, DONE preservation, revision recovery, discovery filtering, review parsing, and wait transitions.
+- Add deterministic regressions for M3 and N6.
+- Add notification-retention rollover coverage using the real writer.
 
 Reviewing does not constitute human acceptance.
