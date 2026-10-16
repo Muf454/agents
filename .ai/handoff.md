@@ -1,7 +1,11 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet on this branch. Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
+- T001 (done): `tests/run_parallel.py` makes itself a child subreaper on Linux (`main()` only)
+  and reaps adopted orphan zombies by pid between thread joins, never `waitpid(-1)`, so batch
+  exit statuses and reports are unchanged.
+
+Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
 order:
 - T001–T002 FL-27: `tests/run_parallel.py` becomes a child subreaper on Linux, reaps adopted
@@ -29,7 +33,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 (re-check severity totals). See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-None yet on this branch.
+2026-10-16 after T001: `.ai/bin/ai-check` PASS (689 tests, 424.6 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -82,6 +86,6 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Implement T001, then the queue in order (T002 depends on T001; T013 on T002; T004 on T003;
+Implement T002, then the queue in order (T002 depends on T001; T013 on T002; T004 on T003;
 T006 on T004 and T005; T007 on T011 and T008 on T012, each sitting right before it in the
 queue; T010 last).

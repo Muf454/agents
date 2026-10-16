@@ -7,11 +7,14 @@ and runs each batch as `python3 -m unittest <ids...>` in its own process. Exits 
 batch fails or crashes, when nothing was collected, or when the batches ran a different
 number of tests than were collected. On Python 3.12+ it also reports the slowest tests and
 how busy each worker was. Each batch runs in its own process group; an interrupt, SIGTERM or
-a crashed worker terminates every running group, so subprocesses the tests started go too. When the caller sets no TMPDIR and /dev/shm is a writable,
+a crashed worker terminates every running group, so subprocesses the tests started go too. On
+Linux the runner is a child subreaper: it adopts the batches' orphaned descendants and reaps
+them, so they stay its descendants. When the caller sets no TMPDIR and /dev/shm is a writable,
 executable tmpfs with 1 GiB free, the batches get a temporary directory there (removed after
 the run); AI_TEST_TMPFS=0 turns that off.
 """
 import argparse
+import ctypes
 import os
 from pathlib import Path
 import queue
@@ -166,12 +169,61 @@ def signal_group(process, signum):
         pass
 
 
+PR_SET_CHILD_SUBREAPER = 36
+
+
+def enable_subreaper():
+    """Make this process the child subreaper of its descendants (Linux): an orphan is
+    reparented here instead of to init. True when that worked."""
+    if not sys.platform.startswith('linux'):
+        return False
+    try:
+        return ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def parse_stat(text):
+    """Return (state, ppid, starttime) from the text of /proc/<pid>/stat, or None. The fields
+    are read after the LAST ')': the command name may contain spaces and parentheses."""
+    try:
+        fields = text.rsplit(')', 1)[1].split()
+        return fields[0], int(fields[1]), int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def proc_stat(pid):
+    try:
+        return parse_stat(Path(f'/proc/{pid}/stat').read_text())
+    except OSError:
+        return None
+
+
+def children_of(pid):
+    """Return {child pid: (state, ppid, starttime)} for the children of `pid`, from one scan
+    of /proc ({} where there is no /proc)."""
+    try:
+        entries = os.listdir('/proc')
+    except OSError:
+        return {}
+    found = {}
+    for entry in entries:
+        if entry.isdigit():
+            stat = proc_stat(entry)
+            if stat and stat[1] == pid:
+                found[int(entry)] = stat
+    return found
+
+
 class Dispatcher:
     """Worker threads pull batches from a shared queue; each batch is one child process in its
-    own process group. Stopping (interrupt or a worker error) terminates every running group."""
+    own process group. Stopping (interrupt or a worker error) terminates every running group.
+    With `reap` (the runner is a subreaper) run() also reaps the orphans it adopts."""
 
-    def __init__(self, batches, workers, start_dir, tmpdir=None):
+    def __init__(self, batches, workers, start_dir, tmpdir=None, reap=False):
         self.batches = batches
+        self.reap = reap
         self.tmpdir = tmpdir
         self.workers = min(workers, len(batches))
         self.start_dir = start_dir
@@ -271,6 +323,20 @@ class Dispatcher:
         for process in children:
             signal_group(process, signal.SIGKILL)
 
+    def reap_adopted(self):
+        """Reap the zombie children of this process that are not batches (orphans adopted as
+        subreaper). Under the lock: batches start under it, so a just-started batch is always
+        in self.running and its status stays with its Popen. Never os.waitpid(-1, ...): it can
+        take a batch's status, and Popen then reports exit 0."""
+        with self.lock:
+            batches = {process.pid for process in self.running}
+            for pid, (state, _, _) in children_of(os.getpid()).items():
+                if state == 'Z' and pid not in batches:
+                    try:
+                        os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
+
     def run(self):
         threads = [threading.Thread(target=self.work, args=(index,), daemon=True)
                    for index in range(self.workers)]
@@ -278,7 +344,15 @@ class Dispatcher:
             thread.start()
         try:
             for thread in threads:
-                thread.join()
+                if not self.reap:
+                    thread.join()
+                    continue
+                thread.join(timeout=DRAIN_POLL)
+                while thread.is_alive():
+                    self.reap_adopted()
+                    thread.join(timeout=DRAIN_POLL)
+            if self.reap:
+                self.reap_adopted()
         except BaseException:
             self.stop()
             for thread in threads:
@@ -334,7 +408,8 @@ def main():
     # `timeout`) misses them: turn it into an exception that makes run() stop them.
     signal.signal(signal.SIGTERM, terminated)
     try:
-        dispatcher = Dispatcher(batches, workers, start_dir, tmpdir)
+        # Here only, never at import: tests import this module and must not become subreapers.
+        dispatcher = Dispatcher(batches, workers, start_dir, tmpdir, reap=enable_subreaper())
         started = time.monotonic()
         results = dispatcher.run()
         elapsed = time.monotonic() - started

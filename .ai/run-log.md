@@ -307,3 +307,4 @@
 | 2026-10-15T08:06:37Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/28 | PASS | 78add43 | Human acceptance and merge remain |
 | 2026-10-16T20:11:09Z | runner | plan-revision | plan revised (round 1): accepted 5, rejected 0, needs-human 0 | n/a | ae6a0c7 | Plan review runs again |
 | 2026-10-16T20:17:00Z | runner | plan-revision | plan revised (round 2): accepted 2, rejected 0, needs-human 0 | n/a | 1597dbe | Plan review runs again |
+| 2026-10-16T20:30:30Z | claude | T001 | done: run_parallel child subreaper + reap_adopted by pid; 3 subreaper tests | PASS (ai-check, 689 tests) | parent 71a5330 | Mutation check: reap off fails the adopts test |

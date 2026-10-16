@@ -25,7 +25,7 @@ No new executable file in this batch (this run's allowlist cannot `chmod +x`); t
 scripts written into temp dirs use `os.chmod` from Python.
 
 ## T001 — Self-check runner becomes a child subreaper and reaps adopted orphans (FL-27, part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -79,6 +79,15 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-16. `tests/run_parallel.py`: `PR_SET_CHILD_SUBREAPER`, `enable_subreaper()` (called
+only in `main()`), `parse_stat()`/`proc_stat()`/`children_of()`, `Dispatcher(reap=…)` with
+`reap_adopted()` (under the lock, per-pid `waitpid(pid, WNOHANG)` for non-batch zombies only)
+between `join(timeout=DRAIN_POLL)` polls and once after the last join; `reap=False` keeps the
+old plain joins. Tests `test_parallel_runner_subreaper_adopts_and_reaps_orphans`,
+`…_keeps_failure_and_crash_reports`, `…_stat_parse_and_main_only`. Mutation check: with
+`reap` forced off, the adopts test fails (orphan zombie never reaped). Targeted
+`-k parallel_runner`: Ran 19 tests OK. `.ai/bin/ai-check`: PASS (689 tests, 424.6 s).
+README and docs/workflow.md describe the subreaper. Flow unchanged (no vault edit).
 
 
 ## T002 — Stopping the self-check terminates the whole descendant tree, GNU `timeout` included (FL-27, part 2)

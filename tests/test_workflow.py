@@ -1,4 +1,5 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
+import ast
 import contextlib
 import importlib.util
 import io
@@ -8813,6 +8814,98 @@ class ParallelRunnerTest(unittest.TestCase):
         output, _ = process.communicate(timeout=self.STOP_BOUND)
         self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
         self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the SIGTERM')
+
+    # FL-27: as a child subreaper the runner adopts what the batches orphan and reaps it.
+    def write_orphan(self):
+        """A test whose `sh` backgrounds a 1 s sleep and exits at once, orphaning it; it records
+        the sleeper's ppid as /proc shows it and the runner's pid (the batch's parent)."""
+        self.pidfile = self.base / 'sleeper.pid'
+        # No kill on cleanup: the sleep ends by itself, and once reaped its pid may be reused.
+        self.seen = self.base / 'seen'
+        self.write('test_orphan.py',
+                   '    def test_spawn(self):\n'
+                   '        import subprocess\n'
+                   f'        path = {str(self.pidfile)!r}\n'
+                   '        subprocess.run(["sh", "-c", "sleep 1 & echo $! > " + path + ".tmp"], check=True)\n'
+                   '        os.replace(path + ".tmp", path)\n'
+                   '        pid = int(open(path).read())\n'
+                   '        stat = open(f"/proc/{pid}/stat").read()\n'
+                   f'        open({str(self.seen)!r}, "w").write(stat.rsplit(")", 1)[1].split()[1]'
+                   ' + " " + str(os.getppid()))\n')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'child subreapers are Linux-only')
+    def test_parallel_runner_subreaper_adopts_and_reaps_orphans(self):
+        self.write_orphan()
+        # Keeps the run going until the sleeper has exited, then wants it reaped (gone from
+        # /proc, not a zombie) and no zombie child of the runner left.
+        self.write('test_wait.py',
+                   '    def test_wait(self):\n'
+                   '        import time\n'
+                   f'        path, deadline = {str(self.pidfile)!r}, time.monotonic() + {MEDIUM_TIMEOUT}\n'
+                   '        while not os.path.exists(path):\n'
+                   '            self.assertLess(time.monotonic(), deadline, "the orphan never started")\n'
+                   '            time.sleep(0.05)\n'
+                   '        pid = int(open(path).read())\n'
+                   '        while os.path.exists(f"/proc/{pid}"):\n'
+                   '            self.assertLess(time.monotonic(), deadline, f"orphan {pid} was not reaped")\n'
+                   '            time.sleep(0.05)\n'
+                   '        runner = os.getppid()\n'
+                   '        while True:\n'
+                   '            zombies = []\n'
+                   '            for entry in filter(str.isdigit, os.listdir("/proc")):\n'
+                   '                try:\n'
+                   '                    fields = open(f"/proc/{entry}/stat").read().rsplit(")", 1)[1].split()\n'
+                   '                except OSError:\n'
+                   '                    continue\n'
+                   '                if fields[0] == "Z" and int(fields[1]) == runner:\n'
+                   '                    zombies.append(entry)\n'
+                   '            if not zombies:\n'
+                   '                break\n'
+                   '            self.assertLess(time.monotonic(), deadline, f"zombie children of the runner: {zombies}")\n'
+                   '            time.sleep(0.05)\n')
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+        self.assertIn('Ran 2 tests', result.stdout)
+        ppid, runner = self.seen.read_text().split()
+        self.assertEqual(ppid, runner, 'the orphan was not reparented to the runner')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'child subreapers are Linux-only')
+    def test_parallel_runner_subreaper_keeps_failure_and_crash_reports(self):
+        self.write_orphan()
+        self.write('test_fail.py', '    def test_fail(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        self.write('test_crash.py', '    def test_crash(self): os._exit(3)\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertIn('FAILED (exit code 1)', result.stdout)
+        self.assertIn('crashed (exit code 3) without a unittest summary', result.stdout)
+        self.assertIn('FAILED (failing batches:', result.stdout)
+        ppid, runner = self.seen.read_text().split()
+        self.assertEqual(ppid, runner)
+
+    def test_parallel_runner_subreaper_stat_parse_and_main_only(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        # Fields 5..52 hold their own numbers, so starttime (field 22) reads 22.
+        text = '4321 (we) (ird name) R 99 ' + ' '.join(str(field) for field in range(5, 53)) + '\n'
+        self.assertEqual(run_parallel.parse_stat(text), ('R', 99, 22))
+        self.assertIsNone(run_parallel.parse_stat('4321 (truncated'))
+        self.assertIsNone(run_parallel.parse_stat('4321 (x) S notanumber'))
+        if sys.platform.startswith('linux'):
+            self.assertEqual(run_parallel.proc_stat(os.getpid())[1], os.getppid())
+            self.assertIn(os.getpid(), run_parallel.children_of(os.getppid()))
+        tree = ast.parse(self.RUNNER.read_text())
+        callers = []
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.ClassDef)):
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'enable_subreaper':
+                        callers.append(function.name)
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'enable_subreaper']
+        # One call, inside main() only (not at module level, not in Dispatcher).
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(callers, ['main'])
 
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
