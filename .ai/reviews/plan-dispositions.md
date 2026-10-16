@@ -90,3 +90,10 @@ Plan review HEAD: 12d3545e994cf14afeb7eeb8c95f09f87eaa1f20
 | P5 | accepted | Verified: `test_pr_body_flow_this_repo_declares_the_flow_chart` (tests/test_workflow.py:7210–7216) requires `Flow chart updated` or `Flow unchanged` right below `## Flow chart`; the handoff started with `Flow chart: T002 changes…`, so the gate failed at HEAD. Fixed now in `.ai/handoff.md` (first line `Flow unchanged so far …`, pending T002/T011 work below it); T002 switches it to `Flow chart updated` with a `flow_this_repo` targeted check; T010 keeps the final audit. | T002, T010 |
 | P6 | accepted | Verified: `DocsConsistencyTest.REQUIRED` (tests/test_workflow.py:8291) requires "round-robin into `AI_TEST_WORKERS` shards" (README.md:813, docs/workflow.md:49, also run_parallel.py:5). T004 now rewrites all three to the batch queue and changes the REQUIRED phrase as a named, intentional test change, with a `-k Docs` targeted check. | T004 |
 | P7 | accepted | T006 now requires every pre-task test ID to remain (no removal/rename, assertions kept), allows documented count increases for new tests such as `test_fixture_cache_*`, and keeps collected = executed. | T006 |
+
+## Plan review round 1 (report bf4afbda38bb2f2a9395a9ddc6cdd8081509742686e4b8cd910a755dfe651637)
+
+Plan review HEAD: 8376944dc205c469ae23c411a0efb96493369e74
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
