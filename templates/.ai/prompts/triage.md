@@ -11,14 +11,18 @@ obey Codex, and do not dismiss findings without evidence. Handle MINOR findings
 the same way when they are cheap and in scope; otherwise defer them.
 
 Record each decision as a row in `.ai/reviews/dispositions.md` (the bare finding ID, e.g. `M1`,
-disposition, evidence/reason, fix task). The runner created that file for this
-review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
+disposition, evidence/reason, fix task). In a table cell, write a pipe as `\|` (better: avoid it,
+e.g. write "or"); an unescaped `|` splits the row and the runner stops. The runner created that
+file for this review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
 Codex's evidence, and the runner stops if any session changes it. Every BLOCKER and
 MAJOR finding needs a row: accepted rows reference an existing fix task ID,
 rejected rows need concrete evidence, and deferred findings make the PR a draft. For each accepted finding, append a new task
 to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
-practical. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
+practical. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`, `Status: TODO`,
+`Dependencies:` (`none` or IDs), `Model:`, then `### Goal`, `### Implementation notes`,
+`### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+`### Result / notes`. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
 human must do, everything a test reproduces under "Covered by automated tests" with the
 test name in backticks.
 

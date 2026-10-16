@@ -455,7 +455,7 @@ PASS (712 tests). Writers unchanged; the recheck record is escaped once. docs/wo
 one sentence. Flow unchanged.
 
 ## T006 — Template prompts show the exact task format and the pipe rule (FL-25, prompts)
-Status: TODO
+Status: DONE
 Dependencies: T004, T005
 Model: haiku
 
@@ -496,6 +496,12 @@ Targeted: `python3 -m unittest discover -s tests -k tool_contract` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-17. `templates/.ai/prompts/triage.md`, `plan-revision.md` and `plan.md` now state the exact
+task format (the `###` sections, empty `### Result / notes`) and the pipe rule ("write a pipe as `\|`");
+`templates/.ai/tasks.md` says the sections are required and `### Result / notes` starts empty. New test
+`test_task_sections_prompts_show_the_format` (tests/test_workflow.py). `.ai/prompts` (installed copy)
+untouched; the shared "How to work here" block is unchanged. Targeted: `-k task_sections` Ran 8 OK;
+`-k tool_contract` Ran 3 OK. Gate: `.ai/bin/ai-check` PASS (713 tests, 385.2 s on 8 workers).
 
 
 ## T011 — Host clears `.ai/local/scratch` through pinned directory descriptors (FL-26, deletion)

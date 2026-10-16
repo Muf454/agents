@@ -1543,6 +1543,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('never prefix commands with `cd`', self.prompt_section('recover'))
         self.assertNotIn('never prefix commands with cd (', (ROOT / 'scripts/ai-run').read_text())
 
+    def test_task_sections_prompts_show_the_format(self):
+        for name in ('triage', 'plan-revision', 'plan'):
+            text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()
+            for phrase in ('### Likely affected modules', '### Result / notes', 'write a pipe as'):
+                self.assertIn(phrase, text, f'{name}.md lacks {phrase!r}')
+        tasks = (ROOT / 'templates/.ai/tasks.md').read_text()
+        self.assertIn('`### Result / notes` starts empty', tasks)
+
     def test_tool_contract_setup_installs_ai_task(self):
         self.setup_project()
         self.assertTrue((self.project / '.ai/bin/ai-task').is_file())
