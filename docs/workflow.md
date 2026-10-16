@@ -50,7 +50,12 @@ Gate speed (FL-11, FL-23): test suites can run in parallel. A stdlib-only runner
 batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six batches per
 worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
 (FL-27): orphans of the batches are reparented to it and reaped without touching a batch's
-exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). It exits non-zero when a batch
+exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). A stop
+(worker error, interrupt, SIGTERM) is owned by its first caller: it signals the batch groups
+and walks the `/proc` ppid tree below the runner, SIGTERM then up to three SIGKILL rounds
+(each pid checked against its recorded start time), then a bounded completion barrier until
+`/proc` shows no live descendant; survivors are printed to stderr and fail the run. No
+adopted zombie is reaped until the stop has finished, so no pid is reused meanwhile. It exits non-zero when a batch
 fails (its test IDs are listed), crashes, collects zero tests, or when the batches ran a
 different number of tests than it collected. On Python 3.12+ it reports the 15 slowest
 tests, the summed test time and each worker's busy time. Batches run

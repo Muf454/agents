@@ -91,7 +91,7 @@ README and docs/workflow.md describe the subreaper. Flow unchanged (no vault edi
 
 
 ## T002 — Stopping the self-check terminates the whole descendant tree, GNU `timeout` included (FL-27, part 2)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -178,6 +178,24 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-16. `tests/run_parallel.py`: `process_table()`, `descendants(root)` (ppid walk of
+one /proc scan), `signal_pid()` (signals only while /proc shows the recorded starttime);
+`Dispatcher.stop()` is owned by its first caller (`terminating` under the lock, later callers
+wait on `stop_done`, set in a `finally`), `terminate()` keeps the group signals and, with
+`reap`, SIGTERMs the `live_descendants()` walk, waits ≤ `TERMINATE_GRACE`, then up to
+`KILL_ROUNDS` = 3 walk + SIGKILL rounds and a `FINAL_WAIT` completion barrier; survivors go to
+`cleanup_failed` + stderr `run_parallel: could not terminate descendants: …`, and `main()`
+adds a problem (exit 1). `reap_adopted()` returns at once while a stop runs (owner passes
+`after_stop=True`); `run()`'s except path reaps after its joins. Deviation noted: each walk
+kills whatever it finds below the runner (a walk-found pid is ours by construction), with the
+starttime re-checked right before each signal, instead of only pids from the first snapshot.
+Tests: 8 `test_parallel_runner_tree_*` (worker failure, SIGTERM, SIGINT to the runner alone,
+stubborn detached descendant, fork during stop, barrier failure, main exit on
+`cleanup_failed`, concurrent stops never reap). Mutation checks: walk disabled
+(`live_descendants` → {}) → 6 of 8 fail, incl. worker-failure, SIGTERM, SIGINT and stubborn;
+the reap-during-stop guard disabled → the concurrent test fails (5 waitpids recorded).
+Targeted `-k parallel_runner`: Ran 27 tests OK. `.ai/bin/ai-check`: PASS (697 tests, 408.3 s).
+README and docs/workflow.md updated. Flow unchanged (no vault flow edit).
 
 
 ## T013 — An interrupt during worker startup still runs the shutdown (FL-27, part 3; plan review round 2 P6)

@@ -309,3 +309,4 @@
 | 2026-10-16T20:17:00Z | runner | plan-revision | plan revised (round 2): accepted 2, rejected 0, needs-human 0 | n/a | 1597dbe | Plan review runs again |
 | 2026-10-16T20:30:30Z | claude | T001 | done: run_parallel child subreaper + reap_adopted by pid; 3 subreaper tests | PASS (ai-check, 689 tests) | parent 71a5330 | Mutation check: reap off fails the adopts test |
 | 2026-10-16T20:38:25Z | runner | T001 | completed | PASS | 5b1b033 | Claude checkpointed; continuing queue |
+| 2026-10-16T21:05Z | claude (opus) | T002 | done: stop() owned by first caller; /proc descendant walk SIGTERM → 3 SIGKILL rounds → completion barrier (cleanup_failed → exit 1); no reap during stop; 8 tree tests | PASS (ai-check, 697 tests; -k parallel_runner 27 OK) | parent bd384ae | Mutation: walk off → 6/8 fail; reap guard off → concurrent test fails |

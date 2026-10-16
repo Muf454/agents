@@ -8907,6 +8907,269 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(callers, ['main'])
 
+    # FL-27 part 2: a stop terminates the runner's whole descendant tree, including GNU
+    # `timeout` (its own process group) and detached sessions. The Dispatcher runs in a child
+    # driver: the test process itself must never become a subreaper.
+    def tree_guard(self):
+        if not sys.platform.startswith('linux'):
+            self.skipTest('the descendant walk needs Linux /proc and a child subreaper')
+        if not shutil.which('timeout') or not shutil.which('setsid'):
+            self.skipTest('GNU timeout and setsid are needed')
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        self.rp = run_parallel
+        self.pidfiles = []
+        self.addCleanup(self.kill_recorded)
+
+    def kill_recorded(self):
+        for path in self.pidfiles:
+            try:
+                os.kill(int(path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    def pidfile(self, name):
+        path = self.base / name
+        self.pidfiles.append(path)
+        return path
+
+    def write_tree_test(self, name, shell, popen_pidfile=None):
+        """A test whose `sh -c <shell>` (or `timeout 120 sh -c`) runs in the batch and is
+        waited for; with `popen_pidfile` the command is `timeout 120 sh -c <shell>` and the
+        `timeout` pid is written there."""
+        command = (['timeout', '120', 'sh', '-c', shell] if popen_pidfile else ['sh', '-c', shell])
+        body = ('    def test_tree(self):\n'
+                '        import subprocess\n'
+                f'        child = subprocess.Popen({command!r})\n')
+        if popen_pidfile:
+            body += (f'        path = {str(popen_pidfile)!r}\n'
+                     '        open(path + ".tmp", "w").write(str(child.pid))\n'
+                     '        os.replace(path + ".tmp", path)\n')
+        body += '        child.wait()\n'
+        self.write(name, body)
+
+    def write_timeout_tree(self):
+        self.timeout_pid, self.child_pid = self.pidfile('timeout.pid'), self.pidfile('child.pid')
+        self.write_tree_test('test_tree.py', f'echo $$ > {self.child_pid}.tmp; mv {self.child_pid}.tmp '
+                             f'{self.child_pid}; exec sleep 120', popen_pidfile=self.timeout_pid)
+        return [self.timeout_pid, self.child_pid]
+
+    def write_stub_tree(self):
+        self.stub_pid = self.pidfile('stub.pid')
+        inner = f'trap "" TERM; echo $$ > {self.stub_pid}.tmp; mv {self.stub_pid}.tmp {self.stub_pid}; exec sleep 120'
+        self.write_tree_test('test_stub.py', f"setsid sh -c '{inner}' </dev/null >/dev/null 2>&1 & "
+                             'while :; do sleep 1; done')
+        return [self.stub_pid]
+
+    def wait_pidfiles(self, paths):
+        deadline = time.monotonic() + MEDIUM_TIMEOUT
+        while not all(path.exists() for path in paths):
+            self.assertLess(time.monotonic(), deadline, f'pid files never appeared: {paths}')
+            time.sleep(0.05)
+        return [int(path.read_text()) for path in paths]
+
+    def driver(self, scenario, batches, workers=2):
+        """Write a driver that runs a subreaper Dispatcher on `batches` after `scenario`
+        (patches) and prints the exception run() raised; returns its path."""
+        script = self.base / 'driver.py'
+        script.write_text(
+            'import os, subprocess, sys, threading, time\n'
+            f'sys.path.insert(0, {str(ROOT / "tests")!r})\n'
+            'import run_parallel\n'
+            f'PIDFILES = {[str(path) for path in self.pidfiles]!r}\n'
+            f'BOUND = {MEDIUM_TIMEOUT!r}\n'
+            'def wait_pidfiles():\n'
+            '    deadline = time.monotonic() + BOUND\n'
+            '    while not all(os.path.exists(path) for path in PIDFILES):\n'
+            '        if time.monotonic() > deadline:\n'
+            '            raise SystemExit("driver: pid files never appeared")\n'
+            '        time.sleep(0.05)\n'
+            'reap = run_parallel.enable_subreaper()\n'
+            'assert reap, "driver: no subreaper"\n'
+            f'dispatcher = run_parallel.Dispatcher({batches!r}, {workers}, {str(self.suite)!r}, reap=reap)\n'
+            + scenario +
+            'try:\n'
+            '    dispatcher.run()\n'
+            'except BaseException as error:\n'
+            '    print("raised", type(error).__name__, error, flush=True)\n'
+            '    sys.exit(3)\n'
+            'print("no error", flush=True)\n')
+        return script
+
+    def run_driver(self, script, paths, bound):
+        """Run the driver; return its result and how long it took after `paths` existed (the
+        stop starts then), failing when that exceeds `bound`."""
+        process = subprocess.Popen([sys.executable, str(script)], cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.wait_pidfiles(paths)
+        started = time.monotonic()
+        stdout, stderr = process.communicate(timeout=bound + MEDIUM_TIMEOUT)
+        elapsed = time.monotonic() - started
+        result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        self.assertLess(elapsed, bound, stdout + stderr)
+        return result
+
+    FAIL_SECOND_LAUNCH = (
+        'real_popen = subprocess.Popen\n'
+        'def popen(command, *args, **kwargs):\n'
+        '    if "test_other.Sample.test_a" in command:\n'
+        '        wait_pidfiles()\n'
+        '        raise OSError("injected launch failure")\n'
+        '    return real_popen(command, *args, **kwargs)\n'
+        'run_parallel.subprocess.Popen = popen\n')
+
+    def state_of(self, pid):
+        """The /proc state letter of `pid`, or None when it is gone."""
+        stat = self.rp.proc_stat(pid)
+        return stat and stat[0]
+
+    def assert_gone(self, pids):
+        for pid in pids:
+            self.assertTrue(self.sleeper_gone(pid), f'{pid} survived the stop ({self.state_of(pid)})')
+
+    def test_parallel_runner_tree_worker_failure_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths, (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertIn('raised OSError injected launch failure', result.stdout, result.stdout + result.stderr)
+        self.assert_gone(self.wait_pidfiles(paths))
+
+    def start_runner(self, wrapper=None):
+        command = [sys.executable, str(self.RUNNER), '--start-dir', str(self.suite)]
+        if wrapper:
+            command = [sys.executable, '-c', wrapper, *command[1:]]
+        process = subprocess.Popen(command, cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(process.kill)
+        return process
+
+    def stop_runner(self, process, paths, signum, bound):
+        pids = self.wait_pidfiles(paths)
+        process.send_signal(signum)
+        started = time.monotonic()
+        output, _ = process.communicate(timeout=bound + MEDIUM_TIMEOUT)
+        self.assertLess(time.monotonic() - started, bound, output)
+        return pids, output
+
+    def test_parallel_runner_tree_sigterm_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        process = self.start_runner()
+        pids, output = self.stop_runner(process, paths, signal.SIGTERM,
+                                        (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_sigint_to_runner_alone_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        # The runner gets Python's SIGINT handler even when this test inherited SIGINT ignored.
+        wrapper = ('import runpy, signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler); '
+                   'sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+        process = self.start_runner(wrapper)
+        pids, output = self.stop_runner(process, paths, signal.SIGINT,
+                                        (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertNotEqual(process.returncode, 0, output)
+        self.assertIn('KeyboardInterrupt', output)
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_sigterm_kills_stubborn_detached_descendant(self):
+        self.tree_guard()
+        paths = self.write_stub_tree()
+        process = self.start_runner()
+        pids, output = self.stop_runner(process, paths, signal.SIGTERM,
+                                        (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        # Right after the runner returned, no extra polling: the completion barrier saw to it.
+        for pid in pids:
+            self.assertIn(self.state_of(pid), (None, 'Z'), f'stub {pid} survived the stop')
+
+    def test_parallel_runner_tree_kills_process_forked_during_stop(self):
+        self.tree_guard()
+        parent, forked = self.pidfile('parent.pid'), self.pidfile('forked.pid')
+        self.write_tree_test('test_tree.py', f'trap "sleep 120 & echo \\$! > {forked}; wait" TERM; '
+                             f'echo $$ > {parent}.tmp; mv {parent}.tmp {parent}; while :; do sleep 1; done')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        self.pidfiles.remove(forked)  # written only during the stop
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        self.pidfiles.append(forked)
+        result = self.run_driver(script, [parent], (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        self.assertIn('raised OSError', result.stdout, result.stdout + result.stderr)
+        pids = [int(parent.read_text())]
+        if forked.exists() and forked.read_text().strip():
+            pids.append(int(forked.read_text()))
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_completion_barrier_failure_exits_non_zero(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        # Above the kernel's largest pid_max (2**22): never a real process.
+        phantom = 2 ** 22 + 1
+        scenario = self.FAIL_SECOND_LAUNCH + (
+            'real_live = run_parallel.Dispatcher.live_descendants\n'
+            f'run_parallel.Dispatcher.live_descendants = lambda self: {{**real_live(self), {phantom}: 0}}\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths, (self.rp.FINAL_WAIT + self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertIn(f'run_parallel: could not terminate descendants: {phantom}', result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_gone(self.wait_pidfiles(paths))
+
+    def test_parallel_runner_tree_main_exits_non_zero_when_cleanup_failed(self):
+        self.tree_guard()
+        self.write('test_one.py', '    def test_a(self): pass\n')
+        wrapper = ('import runpy, sys; sys.argv = sys.argv[1:]; sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0]); '
+                   'import run_parallel; real = run_parallel.Dispatcher.run\n'
+                   'def run(self):\n'
+                   '    results = real(self); self.cleanup_failed = [4242]; return results\n'
+                   'run_parallel.Dispatcher.run = run; sys.exit(run_parallel.main())')
+        process = self.start_runner(wrapper)
+        output, _ = process.communicate(timeout=PIPELINE_TIMEOUT)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertIn('descendants survived the stop: 4242', output)
+
+    def test_parallel_runner_tree_concurrent_stops_never_reap_during_shutdown(self):
+        self.tree_guard()
+        stubs = []
+        for number in (1, 2):
+            stub = self.pidfile(f'stub{number}.pid')
+            stubs.append(stub)
+            inner = f'trap "" TERM; echo $$ > {stub}.tmp; mv {stub}.tmp {stub}; exec sleep 120'
+            self.write_tree_test(f'test_stub{number}.py', f"setsid sh -c '{inner}' </dev/null >/dev/null 2>&1 & "
+                                 'while :; do sleep 1; done')
+        # Both workers fail at once (after both stubs exist) and both call stop(), while run()'s
+        # reap loop keeps polling (the stubs ignore SIGTERM, so the stop lasts TERMINATE_GRACE);
+        # a reap during the kill rounds would free a pid for reuse.
+        scenario = (
+            'barrier = threading.Barrier(2, timeout=BOUND)\n'
+            'def drain(self, process):\n'
+            '    wait_pidfiles()\n'
+            '    barrier.wait()\n'
+            '    raise RuntimeError(f"injected failure {process.pid}")\n'
+            'run_parallel.Dispatcher.drain = drain\n'
+            'real_waitpid = os.waitpid\n'
+            'during_stop = []\n'
+            'def waitpid(pid, options):\n'
+            '    if sys._getframe(1).f_code.co_name == "reap_adopted" and dispatcher.terminating \\\n'
+            '            and not dispatcher.stop_done.is_set():\n'
+            '        during_stop.append(pid)\n'
+            '    return real_waitpid(pid, options)\n'
+            'os.waitpid = waitpid\n'
+            'import atexit\n'
+            'atexit.register(lambda: print("during_stop", during_stop, "rounds", dispatcher.kill_rounds,\n'
+            '                              "errors", len(dispatcher.errors), "alive",\n'
+            '                              [t.name for t in threading.enumerate() if t.daemon], flush=True))\n')
+        script = self.driver(scenario, [['test_stub1.Sample.test_tree'], ['test_stub2.Sample.test_tree']])
+        result = self.run_driver(script, stubs, (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised RuntimeError injected failure', result.stdout, output)
+        self.assertIn('during_stop [] rounds 1 errors 2 alive []', result.stdout, output)
+        self.assert_gone(self.wait_pidfiles(stubs))
+
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
     def scale(self, **env):

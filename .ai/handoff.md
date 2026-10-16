@@ -4,6 +4,11 @@
 - T001 (done): `tests/run_parallel.py` makes itself a child subreaper on Linux (`main()` only)
   and reaps adopted orphan zombies by pid between thread joins, never `waitpid(-1)`, so batch
   exit statuses and reports are unchanged.
+- T002 (done): a stop (worker error, interrupt, SIGTERM) is owned by its first caller and, as
+  subreaper, walks the `/proc` tree below the runner: SIGTERM, up to 3 SIGKILL rounds and a
+  bounded completion barrier, so GNU `timeout` groups and detached sessions go too; survivors
+  are printed (`could not terminate descendants`) and fail the run. No adopted zombie is
+  reaped while the stop runs.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -34,6 +39,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 
 ## Validation run
 2026-10-16 after T001: `.ai/bin/ai-check` PASS (689 tests, 424.6 s on 8 workers).
+2026-10-16 after T002: `.ai/bin/ai-check` PASS (697 tests, 408.3 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the

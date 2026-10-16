@@ -841,7 +841,10 @@ IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the C
 most 8; six batches per worker, so neighbouring and often similarly slow tests land in
 different batches and no worker idles while another works through a slow cluster). Each
 batch runs as `python3 -m unittest` in its own process. On Linux the runner is a child
-subreaper: processes the batches orphan stay its descendants and it reaps them. The runner fails when a batch fails
+subreaper: processes the batches orphan stay its descendants and it reaps them. A stop (a
+worker error, an interrupt or SIGTERM) then terminates every descendant, GNU `timeout` groups
+and detached sessions included, and waits until none is alive; if some survive it prints
+`run_parallel: could not terminate descendants: <pids>` and exits non-zero. The runner fails when a batch fails
 or crashes (listing that batch's test IDs), when it collects no tests, or when the batches
 ran a different number of tests than it collected. Batches always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
 `PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching

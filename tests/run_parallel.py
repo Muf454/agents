@@ -9,7 +9,9 @@ number of tests than were collected. On Python 3.12+ it also reports the slowest
 how busy each worker was. Each batch runs in its own process group; an interrupt, SIGTERM or
 a crashed worker terminates every running group, so subprocesses the tests started go too. On
 Linux the runner is a child subreaper: it adopts the batches' orphaned descendants and reaps
-them, so they stay its descendants. When the caller sets no TMPDIR and /dev/shm is a writable,
+them, so they stay its descendants, and a stop terminates that whole descendant tree (GNU
+`timeout` groups, detached sessions) and waits until /proc shows none alive; when some
+survive it says so on stderr and exits non-zero. When the caller sets no TMPDIR and /dev/shm is a writable,
 executable tmpfs with 1 GiB free, the batches get a temporary directory there (removed after
 the run); AI_TEST_TMPFS=0 turns that off.
 """
@@ -40,6 +42,11 @@ TERMINATE_GRACE = 5
 # that a process outside the batch's process group (one that started its own session) holds.
 DRAIN_POLL = 0.5
 DRAIN_GRACE = 2 * TERMINATE_GRACE
+# Stopping the descendant tree (Linux, subreaper): /proc poll interval, SIGKILL rounds, and
+# how long the completion barrier waits for the last descendants to die.
+KILL_POLL = 0.1
+KILL_ROUNDS = 3
+FINAL_WAIT = TERMINATE_GRACE
 
 
 def worker_count():
@@ -200,9 +207,8 @@ def proc_stat(pid):
         return None
 
 
-def children_of(pid):
-    """Return {child pid: (state, ppid, starttime)} for the children of `pid`, from one scan
-    of /proc ({} where there is no /proc)."""
+def process_table():
+    """Return {pid: (state, ppid, starttime)} from one scan of /proc ({} where there is none)."""
     try:
         entries = os.listdir('/proc')
     except OSError:
@@ -211,15 +217,51 @@ def children_of(pid):
     for entry in entries:
         if entry.isdigit():
             stat = proc_stat(entry)
-            if stat and stat[1] == pid:
+            if stat:
                 found[int(entry)] = stat
     return found
+
+
+def children_of(pid):
+    """Return {child pid: (state, ppid, starttime)} for the children of `pid`, from one scan
+    of /proc ({} where there is no /proc)."""
+    return {child: stat for child, stat in process_table().items() if stat[1] == pid}
+
+
+def descendants(root, table=None):
+    """Return {pid: (state, starttime)} for every descendant of `root` (root excluded), by
+    walking the ppid map of one /proc scan. A process that forks or is reparented during the
+    scan may be missed; callers walk again."""
+    table = process_table() if table is None else table
+    children = {}
+    for pid, (state, ppid, starttime) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found, todo = {}, [root]
+    while todo:
+        for child in children.get(todo.pop(), ()):
+            if child not in found and child != root:
+                found[child] = (table[child][0], table[child][2])
+                todo.append(child)
+    return found
+
+
+def signal_pid(pid, starttime, signum):
+    """Signal `pid` only while /proc still shows the process recorded with `starttime`: a pid
+    that ended and was reused belongs to someone else."""
+    stat = proc_stat(pid)
+    if stat is None or stat[2] != starttime:
+        return
+    try:
+        os.kill(pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 class Dispatcher:
     """Worker threads pull batches from a shared queue; each batch is one child process in its
     own process group. Stopping (interrupt or a worker error) terminates every running group.
-    With `reap` (the runner is a subreaper) run() also reaps the orphans it adopts."""
+    With `reap` (the runner is a subreaper) run() also reaps the orphans it adopts, and stop()
+    terminates every descendant of this process."""
 
     def __init__(self, batches, workers, start_dir, tmpdir=None, reap=False):
         self.batches = batches
@@ -233,6 +275,12 @@ class Dispatcher:
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self.stopped_at = None
+        # Set (under the lock) by the first stop() caller, which owns the shutdown; stop_done
+        # is set when that shutdown has finished, also when it failed.
+        self.terminating = False
+        self.stop_done = threading.Event()
+        self.kill_rounds = 0
+        self.cleanup_failed = []
         self.running = set()
         self.results = {}
         self.busy = [0.0] * self.workers
@@ -306,29 +354,89 @@ class Dispatcher:
                 self.results[number] = result
 
     def stop(self):
+        """Terminate the running batches (and, as subreaper, every descendant). Idempotent:
+        the first caller does the work, later callers wait until it has finished."""
         with self.lock:
             self.stopping.set()
             if self.stopped_at is None:
                 self.stopped_at = time.monotonic()
+            owner = not self.terminating
+            self.terminating = True
             children = list(self.running)
+        if not owner:
+            self.stop_done.wait()
+            return
+        # Outside the lock: no batch can start once `stopping` is set.
+        try:
+            self.kill_rounds += 1
+            self.terminate(children)
+        finally:
+            self.stop_done.set()
+        if self.reap:
+            self.reap_adopted(after_stop=True)
+
+    def live_descendants(self):
+        """{pid: starttime} of the descendants of this process that are not zombies."""
+        return {pid: starttime for pid, (state, starttime) in descendants(os.getpid()).items()
+                if state != 'Z'}
+
+    def terminate(self, children):
+        tree = self.live_descendants() if self.reap else {}
         for process in children:
             signal_group(process, signal.SIGTERM)
+        # GNU `timeout` and detached sessions are outside the batches' groups.
+        for pid, starttime in tree.items():
+            signal_pid(pid, starttime, signal.SIGTERM)
         deadline = time.monotonic() + TERMINATE_GRACE
         for process in children:
             try:
                 process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 pass
+        while tree and time.monotonic() < deadline:
+            live = self.live_descendants()
+            if not any(live.get(pid) == starttime for pid, starttime in tree.items()):
+                break
+            time.sleep(KILL_POLL)
         # Also descendants that ignored SIGTERM or outlived their batch process.
         for process in children:
             signal_group(process, signal.SIGKILL)
+        if not self.reap:
+            return
+        # Every walk kills what it finds, so a process forked during the stop goes too.
+        # Zombies are left alone: reap_adopted() waits until stop_done, so their pids stay
+        # reserved and a SIGKILL never reaches a reused pid.
+        for _ in range(KILL_ROUNDS):
+            live = self.live_descendants()
+            if not live:
+                break
+            for pid, starttime in live.items():
+                signal_pid(pid, starttime, signal.SIGKILL)
+            time.sleep(KILL_POLL)
+        # Completion barrier: SIGKILL is asynchronous, only /proc says a process is gone.
+        deadline = time.monotonic() + FINAL_WAIT
+        while True:
+            live = self.live_descendants()
+            if not live:
+                return
+            if time.monotonic() >= deadline:
+                break
+            for pid, starttime in live.items():
+                signal_pid(pid, starttime, signal.SIGKILL)
+            time.sleep(KILL_POLL)
+        self.cleanup_failed = sorted(live)
+        print('run_parallel: could not terminate descendants: ' + ' '.join(map(str, self.cleanup_failed)),
+              file=sys.stderr, flush=True)
 
-    def reap_adopted(self):
+    def reap_adopted(self, after_stop=False):
         """Reap the zombie children of this process that are not batches (orphans adopted as
         subreaper). Under the lock: batches start under it, so a just-started batch is always
         in self.running and its status stays with its Popen. Never os.waitpid(-1, ...): it can
-        take a batch's status, and Popen then reports exit 0."""
+        take a batch's status, and Popen then reports exit 0. Does nothing while a stop is in
+        progress (its owner passes after_stop once it is done)."""
         with self.lock:
+            if self.terminating and not self.stop_done.is_set() and not after_stop:
+                return
             batches = {process.pid for process in self.running}
             for pid, (state, _, _) in children_of(os.getpid()).items():
                 if state == 'Z' and pid not in batches:
@@ -357,6 +465,8 @@ class Dispatcher:
             self.stop()
             for thread in threads:
                 thread.join()
+            if self.reap:
+                self.reap_adopted()
             raise
         if self.errors:
             raise self.errors[0]
@@ -440,6 +550,8 @@ def main():
         problems.append('failing batches: ' + ', '.join(map(str, failed)))
     if total != len(ids):
         problems.append(f'count mismatch: ran {total} of {len(ids)} collected tests')
+    if dispatcher.cleanup_failed:
+        problems.append('descendants survived the stop: ' + ' '.join(map(str, dispatcher.cleanup_failed)))
     print(f'Ran {total} tests in {elapsed:.1f}s '
           f'({len(batches)} batches on {dispatcher.workers} workers, {len(ids)} collected)')
     if problems:
