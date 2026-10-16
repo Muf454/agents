@@ -22,7 +22,9 @@ Small, local changes; no new runtime dependency, no new executable, no daemon.
    expiry it names the survivors on stderr and the run exits non-zero. Shutdown has one owner
    (the first `stop()` caller; later callers wait on `stop_done`), and `reap_adopted()` does
    nothing while termination is in progress, so the reap loop never frees a PID mid-stop
-   (plan review P4).
+   (plan review P4). `run()`'s cleanup-protected `try:` also covers the worker start loop
+   (T013, plan review round 2 P6): an interrupt during a later `thread.start()` calls `stop()`
+   and joins only the threads that started.
    ```mermaid
    flowchart LR
      M[main: enable_subreaper] --> D[Dispatcher.run: workers + reap loop]
@@ -47,27 +49,37 @@ Small, local changes; no new runtime dependency, no new executable, no daemon.
    post-session `ai_guard_verify` (the checkout helper is trusted only after that). A
    path-based `rm -rf` would follow a symlinked `.ai/local` or `.ai` (plan review P1). No
    permission change: `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
-4. **Recovery answer (T008; opus: recovery authority).** `recover_decision` keeps the strict
-   path for a whole-text JSON value; otherwise only objects starting at a line start and
-   ending their line are candidates (`raw_decode`, scanning resumes after each). A line-start
-   `{` that is malformed or shares its line with more text, or unbalanced `{[`/`}]` in the
-   text before a candidate, escalates the whole answer, so a nested object of a broken or
-   prose-prefixed container is never promoted (plan review P3). Exactly one valid decision is
-   accepted; a duplicate key in any candidate escalates. Escalation keeps a cleaned excerpt.
+4. **Recovery answer (T012 scanner, T008 excerpt/prompt/docs; opus: recovery authority).**
+   Design note "Recovery answer scanner" (convergence: plan review P3 hit this area in rounds
+   1 and 2, each time with a new way to hide a candidate inside an enclosing container, a
+   scan at each `{` and then character counts fooled by brackets inside JSON strings; a
+   string-aware count over prose is ill-defined because prose quotes need not balance). The
+   whole area is replaced by one rule that needs no parsing outside the object:
+   `recover_decision` keeps the strict path for a whole-text JSON value; otherwise the first
+   `{` of the text is the only candidate. It must start its line, `raw_decode` from it
+   (duplicate-key hook) must give a dict that ends its line, and the prose before and after
+   it must contain none of `{`, `}`, `[`, `]`. An enclosing container needs a bracket before
+   and after the object, so none can exist; a second object needs a `{` after it, so at most
+   one candidate exists. It is used only when it is a valid decision; everything else
+   escalates. Escalation keeps a cleaned excerpt (T008). Cost: prose with any bracket
+   escalates even before a valid decision; the prompt asks for the object alone.
 5. **Catch-up coverage (T009).** Pure report logic in `outcomes_report` plus a `catchup`
    outcome kind written by `ai-status --catch-up-done BRANCH...`. "Later" is ordered by
    `(time, file, line)`: equal seconds cover only within one file at a later line (P5).
 
 ## Phases / tasks
 Priority order (the most valuable lands first if the night runs short):
-T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T003
+T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T013
+(interrupt during worker startup goes through `stop()`, opus) → T003
 (`tasks fill-sections`, sonnet) → T004 (host runs it after sessions, sonnet; flow chart) → T005
 (escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T011 (scratch deletion through
 pinned descriptors, opus; placed before T007 in the queue) → T007 (scratch prompts/docs, sonnet;
-flow chart) → T008 (recovery decision, opus; flow chart if it describes the answer) → T009
-(CU-2, sonnet) → T010 (docs/handoff audit, haiku).
-Dependencies: T002 needs T001; T004 needs T003; T006 needs T004 and T005 (it describes them);
-T007 needs T011; T010 needs all. T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
+flow chart) → T012 (recovery answer scanner, opus) → T008 (recovery excerpt, prompt, docs,
+opus; flow chart if it describes the answer) → T009 (CU-2, sonnet) → T010 (docs/handoff
+audit, haiku).
+Dependencies: T002 needs T001; T013 needs T002; T004 needs T003; T006 needs T004 and T005 (it
+describes them); T007 needs T011; T008 needs T012; T010 needs all. New tasks sit right after
+their dependency (the queue check wants dependencies earlier in the file). T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
 regression there shows up at once in every later gate run.
 The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 switches it to
 `Flow chart updated` (`test_pr_body_flow_this_repo_declares_the_flow_chart` needs one of them).
@@ -81,9 +93,11 @@ The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 swit
 - PID reuse during a stop: start-time check before SIGKILL; zombies are not reaped until the
   kill rounds end, so adopted PIDs cannot be reused meanwhile.
 - `test_recovery_decision_parsing_is_strict` stays unchanged: an inline `Decision: {…}` is
-  still escalated (only line-anchored objects are candidates). Accepting prose widens what
-  counts as a decision: guarded by line anchoring, the enclosure check, "exactly one valid
-  object" and duplicate-key escalation.
+  still escalated (the first `{` must start its line). Accepting prose widens what counts as a
+  decision: guarded by bracket-free prose around a single line-start object (T012), which
+  rules out enclosure without parsing prose, and duplicate-key escalation. Prose containing
+  any bracket escalates (false escalations notify the human; never a wrong action).
+- An interrupt during worker startup used to skip `stop()` entirely (T013 closes it).
 - Scratch clearing deletes on the host after an agent session: only through descriptors pinned
   without following symlinks (T011); a symlinked parent means a warning, never a delete.
 - A descendant that cannot be confirmed gone after the final wait makes the self-check fail

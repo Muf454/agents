@@ -171,6 +171,67 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
+## T013 — An interrupt during worker startup still runs the shutdown (FL-27, part 3; plan review round 2 P6)
+Status: TODO
+Dependencies: T002
+Model: opus
+
+### Goal
+SIGINT or SIGTERM that arrives while `Dispatcher.run()` is still starting its worker threads
+(after the first worker launched a batch) goes through T002's `stop()` like any later
+interrupt: no batch, `timeout` or detached descendant survives.
+
+### Implementation notes
+- Verified at 92167cd: `run()` (tests/run_parallel.py:274–286) calls `thread.start()` for every
+  worker BEFORE its `try:`; a `KeyboardInterrupt` (SIGINT) or the `SystemExit(143)` of
+  `terminated()` (SIGTERM, :304–305) raised in the main thread during a later `start()` escapes
+  without `stop()` while the first worker already runs a batch.
+- `run()`: keep a `started` list; the `try:` covers the start loop as well as the joins (and
+  T001's reap loop): `for thread in threads: thread.start(); started.append(thread)`. The
+  `except BaseException:` path calls `self.stop()`, then joins only `started` threads (a
+  `Thread` that was never started cannot be joined: `RuntimeError`), then re-raises. A
+  thread whose `start()` raised is not in `started`. Keep T002's ownership (`stop()` idempotent,
+  later callers wait on `stop_done`) and the final reap after the joins.
+- Signals between `Dispatcher(...)` construction and `run()`'s `try:` start no batch, so they
+  need nothing; check `main()` creates no child before `run()` (comment if relevant).
+- Concurrency: `stop()` from the main thread may race a worker's own `stop()` (first one owns
+  it, T002); a worker started just before the interrupt either launches its batch under the
+  lock before `stopping` is set (then `stop()` sees it in `self.running`) or sees `stopping`
+  and returns, the existing invariant.
+- Test via a child Python driver as in T002 (never make the test process a subreaper): the
+  driver imports `run_parallel`, calls `enable_subreaper()`, builds a Dispatcher with
+  `workers=2` and two batches whose test starts `timeout 120 sh -c 'echo $$ > <child.pid>;
+  exec sleep 120'` (Popen pid of `timeout` written too) plus a detached
+  `setsid sh -c 'trap "" TERM; echo $$ > <stub.pid>; exec sleep 120' </dev/null >/dev/null 2>&1 &`,
+  and patches `threading.Thread.start` (within the driver) so the SECOND call first waits
+  (bounded) until both pid files of the first batch exist and then raises `KeyboardInterrupt`.
+  The driver counts `stop()` kill-round entries, prints the exception type and the count, and
+  exits non-zero. Every recorded pid is SIGKILLed in `addCleanup`.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py (run_parallel tests)
+
+### Acceptance criteria
+- Tests named `test_parallel_runner_startup_*` in tests/test_workflow.py (skip when not Linux
+  or `timeout`/`setsid` is missing):
+  - interrupt on the second `thread.start()` after the first batch launched: the driver prints
+    `KeyboardInterrupt` and a kill-round count of exactly 1, exits non-zero within
+    `TERMINATE_GRACE * 2 + FINAL_WAIT + 10` s × scale, no `RuntimeError` about joining an
+    unstarted thread, and right after it exits the `timeout` pid, the sleeper pid and the stub
+    pid are each gone or a zombie;
+  - the same with `SystemExit(143)` raised instead (the SIGTERM path): exit 143 reported by the
+    driver, same process checks;
+  - mutation check recorded in the result: with the start loop moved back outside the `try:`,
+    the first case fails (stop count 0 or a survivor).
+- `test_parallel_runner_*` (T001's `subreaper_*`, T002's `tree_*` included) pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
 ## T003 — `tasks fill-sections`: add the two content-free sections to TODO tasks (FL-25 a, part 1)
 Status: TODO
 Dependencies: none
@@ -506,9 +567,82 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
-## T008 — Recovery decision: one decision object inside prose is accepted; the escalation keeps what the session wrote (FL-12)
+## T012 — Recovery answer scanner: one line-start object inside bracket-free prose (FL-12 redesign, plan review round 2 P3)
 Status: TODO
 Dependencies: none
+Model: opus
+
+### Goal
+`recover_decision` accepts a decision written after or before prose only when no JSON container
+can enclose it, with a rule that needs no string parsing outside the object: the prose around
+the one candidate object contains no `{`, `}`, `[` or `]` at all.
+
+### Implementation notes
+- Why (design note "Recovery answer scanner" in `.ai/current-plan.md`): rounds 1 and 2 found
+  ways to put a candidate inside an enclosing container (a scan at each `{`; then character
+  counts fooled by a bracket inside a JSON string, `Diagnostic: ["]",` + object + `]`). Any
+  string-aware count over prose is ill-defined (prose has unbalanced quotes). An enclosing
+  container needs an opening bracket before the object and a closing one after it; forbidding
+  every bracket character outside the object rules that out without parsing prose.
+- `scripts/lib/workflow.py` `recover_decision` (~1886–1916). Envelope checks unchanged.
+  1. `text` = fence-stripped result as today. If `json.loads(text)` (duplicate-key hook)
+     succeeds: a dict is validated as today; any other JSON value escalates.
+  2. Otherwise: `start` = index of the first `{` in `text`; none → escalate (no decision).
+     Escalate unless ALL hold:
+     - `text[:start]` contains none of `{}[]` (so in particular no `[` opens before it) and
+       the characters between the last newline before `start` and `start` are whitespace
+       (line start; inline, backticked or quoted objects are prose, so they escalate);
+     - `JSONDecoder(object_pairs_hook=…).raw_decode(text, start)` succeeds (a
+       `DuplicateKey(ValueError)` from the hook or a decode error → escalate) and returns a dict;
+     - the rest of the object's last line is whitespace, and `text[end:]` contains none of
+       `{}[]` (no second object, no closing bracket of an enclosing container);
+     - the dict's `action` is in `RECOVER_ACTIONS` and its fields pass today's checks.
+     Then use it. Fence marker lines are plain prose here (backticks are not brackets).
+     Comment the rule and the reason above the scanner. No character counting, no string
+     parsing outside the object.
+  3. Leave the escalation reason as today; T008 adds the excerpt.
+- Trade-off (recorded in the plan's Risks): prose with any bracket (`[1]`, a markdown link,
+  an inline example object) escalates even when a valid decision follows. Escalation is the
+  safe side and the recover prompt asks for the object alone.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_recovery_decision_scan_*` in tests/test_workflow.py (helper
+  `recover-decision` on envelopes, as the strict test does):
+  - accepted: diagnosis paragraph then, on its own line, `{"action": "escalate", "reason": "x",
+    "human_action": "y"}` → `escalate\tx\ty`; prose on the lines after the object → still
+    accepted; a fenced object after prose → accepted; a decision spread over several lines
+    (line-start `{`, closing `}` alone on the last line) → accepted; a decision whose string
+    values contain `[`, `]`, `{` or `}` → accepted (inside the object the JSON parser decides);
+  - escalate, the P3 round 2 reproduction: `Diagnostic: ["]",` / `{"action":"commit_and_rerun",
+    "reason":"example"}` / `]` (three lines); the same with `"{"` and `"}"` strings in the
+    prefix line; a lone `]` or `}` on a line after a valid decision; a `[` in the prose before it;
+  - escalate, the round 1 cases: `Broken diagnostic: {"details":{"action":"commit_and_rerun",
+    "reason":"example"}, BROKEN}`; the same broken object at a line start; `Diagnostic:
+    [{"action":"rerun","reason":"example"}]`; a line `Diagnostic: [`, the object on its own line,
+    then `]`; a quoted example `"{\"action\": \"rerun\", \"reason\": \"x\"}"`; an inline
+    backticked decision; prose quoting the template inline followed by a real decision on its
+    own line (the inline braces are brackets in the prose);
+  - escalate: two decisions (same or different actions, separate lines); a duplicate key in the
+    candidate; a valid action without `reason`; a line-start object with text after it on the
+    same line; a candidate without a known `action`;
+  - a decision with a nested object containing another action → only the outer one counts.
+- `test_recovery_decision_parsing_is_strict` passes unchanged (`Decision: {…}` → not at a line
+  start; `{…} {…}` → text after the object; `[{…}]` → whole-text JSON that is not an object).
+- All other existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k recovery_decision` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T008 — Recovery decision: one decision object inside prose is accepted; the escalation keeps what the session wrote (FL-12)
+Status: TODO
+Dependencies: T012
 Model: opus
 
 ### Goal
@@ -517,33 +651,13 @@ an answer without exactly one valid decision still escalates, now with the sessi
 the reason.
 
 ### Implementation notes
-- `scripts/lib/workflow.py` `recover_decision` (~1886–1916). Envelope checks unchanged. Then:
-  1. `text` = fence-stripped result as today. If `json.loads(text)` (duplicate-key hook)
-     succeeds: a dict is validated as today; any other JSON value escalates (keeps
-     `[{"action": …}]` → escalate).
-  2. Otherwise scan line-anchored candidates only (plan review P3: a scan "at each `{`" can
-     promote a nested object of a malformed or prose-prefixed container). Rules, in order:
-     - Fence marker lines (```` ``` ````, ```` ```json ````) count as blank lines; their contents
-       are scanned like any other lines (a fenced decision after prose stays accepted).
-     - A candidate starts only where `{` is the first non-whitespace character of a line.
-       `JSONDecoder(object_pairs_hook=…).raw_decode(text, i)` there must succeed AND the rest
-       of the line after the object must be whitespace; scanning resumes after the object, so
-       nothing inside it is ever looked at again.
-     - A line-start `{` that fails to decode, or decodes with non-whitespace after it on the
-       same line, escalates the whole answer (malformed or ambiguous enclosing structure); its
-       inner `{` are never reconsidered.
-     - Enclosure check: the text before each candidate (from the start, or from the end of the
-       previous candidate) must have `{`/`[` and `}`/`]` balanced (plain character counts, no
-       string parsing); unbalanced → escalate (the candidate may sit inside an array or an
-       unclosed object such as `Diagnostic: [` on the line before).
-     - Objects not at a line start (inline after prose, in backticks or inside quotes) are
-       never candidates; they are prose.
-     A duplicate key in any candidate escalates the whole answer (raise a
-     `DuplicateKey(ValueError)` subclass from the hook so it is distinguishable). A candidate
-     counts as a decision when its `action` is in `RECOVER_ACTIONS` and its fields pass today's
-     checks; a candidate whose `action` is one of the three but whose other fields fail →
-     escalate (ambiguous); a candidate without such an `action` is ignored. Exactly one
-     decision → use it; zero or several → escalate. Comment the rules above the scanner.
+- Plan review round 2 (P3): the prose scanner is T012's (design "Recovery answer scanner" in
+  `.ai/current-plan.md`) and replaces the line-anchored scan and character-count enclosure
+  check planned here before. This task builds on T012's `recover_decision` and adds the excerpt, the prompt,
+  the docs and the end-to-end run; do not change T012's scanning rules.
+- `scripts/lib/workflow.py` `recover_decision` (~1886–1916), after T012:
+  1. (T012) whole-text JSON as today; otherwise the bracket-free-prose scan.
+  2. (T012) exactly one valid decision → use it; anything else escalates.
   3. Escalation for want of a decision: reason `the recovery session gave no valid decision;
      it wrote: <excerpt>` when the result text is non-empty (excerpt: whitespace collapsed,
      tabs removed, so the total stays within the existing 300-character `clean` cap), else as
@@ -553,11 +667,9 @@ the reason.
   object or an example object."
 - `scripts/ai-recover` needs no change (it reads the three tab-separated fields); verify the
   notification shows the excerpt reason.
-- `test_recovery_decision_parsing_is_strict` (~4156) passes unchanged: `Decision: {…rerun…}`
-  (~4170) stays `escalate` (inline, not at a line start), `{…} {…}` on one line (~4163) stays
-  `escalate` (non-whitespace after the object), `[{…}]` (~4171) stays `escalate` (whole-text
-  JSON that is not an object).
-- Docs: README and `docs/workflow.md` (recovery decision format). Vault: update the recovery
+- `test_recovery_decision_parsing_is_strict` (~4156) passes unchanged (T012 checks it too).
+- Docs: README and `docs/workflow.md` (recovery decision format, stating T012's rule: the
+  prose around the object may contain no `{`, `}`, `[` or `]`). Vault: update the recovery
   box of `agents-flow.md` only if it describes the answer format (then `updated:` + hub Log
   line); otherwise say "flow unchanged" in the result.
 
@@ -567,28 +679,16 @@ docs/workflow.md
 
 ### Acceptance criteria
 - Tests named `test_recovery_decision_prose_*` in tests/test_workflow.py (helper
-  `recover-decision` on envelopes, as the strict test does):
-  - diagnosis paragraph then, on its own line, `{"action": "escalate", "reason": "x",
-    "human_action": "y"}` → `escalate\tx\ty`; prose on the lines after the object → still
-    accepted; a fenced object after prose → accepted; a decision object spread over several
-    lines (line-start `{`, closing `}` alone on the last line) → accepted;
-  - prose quoting the template inline (`The format is {"action": "rerun|commit_and_rerun|escalate", …}.`)
-    followed by a real `{"action": "rerun", "reason": "crash"}` on its own line → `rerun`;
-  - negative cases from P3, each → escalate: `Broken diagnostic: {"details":{"action":
-    "commit_and_rerun","reason":"example"}, BROKEN}` alone; the same broken object starting at a
-    line start; `Diagnostic: [{"action":"rerun","reason":"example"}]`; a line `Diagnostic: [`,
-    then `{"action":"rerun","reason":"example"}` on its own line, then `]`; a quoted example
-    `"{\"action\": \"rerun\", \"reason\": \"x\"}"` with no other object; an inline backticked
-    decision `` `{"action":"rerun","reason":"x"}` `` with no line-start object;
-  - two valid decisions in prose (same or different actions) → escalate; a decision with a
-    nested object containing another action → only the outer one counts; a duplicate key in an
-    object followed by a valid one → escalate; a valid action without `reason` plus another
-    valid decision → escalate;
+  `recover-decision` on envelopes, as the strict test does); the scanner cases are T012's
+  `test_recovery_decision_scan_*`, which must still pass:
   - prose only → `escalate` with reason starting `the recovery session gave no valid decision;
     it wrote:` and containing the start of the prose, no tab inside the reason, ≤ 300 characters;
+  - prose with a bracket and no valid decision (e.g. the P3 `Diagnostic: ["]",` reproduction)
+    → the same excerpt reason;
   - an end-to-end `ai-recover` run with a mock recovery answer of prose + `rerun` resumes the
     pipeline (an existing MOCK_RECOVER mode extended, e.g. `prose-rerun`).
-- `test_recovery_decision_parsing_is_strict` and all other existing tests pass unchanged.
+- `test_recovery_decision_parsing_is_strict`, T012's `test_recovery_decision_scan_*` and all
+  other existing tests pass unchanged.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k recovery_decision` (must say `Ran N tests`, N ≥ 1).
@@ -659,7 +759,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009, T011
+Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009, T011, T012, T013
 Model: haiku
 
 ### Goal
@@ -668,9 +768,9 @@ does; the human knows which upgrade, vault and backlog steps remain.
 
 ### Implementation notes
 - Check each sentence the tasks added (README, `docs/workflow.md`) against the code once:
-  subreaper and tree termination (T001/T002), `tasks fill-sections` and the host step
+  subreaper and tree termination (T001/T002/T013), `tasks fill-sections` and the host step
   (T003/T004), escaped pipes (T005), prompt wording (T006), `.ai/local/scratch` (T011/T007),
-  recovery decision with prose (T008), catch-up coverage and `--catch-up-done` (T009). Fix
+  recovery decision with prose (T012/T008), catch-up coverage and `--catch-up-done` (T009). Fix
   contradictions; no new behaviour.
 - Vault: confirm `agents-flow.md` reflects T004 and T007 (and T008 if it changed the chart)
   with a current `updated:`; hub Log has one dated line per flow-changing task. Append one
@@ -689,6 +789,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   the recovery-decision rule.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
 - The handoff names `test_parallel_runner_subreaper_*`, `test_parallel_runner_tree_*`,
+  `test_parallel_runner_startup_*`, `test_recovery_decision_scan_*`,
   `test_task_sections_fill_*`, `test_task_sections_host_*`,
   `test_task_sections_prompts_show_the_format`, `test_disposition_pipes_*`,
   `test_scratch_clear_*`, `test_scratch_dir_*`, `test_recovery_decision_prose_*` and `test_outcome_catchup_*` under

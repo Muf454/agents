@@ -7,6 +7,8 @@ order:
 - T001–T002 FL-27: `tests/run_parallel.py` becomes a child subreaper on Linux, reaps adopted
   orphans without touching batch exit statuses, and on a worker failure, interrupt or SIGTERM
   terminates the whole descendant tree, GNU `timeout` groups included (PR #28 final review M3).
+  T013: an interrupt while workers are still being started goes through the same shutdown
+  (plan review round 2 P6).
 - T003–T004 FL-25 (a): `workflow.py tasks fill-sections` adds a missing `### Likely affected
   modules` / empty `### Result / notes` to TODO tasks; the host runs it after triage, planning
   and plan-revision sessions.
@@ -16,8 +18,9 @@ order:
   before and after every session through `workflow.py clear-scratch`, which deletes only via
   descriptors pinned without following symlinks (T011, opus; plan review P1); T007 adds the
   prompt rule and docs (no permission change).
-- T008 FL-12: `recover-decision` accepts exactly one valid decision object inside prose; the
-  escalation reason keeps an excerpt of what the session wrote.
+- T012 + T008 FL-12: `recover-decision` accepts exactly one valid line-start decision object
+  inside prose that contains no `{}[]` (T012, scanner redesign after plan review rounds 1–2
+  P3); T008 adds the escalation excerpt of what the session wrote, the prompt and docs.
 - T009 CU-2: `ai-status --outcomes` drops Claude reviews covered by a later Codex review of the
   same branch or by `ai-status --catch-up-done BRANCH`.
 - T010: docs/handoff audit.
@@ -34,7 +37,8 @@ None yet on this branch.
 - FL-25: only the two content-free sections are added, only to TODO tasks, only right after a
   session; escaped pipes are accepted, unescaped ones still split a row.
 - FL-26: no `rm`/`git clean` on the allowlist; the host clears `.ai/local/scratch`.
-- FL-12: no `--json-schema`; prose around exactly one valid decision is accepted.
+- FL-12: no `--json-schema`; prose around exactly one valid decision is accepted only when the
+  prose has no brackets (otherwise escalate: safe side).
 - CU-2: a later Codex review of the same project+branch and family covers earlier Claude
   reviews; other branches need `--catch-up-done`.
 
@@ -59,12 +63,13 @@ T008 updates it only if the chart describes the recovery answer format.
 ### Covered by automated tests
 Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its
 tests (the groups are added by the tasks named).
-- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002).
+- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002),
+  `test_parallel_runner_startup_*` (T013).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005).
 - `test_scratch_clear_*` (T011), `test_scratch_dir_*` (T007).
-- `test_recovery_decision_prose_*` (T008).
+- `test_recovery_decision_scan_*` (T012), `test_recovery_decision_prose_*` (T008).
 - `test_outcome_catchup_*` (T009).
 
 ## Human todos
@@ -77,5 +82,6 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Implement T001, then the queue in order (T002 depends on T001; T004 on T003; T006 on T004 and
-T005; T007 on T011, which sits before it in the queue; T010 last).
+Implement T001, then the queue in order (T002 depends on T001; T013 on T002; T004 on T003;
+T006 on T004 and T005; T007 on T011 and T008 on T012, each sitting right before it in the
+queue; T010 last).
