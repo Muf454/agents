@@ -505,7 +505,7 @@ untouched; the shared "How to work here" block is unchanged. Targeted: `-k task_
 
 
 ## T011 — Host clears `.ai/local/scratch` through pinned directory descriptors (FL-26, deletion)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -570,6 +570,21 @@ Targeted: `python3 -m unittest discover -s tests -k scratch_clear` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-17. `scripts/lib/workflow.py`: `clear_scratch()` (`workflow.py clear-scratch`, root
+from `AI_ROOT` else cwd) pins `.ai/local` with `local_dir_fd`, `os.stat(..., follow_symlinks=False)`
+on `scratch`: missing → silent; non-directory or symlink → `os.unlink(dir_fd=)`; directory →
+`remove_tree()`. Deviation from the notes: `remove_tree` is an own descriptor walk (`DIR_FLAGS`
+with `O_NOFOLLOW`, `os.scandir(fd)`, `unlink`/`rmdir` with `dir_fd`; inner symlinks are unlinked,
+never entered) instead of `shutil.rmtree(dir_fd=)`, which needs Python 3.11 while README says
+3.10+. `OSError`/`RecursionError` → `Warning: could not clear .ai/local/scratch: …`; exit 0
+always. `scripts/ai-run`: `clear_scratch() { ai_helper clear-scratch || true; }`, called before
+the `timeout … claude -p` call (every loop pass, so also before a limit retry) and right after
+the post-session `ai_guard_verify`. Tests (tests/test_workflow.py, mock modes `scratch-leftover`,
+`scratch-parent-symlink`, `scratch-symlink`, mock records `scratch-seen`): 8
+`test_scratch_clear_*`, covering the six helper cases (symlinked `.ai/local` and `.ai` in one
+test), the three end-to-end modes and the startup `Unsafe symlink in workflow path` refusal.
+README/docs/prompts are T007. Targeted: `-k scratch_clear` Ran 8 OK. Gate: `.ai/bin/ai-check`
+PASS (721 tests, 396.2 s on 8 workers).
 
 
 ## T007 — Scratch files go to `.ai/local/scratch/`, which the host empties around every session (FL-26, prompts and docs)

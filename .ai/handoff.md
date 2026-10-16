@@ -22,6 +22,10 @@
 - T006 (done): the triage, plan-revision and plan prompts state the exact task format and the
   pipe rule (`\|` in a table cell); `templates/.ai/tasks.md` says `### Result / notes` starts empty.
   Installed `.ai/prompts` copies are unchanged until the upgrade.
+- T011 (done): `workflow.py clear-scratch` empties `.ai/local/scratch` through the pinned
+  `.ai/local` descriptor (own descriptor walk, no symlink followed; a symlink at `scratch` is
+  unlinked; a symlinked `.ai`/`.ai/local` only warns). `ai-run` `claude_session` calls it before
+  each `claude` call and after the post-session `ai_guard_verify`; it never fails the run.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -57,6 +61,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-16 after T003: `.ai/bin/ai-check` PASS (702 tests, 406.1 s on 8 workers).
 2026-10-16 after T004: `.ai/bin/ai-check` PASS (706 tests, 365.4 s on 8 workers).
 2026-10-17 after T006: `.ai/bin/ai-check` PASS (713 tests, 385.2 s on 8 workers).
+2026-10-17 after T011: `.ai/bin/ai-check` PASS (721 tests, 396.2 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -97,8 +102,9 @@ tests (the groups are added by the tasks named).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005).
-- `test_disposition_pipes_*` (T005).
-- `test_scratch_clear_*` (T011), `test_scratch_dir_*` (T007).
+- `test_scratch_clear_*` (T011: symlinked `.ai`/`.ai/local` refused, `scratch` symlink unlinked,
+  tree removed without entering inner symlinks, cleared before and after a real `ai-run` session,
+  a pre-existing `scratch` symlink stops the run at startup), `test_scratch_dir_*` (T007).
 - `test_recovery_decision_scan_*` (T012), `test_recovery_decision_prose_*` (T008).
 - `test_outcome_catchup_*` (T009).
 
@@ -113,5 +119,5 @@ tests (the groups are added by the tasks named).
 
 ## Next action
 Implement the queue in order (T001, T002, T013, T003, T004 done;
-T006 is done; T007 on T011 and T008 on T012, each sitting right before it in the
+T006 and T011 are done; next T007; T007 on T011 and T008 on T012, each sitting right before it in the
 queue; T010 last).

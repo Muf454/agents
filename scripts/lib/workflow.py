@@ -3441,6 +3441,48 @@ def local_dir_fd(root):
     return fds[2]
 
 
+def remove_tree(parent_fd, name):
+    """Delete the directory NAME of PARENT_FD and everything below it, walking descriptors
+    opened without following symlinks: an inner symlink is unlinked, never entered."""
+    fd = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as entries:
+            children = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        for child, is_dir in children:
+            if is_dir:
+                remove_tree(fd, child)
+            else:
+                os.unlink(child, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def clear_scratch():
+    """clear-scratch: empty .ai/local/scratch of AI_ROOT (else the current directory) between
+    agent sessions. Never a path-based delete: a session may have replaced `.ai`, `.ai/local`
+    or `scratch` by a symlink, so everything goes through the pinned `.ai/local` descriptor.
+    Warns and never fails the caller."""
+    root = os.environ.get('AI_ROOT') or os.getcwd()
+    local_fd = local_dir_fd(root)
+    if local_fd is None:
+        return warn('could not clear .ai/local/scratch: unsafe or missing .ai/local')
+    try:
+        try:
+            info = os.stat('scratch', dir_fd=local_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(info.st_mode):
+            remove_tree(local_fd, 'scratch')
+        else:
+            # A symlink is removed itself, never followed.
+            os.unlink('scratch', dir_fd=local_fd)
+    except (OSError, RecursionError) as error:
+        warn(f'could not clear .ai/local/scratch: {error}')
+    finally:
+        os.close(local_fd)
+
+
 def read_record(dir_fd, name, limit, tail=False):
     """(text, stat) of the regular file NAME in DIR_FD, at most LIMIT bytes, or None. Never
     follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines."""
@@ -3831,6 +3873,8 @@ def main():
         deps_status(arguments)
     elif command == 'deps-record':
         deps_record(arguments)
+    elif command == 'clear-scratch':
+        clear_scratch()
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
     elif command == 'finish-summary':

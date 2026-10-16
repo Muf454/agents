@@ -286,6 +286,9 @@ mode = os.environ.get('MOCK_CLAUDE', 'success')
 if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
     assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
+if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before every session
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'scratch-seen', 'a') as f:
+        f.write(' '.join(sorted(os.listdir('.ai/local/scratch'))) + '\n')
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
@@ -430,6 +433,17 @@ if mode not in ('no-progress', 'bad-format'):
             pathlib.Path(task_id + '.txt').chmod(0o755)
             subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
+if mode == 'scratch-leftover':
+    # Throwaway files a session leaves behind; the host must remove them after the session.
+    scratch = pathlib.Path('.ai/local/scratch')
+    (scratch / 'nested/deeper').mkdir(parents=True, exist_ok=True)
+    (scratch / 'tmp.test.sh').write_text('echo scratch\n')
+    (scratch / 'nested/deeper/notes.txt').write_text('scratch\n')
+if mode == 'scratch-parent-symlink':
+    pathlib.Path('.ai/local').rename('.ai/local-aside')
+    pathlib.Path('.ai/local').symlink_to(os.environ['MOCK_VICTIM'])
+if mode == 'scratch-symlink':
+    pathlib.Path('.ai/local/scratch').symlink_to(os.environ['MOCK_VICTIM'])
 if mode == 'bad-format':
     pathlib.Path('.ai/tasks.md').write_text('## T001 — broken\nStatus: MAGIC\n')
 if denied_but_done:
@@ -1978,6 +1992,120 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('deploy.pem', tracked)
         self.assertNotIn('T001.txt', tracked)
         self.assertEqual(self.run_cmd(['git', 'diff', '--cached', '--name-only']).stdout.strip(), '')
+
+    def scratch_victim(self):
+        """An external directory a session might point the host's delete at."""
+        victim = self.base / 'victim'
+        (victim / 'scratch').mkdir(parents=True)
+        (victim / 'scratch/keep').write_text('keep\n')
+        (victim / 'keep').write_text('keep\n')
+        return victim
+
+    def clear_scratch(self):
+        return self.helper('clear-scratch')
+
+    def test_scratch_clear_refuses_a_symlinked_local_or_ai(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        local.rename(self.base / 'local-aside')
+        local.symlink_to(victim)
+        result = self.clear_scratch()
+        self.assertIn('Warning: could not clear .ai/local/scratch', result.stderr)
+        self.assertTrue((victim / 'scratch/keep').exists())
+        local.unlink()
+        ai = self.project / '.ai'
+        other = self.base / 'other-ai'
+        (other / 'local/scratch').mkdir(parents=True)
+        (other / 'local/scratch/keep').write_text('keep\n')
+        ai.rename(self.base / 'ai-aside')
+        ai.symlink_to(other)
+        result = self.clear_scratch()
+        self.assertIn('Warning: could not clear .ai/local/scratch', result.stderr)
+        self.assertTrue((other / 'local/scratch/keep').exists())
+
+    def test_scratch_clear_removes_a_symlink_without_following_it(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        scratch.symlink_to(victim)
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.is_symlink() or scratch.exists())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_clear_removes_a_tree_but_never_enters_inner_symlinks(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        (scratch / 'nested/deeper').mkdir(parents=True)
+        (scratch / 'tmp.test.sh').write_text('echo\n')
+        (scratch / 'nested/deeper/file').write_text('x\n')
+        (scratch / 'link').symlink_to(victim)
+        (scratch / 'nested/link').symlink_to(victim / 'keep')
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.exists())
+        self.assertTrue((self.project / '.ai/local').is_dir())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_clear_handles_missing_scratch_and_a_regular_file(self):
+        self.setup_project()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        scratch.write_text('a file, not a directory\n')
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.exists())
+
+    def test_scratch_clear_runs_before_and_after_each_session(self):
+        self.ready()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.mkdir(parents=True)
+        (scratch / 'old').write_text('left by an earlier session\n')
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='scratch-leftover')
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+        # The mock records any scratch it finds at session start: there must be none.
+        seen = self.base / 'scratch-seen'
+        self.assertFalse(seen.exists(), seen.read_text() if seen.exists() else '')
+        self.assertFalse(scratch.exists())
+        self.assertNotIn('scratch', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_scratch_clear_never_follows_a_symlink_a_session_planted(self):
+        self.ready()
+        victim = self.scratch_victim()
+        self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='scratch-parent-symlink',
+                  MOCK_VICTIM=str(victim))
+        self.assertTrue((victim / 'scratch/keep').exists())
+        self.assertTrue((victim / 'keep').exists())
+
+    def test_scratch_clear_removes_a_scratch_symlink_after_the_session(self):
+        self.ready()
+        victim = self.scratch_victim()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='scratch-symlink', MOCK_VICTIM=str(victim))
+        scratch = self.project / '.ai/local/scratch'
+        self.assertFalse(scratch.is_symlink() or scratch.exists())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_clear_startup_refuses_a_preexisting_scratch_symlink(self):
+        self.ready()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        scratch.symlink_to(victim)
+        result = self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Unsafe symlink in workflow path', result.stderr)
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
 
     def test_recovery_never_commits_secret_looking_files(self):
         self.ready()
