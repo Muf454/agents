@@ -645,7 +645,7 @@ no writing shell, so they were not changed.
 
 
 ## T012 — Recovery answer scanner: one line-start object inside bracket-free prose (FL-12 redesign, plan review round 2 P3)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -715,6 +715,16 @@ Targeted: `python3 -m unittest discover -s tests -k recovery_decision` (must say
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17 (claude opus): `scripts/lib/workflow.py` `_scan_decision` (commented rule above it,
+`_PROSE_BRACKETS = [{}\[\]]`) runs only when whole-text `json.loads` fails: first `{` at a line
+start, no bracket before it, `raw_decode` with the duplicate-key hook to a dict, rest of its
+last line whitespace, no bracket after it; then today's action/field checks. No counting or
+string parsing outside the object. Escalation reason unchanged (T008 adds the excerpt). Tests
+`test_recovery_decision_scan_*` (4: accepted cases incl. fenced, multi-line, brackets inside
+strings and prose after; nested action → outer; P3 round 2 + round 1 container cases; two
+decisions, duplicate key, no reason, text after the object, unknown/missing action, prose only).
+`test_recovery_decision_parsing_is_strict` unchanged and passing. Targeted `-k recovery_decision`
+Ran 5 OK. Gate `.ai/bin/ai-check` PASS (727 tests, 389.6 s). Docs are T008's; flow unchanged.
 
 
 ## T008 — Recovery decision: one decision object inside prose is accepted; the escalation keeps what the session wrote (FL-12)

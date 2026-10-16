@@ -1966,11 +1966,38 @@ def _no_duplicate_keys(pairs):
     return dict(pairs)
 
 
+# Recovery answer scanner. Prose around a decision may hide it inside an enclosing container
+# (`Diagnostic: [` ... `]`, or a bracket inside a JSON string fooling a count), and prose has
+# unbalanced quotes, so no string-aware count over it is well defined. A container needs an
+# opening bracket before the object and a closing one after it, so the prose around the one
+# candidate may contain no '{', '}', '[' or ']' at all; inside the object the JSON parser decides.
+# The object must start a line and end its last line (inline, quoted or backticked objects are
+# prose). No character counting and no string parsing happen outside the object.
+_PROSE_BRACKETS = re.compile(r'[{}\[\]]')
+
+
+def _scan_decision(text):
+    """The one line-start object inside bracket-free prose, or None."""
+    start = text.find('{')
+    if start < 0 or _PROSE_BRACKETS.search(text, 0, start) \
+            or text[text.rfind('\n', 0, start) + 1:start].strip():
+        return None
+    try:
+        decision, end = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys).raw_decode(text, start)
+    except ValueError:
+        return None
+    line_end = text.find('\n', end)
+    if not isinstance(decision, dict) or _PROSE_BRACKETS.search(text, end) \
+            or text[end:len(text) if line_end < 0 else line_end].strip():
+        return None
+    return decision
+
+
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
-    object (no duplicate keys; the span from the first '{' to the last '}') count.
-    Everything else escalates."""
+    object (no duplicate keys; the whole answer, or one line-start object inside prose
+    that has no '{', '}', '[' or ']') count. Everything else escalates."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
     try:
@@ -1981,12 +2008,12 @@ def recover_decision(arguments):
             or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
-    # The answer must be exactly one JSON object (optionally in a ```json fence), nothing else.
+    # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
         decision = json.loads(text, object_pairs_hook=_no_duplicate_keys)
     except ValueError:
-        decision = None
+        decision = _scan_decision(text)
     if not isinstance(decision, dict):
         print(escalate)
         return

@@ -4409,6 +4409,68 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         log.write_text('not json')
         self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
 
+    def scan_decision(self, result):
+        log = self.base / 'decision.json'
+        log.write_text(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result}))
+        return self.helper('recover-decision', str(log), '0').stdout.rstrip('\n')
+
+    def assert_scan_escalates(self, cases):
+        for result in cases:
+            with self.subTest(result=result):
+                self.assertEqual(self.scan_decision(result),
+                                 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+
+    def test_recovery_decision_scan_accepts_one_line_start_object_in_bracket_free_prose(self):
+        decision = '{"action": "escalate", "reason": "x", "human_action": "y"}'
+        self.assertEqual(self.scan_decision(f'The run stopped because the gate timed out.\nIt looks real.\n{decision}'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n{decision}\nThat is my verdict.\nThanks.'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n```json\n{decision}\n```'), 'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n```json\n{decision}\n```\nMore prose.'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision('Diagnosis.\n  {\n    "action": "rerun",\n    "reason": "crash"\n}\n'),
+                         'rerun\tcrash\t')
+        self.assertEqual(self.scan_decision('Diagnosis.\n{"action": "rerun", "reason": "saw [1] and {x} ]["}'),
+                         'rerun\tsaw [1] and {x} ][\t')
+
+    def test_recovery_decision_scan_nested_action_only_outer_counts(self):
+        self.assertEqual(self.scan_decision('Diagnosis.\n{"action": "rerun", "reason": "x", '
+                                            '"n": {"action": "commit_and_rerun", "reason": "y"}}'),
+                         'rerun\tx\t')
+
+    def test_recovery_decision_scan_escalates_enclosing_containers(self):
+        candidate = '{"action":"commit_and_rerun","reason":"example"}'
+        self.assert_scan_escalates([
+            # plan review round 2 (P3): a bracket inside a JSON string in the prose
+            f'Diagnostic: ["]",\n{candidate}\n]',
+            f'Diagnostic: ["{{",\n{candidate}\n]',
+            f'Diagnostic: ["}}",\n{candidate}\n]',
+            f'Diagnosis.\n{candidate}\n]',
+            f'Diagnosis.\n{candidate}\n}}',
+            f'See [the log].\n{candidate}',
+            # round 1
+            'Broken diagnostic: {"details":{"action":"commit_and_rerun", "reason":"example"}, BROKEN}',
+            'Broken diagnostic:\n{"details":{"action":"commit_and_rerun", "reason":"example"}, BROKEN}',
+            'Diagnostic: [{"action":"rerun","reason":"example"}]',
+            f'Diagnostic: [\n{candidate}\n]',
+            'An example: "{\\"action\\": \\"rerun\\", \\"reason\\": \\"x\\"}"',
+            'I would answer `{"action": "rerun", "reason": "x"}` here.',
+            f'The template is {{"action": "...", "reason": "..."}}.\n{candidate}',
+        ])
+
+    def test_recovery_decision_scan_escalates_invalid_or_ambiguous_candidates(self):
+        self.assert_scan_escalates([
+            'Diagnosis.\n{"action": "rerun", "reason": "a"}\n{"action": "rerun", "reason": "b"}',
+            'Diagnosis.\n{"action": "rerun", "reason": "a"}\n{"action": "escalate", "reason": "b"}',
+            'Diagnosis.\n{"action": "rerun", "action": "escalate", "reason": "a"}',
+            'Diagnosis.\n{"action": "rerun"}',
+            'Diagnosis.\n{"action": "rerun", "reason": "a"} that is it',
+            'Diagnosis.\n{"verdict": "rerun", "reason": "a"}',
+            'Diagnosis.\n{"action": "delete_branch", "reason": "a"}',
+            'Prose only, no decision at all.',
+        ])
+
     def test_recovery_refuses_other_branch_and_tampered_manifest(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
