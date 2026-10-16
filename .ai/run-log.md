@@ -312,3 +312,4 @@
 | 2026-10-16T21:05Z | claude (opus) | T002 | done: stop() owned by first caller; /proc descendant walk SIGTERM → 3 SIGKILL rounds → completion barrier (cleanup_failed → exit 1); no reap during stop; 8 tree tests | PASS (ai-check, 697 tests; -k parallel_runner 27 OK) | parent bd384ae | Mutation: walk off → 6/8 fail; reap guard off → concurrent test fails |
 | 2026-10-16T21:00:35Z | runner | T002 | completed | PASS | 796746e | Claude checkpointed; continuing queue |
 | 2026-10-16T21:20Z | claude (opus) | T013 | done: run() starts workers inside the try, joins only started threads; 2 startup tests (KeyboardInterrupt, SystemExit(143)) | PASS (ai-check, 699 tests; -k parallel_runner 29 OK) | parent 648e4bd | Mutation: start loop outside try → both fail (rounds 0) |
+| 2026-10-16T21:16:41Z | runner | T013 | completed | PASS | 9138df2 | Claude checkpointed; continuing queue |
