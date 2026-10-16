@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: fix/flow-batch-3
-Phase: ready_for_acceptance
+Branch: fix/flow-batch-4
+Phase: implementing
 Current task: none
-Last completed task: T015
-Tasks complete: 14
-Tasks remaining: 0
-Last validation: PASS at 2026-10-15T08:02:12Z
+Last completed task: none
+Tasks complete: 0
+Tasks remaining: 10
+Last validation: none on this branch
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/28
-Last updated: 2026-10-15T08:06:37Z
+Next action: Implement T001 (run_parallel subreaper and orphan reaping), then the queue in order
+Last updated: 2026-10-16T00:00:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

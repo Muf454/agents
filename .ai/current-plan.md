@@ -1,112 +1,96 @@
-# Plan: Flow batch 3: FL-24, FL-23, DB-05, DB-02, DB-03
+# Plan: Flow batch 4: FL-27, FL-25, FL-26, FL-12, CU-2
 
-## Assessment (verified at 5894c2b, 2026-10-14)
-All five backlog items are open; details and line references are in `.ai/project-spec.md` →
-"Verified against the code". Only FL-23's CI job timeout (40 min) is already applied. Two
-corrections to the backlog wording: FL-24's escalation comes from a revision-stage queue
-failure that leaves no `last-error` (so recovery cannot classify it), and FL-23's reported
-timeouts are partly a harness bug: `tool('ai-recover')` runs a whole resumed pipeline under the
-25 s single-command timeout.
+## Assessment (verified at 7d22939, 2026-10-16)
+Open: FL-27, FL-25 (a and b), FL-26, FL-12, CU-2. Already done and dropped: FL-21 (5-minute
+stall confirmation in the watchdog), CU-4 (colour variables stripped for batches, ANSI-tolerant
+summary), CU-1 (attempts credited to their own model), CU-3 (re-check severity totals).
+Evidence and line references: `.ai/project-spec.md` → "Verified against the code".
 
 ## Architecture
 Small, local changes; no new runtime dependency, no new executable, no daemon.
-1. **Queue reorder (T001, T002).** A pure helper `workflow.py tasks reorder` next to
-   `tasks()`. It splits the file into preamble, task blocks (heading + every raw line, fences
-   included, same fence rules as `task_blocks`) and trailer, validates the dependency lines
-   itself (`tasks()` stops at the first out-of-order dependency, so it cannot be reused for
-   that), and emits a depth-first order:
+1. **Process ownership in the self-check (T001, T002; opus: process handling, signals,
+   concurrency).** `run_parallel.py main()` calls `enable_subreaper()` (Linux `prctl(36, 1)`
+   through `ctypes.CDLL(None, use_errno=True)`; False elsewhere). The Dispatcher gets a
+   `reap` flag: `run()` joins its threads with a short timeout in a loop and, under the
+   dispatcher lock, reaps adopted zombies (`/proc/<pid>/stat`: ppid == own pid, state `Z`,
+   pid not a running batch) with `waitpid(pid, WNOHANG)`. Never `waitpid(-1)`: it would steal
+   a batch's exit status (Popen then reports 0). `stop()` additionally walks the `/proc` tree
+   below the runner (ppid map; `comm` parsed after the last `)`), SIGTERMs every descendant,
+   waits up to `TERMINATE_GRACE` for them to be gone or zombies, re-walks and SIGKILLs
+   survivors whose start time still matches, up to a few rounds (forks during the stop).
    ```mermaid
    flowchart LR
-     S[session edits .ai/tasks.md] --> K[plan-keeps-done / revision scope]
-     K --> R{tasks reorder}
-     R -- cycle / unknown id / prose --> X[ai_die ... task queue is invalid → ⛔, recovery escalates at once]
-     R -- ok: moved or unchanged --> C{tasks check}
-     C -- invalid --> X
-     C -- valid --> D[planned / revision commit]
+     M[main: enable_subreaper] --> D[Dispatcher.run: workers + reap loop]
+     D -- worker error / SIGINT / SIGTERM --> S[stop: batch groups + /proc descendant tree]
+     S --> T[SIGTERM all, grace]
+     T --> K[re-walk, SIGKILL survivors with same start time]
+     K --> R[reap adopted zombies, join, re-raise]
    ```
-   Depth-first (mission control's `reorder-queue.py`) rather than Kahn: it pulls a new
-   prerequisite up to just before its first dependent and keeps earlier tasks early, which is
-   what "insert new tasks before their first dependent" means; a valid queue is unchanged.
-   Block text never changes, so `plan-keeps-done` (which compares blocks by ID, trailing blank
-   lines ignored) still holds after a move.
-   Revision recovery (T011, plan review round 1 P1): an interrupted revision's uncommitted
-   queue meets four queue checks before T002's post-session reorder (ai-pipeline ~416, ai-run
-   ~138, `tasks untouched` ~338, `plan-dispositions-check` → `tasks()`). One guarded helper
-   `revision-queue-repair` runs before all of them (ai-pipeline with plan review on; ai-run
-   `--revise-plan`); it repairs only an uncommitted queue whose dirty files are plan revision
-   records, whose HEAD queue is valid with no DONE task, for a verified, not-yet-revised plan
-   review, and is a no-op otherwise, so committed-queue rejection (FL-18) and the no-DONE rule
-   stay as they are.
-2. **Timeouts (T003).** One rule in the harness: pipeline-running commands (`ai-pipeline`,
-   `ai-recover`) get `PIPELINE_TIMEOUT`; named, scaled constants replace literal timeouts;
-   `CI=true` defaults the scale to 2 (the workflow file itself is a gate file).
-3. **Parallel runner (T004, opus: concurrent dispatch).** Work queue of interleaved small
-   batches (`ids[k::batches]`, about 6 per worker) pulled by `AI_TEST_WORKERS` threads, each
-   batch one `python3 -m unittest --durations 0` process (Python ≥ 3.12; older: no timing
-   lines). The summary adds the 15 slowest tests, the sum of test time and per-worker busy
-   time. The docs' "round-robin into shards" wording and its `DocsConsistencyTest` phrase change
-   with it.
-4. **Cheaper tests (T005, T006).** T005: harness I/O (git `core.fsync=none` for fixtures via
-   `GIT_CONFIG_COUNT/KEY/VALUE`, test temp dirs under a fresh `/dev/shm` directory when it is
-   a writable tmpfs with room AND a probe script executes there (fixtures exec mock agents and
-   toolkit scripts from temp dirs; `noexec` → default temp dir), cleaned up). T006: profile-driven reductions of the slowest
-   tests from T004's report (fixture reuse, fewer redundant processes), never fewer
-   assertions or tests, never bytecode under `.ai/bin` (part of the gate digest).
-5. **Dashboard (T007–T009).** DB-05 filter in `discover` (environ marker). DB-02 readers in
-   `inspect` via the pinned fds (`reviews` dir opened no-follow from the `.ai` fd). DB-03: a
-   `--wait` loop over `snapshot(all_runs=True)` comparing per-checkout keys
-   `(status, stage, observation state, notifications_mark)`; the mark hashes the log's
-   inode/size/mtime_ns and its raw last line (not the sanitised 300-character display text), so
-   identical or same-prefix notifications are still distinct changes; the cursor is base64url
-   JSON of those keys, so successive calls lose nothing.
+   Tests run the dispatcher in a child Python driver (the flag must never be set on a test
+   process) and the real script for SIGTERM/SIGINT, with `timeout 120 sleep 120`.
+2. **Record-format tolerance (T003–T006).** A pure helper `workflow.py tasks fill-sections`
+   (fence-aware through `queue_segments`, atomic write, TODO tasks only) runs on the host after
+   triage, planning and plan-revision sessions, before the reorder / `tasks check` there. The
+   two disposition regexes read cells as `(?:\\\||[^|\n])*?` and unescape `\|`; one shared cell
+   pattern for both. Prompts and contracts show the task format and the pipe rule.
+3. **Scratch files (T007).** Prompt rule plus a host step in `ai-run`'s `claude_session`
+   (`rm -rf -- .ai/local/scratch` before and after each `claude` call). No permission change:
+   `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
+4. **Recovery answer (T008; opus: recovery authority).** `recover_decision` keeps the strict
+   path for a whole-text JSON value; otherwise it scans top-level objects with
+   `JSONDecoder.raw_decode` (skipping past each decoded object, so nested objects are never
+   candidates) and accepts exactly one valid decision. A duplicate key in any candidate
+   escalates. Escalation keeps a cleaned excerpt.
+5. **Catch-up coverage (T009).** Pure report logic in `outcomes_report` plus a `catchup`
+   outcome kind written by `ai-status --catch-up-done BRANCH...`.
 
 ## Phases / tasks
 Priority order (the most valuable lands first if the night runs short):
-T001 (reorder helper, sonnet) → T002 (wire into planning/revision after the session, opus;
-flow chart) → T011 (repair before the queue checks on revision recovery, opus; sits right after
-T002 in the file) → T003 (timeouts, sonnet) → T004 (runner timing and balancing, opus) → T005
-(harness I/O, sonnet) → T006 (slowest tests, sonnet) → T007 (DB-05, opus: process discovery) →
-T008 (DB-02, sonnet) → T009 (DB-03, sonnet) → T010 (docs/handoff audit, haiku).
-Dependencies: T002 needs T001; T011 needs T002; T006 needs T004 (its timing report) and T005
-(baseline after the I/O change); T010 needs all.
-The handoff's "## Flow chart" line reads `Flow unchanged so far` from plan review round 1 on
-(the gate's `test_pr_body_flow_this_repo_declares_the_flow_chart` needs it before the first
-task); T002 switches it to `Flow chart updated`, T010 audits it. The rest are independent so one blocked item never stops the
-others.
+T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T003
+(`tasks fill-sections`, sonnet) → T004 (host runs it after sessions, sonnet; flow chart) → T005
+(escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T007 (scratch dir, sonnet; flow
+chart) → T008 (recovery decision, opus; flow chart if it describes the answer) → T009 (CU-2,
+sonnet) → T010 (docs/handoff audit, haiku).
+Dependencies: T002 needs T001; T004 needs T003; T006 needs T004 and T005 (it describes them);
+T010 needs all. T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
+regression there shows up at once in every later gate run.
+The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 switches it to
+`Flow chart updated` (`test_pr_body_flow_this_repo_declares_the_flow_chart` needs one of them).
 
 ## Risks
-- Existing tests that change on purpose: `test_plan_session_invalid_queue_stops_and_keeps_the_file`
-  (its `plan-bad-queue` mock now writes a cycle, since an out-of-order queue is repaired), and
-  run_parallel tests that assert the shard summary (T004 keeps the existing summary line;
-  anything else is named in the result), and `DocsConsistencyTest.REQUIRED`'s shard phrase
-  (T004).
-- Reorder moves DONE blocks relative to TODO blocks when a TODO task before them depends on a
-  later task; their text is unchanged and `plan-keeps-done` keeps passing (tested).
-- `/dev/shm` may be small or `noexec` in containers: T005 uses it only with enough free space
-  and a passing execution probe, else the default temp dir.
-- Speed-up results on GitHub's runner cannot be measured offline; T004–T006 record local
-  numbers, the CI time is a human check.
-- `/proc/<pid>/environ` is the environment at exec time; a runner that changes its own
-  environment later is judged by the original one. Processes of other users are unreadable
-  → not ignored (as today).
-- `--wait` polls (default 2 s): several notifications between two polls are reported as one
-  change of that run (the run dict carries the last `EVENT_COUNT` events), never lost.
+- The gate runs the changed runner (T001/T002). A reaper that steals a batch's status would
+  turn failures into passes: T001 asserts a failing batch still fails with the subreaper on.
+- Subreaper adoption keeps orphaned fixture processes as the runner's children during a normal
+  run; they are reaped when they exit and, as before, reparent to init when the runner exits.
+  Normal runs do not kill leftovers (unchanged behaviour).
+- PID reuse during a stop: start-time check before SIGKILL; zombies are not reaped until the
+  kill rounds end, so adopted PIDs cannot be reused meanwhile.
+- `test_recovery_decision_parsing_is_strict` changes on purpose (`Decision: {…}` → rerun);
+  named in T008's result. Accepting prose widens what counts as a decision: guarded by
+  "exactly one valid object" and duplicate-key escalation.
+- Filling `### Likely affected modules` with `(not listed)` hides a planner omission; the host
+  prints which tasks it filled, so the log shows it.
+- Installed copies (`.ai/bin`, `.ai/prompts` here and in other projects) keep the old
+  behaviour until the human runs `setup-project --upgrade` (handoff).
 
 ## Validation strategy
-Each task: its targeted `-k` tests, then `.ai/bin/ai-check` (parallel; see the gate note in
-`.ai/tasks.md`). All tests offline (mock agents, fixture `/proc` trees).
+Each task: its targeted `-k` tests, then `.ai/bin/ai-check` (parallel; gate note in
+`.ai/tasks.md`). All tests offline (mock agents, generated suites, real `/proc` on Linux with
+skips elsewhere).
 
 ## Assumptions (unattended run; recorded instead of asked)
-- Prose in `Dependencies:` is rejected, not rewritten (Zack's brief), unlike mission control's
-  script.
-- Reorder runs only on the planning/revision paths (incl. revision recovery, T011);
-  ai-pipeline's own queue check (FL-18) still stops on an out-of-order committed queue.
-- `CI=true` defaults `AI_TEST_TIMEOUT_SCALE` to 2; an explicit value always wins.
-- The DB-02 counts are read, not verified (a dashboard must not need the host binding to
-  draw); the reviewed HEAD is shown so a stale report is visible.
-- DB-03 exit codes: 0 change, 1 timeout, 2 usage/cursor error; default `--timeout 3600`,
-  `--interval 2`.
-- The environ marker is `AI_DASHBOARD_IGNORE=1` (general, documented), not a temp-path rule
-  (real worktrees may live under `/tmp`).
-- Sessions may edit the vault flow chart and append a hub Log line; if the runner's
-  permissions deny the vault path, the task records it and the handoff lists the change.
+- FL-27 uses `PR_SET_CHILD_SUBREAPER` plus a `/proc` walk, not cgroups (no systemd/root
+  dependency); non-Linux keeps the T014 behaviour.
+- FL-25 repairs only the two content-free sections, only in TODO tasks, only on the host paths
+  right after a session; an interrupted triage whose committed queue lacks them still stops
+  (rare after this fix; recorded limitation).
+- FL-25 (b): escaped pipes are accepted, unescaped pipes still split (a row cannot be
+  repaired without guessing).
+- FL-26: no permission change; the host clears `.ai/local/scratch` (gitignored, so the tier-1
+  `git add --all` never stages it).
+- FL-12: prose around one decision is accepted; no `--json-schema` (the CLI flag and the mock
+  would both change; not verifiable offline).
+- CU-2: a later Codex review of the same project and branch covers earlier Claude reviews of
+  the same family; a catch-up on another branch needs the explicit `--catch-up-done` record.
+- Sessions may edit the vault flow chart and append a hub Log line; if denied, the task
+  records it and the handoff lists the pending change.
