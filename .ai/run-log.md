@@ -331,3 +331,4 @@
 | 2026-10-16T23:25:11Z | runner | T008 | completed | PASS | fb71a26 | Claude checkpointed; continuing queue |
 | 2026-10-17 | claude (sonnet) | T009 | DONE: covered Claude reviews leave "Codex catch-up pending" (later Codex review of same family, or `catchup` record); `ai-status --catch-up-done BRANCH...`; docs updated; 5 `test_outcome_catchup_*` tests | PASS (ai-check, 736 tests; -k outcome 21 OK) | parent a9ed6b0 | flow unchanged |
 | 2026-10-16T23:40:26Z | runner | T009 | completed | PASS | fd27337 | Claude checkpointed; continuing queue |
+| 2026-10-16T23:40:46Z | runner | T010 | stopped (exit 1); inspect state/diff before resuming | see local logs | f550504 | No merge or deployment performed |
