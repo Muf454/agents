@@ -12,8 +12,10 @@ order:
   and plan-revision sessions.
 - T005 FL-25 (b): `\|` inside disposition and plan-disposition cells is part of the cell.
 - T006: template prompts show the exact task format and the pipe rule.
-- T007 FL-26: sessions put scratch files under `.ai/local/scratch/`; `ai-run` empties it before
-  and after every session (no permission change).
+- T011 + T007 FL-26: sessions put scratch files under `.ai/local/scratch/`; `ai-run` empties it
+  before and after every session through `workflow.py clear-scratch`, which deletes only via
+  descriptors pinned without following symlinks (T011, opus; plan review P1); T007 adds the
+  prompt rule and docs (no permission change).
 - T008 FL-12: `recover-decision` accepts exactly one valid decision object inside prose; the
   escalation reason keeps an excerpt of what the session wrote.
 - T009 CU-2: `ai-status --outcomes` drops Claude reviews covered by a later Codex review of the
@@ -61,7 +63,7 @@ tests (the groups are added by the tasks named).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005).
-- `test_scratch_dir_*` (T007).
+- `test_scratch_clear_*` (T011), `test_scratch_dir_*` (T007).
 - `test_recovery_decision_prose_*` (T008).
 - `test_outcome_catchup_*` (T009).
 
@@ -76,4 +78,4 @@ tests (the groups are added by the tasks named).
 
 ## Next action
 Implement T001, then the queue in order (T002 depends on T001; T004 on T003; T006 on T004 and
-T005; T010 last).
+T005; T007 on T011, which sits before it in the queue; T010 last).

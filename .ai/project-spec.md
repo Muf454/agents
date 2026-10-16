@@ -62,7 +62,10 @@ authorizes), gate files are never edited by a pipeline session.
     summaries stay exactly as today).
   - On a worker failure, an interrupt (SIGINT) or SIGTERM, every descendant process is
     terminated (SIGTERM, grace, SIGKILL; identity checked by `/proc` start time before SIGKILL)
-    before `run()` returns or re-raises, including GNU `timeout` and its child. Elsewhere
+    before `run()` returns or re-raises, including GNU `timeout` and its child; a bounded
+    final wait confirms each is gone or a zombie, and survivors after it are named on stderr
+    with a non-zero exit. One `stop()` caller owns termination, and no adopted zombie is
+    reaped while it runs. Elsewhere
     (no `prctl`, not Linux) the behaviour stays as today.
   - The flag is set only by the runner's `main()`, never in a process that imports the module.
 - **FL-25 record formats.**
@@ -72,26 +75,32 @@ authorizes), gate files are never edited by a pipeline session.
     the run as today. Nothing is written when nothing is missing. DONE, IN_PROGRESS and
     BLOCKED blocks are never touched.
   - (b) Disposition and plan-disposition rows accept `\|` inside a cell (it is part of the
-    cell, read back as `|`); an unescaped `|` still splits a row.
+    cell, read back as `|`, and never split into a cell ending in `\`); an unescaped `|`
+    still splits a row, and a row whose Task cell is missing stays malformed.
   - The template prompts (triage, plan, plan revision) and the host contracts show the exact
     task format and say how to write a pipe in a table cell.
 - **FL-26 scratch files.** Template prompts tell sessions to put throwaway files only under
   `.ai/local/scratch/` (ignored by Git, never named like a test file) and never in source or
   test directories. `ai-run` empties `.ai/local/scratch` before and after every Claude
-  session (a symlink there is removed, not followed; a failure is reported and never stops the
-  run). The permission template is unchanged (no `rm`).
+  session through directory descriptors pinned without following symlinks (a symlink at
+  `scratch` is removed, not followed; a symlinked `.ai/local` or `.ai` means a warning and no
+  delete; the clear after a session runs only once the gate digest is verified; a failure is
+  reported and never stops the run). The permission template is unchanged (no `rm`).
 - **FL-12 recovery answer with prose.** `recover-decision` accepts a result whose text holds
-  prose around exactly one decision object (a top-level JSON object whose `action` is one of
-  the three actions and whose fields are valid). Zero or several such objects, a duplicate key
-  anywhere in a candidate object, a whole-text JSON value that is not an object, or a failed
-  envelope escalate as today. When it escalates for want of a decision, the reason carries a
+  prose around exactly one decision object (a JSON object that starts at a line start, ends its
+  line, sits in no unclosed `{`/`[`, and whose `action` is one of the three actions and whose
+  fields are valid). Zero or several such objects, a duplicate key anywhere in a candidate
+  object, a malformed line-start object, a whole-text JSON value that is not an object, or a
+  failed envelope escalate as today; objects inline in prose or nested in another value are
+  never decisions. When it escalates for want of a decision, the reason carries a
   short, cleaned excerpt of what the session wrote. The recover prompt template asks for the
   JSON object alone, with the diagnosis inside `reason`.
 - **CU-2 catch-up coverage.** `ai-status --outcomes` lists under "Codex catch-up pending" only
   Claude reviews that no later Codex review of the same project and branch (same family:
   plan covers plan; code covers code and re-check) and no explicit catch-up record covers. A
   human command `ai-status --catch-up-done BRANCH...` appends a `catchup` outcome per branch
-  (covers that project+branch's Claude reviews up to that time). The report says how many
+  (covers that project+branch's Claude reviews up to that time; with equal timestamps only
+  records earlier in the same log file). The report says how many
   Claude reviews are covered.
 - **Docs.** README and `docs/workflow.md` describe each change; every flow change updates the
   vault flow chart (`agents-flow.md`, `updated:`) and appends a dated hub Log line in the same

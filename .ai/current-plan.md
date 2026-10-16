@@ -17,42 +17,57 @@ Small, local changes; no new runtime dependency, no new executable, no daemon.
    a batch's exit status (Popen then reports 0). `stop()` additionally walks the `/proc` tree
    below the runner (ppid map; `comm` parsed after the last `)`), SIGTERMs every descendant,
    waits up to `TERMINATE_GRACE` for them to be gone or zombies, re-walks and SIGKILLs
-   survivors whose start time still matches, up to a few rounds (forks during the stop).
+   survivors whose start time still matches, up to a few rounds (forks during the stop), then
+   a bounded final wait (`FINAL_WAIT`) confirms every descendant is gone or a zombie; on
+   expiry it names the survivors on stderr and the run exits non-zero. Shutdown has one owner
+   (the first `stop()` caller; later callers wait on `stop_done`), and `reap_adopted()` does
+   nothing while termination is in progress, so the reap loop never frees a PID mid-stop
+   (plan review P4).
    ```mermaid
    flowchart LR
      M[main: enable_subreaper] --> D[Dispatcher.run: workers + reap loop]
      D -- worker error / SIGINT / SIGTERM --> S[stop: batch groups + /proc descendant tree]
      S --> T[SIGTERM all, grace]
      T --> K[re-walk, SIGKILL survivors with same start time]
-     K --> R[reap adopted zombies, join, re-raise]
+     K --> W[final wait: all gone or zombies, else report + exit 1]
+     W --> R[reap adopted zombies, join, re-raise]
    ```
    Tests run the dispatcher in a child Python driver (the flag must never be set on a test
    process) and the real script for SIGTERM/SIGINT, with `timeout 120 sleep 120`.
 2. **Record-format tolerance (T003–T006).** A pure helper `workflow.py tasks fill-sections`
    (fence-aware through `queue_segments`, atomic write, TODO tasks only) runs on the host after
    triage, planning and plan-revision sessions, before the reorder / `tasks check` there. The
-   two disposition regexes read cells as `(?:\\\||[^|\n])*?` and unescape `\|`; one shared cell
-   pattern for both. Prompts and contracts show the task format and the pipe rule.
-3. **Scratch files (T007).** Prompt rule plus a host step in `ai-run`'s `claude_session`
-   (`rm -rf -- .ai/local/scratch` before and after each `claude` call). No permission change:
-   `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
+   two disposition regexes read cells as `(?:\\.|[^\\|\n])*?` (a backslash always pairs with
+   the next character, so `\|` is never split; plan review P2) and unescape `\|`; one shared
+   cell pattern for both. Prompts and contracts show the task format and the pipe rule.
+3. **Scratch files (T011 opus: deletion; T007 sonnet: prompts/docs).** `workflow.py
+   clear-scratch` pins `.ai/local` with `local_dir_fd` (no symlink followed anywhere on the
+   path) and unlinks / `shutil.rmtree(…, dir_fd=…)`s `scratch` relative to it; unsafe paths
+   warn and continue. `claude_session` calls it before each `claude` call and after the
+   post-session `ai_guard_verify` (the checkout helper is trusted only after that). A
+   path-based `rm -rf` would follow a symlinked `.ai/local` or `.ai` (plan review P1). No
+   permission change: `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
 4. **Recovery answer (T008; opus: recovery authority).** `recover_decision` keeps the strict
-   path for a whole-text JSON value; otherwise it scans top-level objects with
-   `JSONDecoder.raw_decode` (skipping past each decoded object, so nested objects are never
-   candidates) and accepts exactly one valid decision. A duplicate key in any candidate
-   escalates. Escalation keeps a cleaned excerpt.
+   path for a whole-text JSON value; otherwise only objects starting at a line start and
+   ending their line are candidates (`raw_decode`, scanning resumes after each). A line-start
+   `{` that is malformed or shares its line with more text, or unbalanced `{[`/`}]` in the
+   text before a candidate, escalates the whole answer, so a nested object of a broken or
+   prose-prefixed container is never promoted (plan review P3). Exactly one valid decision is
+   accepted; a duplicate key in any candidate escalates. Escalation keeps a cleaned excerpt.
 5. **Catch-up coverage (T009).** Pure report logic in `outcomes_report` plus a `catchup`
-   outcome kind written by `ai-status --catch-up-done BRANCH...`.
+   outcome kind written by `ai-status --catch-up-done BRANCH...`. "Later" is ordered by
+   `(time, file, line)`: equal seconds cover only within one file at a later line (P5).
 
 ## Phases / tasks
 Priority order (the most valuable lands first if the night runs short):
 T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T003
 (`tasks fill-sections`, sonnet) → T004 (host runs it after sessions, sonnet; flow chart) → T005
-(escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T007 (scratch dir, sonnet; flow
-chart) → T008 (recovery decision, opus; flow chart if it describes the answer) → T009 (CU-2,
-sonnet) → T010 (docs/handoff audit, haiku).
+(escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T011 (scratch deletion through
+pinned descriptors, opus; placed before T007 in the queue) → T007 (scratch prompts/docs, sonnet;
+flow chart) → T008 (recovery decision, opus; flow chart if it describes the answer) → T009
+(CU-2, sonnet) → T010 (docs/handoff audit, haiku).
 Dependencies: T002 needs T001; T004 needs T003; T006 needs T004 and T005 (it describes them);
-T010 needs all. T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
+T007 needs T011; T010 needs all. T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
 regression there shows up at once in every later gate run.
 The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 switches it to
 `Flow chart updated` (`test_pr_body_flow_this_repo_declares_the_flow_chart` needs one of them).
@@ -65,9 +80,14 @@ The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 swit
   Normal runs do not kill leftovers (unchanged behaviour).
 - PID reuse during a stop: start-time check before SIGKILL; zombies are not reaped until the
   kill rounds end, so adopted PIDs cannot be reused meanwhile.
-- `test_recovery_decision_parsing_is_strict` changes on purpose (`Decision: {…}` → rerun);
-  named in T008's result. Accepting prose widens what counts as a decision: guarded by
-  "exactly one valid object" and duplicate-key escalation.
+- `test_recovery_decision_parsing_is_strict` stays unchanged: an inline `Decision: {…}` is
+  still escalated (only line-anchored objects are candidates). Accepting prose widens what
+  counts as a decision: guarded by line anchoring, the enclosure check, "exactly one valid
+  object" and duplicate-key escalation.
+- Scratch clearing deletes on the host after an agent session: only through descriptors pinned
+  without following symlinks (T011); a symlinked parent means a warning, never a delete.
+- A descendant that cannot be confirmed gone after the final wait makes the self-check fail
+  loudly rather than leaving a silent leftover (T002).
 - Filling `### Likely affected modules` with `(not listed)` hides a planner omission; the host
   prints which tasks it filled, so the log shows it.
 - Installed copies (`.ai/bin`, `.ai/prompts` here and in other projects) keep the old

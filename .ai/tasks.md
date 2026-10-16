@@ -98,8 +98,23 @@ A worker failure, an interrupt or SIGTERM leaves no process the self-check start
   (poll ~0.1 s); then re-walk and SIGKILL every live descendant whose `/proc` starttime still
   equals the recorded one (new pids from forks during the stop get SIGKILL in that walk too);
   repeat the walk + SIGKILL up to 3 rounds until no live (non-zombie) descendant remains.
-  Tolerate `ProcessLookupError`/`PermissionError`. Do not reap during the kill rounds (zombies
-  keep their pids, so no reuse); `reap_adopted()` after.
+  Tolerate `ProcessLookupError`/`PermissionError`.
+- Completion barrier (plan review P4): after the kill rounds, a bounded final wait
+  (`FINAL_WAIT = TERMINATE_GRACE`, poll ~0.1 s, re-walking each poll and SIGKILLing any new
+  live descendant) until every descendant is gone or a zombie. If the bound expires, store
+  the survivors in `self.cleanup_failed` and print `run_parallel: could not terminate
+  descendants: <pid> <pid> …` to stderr; `main()` then exits 1 even on a path that would
+  otherwise exit 0 (SIGTERM keeps 143). SIGKILL is asynchronous: never treat "signal sent" as
+  "gone"; only `/proc` state counts.
+- Shutdown ownership (P4): `stop()` is idempotent and owned by its first caller: under
+  `self.lock` the first caller sets `self.terminating = True` and does the kill rounds and the
+  final wait outside the lock; every later caller (second worker, `run()`'s except path)
+  waits on `self.stop_done` (a `threading.Event` set at the end, also on exception, in a
+  `finally`). `reap_adopted()` checks `self.terminating` under the lock and returns at once
+  while it is set and `stop_done` is not, so the main-thread reap loop of T001 never reaps
+  during the kill rounds or the final wait (zombies keep their pids, so no reuse). The owner
+  calls `reap_adopted()` itself after `stop_done` is set (a flag argument bypasses the check),
+  and `run()` reaps once more after joining.
 - `drain()` / `DRAIN_GRACE` stay as the fallback for a pipe held by a process the walk cannot
   see (non-Linux).
 - SIGTERM handling in `main()` (`terminated` → `SystemExit(143)`) and the KeyboardInterrupt
@@ -129,8 +144,23 @@ tests/run_parallel.py, tests/test_workflow.py (run_parallel tests), README.md
   - SIGTERM: the real `run_parallel.py` on a generated suite with the same test, SIGTERM to
     the runner once both pid files exist: exit 143 within the bound, both pids gone;
   - SIGINT to the runner alone: it exits non-zero within the bound, both pids gone;
-  - mutation check recorded in the result: with the descendant walk disabled, the three tests
-    fail (`timeout` survives).
+  - stubborn detached descendant: the batch test starts `setsid sh -c 'trap "" TERM; echo $$ >
+    <stub.pid>; exec sleep 120' </dev/null >/dev/null 2>&1 &` (ignores SIGTERM, own session,
+    inherited output closed, so no batch reader waits on it) and waits; SIGTERM to the runner →
+    exit 143 within `TERMINATE_GRACE * 2 + 10` s × scale and the stub pid is gone or a zombie
+    when the runner has returned (checked right after exit, no extra polling);
+  - fork during shutdown: the batch test runs `sh -c 'trap "sleep 120 & echo \$! > <forked.pid>;
+    wait" TERM; echo $$ > <parent.pid>; while :; do sleep 1; done'`; worker-failure stop → both
+    the parent and the pid in `forked.pid` (if written) are gone after the driver exits;
+  - completion barrier failure: a driver that patches the "is descendant alive" check to always
+    report one live pid → stderr has `could not terminate descendants` and the exit code is
+    non-zero, within `FINAL_WAIT + TERMINATE_GRACE + 10` s × scale;
+  - concurrent stop and reaping: in a driver, two batches fail at once (both workers call
+    `stop()`) while `run()`'s reap loop runs; a patched `os.waitpid` records the calls made while
+    `terminating` is set and `stop_done` is not → none; `stop()`'s kill rounds ran exactly once
+    (a counter); both workers returned and `run()` re-raised the first error;
+  - mutation check recorded in the result: with the descendant walk disabled, the three
+    original tests and the stubborn-descendant test fail (`timeout` or the stub survives).
 - Existing `test_parallel_runner_*` tests (T014's three `*_kills_batch_descendants` included)
   pass unchanged.
 
@@ -269,8 +299,10 @@ A disposition row whose Evidence cell contains `\|` (raid polish P11: `--yes \| 
 with the right Task column instead of stopping the run.
 
 ### Implementation notes
-- `scripts/lib/workflow.py`: one cell pattern `TABLE_CELL = r'((?:\\\||[^|\n])*?)'` used for the
-  evidence and task cells of `DISPOSITION_ROW` (~911) and `PLAN_DISPOSITION_ROW` (~2329) in
+- `scripts/lib/workflow.py`: one cell pattern `TABLE_CELL = r'((?:\\.|[^\\|\n])*?)'` used for the
+  evidence and task cells (plan review P2: a backslash is only ever consumed together with the
+  character after it, so `\|` can never be split into a cell ending in `\` and a separator;
+  the earlier `(?:\\\||[^|\n])` let `[^|\n]` eat the backslash on backtracking; comment why) of `DISPOSITION_ROW` (~911) and `PLAN_DISPOSITION_ROW` (~2329) in
   place of `(.*?)`; keep the ID and disposition groups and flags as they are. A helper
   `table_cell(text)` → `text.replace('\\|', '|').strip()` applied where the captured cells are
   turned into values (triage_check ~951, review_rounds ~1027, rejected rows ~1470, disputes
@@ -292,7 +324,15 @@ scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
     with T030 TODO: passes and counts it accepted (the Task cell reads `T030`, not `--no\`);
   - the re-check prompt / dispute record of a rejected row with `\|` carries the evidence with
     `|`, and the PR body renders it escaped once;
-  - an unescaped `|` in the evidence still fails as today (row misread → the existing error).
+  - an unescaped `|` in the evidence still fails as today (row misread → the existing error);
+  - malformed rows (P2), for both `triage-check --fresh` and `plan-dispositions-check`: the
+    missing-task-cell row `| P11 | accepted | discussion of fix \| T030 |` (and `| M1 | accepted
+    | discussion of fix \| T019 |`) with T030/T019 TODO fails as a malformed row (no Task cell;
+    it is never read as evidence `discussion of fix \` + task `T030`); a unit case on
+    `TABLE_CELL` itself shows `a \| b` matches as one cell; a backslash elsewhere (`C:\path`)
+    is kept as is;
+  - round trip: evidence read from `x \| y`, rendered by the existing `cell` writers and read
+    again gives `x | y` both times.
 - All existing tests pass unchanged (`test_triage_severity_suffix_*` included).
 
 ### Validation
@@ -347,9 +387,77 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
-## T007 — Scratch files go to `.ai/local/scratch/`, which the host empties around every session (FL-26)
+## T011 — Host clears `.ai/local/scratch` through pinned directory descriptors (FL-26, deletion)
 Status: TODO
 Dependencies: none
+Model: opus
+
+### Goal
+The host empties `.ai/local/scratch` before and after every Claude session and can never
+delete anything outside it, even when a session replaced `scratch`, `.ai/local` or `.ai` with
+a symlink (plan review P1).
+
+### Implementation notes
+- Why not `rm -rf -- .ai/local/scratch`: it follows a symlinked parent (`.ai/local` or `.ai`)
+  and the gate digest does not cover `.ai/local`, so a session could point the host's delete
+  at an external directory. Startup `safe_paths` (workflow.py:44–63, via `ai_root`) runs
+  before the session and does not help after it.
+- `scripts/lib/workflow.py`, next to `local_dir_fd` (~3352): `clear_scratch(root)` dispatched
+  as `workflow.py clear-scratch` (root from `AI_ROOT`, else cwd). `local_fd =
+  local_dir_fd(root)` (every component opened `O_NOFOLLOW`); None → `warn('could not clear
+  .ai/local/scratch: unsafe or missing .ai/local')`. Then `os.stat('scratch', dir_fd=local_fd,
+  follow_symlinks=False)`: missing → nothing; a symlink or any non-directory →
+  `os.unlink('scratch', dir_fd=local_fd)`; a directory → `shutil.rmtree('scratch',
+  dir_fd=local_fd)` only when `shutil.rmtree.avoids_symlink_attacks` is True (fd-based walk,
+  never follows inner symlinks), else warn and skip. Every `OSError` → warning. Always exit 0
+  (never fails its caller), warning text starts `Warning: could not clear .ai/local/scratch`.
+  Comment: never a path-based delete; the pinned descriptor is the protection.
+- `scripts/ai-run` `claude_session` (~244–289): `clear_scratch() { ai_helper clear-scratch ||
+  true; }`. Called (a) inside the loop right before the `timeout … claude -p` call (~265; also
+  before a retry after a limit pause), and (b) right after the post-session `ai_guard_verify`
+  (~274), never before it: the helper is the checkout's `.ai/bin/lib/workflow.py`, which is
+  only trusted once the gate digest has been verified. If the verify dies, no clear runs; the
+  next start's `safe_paths` rejects a symlinked `scratch` with `Unsafe symlink in workflow
+  path` (existing behaviour, kept: reconciles P1's "startup rejection vs cleanup" point — a
+  pre-existing `scratch` symlink stops the run at startup, one created during a session is
+  removed after it).
+- No permission change; prompts and docs are T007.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_scratch_clear_*` in tests/test_workflow.py:
+  - helper level (`workflow.py clear-scratch` in a fixture checkout, an external temp dir
+    `victim/` holding `scratch/keep` and `keep`): (1) `.ai/local` replaced by a symlink to
+    `victim/` → exit 0, warning, `victim/scratch/keep` still exists; (2) `.ai` replaced by a
+    symlink to a dir whose `local/scratch/keep` exists → exit 0, warning, file survives;
+    (3) `.ai/local/scratch` a symlink to `victim/` → link gone, `victim/keep` exists; (4) a real
+    `scratch/` holding a nested dir and an inner symlink to `victim/` → `scratch` gone,
+    `victim/keep` exists; (5) no `scratch` → exit 0, no output; (6) `scratch` a regular file →
+    removed;
+  - end to end (`ai-run --approved`, mock claude): mode `scratch-leftover` implements the task,
+    commits and writes `.ai/local/scratch/tmp.test.sh` plus a nested dir → task DONE, no
+    `.ai/local/scratch` afterwards, nothing under it committed; a pre-existing
+    `.ai/local/scratch/old` is gone when the session starts (the mock records whether it saw
+    it: it must not); mode `scratch-parent-symlink` moves `.ai/local` aside and replaces it by a
+    symlink to `victim/` (with `scratch/keep`) → whatever the run's exit code,
+    `victim/scratch/keep` still exists; mode `scratch-symlink` makes `.ai/local/scratch` a
+    symlink to `victim/` → link removed after the session, `victim/keep` exists;
+  - a pre-existing `.ai/local/scratch` symlink at start → the run stops with `Unsafe symlink
+    in workflow path` and the target is untouched.
+- All existing tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k scratch_clear` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T007 — Scratch files go to `.ai/local/scratch/`, which the host empties around every session (FL-26, prompts and docs)
+Status: TODO
+Dependencies: T011
 Model: sonnet
 
 ### Goal
@@ -357,10 +465,8 @@ A session that needs a throwaway file never leaves one in source or test directo
 leftover scratch files never reach the gate or a commit.
 
 ### Implementation notes
-- `scripts/ai-run` `claude_session` (~244–289): before the `timeout … claude -p` call (~265)
-  and right after it (before `ai_guard_verify`), `clear_scratch`: `rm -rf -- .ai/local/scratch`
-  (no trailing slash: a symlink is removed, not followed; comment it). On failure print
-  `Note: could not clear .ai/local/scratch` to stderr and continue (never `ai_die`).
+- The host clear (`workflow.py clear-scratch`, called in `claude_session`) is T011; this task
+  only tells sessions and readers about it. Do not change `scripts/ai-run` or the helper.
 - Template prompts, shared "## How to work here" block of `templates/.ai/prompts/runner.md` and
   `triage.md` (keep both identical; `test_tool_contract_section_is_shared_by_prompts`), plus
   any other template prompt that has that block and a shell: a bullet "Scratch files
@@ -378,26 +484,22 @@ leftover scratch files never reach the gate or a commit.
   before and after each session"; `updated:` bumped; hub Log line.
 
 ### Likely affected modules
-scripts/ai-run, templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md,
+templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md,
 templates/CLAUDE.md, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
 and agents.md (Log)
 
 ### Acceptance criteria
 - Tests named `test_scratch_dir_*` in tests/test_workflow.py:
-  - a mock claude mode `scratch-leftover` that implements the task, commits, and also writes
-    `.ai/local/scratch/tmp.test.sh` (and a nested dir): after `ai-run --approved` the task is DONE,
-    `.ai/local/scratch` does not exist, nothing under it was committed;
-  - a pre-existing `.ai/local/scratch/old` from a crashed run is gone when the next session
-    starts (the mock records whether it saw it: it must not);
-  - `.ai/local/scratch` as a symlink to a directory outside the checkout: the link is removed,
-    the target directory and its file still exist;
   - the runner prompt (recorded by the mock) contains `.ai/local/scratch/`; the shared "How to
-    work here" blocks stay identical.
+    work here" blocks stay identical;
+  - README and `docs/workflow.md` mention that the host empties `.ai/local/scratch` and never
+    follows a symlink there (string checks).
+- T011's `test_scratch_clear_*` still pass.
 - All existing tests pass unchanged; vault flow chart and hub Log updated (or the denial
   recorded).
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k scratch_dir` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k scratch` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k tool_contract` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
@@ -419,14 +521,29 @@ the reason.
   1. `text` = fence-stripped result as today. If `json.loads(text)` (duplicate-key hook)
      succeeds: a dict is validated as today; any other JSON value escalates (keeps
      `[{"action": …}]` → escalate).
-  2. Otherwise scan: `JSONDecoder(object_pairs_hook=…).raw_decode(text, i)` at each `{`; on
-     success the dict is a candidate and scanning resumes at its end (nested objects are never
-     candidates); on a plain decode error move to the next `{`. A duplicate key in any
-     candidate escalates the whole answer (raise a `DuplicateKey(ValueError)` subclass from the
-     hook so it is distinguishable). A candidate counts as a decision when its `action` is in
-     `RECOVER_ACTIONS` and its fields pass today's checks; a candidate whose `action` is one of
-     the three but whose other fields fail → escalate (ambiguous). Exactly one decision →
-     use it; zero or several → escalate.
+  2. Otherwise scan line-anchored candidates only (plan review P3: a scan "at each `{`" can
+     promote a nested object of a malformed or prose-prefixed container). Rules, in order:
+     - Fence marker lines (```` ``` ````, ```` ```json ````) count as blank lines; their contents
+       are scanned like any other lines (a fenced decision after prose stays accepted).
+     - A candidate starts only where `{` is the first non-whitespace character of a line.
+       `JSONDecoder(object_pairs_hook=…).raw_decode(text, i)` there must succeed AND the rest
+       of the line after the object must be whitespace; scanning resumes after the object, so
+       nothing inside it is ever looked at again.
+     - A line-start `{` that fails to decode, or decodes with non-whitespace after it on the
+       same line, escalates the whole answer (malformed or ambiguous enclosing structure); its
+       inner `{` are never reconsidered.
+     - Enclosure check: the text before each candidate (from the start, or from the end of the
+       previous candidate) must have `{`/`[` and `}`/`]` balanced (plain character counts, no
+       string parsing); unbalanced → escalate (the candidate may sit inside an array or an
+       unclosed object such as `Diagnostic: [` on the line before).
+     - Objects not at a line start (inline after prose, in backticks or inside quotes) are
+       never candidates; they are prose.
+     A duplicate key in any candidate escalates the whole answer (raise a
+     `DuplicateKey(ValueError)` subclass from the hook so it is distinguishable). A candidate
+     counts as a decision when its `action` is in `RECOVER_ACTIONS` and its fields pass today's
+     checks; a candidate whose `action` is one of the three but whose other fields fail →
+     escalate (ambiguous); a candidate without such an `action` is ignored. Exactly one
+     decision → use it; zero or several → escalate. Comment the rules above the scanner.
   3. Escalation for want of a decision: reason `the recovery session gave no valid decision;
      it wrote: <excerpt>` when the result text is non-empty (excerpt: whitespace collapsed,
      tabs removed, so the total stays within the existing 300-character `clean` cap), else as
@@ -436,8 +553,10 @@ the reason.
   object or an example object."
 - `scripts/ai-recover` needs no change (it reads the three tab-separated fields); verify the
   notification shows the excerpt reason.
-- `test_recovery_decision_parsing_is_strict` (~4156): the case `Decision: {…rerun…}` now
-  expects `rerun` (intentional; name it in the result); all other cases stay.
+- `test_recovery_decision_parsing_is_strict` (~4156) passes unchanged: `Decision: {…rerun…}`
+  (~4170) stays `escalate` (inline, not at a line start), `{…} {…}` on one line (~4163) stays
+  `escalate` (non-whitespace after the object), `[{…}]` (~4171) stays `escalate` (whole-text
+  JSON that is not an object).
 - Docs: README and `docs/workflow.md` (recovery decision format). Vault: update the recovery
   box of `agents-flow.md` only if it describes the answer format (then `updated:` + hub Log
   line); otherwise say "flow unchanged" in the result.
@@ -449,11 +568,18 @@ docs/workflow.md
 ### Acceptance criteria
 - Tests named `test_recovery_decision_prose_*` in tests/test_workflow.py (helper
   `recover-decision` on envelopes, as the strict test does):
-  - diagnosis paragraph then `{"action": "escalate", "reason": "x", "human_action": "y"}` →
-    `escalate\tx\ty`; prose after the object → still accepted; a fenced object after prose →
-    accepted;
-  - prose quoting the template `{"action": "rerun|commit_and_rerun|escalate", …}` followed by a
-    real `{"action": "rerun", "reason": "crash"}` → `rerun`;
+  - diagnosis paragraph then, on its own line, `{"action": "escalate", "reason": "x",
+    "human_action": "y"}` → `escalate\tx\ty`; prose on the lines after the object → still
+    accepted; a fenced object after prose → accepted; a decision object spread over several
+    lines (line-start `{`, closing `}` alone on the last line) → accepted;
+  - prose quoting the template inline (`The format is {"action": "rerun|commit_and_rerun|escalate", …}.`)
+    followed by a real `{"action": "rerun", "reason": "crash"}` on its own line → `rerun`;
+  - negative cases from P3, each → escalate: `Broken diagnostic: {"details":{"action":
+    "commit_and_rerun","reason":"example"}, BROKEN}` alone; the same broken object starting at a
+    line start; `Diagnostic: [{"action":"rerun","reason":"example"}]`; a line `Diagnostic: [`,
+    then `{"action":"rerun","reason":"example"}` on its own line, then `]`; a quoted example
+    `"{\"action\": \"rerun\", \"reason\": \"x\"}"` with no other object; an inline backticked
+    decision `` `{"action":"rerun","reason":"x"}` `` with no line-start object;
   - two valid decisions in prose (same or different actions) → escalate; a decision with a
     nested object containing another action → only the outer one counts; a duplicate key in an
     object followed by a valid one → escalate; a valid action without `reason` plus another
@@ -462,8 +588,7 @@ docs/workflow.md
     it wrote:` and containing the start of the prose, no tab inside the reason, ≤ 300 characters;
   - an end-to-end `ai-recover` run with a mock recovery answer of prose + `rerun` resumes the
     pipeline (an existing MOCK_RECOVER mode extended, e.g. `prose-rerun`).
-- `test_recovery_decision_parsing_is_strict` passes with the one intentional change; all other
-  existing tests pass unchanged.
+- `test_recovery_decision_parsing_is_strict` and all other existing tests pass unchanged.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k recovery_decision` (must say `Ran N tests`, N ≥ 1).
@@ -484,9 +609,14 @@ record a catch-up done on another branch.
 
 ### Implementation notes
 - `scripts/lib/workflow.py` `outcomes_report` (~3050–3055): a Claude review record
-  (`reviewer` starting with `claude`) is covered when a LATER record (by `time`, ISO strings
-  compare) of the same `project` and `branch` is (a) a `review` with `reviewer == 'codex'` of
-  the same family (plan covers plan; code covers code and recheck), or (b) a `catchup` record.
+  (`reviewer` starting with `claude`) is covered when a LATER record of the same `project`
+  and `branch` is (a) a `review` with `reviewer == 'codex'` of the same family (plan covers
+  plan; code covers code and recheck), or (b) a `catchup` record. "Later" (plan review P5:
+  `now()` has whole seconds, so equal `time` strings happen): order every record by the key
+  `(time, file index, line index)` from `read_outcomes` (have it keep each record's position;
+  the log is append-only, so line order is write order within a file). A record covers only
+  when its `time` is strictly greater, or the `time` is equal and it is in the same file at a
+  higher line index; equal times in different files never cover (stays pending: the safe side).
   The section lists only uncovered ones; below it (or instead, when none is pending) a line
   `<n> Claude review(s) covered by a later Codex review or catch-up record.`
 - `outcome catchup BRANCH`: appends `{"time", "kind": "catchup", "project", "branch": BRANCH}`
@@ -512,6 +642,9 @@ scripts/lib/workflow.py, scripts/ai-status, tests/test_workflow.py, README.md, d
   - `ai-status --catch-up-done feature/x` appends a `catchup` line (project, branch, time) to
     the host outcomes log; afterwards that branch's earlier Claude reviews are covered and a
     later Claude review on it is pending again;
+  - equal timestamps (P5): Claude review and catch-up with the same `time`, catch-up on the
+    later line → covered; a Claude review with the same `time` on a line after the catch-up →
+    pending; the same pair with equal `time` in two different report files → pending;
   - `test_runner_logs_task_outcomes_and_report` passes unchanged (both its Claude reviews stay
     pending).
 - All existing tests pass unchanged.
@@ -526,7 +659,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009
+Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009, T011
 Model: haiku
 
 ### Goal
@@ -536,7 +669,7 @@ does; the human knows which upgrade, vault and backlog steps remain.
 ### Implementation notes
 - Check each sentence the tasks added (README, `docs/workflow.md`) against the code once:
   subreaper and tree termination (T001/T002), `tasks fill-sections` and the host step
-  (T003/T004), escaped pipes (T005), prompt wording (T006), `.ai/local/scratch` (T007),
+  (T003/T004), escaped pipes (T005), prompt wording (T006), `.ai/local/scratch` (T011/T007),
   recovery decision with prose (T008), catch-up coverage and `--catch-up-done` (T009). Fix
   contradictions; no new behaviour.
 - Vault: confirm `agents-flow.md` reflects T004 and T007 (and T008 if it changed the chart)
@@ -558,7 +691,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
 - The handoff names `test_parallel_runner_subreaper_*`, `test_parallel_runner_tree_*`,
   `test_task_sections_fill_*`, `test_task_sections_host_*`,
   `test_task_sections_prompts_show_the_format`, `test_disposition_pipes_*`,
-  `test_scratch_dir_*`, `test_recovery_decision_prose_*` and `test_outcome_catchup_*` under
+  `test_scratch_clear_*`, `test_scratch_dir_*`, `test_recovery_decision_prose_*` and `test_outcome_catchup_*` under
   "Covered by automated tests", and every group exists
   (`python3 -m unittest discover -s tests -k <group>` runs ≥ 1 test each).
 
