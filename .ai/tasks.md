@@ -199,7 +199,7 @@ README and docs/workflow.md updated. Flow unchanged (no vault flow edit).
 
 
 ## T013 — An interrupt during worker startup still runs the shutdown (FL-27, part 3; plan review round 2 P6)
-Status: TODO
+Status: DONE
 Dependencies: T002
 Model: opus
 
@@ -257,7 +257,17 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+2026-10-16 (claude, opus): `Dispatcher.run()` keeps a `started` list; the start loop is inside
+the `try:`, the `except BaseException:` path calls `stop()` and joins only `started`, then the
+final reap and re-raise as before. `main()` starts no child between `Dispatcher(...)` and
+`run()`; its earlier `exec_probe` is a bounded `subprocess.run` in the runner's own group.
+Tests `test_parallel_runner_startup_sigint_during_worker_start_stops_batch` and
+`..._sigterm_...` (driver patches the main thread's second `Thread.start()` to wait for the
+`timeout`, sleeper and detached TERM-ignoring stub pid files, then raise `KeyboardInterrupt` /
+`SystemExit(143)`): driver prints the exception, `rounds 1`, exits non-zero within
+`(TERMINATE_GRACE*2 + FINAL_WAIT + 10) × scale`, no `RuntimeError`, all three pids gone or
+zombie right after exit. Mutation (start loop back outside the `try:`): both fail with
+`rounds 0`. `-k parallel_runner`: Ran 29 tests OK. `.ai/bin/ai-check`: PASS, 699 tests.
 
 ## T003 — `tasks fill-sections`: add the two content-free sections to TODO tasks (FL-25 a, part 1)
 Status: TODO

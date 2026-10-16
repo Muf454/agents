@@ -9170,6 +9170,53 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertIn('during_stop [] rounds 1 errors 2 alive []', result.stdout, output)
         self.assert_gone(self.wait_pidfiles(stubs))
 
+    # FL-27 part 3: an interrupt while run() is still starting workers (after the first one
+    # launched its batch) goes through stop() like any later interrupt.
+    def startup_interrupt(self, raised):
+        self.tree_guard()
+        self.timeout_pid, self.child_pid = self.pidfile('timeout.pid'), self.pidfile('child.pid')
+        self.stub_pid = self.pidfile('stub.pid')
+        stub = (f'trap "" TERM; echo $$ > {self.stub_pid}.tmp; mv {self.stub_pid}.tmp {self.stub_pid}; '
+                'exec sleep 120')
+        self.write_tree_test('test_tree.py', f"setsid sh -c '{stub}' </dev/null >/dev/null 2>&1 & "
+                             f'echo $$ > {self.child_pid}.tmp; mv {self.child_pid}.tmp {self.child_pid}; '
+                             'exec sleep 120', popen_pidfile=self.timeout_pid)
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        paths = [self.timeout_pid, self.child_pid, self.stub_pid]
+        # The main thread's second Thread.start() raises once the first batch's tree exists.
+        scenario = (
+            'real_start = threading.Thread.start\n'
+            'starts = []\n'
+            'def start(self):\n'
+            '    if threading.current_thread() is threading.main_thread():\n'
+            '        starts.append(self)\n'
+            '        if len(starts) == 2:\n'
+            '            wait_pidfiles()\n'
+            f'            raise {raised}\n'
+            '    return real_start(self)\n'
+            'threading.Thread.start = start\n'
+            'import atexit\n'
+            'atexit.register(lambda: print("rounds", dispatcher.kill_rounds, flush=True))\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths,
+                                 (self.rp.TERMINATE_GRACE * 2 + self.rp.FINAL_WAIT + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn('rounds 1\n', result.stdout, output)
+        self.assertNotIn('RuntimeError', output)
+        # Right after the driver exited, no extra polling: the completion barrier saw to it.
+        for pid in self.wait_pidfiles(paths):
+            self.assertIn(self.state_of(pid), (None, 'Z'), f'{pid} survived the stop')
+        return result
+
+    def test_parallel_runner_startup_sigint_during_worker_start_stops_batch(self):
+        result = self.startup_interrupt('KeyboardInterrupt')
+        self.assertIn('raised KeyboardInterrupt', result.stdout, result.stdout + result.stderr)
+
+    def test_parallel_runner_startup_sigterm_during_worker_start_stops_batch(self):
+        result = self.startup_interrupt('SystemExit(143)')
+        self.assertIn('raised SystemExit 143', result.stdout, result.stdout + result.stderr)
+
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
     def scale(self, **env):

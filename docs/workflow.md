@@ -51,7 +51,8 @@ batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six ba
 worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
 (FL-27): orphans of the batches are reparented to it and reaped without touching a batch's
 exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). A stop
-(worker error, interrupt, SIGTERM) is owned by its first caller: it signals the batch groups
+(worker error, interrupt, SIGTERM, also one that arrives while the workers are still being
+started) is owned by its first caller: it signals the batch groups
 and walks the `/proc` ppid tree below the runner, SIGTERM then up to three SIGKILL rounds
 (each pid checked against its recorded start time), then a bounded completion barrier until
 `/proc` shows no live descendant; survivors are printed to stderr and fail the run. No

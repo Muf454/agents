@@ -448,9 +448,13 @@ class Dispatcher:
     def run(self):
         threads = [threading.Thread(target=self.work, args=(index,), daemon=True)
                    for index in range(self.workers)]
-        for thread in threads:
-            thread.start()
+        # The start loop is inside the try: an interrupt during a later start() must still stop
+        # the batch an earlier worker launched. Only started threads can be joined.
+        started = []
         try:
+            for thread in threads:
+                thread.start()
+                started.append(thread)
             for thread in threads:
                 if not self.reap:
                     thread.join()
@@ -463,7 +467,7 @@ class Dispatcher:
                 self.reap_adopted()
         except BaseException:
             self.stop()
-            for thread in threads:
+            for thread in started:
                 thread.join()
             if self.reap:
                 self.reap_adopted()
