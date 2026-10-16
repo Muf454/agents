@@ -863,7 +863,7 @@ docs/workflow.md updated. 5 `test_outcome_catchup_*` tests; `-k outcome` 21 OK; 
 
 
 ## T010 — Docs, handoff and final audit for the batch
-Status: TODO
+Status: DONE
 Dependencies: T001, T002, T003, T004, T005, T006, T007, T008, T009, T011, T012, T013
 Model: haiku
 
@@ -907,3 +907,12 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17 (claude haiku; the previous attempt stopped on a denied compound command and changed nothing).
+Audit, no behaviour change: README (`.ai/local/scratch`, `--catch-up-done`, self-check descendant
+termination, `tasks fill-sections`, `\|`) and `docs/workflow.md` (subreaper, `fill-sections`, scratch
+clear, recovery-decision bracket rule, catch-up) checked against the code. Vault: `agents-flow.md`
+already current (`updated: 2026-10-17`; T004 and T007 boxes present; T008/T009/T012 flow unchanged);
+hub Log has the FL-21/CU-1/CU-3/CU-4 "already done" line (2026-10-16) plus new T010 and T009 lines.
+Handoff: "Manual testing" (Needs you, every test group named under Covered), Human todos, the
+flow chart and next action updated. Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
+Gate: `.ai/bin/ai-check` PASS (736 tests, 397.4 s on 8 workers). No human acceptance is implied.

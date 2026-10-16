@@ -38,6 +38,11 @@
   answer is non-empty; the recover prompt asks for the object alone with the diagnosis in
   `reason`; README and `docs/workflow.md` state the format and T012's bracket rule. Installed
   `.ai/prompts` copies unchanged until the upgrade.
+- T009 (done, CU-2): a covered Claude review leaves "Codex catch-up pending" once a later Codex
+  review of the same project, branch and family exists, or `ai-status --catch-up-done BRANCH...`
+  records a catch-up (a human command). 5 `test_outcome_catchup_*` tests.
+- T010 (done): README, `docs/workflow.md`, the vault flow chart and this handoff were checked
+  against the code; no behaviour changed. `DocsConsistencyTest` and `flow_this_repo` pass.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -77,6 +82,8 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-17 after T007: `.ai/bin/ai-check` PASS (723 tests, 386.4 s on 8 workers).
 2026-10-17 after T012: `.ai/bin/ai-check` PASS (727 tests, 389.6 s on 8 workers).
 2026-10-17 after T008: `.ai/bin/ai-check` PASS (731 tests, 390.6 s on 8 workers).
+2026-10-17 after T009: `.ai/bin/ai-check` PASS (736 tests; recorded in the run log, not re-run here).
+2026-10-17 after T010: targeted `-k Docs` (3 tests) and `-k flow_this_repo` (1 test) OK; full gate: see the run log entry for T010.
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -93,8 +100,9 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 Flow chart updated: T004 added the host step `tasks fill-sections` (adds a missing Likely
 affected modules / Result / notes) after the triage, planning and plan-revision sessions, in
 `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (triage node, plan/revision script boxes). T007
-added "empty .ai/local/scratch" to the pick and gate boxes of "Inside one task". Still pending:
-T008: flow unchanged (the chart's recovery box does not describe the answer format).
+added "empty .ai/local/scratch" to the pick and gate boxes of "Inside one task". T008, T009
+and T012 left the chart unchanged (the recovery box does not describe the answer format; the
+catch-up rule is a reviewer-log rule, not a chart box). Nothing pending.
 
 ## Manual testing for the human
 
@@ -135,5 +143,5 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Implement the queue in order (T001, T002, T013, T003, T004 done;
-T006, T011, T007, T012 and T008 are done; next T009; T010 last).
+Queue complete: T001–T013 (all 13 batch tasks) are DONE. Next: independent review
+(`.ai/reviews/current.md`), then the human's acceptance steps above and the merge.
