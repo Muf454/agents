@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T011
 Tasks complete: 8
 Tasks remaining: 5
-Last validation: PASS at 2026-10-16T22:18:46Z
+Last validation: PASS at 2026-10-16T22:35:00Z
 Blocked: no
-Next action: Implement T007 (scratch prompts and docs)
-Last updated: 2026-10-16T22:18:47Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-16T22:35:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
