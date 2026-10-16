@@ -283,7 +283,9 @@ tmux new -s my-app-ai
    new task appended after the tasks that depend on it still runs first; a cycle, unknown ID
    or prose in `Dependencies:` stops at once (`Plan revision stage: task queue is invalid`,
    no recovery attempt). A revision interrupted after its session wrote such a queue (crash,
-   restart) resumes the same way: the host repairs the uncommitted queue before any queue
+   restart) resumes the same way (after triage, planning and each revision the host also adds a
+   missing `### Likely affected modules` or `### Result / notes` to new tasks and prints
+   `Task queue: added missing sections: …`; any other missing section still stops): the host repairs the uncommitted queue before any queue
    check and records the revision without a second session. From review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass

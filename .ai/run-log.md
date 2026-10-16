@@ -315,3 +315,4 @@
 | 2026-10-16T21:16:41Z | runner | T013 | completed | PASS | 9138df2 | Claude checkpointed; continuing queue |
 | 2026-10-16T21:50Z | claude (sonnet) | T003 | done: `tasks fill-sections` (fence-aware, TODO only, atomic) + shared REQUIRED_SECTIONS; 3 task_sections_fill tests; README/docs line | PASS (ai-check, 702 tests; -k queue_reorder 7 OK) | parent 1ede7a2 | |
 | 2026-10-16T21:30:57Z | runner | T003 | completed | PASS | 63a25e4 | Claude checkpointed; continuing queue |
+| 2026-10-16T22:20Z | claude (sonnet) | T004 | done: ai-run fills missing task sections after triage, planning and revision sessions; contracts say to copy the task format; 4 task_sections_host tests; docs, vault chart and Log | PASS (ai-check, 706 tests; -k triage 29 OK) | parent 63a25e4 | |

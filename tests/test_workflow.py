@@ -102,6 +102,11 @@ args = sys.argv[1:]
 assert '--permission-mode' in args and args[args.index('--permission-mode')+1] == 'dontAsk'
 assert '--' in args
 prompt = args[args.index('--')+1]
+def drop_sections(block, names=('Likely affected modules', 'Result / notes')):
+    # A task block as a forgetful session would write it: the named ### sections left out.
+    for name in names:
+        block = re.sub(r'^### ' + re.escape(name) + r'\n.*?(?=^### |\Z)', '', block, flags=re.S | re.M)
+    return block
 if 'RECOVERY CONTRACT' in prompt:
     assert args[args.index('--tools')+1] == 'Read,Glob,Grep'
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
@@ -188,6 +193,8 @@ if 'REVISION CONTRACT' in prompt:
             text = tasks_file.read_text()
             new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
             new_task = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+            if mode == 'revise-accept-missing-sections':
+                new_task = drop_sections(new_task)
             if mode in ('revise-accept-prereq', 'revise-accept-cycle'):
                 # The new task is a prerequisite of the first task, appended after it (the cycle
                 # variant also makes the new task depend on that first task).
@@ -247,6 +254,8 @@ if 'PLANNING CONTRACT' in prompt:
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
+    if mode == 'plan-missing-sections':
+        second = drop_sections(second)
     if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
     if mode == 'plan-bad-queue':
@@ -318,6 +327,10 @@ if 'TRIAGE CONTRACT' in prompt:
         ids = [int(x) for x in re.findall(r'^## T(\d+)', text, re.M)]
         new_id = 'T%03d' % (max(ids) + 1)
         block = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+        if mode == 'triage-missing-sections':
+            block = drop_sections(block)
+        if mode == 'triage-missing-goal':
+            block = drop_sections(block, ('Goal', 'Likely affected modules', 'Result / notes'))
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
         review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
@@ -6397,6 +6410,55 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.triage_calls(), 1)
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
         self.assertEqual(self.open_stage(), '')
+
+    def test_task_sections_host_triage_adds_the_missing_sections(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002 (Likely affected modules, Result / notes)',
+                      result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        counted = self.run_cmd(['git', 'log', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.split()
+        tasks_text = self.run_cmd(['git', 'show', f'{counted[0]}:.ai/tasks.md']).stdout
+        new_task = tasks_text.split('## T002')[1]
+        self.assertIn('### Likely affected modules', new_task)
+        self.assertIn('### Result / notes', new_task)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.open_stage(), '')
+        prompt = (self.base / 'triage-prompts.log').read_text()
+        self.assertIn('Copy the task format of .ai/tasks.md exactly', prompt)
+
+    def test_task_sections_host_triage_missing_goal_still_stops(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-missing-goal')
+        self.assertIn('missing ### Goal', result.stderr)
+        self.assertNotIn('(Goal', result.stdout)
+
+    def test_task_sections_host_planning_adds_the_missing_sections(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002 (Likely affected modules, Result / notes)',
+                      result.stdout)
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        second = queue.split('## T002')[1]
+        self.assertIn('### Likely affected modules', second)
+        self.assertIn('### Result / notes', second)
+        self.assertEqual(self.observation()['note'], '2 tasks')
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_task_sections_host_revision_adds_the_missing_sections(self):
+        self.revise_ready()
+        result = self.revise(MOCK_CLAUDE='revise-accept-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        committed = self.run_cmd(['git', 'show', 'HEAD:.ai/tasks.md']).stdout.split('## T002')[1]
+        self.assertIn('### Likely affected modules', committed)
+        self.assertIn('### Result / notes', committed)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
 
     def test_triage_completion_uncommitted_records_recover_into_one_round(self):
         # 2026-10-05: the triage session's commit was denied, the run stopped, recovery resumed.

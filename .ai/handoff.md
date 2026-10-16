@@ -14,8 +14,11 @@
   threads that started.
 - T003 (done): `workflow.py tasks fill-sections` adds a missing `### Likely affected modules`
   (`(not listed)`) or empty `### Result / notes` to TODO tasks only (fence-aware, atomic, silent
-  no-op when nothing is missing); `tasks()` shares `REQUIRED_SECTIONS`. Not wired into the flow
-  yet (T004).
+  no-op when nothing is missing); `tasks()` shares `REQUIRED_SECTIONS`.
+- T004 (done): `ai-run` runs `tasks fill-sections` after the triage, planning and plan-revision
+  sessions (before `tasks check`/`reorder`), prints `Task queue: added missing sections: …`, and
+  the repair lands in the stage's own commit; the three contracts tell the session to copy the
+  exact task format. A task without `### Goal` etc. still stops.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -49,6 +52,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-16 after T002: `.ai/bin/ai-check` PASS (697 tests, 408.3 s on 8 workers).
 2026-10-16 after T013: `.ai/bin/ai-check` PASS (699 tests, 416.7 s on 8 workers).
 2026-10-16 after T003: `.ai/bin/ai-check` PASS (702 tests, 406.1 s on 8 workers).
+2026-10-16 after T004: `.ai/bin/ai-check` PASS (706 tests, 365.4 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -62,9 +66,11 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
   reviews; other branches need `--catch-up-done`.
 
 ## Flow chart
-Flow unchanged so far. T004 (host fills task sections after sessions) and T007 (host empties
-`.ai/local/scratch`) change the flow and update `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`;
-T008 updates it only if the chart describes the recovery answer format.
+Flow chart updated: T004 added the host step `tasks fill-sections` (adds a missing Likely
+affected modules / Result / notes) after the triage, planning and plan-revision sessions, in
+`~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (triage node, plan/revision script boxes). Still
+pending: T007 (host empties `.ai/local/scratch`) updates it; T008 only if the chart describes
+the recovery answer format.
 
 ## Manual testing for the human
 
@@ -101,6 +107,6 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Implement the queue in order (T001, T002, T013, T003 done; T004 next;
+Implement the queue in order (T001, T002, T013, T003, T004 done;
 T006 on T004 and T005; T007 on T011 and T008 on T012, each sitting right before it in the
 queue; T010 last).

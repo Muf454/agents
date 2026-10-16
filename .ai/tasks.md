@@ -329,7 +329,7 @@ Tests `test_task_sections_fill_{raid_case,complete_queue_is_untouched,ignores_fe
 pass; `-k queue_reorder`: 7 OK; `.ai/bin/ai-check`: PASS, 702 tests. README and docs/workflow.md updated.
 
 ## T004 — The host fills missing task sections after triage, planning and plan revision (FL-25 a, part 2)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: sonnet
 
@@ -389,7 +389,12 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+`ai-run` runs `tasks fill-sections` before `tasks check`/`reorder` in the triage, planning and
+revision paths, prints its line, and the three contracts carry the format sentence. Mock modes
+`triage-missing-sections`, `triage-missing-goal`, `plan-missing-sections`,
+`revise-accept-missing-sections`; tests `test_task_sections_host_*` (4) pass; `-k triage`: 29 OK;
+`-k flow_this_repo`: 1 OK; `.ai/bin/ai-check`: PASS, 706 tests. README, docs/workflow.md, vault
+flow chart and hub Log updated. Limitation: the "dispositions already complete" triage path is unchanged.
 
 ## T005 — Escaped pipes inside disposition and plan-disposition cells (FL-25 b)
 Status: TODO

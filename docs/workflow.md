@@ -257,7 +257,9 @@ task DONE when the session starts, committed or not, i.e. DONE in START's `.ai/t
 the baseline copy, keeps its raw block; a task DONE in both must match the baseline block;
 fenced lines included and trailing blank lines ignored;
 unconditional, so a forgotten `--revision` cannot bypass it: `Planning: DONE task T00x was
-changed or removed`), `tasks reorder` (a task placed before one it depends on is moved after it,
+changed or removed`), `tasks fill-sections` (a missing `### Likely affected modules` /
+`### Result / notes` of a TODO task is added, `Task queue: added missing sections: …` printed),
+`tasks reorder` (a task placed before one it depends on is moved after it,
 block text unchanged, `Task queue reordered (dependencies first): …` printed; a cycle, unknown
 ID or prose in `Dependencies:` stops with `Planning: task queue is invalid: …`) and `tasks check`
 (`Planning: task queue is invalid: …` with the same text as `ai-task check`). Success records
@@ -313,7 +315,9 @@ plus the host `REVISION CONTRACT` (round, section header, editable files, the Co
 from round 3, "do not commit") and `PREVIOUS PLAN ROUNDS`; git context the session cannot fetch
 itself (plan history, recent diffs of the plan records) is written to the ignored
 `.ai/local/revision-context/` and removed afterwards. Afterwards the host checks that
-`plan.md` and the gate are byte-identical, `tasks reorder` (the contract tells the session to
+`plan.md` and the gate are byte-identical, `tasks fill-sections` (adds a missing `### Likely
+affected modules` / `### Result / notes` to new TODO tasks and prints `Task queue: added missing
+sections: …`; any other missing section still stops), `tasks reorder` (the contract tells the session to
 place new tasks before the first task that depends on them; the host repairs a prerequisite
 appended after its dependents, and the reordered queue goes into the revision commit), `tasks
 check` (either failure stops with `Plan revision stage: task queue is invalid: …`, which
@@ -446,7 +450,10 @@ row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evi
 deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
 decorations do not match. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
-`.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
+`.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that
+lacks `### Likely affected modules` or `### Result / notes` gets it; the line `Task queue: added
+missing sections: …` is printed and the repair goes into the triage commit), then `tasks check`
+(anything else missing, such as `### Goal`, stops the run). No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
 reviews need exactly one counts line that agrees with the listed finding IDs, plus (code
 reviews only) a verdict, either an `Overall verdict: <text>` line or an `## Overall verdict`
