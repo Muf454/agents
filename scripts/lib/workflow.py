@@ -422,13 +422,18 @@ def task_blocks(text):
     return blocks
 
 
+REQUIRED_SECTIONS = ('Goal', 'Implementation notes', 'Likely affected modules',
+                     'Acceptance criteria', 'Validation', 'Result / notes')
+# The content-free sections `tasks fill-sections` may add, with the body inserted under the heading.
+FILLABLE_SECTIONS = {'Likely affected modules': ['(not listed)\n'], 'Result / notes': []}
+
+
 def tasks(text=None):
     blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
         fail('Duplicate task IDs.')
-    required = ('Goal', 'Implementation notes', 'Likely affected modules',
-                'Acceptance criteria', 'Validation', 'Result / notes')
+    required = REQUIRED_SECTIONS
     for task in blocks:
         for field in ('Status', 'Dependencies'):
             values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith(field + ':')]
@@ -551,9 +556,75 @@ def tasks_reorder():
     print('Task queue reordered (dependencies first): ' + ' '.join(order))
 
 
+def section_positions(lines):
+    """Line index of each exact `### <required section>` heading outside code fences."""
+    found, fence = {}, None
+    for index, line in enumerate(lines):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence and line.rstrip('\n') in {f'### {name}' for name in REQUIRED_SECTIONS}:
+            found.setdefault(line.rstrip('\n')[4:], index)
+    return found, fence
+
+
+def fill_task_sections(lines):
+    """Return (new lines, names added) for one TODO task block; other blocks are the caller's to skip."""
+    lines, added = list(lines), []
+    for name, body in FILLABLE_SECTIONS.items():
+        found, fence = section_positions(lines)
+        if name in found or fence:
+            continue
+        later = [found[n] for n in REQUIRED_SECTIONS[REQUIRED_SECTIONS.index(name) + 1:] if n in found]
+        if later:
+            at = min(later)
+            new = [f'### {name}\n', *body, '\n']
+            if lines[at - 1].strip():
+                new.insert(0, '\n')
+        else:
+            at = len(lines)
+            while at > 0 and not lines[at - 1].strip():
+                at -= 1
+            if lines[at - 1] and not lines[at - 1].endswith('\n'):
+                lines[at - 1] += '\n'
+            new = ['\n', f'### {name}\n', *body]
+        lines[at:at] = new
+        added.append(name)
+    return lines, added
+
+
+def tasks_fill_sections():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    out, report = [], []
+    for kind, key, lines in queue_segments(text):
+        if kind == 'task':
+            # Fenced Status: lines don't count; task_blocks ignores them too.
+            block = next((b for b in task_blocks(''.join(lines)) if b['id'] == key), None)
+            statuses = [line for line in block['lines'] if line.startswith('Status:')] if block else []
+            if len(statuses) == 1 and statuses[0].split(':', 1)[1].strip() == 'TODO':
+                lines, added = fill_task_sections(lines)
+                if added:
+                    report.append(f"{key} ({', '.join(added)})")
+        out.extend(lines)
+    if not report:
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue: added missing sections: ' + ', '.join(report))
+
+
 def task_command(arguments):
     if arguments[0] == 'reorder':
         tasks_reorder()
+        return
+    if arguments[0] == 'fill-sections':
+        tasks_fill_sections()
         return
     blocks = tasks()
     action = arguments[0]

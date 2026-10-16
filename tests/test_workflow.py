@@ -2293,6 +2293,66 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('Task queue reordered (dependencies first): T011 T001', result.stdout)
         self.tool('ai-task', 'check')
 
+    def test_task_sections_fill_raid_case(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        no_result = '### Result / notes\nPending.\n'
+
+        def without_likely(text, task_id):
+            return text.replace(f'### Likely affected modules\n{task_id}.txt\n', '')
+        t19 = without_likely(task('T019'), 'T019').replace(no_result, '')
+        t20 = task('T020').replace(no_result, '')
+        t01 = without_likely(task('T001', status='DONE'), 'T001')
+        original = '# Queue\n\nPreamble.\n\n' + t01 + t19 + t20 + '## Notes\nTrailer.\n'
+        queue.write_text(original)
+        self.commit()
+        result = self.helper('tasks', 'fill-sections')
+        self.assertEqual(result.stdout.strip(), 'Task queue: added missing sections: '
+                         'T019 (Likely affected modules, Result / notes), T020 (Result / notes)')
+        text = queue.read_text()
+        self.assertTrue(text.startswith('# Queue\n\nPreamble.\n\n' + t01 + '## T019'))
+        self.assertTrue(text.endswith('## Notes\nTrailer.\n'))
+        parts = self.queue_blocks(text)
+        self.assertEqual(parts['T001'], t01.rstrip('\n'))
+        self.assertEqual(parts['T019'].count('### Likely affected modules\n(not listed)\n\n### Acceptance'), 1)
+        self.assertTrue(parts['T019'].endswith('### Validation\nbash .ai/validate\n\n### Result / notes'))
+        self.assertTrue(parts['T020'].endswith('### Validation\nbash .ai/validate\n\n### Result / notes'))
+        self.assertEqual(parts['T020'].count('### Likely affected modules'), 1)
+        self.helper('plan-keeps-done', 'HEAD')
+        result = self.helper('tasks', 'check', expected=1)
+        self.assertIn('T001: missing ### Likely affected modules', result.stderr)
+        queue.write_text(text.replace(t01, task('T001', status='DONE'), 1))
+        self.helper('tasks', 'check')
+
+    def test_task_sections_fill_complete_queue_is_untouched(self):
+        self.ready(task('T001') + task('T002', dependencies='T001'))
+        queue = self.project / '.ai/tasks.md'
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        result = self.helper('tasks', 'fill-sections')
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_task_sections_fill_ignores_fences_and_adds_only_two(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        fenced = task('T001').replace('### Result / notes\nPending.\n',
+                                      '```\n### Result / notes\n```\n')
+        queue.write_text(fenced)
+        self.helper('tasks', 'check', expected=1)
+        self.helper('tasks', 'fill-sections')
+        text = queue.read_text()
+        self.assertTrue(text.rstrip('\n').endswith('```\n\n### Result / notes'))
+        self.helper('tasks', 'check')
+        no_goal = task('T001').replace('### Goal\nWrite a local test artifact.\n', '') \
+            .replace('### Result / notes\nPending.\n', '')
+        queue.write_text(no_goal)
+        self.helper('tasks', 'fill-sections')
+        self.assertNotIn('### Goal', queue.read_text())
+        self.assertIn('### Result / notes', queue.read_text())
+        result = self.helper('tasks', 'check', expected=1)
+        self.assertIn('T001: missing ### Goal', result.stderr)
+
     def test_queue_check_empty_template_queue_fails(self):
         self.setup_project()
         result = self.tool('ai-task', 'check', expected=1)

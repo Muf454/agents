@@ -395,6 +395,7 @@ tasks: stable depth-first order, task text unchanged, nothing written when alrea
 cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before the first task
 (including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
 `## ` section between two tasks blocks reordering.
+`workflow.py tasks fill-sections` (host-only, not an `ai-task` subcommand) gives TODO tasks a missing `### Likely affected modules` (body `(not listed)`) or `### Result / notes` heading at its canonical position; other sections and tasks are untouched, and nothing is written when nothing is missing.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only

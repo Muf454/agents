@@ -162,7 +162,9 @@ Before leaving an implementation session unattended:
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
    check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
    task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
-   prose in `Dependencies:`.
+   prose in `Dependencies:`. `python3 scripts/lib/workflow.py tasks fill-sections` (host-only)
+   adds a missing `### Likely affected modules` or `### Result / notes` heading to TODO tasks and
+   changes nothing else.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write

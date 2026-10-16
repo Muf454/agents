@@ -313,3 +313,4 @@
 | 2026-10-16T21:00:35Z | runner | T002 | completed | PASS | 796746e | Claude checkpointed; continuing queue |
 | 2026-10-16T21:20Z | claude (opus) | T013 | done: run() starts workers inside the try, joins only started threads; 2 startup tests (KeyboardInterrupt, SystemExit(143)) | PASS (ai-check, 699 tests; -k parallel_runner 29 OK) | parent 648e4bd | Mutation: start loop outside try → both fail (rounds 0) |
 | 2026-10-16T21:16:41Z | runner | T013 | completed | PASS | 9138df2 | Claude checkpointed; continuing queue |
+| 2026-10-16T21:50Z | claude (sonnet) | T003 | done: `tasks fill-sections` (fence-aware, TODO only, atomic) + shared REQUIRED_SECTIONS; 3 task_sections_fill tests; README/docs line | PASS (ai-check, 702 tests; -k queue_reorder 7 OK) | parent 1ede7a2 | |

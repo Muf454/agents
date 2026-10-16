@@ -270,7 +270,7 @@ zombie right after exit. Mutation (start loop back outside the `try:`): both fai
 `rounds 0`. `-k parallel_runner`: Ran 29 tests OK. `.ai/bin/ai-check`: PASS, 699 tests.
 
 ## T003 — `tasks fill-sections`: add the two content-free sections to TODO tasks (FL-25 a, part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -322,7 +322,11 @@ Targeted: `python3 -m unittest discover -s tests -k queue_reorder` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+Added `workflow.py tasks fill-sections` (`tasks_fill_sections`, `fill_task_sections`,
+`section_positions`) and the shared `REQUIRED_SECTIONS` constant used by `tasks()`. Fence-aware,
+TODO tasks with exactly one Status line only; atomic write, mode kept; silent no-op otherwise.
+Tests `test_task_sections_fill_{raid_case,complete_queue_is_untouched,ignores_fences_and_adds_only_two}`
+pass; `-k queue_reorder`: 7 OK; `.ai/bin/ai-check`: PASS, 702 tests. README and docs/workflow.md updated.
 
 ## T004 — The host fills missing task sections after triage, planning and plan revision (FL-25 a, part 2)
 Status: TODO

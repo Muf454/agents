@@ -12,6 +12,10 @@
 - T013 (done): `Dispatcher.run()` starts its workers inside the `try:`, so an interrupt or
   SIGTERM during a later `Thread.start()` still runs `stop()` (once) and joins only the
   threads that started.
+- T003 (done): `workflow.py tasks fill-sections` adds a missing `### Likely affected modules`
+  (`(not listed)`) or empty `### Result / notes` to TODO tasks only (fence-aware, atomic, silent
+  no-op when nothing is missing); `tasks()` shares `REQUIRED_SECTIONS`. Not wired into the flow
+  yet (T004).
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -44,6 +48,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-16 after T001: `.ai/bin/ai-check` PASS (689 tests, 424.6 s on 8 workers).
 2026-10-16 after T002: `.ai/bin/ai-check` PASS (697 tests, 408.3 s on 8 workers).
 2026-10-16 after T013: `.ai/bin/ai-check` PASS (699 tests, 416.7 s on 8 workers).
+2026-10-16 after T003: `.ai/bin/ai-check` PASS (702 tests, 406.1 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -96,6 +101,6 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Implement the queue in order (T001, T002, T013 done; T004 on T003;
+Implement the queue in order (T001, T002, T013, T003 done; T004 next;
 T006 on T004 and T005; T007 on T011 and T008 on T012, each sitting right before it in the
 queue; T010 last).
