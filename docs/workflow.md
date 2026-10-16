@@ -685,8 +685,13 @@ with its PID and `kill` hint) or `ai-pipeline`. Known limit: an `ai-recover` sta
 `ai-watchdog --recover` after a crash leaves `pipeline.active` naming the dead pipeline (the
 watchdog's `pipeline_died` input), so a relaunch during it gets the plain message. Checkpoints must also satisfy `committed-matches-worktree`
 (HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
-filters and staged mode changes). The recovery decision must be exactly one JSON object
-(optionally fenced); envelope and decision reject duplicate keys.
+filters and staged mode changes). The recovery decision must be exactly one JSON object:
+the whole answer (optionally fenced), or one object that starts a line and ends its last
+line inside prose that contains no `{`, `}`, `[` or `]` (so no enclosing container, second
+object or inline example can hide it; prose with any bracket escalates, the safe side);
+envelope and decision reject duplicate keys. Without a valid decision the escalation reason
+is `the recovery session gave no valid decision; it wrote: <excerpt>` (whitespace collapsed,
+at most 300 characters) when the answer is non-empty, else without the excerpt.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
 checks after the commit. Checkpoint scope: `git add --all` (ignored
 files stay out), then `checkpoint-guard` inspects every staged addition (renames count as

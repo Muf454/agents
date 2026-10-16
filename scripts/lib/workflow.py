@@ -1997,9 +1997,11 @@ def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
     object (no duplicate keys; the whole answer, or one line-start object inside prose
-    that has no '{', '}', '[' or ']') count. Everything else escalates."""
+    that has no '{', '}', '[' or ']') count. Everything else escalates; when the session
+    wrote something, the reason quotes the start of it."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
+    clean = lambda value: ' '.join(value.split())[:300]
     try:
         envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
@@ -2008,6 +2010,9 @@ def recover_decision(arguments):
             or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
+    if envelope['result'].strip():
+        escalate = ('escalate\t' + clean('the recovery session gave no valid decision; it wrote: '
+                                         + envelope['result']) + '\tinspect the stop yourself')
     # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
@@ -2022,7 +2027,6 @@ def recover_decision(arguments):
             or not fields[1].strip():
         print(escalate)
         return
-    clean = lambda value: ' '.join(value.split())[:300]
     print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
 
 

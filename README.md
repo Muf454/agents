@@ -413,7 +413,10 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or
-   `escalate`. Malformed answers escalate.
+   `escalate`. The answer is one JSON decision object; a diagnosis written before or after it
+   still counts when the object starts its own line and the prose around it contains no `{`,
+   `}`, `[` or `]`. Any other answer escalates, and the ⛔ reason quotes the start of what the
+   session wrote (`the recovery session gave no valid decision; it wrote: …`).
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
    pipeline was killed or the machine restarted.
 

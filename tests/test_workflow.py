@@ -116,10 +116,15 @@ if 'RECOVERY CONTRACT' in prompt:
     if os.environ.get('MOCK_RECOVER_KILL'):
         # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
         os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
-    decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
+    mode = os.environ.get('MOCK_RECOVER', 'rerun')
+    decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
-    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
-                      'result': json.dumps(decision)}))
+    answer = json.dumps(decision)
+    if mode == 'prose-only':
+        answer = 'The session\tcrashed once;\n\nI could not decide what to do.'
+    elif mode.startswith('prose-'):
+        answer = 'The session crashed once and left nothing behind.\n' + answer + '\nThat is my verdict.'
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': answer}))
     sys.exit(0)
 if 'CLAUDE REVIEWER' in prompt:
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
@@ -4417,8 +4422,49 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def assert_scan_escalates(self, cases):
         for result in cases:
             with self.subTest(result=result):
-                self.assertEqual(self.scan_decision(result),
-                                 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+                reason = ' '.join(f'the recovery session gave no valid decision; it wrote: {result}'.split())[:300]
+                self.assertEqual(self.scan_decision(result), f'escalate\t{reason}\tinspect the stop yourself')
+
+    def assert_prose_excerpt(self, result):
+        action, reason, human = self.scan_decision(result).split('\t')
+        self.assertEqual((action, human), ('escalate', 'inspect the stop yourself'))
+        self.assertTrue(reason.startswith('the recovery session gave no valid decision; it wrote: '), reason)
+        self.assertLessEqual(len(reason), 300)
+        return reason
+
+    def test_recovery_decision_prose_only_escalates_with_an_excerpt(self):
+        reason = self.assert_prose_excerpt('The gate\ttimed out   twice.\n\nI cannot tell why. ' + 'x' * 400)
+        self.assertIn('it wrote: The gate timed out twice. I cannot tell why. xxx', reason)
+        self.assertEqual(len(reason), 300)
+        # Nothing written: the reason stays as before.
+        self.assertEqual(self.scan_decision('  \n '),
+                         'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+
+    def test_recovery_decision_prose_with_brackets_escalates_with_an_excerpt(self):
+        candidate = '{"action":"commit_and_rerun","reason":"example"}'
+        reason = self.assert_prose_excerpt(f'Diagnostic: ["]",\n{candidate}\n]')
+        self.assertIn('it wrote: Diagnostic: ["]", {"action":"commit_and_rerun"', reason)
+        reason = self.assert_prose_excerpt('Diagnosis.\n{"action": "delete_branch", "reason": "a"}')
+        self.assertIn('it wrote: Diagnosis. {"action": "delete_branch"', reason)
+
+    def test_recovery_decision_prose_rerun_resumes_the_pipeline(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error-once', MOCK_RECOVER='prose-rerun')
+        notes = self.notifications()
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+
+    def test_recovery_decision_prose_only_notification_quotes_the_session(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='prose-only')
+        notes = self.notifications()
+        self.assertIn('the recovery session gave no valid decision; it wrote: The session crashed once; '
+                      'I could not decide what to do.', notes)
+        self.assertEqual(notes.count('⛔'), 1)
 
     def test_recovery_decision_scan_accepts_one_line_start_object_in_bracket_free_prose(self):
         decision = '{"action": "escalate", "reason": "x", "human_action": "y"}'

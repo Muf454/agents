@@ -728,7 +728,7 @@ Ran 5 OK. Gate `.ai/bin/ai-check` PASS (727 tests, 389.6 s). Docs are T008's; fl
 
 
 ## T008 — Recovery decision: one decision object inside prose is accepted; the escalation keeps what the session wrote (FL-12)
-Status: TODO
+Status: DONE
 Dependencies: T012
 Model: opus
 
@@ -783,6 +783,20 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17. `recover_decision` escalates for want of a valid decision (no object, invalid
+object or fields) with `the recovery session gave no valid decision; it wrote: <excerpt>`,
+cleaned as a whole (whitespace collapsed, no tab, ≤ 300 characters) when the result is non-empty;
+an empty result and envelope failures keep the old reason. Scanner rules unchanged. Prompt
+`templates/.ai/prompts/recover.md` asks for the object alone with the diagnosis in `reason`;
+README (Auto-recovery) and `docs/workflow.md` state the format and T012's bracket rule. Mock
+`MOCK_RECOVER` gained `prose-<action>` and `prose-only`. Tests: 4 `test_recovery_decision_prose_*`
+(prose-only excerpt and 300 cap, empty answer, P3 bracket reproduction, end-to-end prose + rerun
+resumes, prose-only ⛔ notification quotes the session; `ai-recover` unchanged). T012's
+`assert_scan_escalates` helper now expects the excerpt reason (cases unchanged); the strict test is
+unchanged. Evidence: `-k recovery_decision` 9 OK; `-k recovery` 60 OK; `-k prompt` 13 OK;
+`.ai/bin/ai-check` PASS (731 tests, 390.6 s); it ran chained after the `-k recovery` run, so the
+Bash tool moved it to the background, and it finished with exit 0. Flow unchanged: the recovery box in
+`agents-flow.md` does not describe the answer format. Installed `.ai/prompts` unchanged until upgrade.
 
 
 ## T009 — Outcome report: covered Claude reviews leave "Codex catch-up pending" (CU-2)
