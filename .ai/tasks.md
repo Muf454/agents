@@ -588,7 +588,7 @@ PASS (721 tests, 396.2 s on 8 workers).
 
 
 ## T007 — Scratch files go to `.ai/local/scratch/`, which the host empties around every session (FL-26, prompts and docs)
-Status: TODO
+Status: DONE
 Dependencies: T011
 Model: sonnet
 
@@ -636,6 +636,12 @@ Targeted: `python3 -m unittest discover -s tests -k tool_contract` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Scratch rule added to the identical runner/triage blocks and `templates/CLAUDE.md`; README and
+`docs/workflow.md` describe the host clear and record the no-permission-change decision. The mock
+now asserts every session prompt names `.ai/local/scratch/`. Tests `test_scratch_dir_*` (2).
+Targeted: `-k scratch` Ran 10 OK; `-k tool_contract` Ran 3 OK. Gate: `.ai/bin/ai-check` PASS
+(723 tests, 386.4 s). Vault flow chart and hub Log updated. recover/plan-revision prompts have
+no writing shell, so they were not changed.
 
 
 ## T012 — Recovery answer scanner: one line-start object inside bracket-free prose (FL-12 redesign, plan review round 2 P3)

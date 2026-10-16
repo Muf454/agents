@@ -103,7 +103,8 @@ Do not treat a successful CLI exit or a review with no findings as proof of corr
 Keep state compact. Update after meaningful checkpoints and before a known context
 reset. Keep run log append-only: timestamp, agent, task, action/result, validation,
 checkpoint hash if available, important notes. Log outcomes, never chain-of-thought
-or entire terminal output. Raw logs live in ignored `.ai/local/`.
+or entire terminal output. Raw logs live in ignored `.ai/local/`. Throwaway files go only under
+`.ai/local/scratch/`, which the runner empties before and after every session.
 
 Use feature branches and meaningful commits. Commit implementation and workflow
 records together when possible. If interruption happens between commits, inspect

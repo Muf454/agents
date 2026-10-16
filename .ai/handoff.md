@@ -26,6 +26,10 @@
   `.ai/local` descriptor (own descriptor walk, no symlink followed; a symlink at `scratch` is
   unlinked; a symlinked `.ai`/`.ai/local` only warns). `ai-run` `claude_session` calls it before
   each `claude` call and after the post-session `ai_guard_verify`; it never fails the run.
+- T007 (done): the runner and triage "How to work here" blocks (still identical) and
+  `templates/CLAUDE.md` tell sessions to keep scratch files under `.ai/local/scratch/` (host
+  empties it; `rm` stays denied); README and `docs/workflow.md` describe the host clear and
+  record the no-permission-change decision. Installed `.ai/prompts` copies unchanged until upgrade.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -62,6 +66,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-16 after T004: `.ai/bin/ai-check` PASS (706 tests, 365.4 s on 8 workers).
 2026-10-17 after T006: `.ai/bin/ai-check` PASS (713 tests, 385.2 s on 8 workers).
 2026-10-17 after T011: `.ai/bin/ai-check` PASS (721 tests, 396.2 s on 8 workers).
+2026-10-17 after T007: `.ai/bin/ai-check` PASS (723 tests, 386.4 s on 8 workers).
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -77,9 +82,9 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 ## Flow chart
 Flow chart updated: T004 added the host step `tasks fill-sections` (adds a missing Likely
 affected modules / Result / notes) after the triage, planning and plan-revision sessions, in
-`~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (triage node, plan/revision script boxes). Still
-pending: T007 (host empties `.ai/local/scratch`) updates it; T008 only if the chart describes
-the recovery answer format.
+`~/zWiki/zWiki/20 Projects/agents/agents-flow.md` (triage node, plan/revision script boxes). T007
+added "empty .ai/local/scratch" to the pick and gate boxes of "Inside one task". Still pending:
+T008 only if the chart describes the recovery answer format.
 
 ## Manual testing for the human
 
@@ -119,5 +124,4 @@ tests (the groups are added by the tasks named).
 
 ## Next action
 Implement the queue in order (T001, T002, T013, T003, T004 done;
-T006 and T011 are done; next T007; T007 on T011 and T008 on T012, each sitting right before it in the
-queue; T010 last).
+T006, T011 and T007 are done; next T012 then T008; T010 last).

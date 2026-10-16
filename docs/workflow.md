@@ -146,6 +146,13 @@ form) so a session can make a script it created executable. Denials are logged a
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
 and the run stops there. Inspect the log and adjust permissions yourself.
 
+Scratch files: sessions put throwaway files only under `.ai/local/scratch/` (ignored by Git).
+The host empties `.ai/local/scratch` before and after every session (`workflow.py
+clear-scratch`) and never follows a symlink there: a symlink is removed as a link, and an unsafe
+`.ai` or `.ai/local` is left alone with a warning. Decision: `rm` stays off the allowlist
+(`Bash(rm *)` cannot be limited to untracked paths), so `permissions.allow` is unchanged and
+sessions are told not to delete files.
+
 | Mode | May do | May not do |
 | --- | --- | --- |
 | Interactive Claude | Your normal permissions (may ask); whole queue; local checkpoint commits | Merge, deploy, push without your say-so |

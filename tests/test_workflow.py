@@ -273,6 +273,7 @@ if 'PLANNING CONTRACT' in prompt:
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
+assert '.ai/local/scratch/' in prompt, 'the prompt does not name the scratch directory'
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -2094,6 +2095,23 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse(scratch.is_symlink() or scratch.exists())
         self.assertTrue((victim / 'keep').exists())
         self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_dir_prompts_name_it_and_share_one_block(self):
+        self.ready()
+        # The mock asserts the runner prompt names .ai/local/scratch/ on every session.
+        self.tool('ai-run', '--approved')
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+        for name in ('runner', 'triage'):
+            self.assertIn('`.ai/local/scratch/`', self.prompt_section(name))
+            self.assertIn('`rm` is not allowed', self.prompt_section(name))
+        self.assertEqual(self.prompt_section('runner'), self.prompt_section('triage'))
+        self.assertIn('.ai/local/scratch/', (ROOT / 'templates/CLAUDE.md').read_text())
+
+    def test_scratch_dir_docs_describe_the_host_clear(self):
+        for path in ('README.md', 'docs/workflow.md'):
+            text = ' '.join((ROOT / path).read_text().split())
+            self.assertIn('empties `.ai/local/scratch`', text, path)
+            self.assertIn('never follows a symlink', text, path)
 
     def test_scratch_clear_startup_refuses_a_preexisting_scratch_symlink(self):
         self.ready()
