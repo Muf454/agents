@@ -28,6 +28,11 @@ under `Dependencies:` on EVERY task (don't rely on the run default, which may di
   retried on opus; review-fix tasks get a model by their own risk (no blanket promotion).
 Keep tasks small enough that the cheaper model fits; split rather than upgrade.
 
+Check the queue with `.ai/bin/ai-task check` when you have a shell; a headless planning
+session (`ai-run --plan`) gets the same check from the host after it ends, after the host
+reorders the queue into dependency order (it stops on cycles, unknown IDs or prose in
+`Dependencies:`).
+
 Update compact state and handoff for the next session. Do NOT start implementation
 unless explicitly instructed. Finish with a concrete plan and any critical choices
 for the human. Do not fill templates with fictional requirements or tasks.

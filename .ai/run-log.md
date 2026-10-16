@@ -235,3 +235,73 @@
 | 2026-10-09T13:59:21Z | runner | T013 | completed | PASS | a3bbd11 | Claude checkpointed; continuing queue |
 | 2026-10-09T14:05:06Z | runner | none | queue complete; ready for independent review | PASS | eae2a10 | Human acceptance remains |
 | 2026-10-09T14:10:26Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/25 | PASS | b6add1d | Human acceptance and merge remain |
+| 2026-10-09T21:08:10Z | runner | plan-revision | plan revised (round 1): accepted 6, rejected 2, needs-human 0 | n/a | 470d958 | Plan review runs again |
+| 2026-10-09T22:21:29Z | runner | plan-revision | plan revised (round 2): accepted 4, rejected 0, needs-human 0 | n/a | 5621c14 | Plan review runs again |
+| 2026-10-09T22:31:31Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | caeb7e3 | No merge or deployment performed |
+| 2026-10-10T05:25:59Z | runner | plan-revision | plan revised (round 3): accepted 4, rejected 0, needs-human 0 | n/a | caeb7e3 | Plan review runs again |
+| 2026-10-10T06:00:00Z | claude | T001 | ai-task check; pipeline stops on an invalid queue; recover escalates it | PASS (ai-check, 554 tests) | see git log | Vault flow chart still pending |
+| 2026-10-10T05:44:34Z | runner | T001 | completed | PASS | fc2e30f | Claude checkpointed; continuing queue |
+| 2026-10-10T06:30:00Z | claude | T002 | default session budget max(16, unfinished + 2), printed by ai-run | PASS (ai-check, 559 tests) | see git log | Vault flow chart still pending |
+| 2026-10-10T05:59:10Z | runner | T002 | completed | PASS | a78aa07 | Claude checkpointed; continuing queue |
+| 2026-10-10T08:21:00Z | claude | T003 | lock rejection names the owner (auto-recovery/pipeline PID), writes no last-error | PASS (ai-check, 565 tests) | see git log | Resumed interrupted diff; vault flow chart still pending |
+| 2026-10-10T08:28:50Z | runner | T003 | completed | PASS | fa57b4d | Claude checkpointed; continuing queue |
+| 2026-10-10T08:43:13Z | claude | T004 | watchdog timer OnActiveSec=2min; stalled confirmed after ≥5 min (stall_seen_ns); planning never stalled | PASS (ai-check, 571 tests) | see git log | six diagnosis tests seed an old sighting; vault flow chart still pending |
+| 2026-10-10T08:50:21Z | runner | T004 | completed | PASS | b901c50 | Claude checkpointed; continuing queue |
+| 2026-10-10T09:03:31Z | claude | T005 | Bash(chmod +x *) in permissions template; chmod rule in runner and triage prompts; docs | PASS (ai-check, 574 tests) | see git log | this repo's own permissions.allow is a human step |
+| 2026-10-10T09:09:07Z | runner | T005 | completed | PASS | f15efe8 | Claude checkpointed; continuing queue |
+| 2026-10-10T09:20:00Z | claude | T006 | planning box key, `plan` stop label, `observe planned`, plan-allowlist/plan-scope helpers | PASS (ai-check, 579 tests) | see git log | dashboard draws no Plan box until T008 |
+| 2026-10-10T09:21:01Z | runner | T006 | completed | PASS | 1fb2634 | Claude checkpointed; continuing queue |
+| 2026-10-10T09:45:00Z | claude | T007 | `ai-run --plan PROMPT_FILE [--revision]`: confined planning session, planning/planned/stop records, registry, 📝 notifications, no commit | PASS (ai-check, 587 tests) | see git log | vault flow chart plan box and 📝 row applied; dashboard Plan box is T008 |
+| 2026-10-10T09:36:30Z | runner | T007 | completed | PASS | 276cd54 | Claude checkpointed; continuing queue |
+| 2026-10-10T10:10:00Z | claude | T008 | dashboard: Plan box first (nine boxes, `─` joiners), `planned` status with 📝 marker, stage-none ticks Plan | PASS (ai-check, 597 tests) | see git log | README/docs sentences are T009; flow-chart dashboard note still pending in vault |
+| 2026-10-10T09:50:31Z | runner | T008 | completed | PASS | 58ec2ba | Claude checkpointed; continuing queue |
+| 2026-10-10T10:03:59Z | runner | T010 | completed | PASS | 2f6c722 | Claude checkpointed; continuing queue |
+| 2026-10-10T10:30:00Z | claude | T011 | `plan-keeps-done START` (raw block compare, fences included) before/after every planning session; mock revision modes; docs | PASS (ai-check, 609 tests) | see git log | vault flow-chart plan box and hub Log updated |
+| 2026-10-10T10:18:51Z | runner | T011 | completed | PASS | 68a255a | Claude checkpointed; continuing queue |
+| 2026-10-10T10:30Z | claude | T009 | DONE: README dashboard section (nine boxes, planned, old records, `─` layout), workflow.md stage list; audit of docs/test groups | PASS (ai-check, 609 tests; Docs and flow_this_repo targeted OK) | see git log | vault flow chart still PENDING (human) |
+| 2026-10-10T10:31:21Z | runner | T009 | completed | PASS | c5500f1 | Claude checkpointed; continuing queue |
+| 2026-10-10T10:37:13Z | runner | none | queue complete; ready for independent review | PASS | 4d092ec | Human acceptance remains |
+| 2026-10-13T05:45:31Z | runner | triage | review triaged into dispositions/tasks | n/a | d2b4f2b | Fix tasks run next |
+| 2026-10-13T05:55:00Z | claude | T012 | DONE: `plan-keeps-done START --baseline FILE`; ai-run --plan protects working-tree (uncommitted) DONE tasks via a host mktemp copy removed on exit | PASS (ai-check, 618 tests) | see git log | vault not edited by this session |
+| 2026-10-13T06:00:53Z | runner | T012 | completed | PASS | c94be75 | Claude checkpointed; continuing queue |
+| 2026-10-13T06:20:00Z | claude | T013 | DONE: watchdog keeps a stall an old record (no `stall_seen_ns`) lists as active confirmed; no repeated ⛔/diagnosis after upgrade | PASS (ai-check, 619 tests) | see git log | vault not edited by this session |
+| 2026-10-13T06:14:08Z | runner | T013 | completed | PASS | dbea1b8 | Claude checkpointed; continuing queue |
+| 2026-10-13T06:20:04Z | runner | none | queue complete; ready for independent review | PASS | 8d3ecf4 | Human acceptance remains |
+| 2026-10-13T06:27:41Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/27 | PASS | e39161b | Human acceptance and merge remain |
+| 2026-10-14T21:14:14Z | runner | plan-revision | plan revised (round 1): accepted 7, rejected 0, needs-human 0 | n/a | 5306926 | Plan review runs again |
+| 2026-10-14T21:40:00Z | claude | T001 | DONE: `tasks reorder` / `ai-task reorder` (stable dependency order, rejects cycles/unknown/prose) | PASS (ai-check, 624 tests) | see git log | |
+| 2026-10-14T21:32:02Z | runner | T001 | completed | PASS | 8c848ea | Claude checkpointed; continuing queue |
+| 2026-10-14T22:10:00Z | claude | T002 | DONE: host `tasks reorder` after `ai-run --plan` and `--revise-plan`; unrepairable queue → `… task queue is invalid` (escalated) | PASS (ai-check, 631 tests) | see git log | vault flow chart and hub Log updated |
+| 2026-10-14T21:56:29Z | runner | T002 | completed | PASS | 83da3a9 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:00Z | claude | T011 | DONE: `revision-queue-repair` before ai-run's and ai-pipeline's queue checks; interrupted revision resumes without a second session | PASS (ai-check, 641 tests) | see git log | vault flow chart and hub Log updated |
+| 2026-10-14T22:20:01Z | runner | T011 | completed | PASS | c01ef22 | Claude checkpointed; continuing queue |
+| 2026-10-15T01:00Z | claude (sonnet) | T003 | DONE: shared `tests/timeouts.py` scale (`CI=true` → 2), `ai-recover` gets PIPELINE_TIMEOUT, literal timeouts scaled, `run_cmd` timeout shows output | targeted 4 + 28 OK; ai-check OK (645 tests) | see git log | README updated |
+| 2026-10-14T22:42:02Z | runner | T003 | completed | PASS | 3379d65 | Claude checkpointed; continuing queue |
+| 2026-10-14T22:52Z | claude (opus) | T004 | DONE: run_parallel interleaved batches (6/worker) on a thread work queue, children terminated on interrupt/error, slowest-15 + test time + worker busy report, failing batch lists its IDs | parallel 13 OK, Docs 3 OK; ai-check PASS (648 tests, 381.8 s, test time 2841.7 s, 16 CPUs) | see git log | REQUIRED docs phrase and two summary assertions changed (named in result) |
+| 2026-10-14T22:58:29Z | runner | T004 | completed | PASS | 7d1ae34 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:10Z | claude (sonnet) | T005 | DONE: fixtures run git with core.fsync=none, gc.auto=0; run_parallel gives batches an exec-probed /dev/shm TMPDIR (AI_TEST_TMPFS=0 off); README | fixture_io 6 OK; ai-check PASS (654 tests, 393.7 s, test time 2813.6 s, 16 CPUs, /tmp already tmpfs) | see git log | flow unchanged |
+| 2026-10-14T23:13:15Z | runner | T005 | completed | PASS | f2a8d19 | Claude checkpointed; continuing queue |
+| 2026-10-14T23:14:27Z | runner | T006 | blocked; try next independent task | not complete | 694c9f4 | See task result |
+| 2026-10-15T00:00Z | claude (opus) | T007 | DONE: dashboard discovery skips runners whose /proc environ has AI_DASHBOARD_IGNORE=1 (bounded regular-file read); ToolkitTest sets it; survives ai-recover and watchdog recovery | dashboard_ignore 13 OK, dashboard 89 OK; ai-check PASS (667 tests) | see git log | README, docs/workflow.md; flow unchanged |
+| 2026-10-14T23:33:05Z | runner | T007 | completed | PASS | 8443b04 | Claude checkpointed; continuing queue |
+| 2026-10-14T23:47:14Z | runner | T008 | completed | PASS | 2cbd111 | Claude checkpointed; continuing queue |
+| 2026-10-15T00:30Z | claude (sonnet) | T009 | DONE: `ai-dashboard --wait/--since/--timeout/--interval`; fingerprint + cursor, notifications_mark from events_of (dropped from all printers) | dashboard_wait 7 OK; ai-check PASS (679 tests) | see git log | README, docs/workflow.md; flow unchanged |
+| 2026-10-15T00:01:13Z | runner | T009 | completed | PASS | e79d58f | Claude checkpointed; continuing queue |
+| 2026-10-15T00:01:14Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | 9da5511 | No merge or deployment performed |
+| 2026-10-15T06:27Z | claude (haiku) | T010 | DONE: docs/handoff audit; README re-wrap, handoff test groups/T006 deferral/next action; vault Log line | PASS (ai-check, 679 tests; -k Docs 3, -k flow_this_repo 1) | see git log | flow unchanged; no checkboxes ticked |
+| 2026-10-15T06:30Z | mission control (claude) | T006 | removed from the queue at Zack's request (BLOCKED: runner may not profile); kept in the vault backlog as FL-23 follow-up; T010 no longer depends on it | n/a | (this commit) | pipeline restart follows |
+| 2026-10-15T06:34:53Z | runner | T010 | completed | PASS | 09410ee | Claude checkpointed; continuing queue |
+| 2026-10-15T06:41:30Z | runner | none | queue complete; ready for independent review | PASS | 1699c97 | Human acceptance remains |
+| 2026-10-15T06:47:53Z | runner | triage | review triaged into dispositions/tasks | n/a | 63b8408 | Fix tasks run next |
+| 2026-10-15T07:05Z | claude (opus) | T012 | DONE: `tasks reorder` keeps `## ` sections before the first task as preamble; only a section between tasks blocks (review M2) | queue_reorder 6 OK, queue_repair 8 OK; ai-check PASS (681 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |
+| 2026-10-15T07:03:09Z | runner | T012 | completed | PASS | bb7d82e | Claude checkpointed; continuing queue |
+| 2026-10-15T07:20Z | claude (opus) | T013 | DONE: dashboard review reader parses genuine plan-report HEAD; counts over 6 digits → that side null (review N4, N5) | dashboard_pr_review 6 OK; ai-check PASS (682 tests) | see git log | docs/workflow.md; vault hub Log; flow unchanged |
+| 2026-10-15T07:16:45Z | runner | T013 | completed | PASS | 2f67891 | Claude checkpointed; continuing queue |
+| 2026-10-15T07:22:54Z | runner | none | queue complete; ready for independent review | PASS | afb2aeb | Human acceptance remains |
+| 2026-10-15T07:27:20Z | runner | triage | review triaged into dispositions/tasks | n/a | c99e77d | Fix tasks run next |
+| 2026-10-15T07:38Z | claude (opus) | T014 | DONE: run_parallel batches in own process groups; stop/interrupt/SIGTERM kill the groups; bounded drain after stop (review M3) | parallel_runner 16 OK; ai-check PASS (685 tests) | see git log | vault hub Log; flow unchanged |
+| 2026-10-15T07:43:36Z | runner | T014 | completed | PASS | 35f312c | Claude checkpointed; continuing queue |
+| 2026-10-15T07:55Z | claude (sonnet) | T015 | DONE: `queue_segments` classifies headings like `task_blocks` (`##<TAB>T001 — …` reorders, no KeyError; review N6) | queue_reorder+repair 15 OK; ai-check PASS (686 tests) | see git log | flow unchanged |
+| 2026-10-15T07:56:23Z | runner | T015 | completed | PASS | 6ba6e29 | Claude checkpointed; continuing queue |
+| 2026-10-15T08:02:12Z | runner | none | queue complete; ready for independent review | PASS | 26fb3ee | Human acceptance remains |
+| 2026-10-15T08:06:37Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/28 | PASS | 78add43 | Human acceptance and merge remain |

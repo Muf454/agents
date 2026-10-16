@@ -1,4 +1,7 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -8,16 +11,47 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
 # Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
-# slower than a workstation). AI_TEST_TIMEOUT_SCALE stretches both on slow machines.
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+# slower than a workstation). AI_TEST_TIMEOUT_SCALE (or CI=true) stretches every bound; see timeouts.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
+SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
+MEDIUM_TIMEOUT = 60 * TIMEOUT_SCALE
 PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
+# 17 mock sessions in one ai-run (about 5 s each in parallel batches); CI runs on a 2-core runner
+# without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
+LONG_RUN_TIMEOUT = 600 * TIMEOUT_SCALE
+
+
+def git_fixture_env(base=None):
+    """Environment for fixture repositories: no user/system git config, and no fsync or
+    background gc (short-lived repos gain nothing from them; disk syncs are slow on CI).
+    An outer GIT_CONFIG_COUNT entry list is kept and extended."""
+    env = dict(os.environ if base is None else base, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    try:
+        count = max(int(env.get('GIT_CONFIG_COUNT', '0')), 0)
+    except ValueError:
+        count = 0
+    for key, value in (('core.fsync', 'none'), ('gc.auto', '0')):
+        env[f'GIT_CONFIG_KEY_{count}'] = key
+        env[f'GIT_CONFIG_VALUE_{count}'] = value
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
+
+
+def command_timeout(name):
+    # ai-recover execs the resumed pipeline in the same process, so it needs the pipeline bound too
+    # (PR #27 run 38356827946 timed out at 25 s in test_supervised_plan_resume_*_watchdog).
+    return PIPELINE_TIMEOUT if name in ('ai-pipeline', 'ai-recover') else COMMAND_TIMEOUT
 
 
 def task(task_id, status='TODO', dependencies='none'):
@@ -152,7 +186,15 @@ if 'REVISION CONTRACT' in prompt:
         else:
             text = tasks_file.read_text()
             new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
-            tasks_file.write_text(text.rstrip('\n') + '\n\n' + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id))
+            new_task = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+            if mode in ('revise-accept-prereq', 'revise-accept-cycle'):
+                # The new task is a prerequisite of the first task, appended after it (the cycle
+                # variant also makes the new task depend on that first task).
+                first = re.search(r'^## (T\d+)', text, re.M).group(1)
+                text = re.sub(r'^Dependencies: .*$', f'Dependencies: {new_id}', text, count=1, flags=re.M)
+                if mode == 'revise-accept-cycle':
+                    new_task = new_task.replace('Dependencies: none', f'Dependencies: {first}')
+            tasks_file.write_text(text.rstrip('\n') + '\n\n' + new_task)
             rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
     if os.environ.get('MOCK_CONVERGENCE'):
         rows += os.environ['MOCK_CONVERGENCE'] + '\n'
@@ -165,6 +207,58 @@ if 'REVISION CONTRACT' in prompt:
     if mode == 'revise-error':
         print(json.dumps({'type':'result','subtype':'error','is_error':True}))
         sys.exit(0)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+    sys.exit(0)
+if 'PLANNING CONTRACT' in prompt:
+    # A headless planning session (ai-run --plan): Edit/Write of the plan records, no shell, no commit.
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'plan-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
+    with open(state / 'plan-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    if os.path.exists('.ai/local/observation.json'):
+        with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    mode = os.environ.get('MOCK_CLAUDE', 'plan-ok')
+    if mode == 'limit-once' and not (state / 'plan-limit-hit').exists():
+        (state / 'plan-limit-hit').touch()
+        print(json.dumps({'type':'result','subtype':'error','is_error':True,
+                          'result':"You've hit your usage limit. Try again in 2 minutes."}))
+        sys.exit(1)
+    if mode == 'plan-error':
+        print(json.dumps({'type':'result','subtype':'error','is_error':True}))
+        sys.exit(0)
+    template = open(os.environ['MOCK_TASK_TEMPLATE']).read()
+    if mode in ('plan-revision-ok', 'plan-revision-drops-done', 'plan-revision-removes-done',
+                'plan-revision-edits-done', 'plan-revision-prereq'):
+        # A revision of the queue: append a TODO task; the drop variant flips DONE to TODO, the
+        # remove variant deletes the first DONE block, the edit variant changes its result text,
+        # the prereq variant makes the first TODO task depend on the appended task.
+        queue = pathlib.Path('.ai/tasks.md').read_text()
+        if mode == 'plan-revision-drops-done':
+            queue = queue.replace('Status: DONE', 'Status: TODO', 1)
+        done_block = re.compile(r'^## T\d+[^\n]*\nStatus: DONE\n.*?(?=^## |\Z)', re.S | re.M)
+        if mode == 'plan-revision-removes-done':
+            queue = done_block.sub('', queue, count=1)
+        if mode == 'plan-revision-edits-done':
+            queue = done_block.sub(lambda m: m.group(0).replace('Pending.', 'Passed.'), queue, count=1)
+        new_id = 'T%03d' % (max(map(int, re.findall(r'^## T(\d+)', queue, re.M)), default=0) + 1)
+        if mode == 'plan-revision-prereq':
+            queue = re.sub(r'(^Status: TODO\nDependencies: ).*$', r'\g<1>' + new_id, queue, count=1, flags=re.M)
+        pathlib.Path('.ai/tasks.md').write_text(queue.rstrip('\n') + '\n\n' + template.replace('TXXX', new_id))
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+        sys.exit(0)
+    first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
+    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
+        first = first.replace('Dependencies: none', 'Dependencies: T002')
+    if mode == 'plan-bad-queue':
+        second = second.replace('Dependencies: none', 'Dependencies: T001')
+    preamble = '## Context\nKeep this intro.\n\n' if mode == 'plan-preamble-section' else ''
+    pathlib.Path('.ai/tasks.md').write_text('# Task queue\n\n' + preamble + first + second)
+    with open('.ai/project-spec.md', 'a') as f: f.write('\nObjective from the planning session.\n')
+    if mode == 'plan-outside':
+        pathlib.Path('src.txt').write_text('not allowed in planning\n')
+    if mode == 'plan-gate':
+        helper = pathlib.Path('.ai/bin/lib/workflow.py')
+        helper.write_text(f'import pathlib; pathlib.Path({str(state / "UNTRUSTED_HELPER_RAN")!r}).touch()\n'
+                          + helper.read_text())
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
@@ -536,7 +630,7 @@ class ToolkitTest(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.project = self.base / 'project with spaces'
         self.project.mkdir()
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        self.env = git_fixture_env()
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
                      'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                      'AI_SUPERVISE_ESCALATE_MODEL'):
@@ -562,6 +656,8 @@ class ToolkitTest(unittest.TestCase):
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
         self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
+        # ai-dashboard on the host lists only real pipelines, not these fixture runners.
+        self.env['AI_DASHBOARD_IGNORE'] = '1'
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
         self.env.update(XDG_CONFIG_HOME=str(self.config), MOCK_STATE_DIR=str(self.base),
                         MOCK_GH_LOG=str(self.base / 'gh.log'), MOCK_TASK_TEMPLATE=str(template),
@@ -570,8 +666,15 @@ class ToolkitTest(unittest.TestCase):
                         AI_NOTIFY_CMD=f'printf "%s\\n" "$1" >> "{self.notify_log}"')
 
     def run_cmd(self, command, expected=0, env=None, timeout=COMMAND_TIMEOUT):
-        result = subprocess.run(command, cwd=self.project, env=env or self.env,
-                                capture_output=True, text=True, timeout=timeout)
+        try:
+            result = subprocess.run(command, cwd=self.project, env=env or self.env,
+                                    capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            def tail(data):
+                data = data.decode(errors='replace') if isinstance(data, bytes) else data or ''
+                return data[-3000:]
+            self.fail(f'command timed out after {timeout} s: {command}\n'
+                      f'--- stdout (tail) ---\n{tail(error.stdout)}\n--- stderr (tail) ---\n{tail(error.stderr)}')
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -606,6 +709,17 @@ class ToolkitTest(unittest.TestCase):
             time.sleep(0.01)
         return process
 
+    def watchdog_stalled(self, phase):
+        # A stall a probe already sighted long ago: the next probe confirms it.
+        self.watchdog_phase(phase)
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        record = json.loads(state.read_text()) if state.exists() else {}
+        state.write_text(json.dumps(dict(record, stall_seen_ns=0)) + '\n')
+
+    def watchdog_state(self):
+        return json.loads((self.project / '.ai/local/watchdog.json').read_text())
+
     def test_watchdog_health_stall_recovery_and_checkout_scope(self):
         self.setup_project()
         self.watchdog()
@@ -614,14 +728,114 @@ class ToolkitTest(unittest.TestCase):
         other = self.base / 'other'
         other.mkdir()
         self.watchdog_runner(other)
-        self.watchdog(expected=1)
-        self.watchdog(expected=1)
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))  # first sighting: not confirmed yet
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 600))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1200))
         self.assertEqual(len(self.notifications().splitlines()), 1)
         self.watchdog_phase('ready_for_review')
-        self.watchdog()
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 1800))
         self.watchdog_phase('fixing_review')
-        self.watchdog(expected=1)
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 2400))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 3000))
         self.assertEqual(len(self.notifications().splitlines()), 2)
+
+    def test_watchdog_confirm_timer_first_probe_two_minutes_after_activation(self):
+        self.setup_project()
+        self.mock_systemctl()
+        self.watchdog('--install-timer')
+        timer = next((self.config / 'systemd/user').glob('*.timer')).read_text()
+        self.assertIn('OnActiveSec=2min\n', timer)
+        self.assertIn('OnUnitActiveSec=10min\n', timer)
+        self.assertNotIn('OnBootSec', timer)
+
+    def test_watchdog_confirm_install_before_pipeline_start_is_silent(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))
+        self.assertIsInstance(self.watchdog_state()['stall_seen_ns'], int)
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        (self.project / '.ai/local/pipeline.active').write_text(f'{pipeline.pid}\n')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 600))
+        self.assertEqual(self.notifications(), '')
+        self.assertNotIn('stall_seen_ns', self.watchdog_state())
+
+    def test_watchdog_confirm_killed_runner_reported_once_after_five_minutes(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        start = time.time()
+        self.watchdog(AI_WATCHDOG_NOW=str(start))
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 120))
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 360))
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 960))
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('⛔', self.notifications())
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_dead_pipeline_marker_reported_at_first_probe(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        self.crashed_marker()
+        self.watchdog(expected=1)
+        self.assertIn('ai-pipeline is gone', self.notifications())
+        self.assertNotIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_planning_stage_is_not_stalled(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        observation = self.project / '.ai/local/observation.json'
+        observation.parent.mkdir(exist_ok=True)
+        start = time.time()
+        for offset, state in ((0, 'active'), (600, 'done')):
+            observation.write_text(json.dumps({'stage': 'planning', 'state': state}) + '\n')
+            self.watchdog(AI_WATCHDOG_NOW=str(start + offset))
+            self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        self.assertEqual(self.notifications(), '')
+        # An unreadable record (a FIFO) is ignored without blocking: the stall rule applies.
+        observation.unlink()
+        os.mkfifo(observation)
+        command = [str(self.project / '.ai/bin/ai-watchdog')]
+        self.run_cmd(command, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1200)), timeout=SHORT_TIMEOUT)
+        self.assertIn('stall_seen_ns', self.watchdog_state())
+        self.run_cmd(command, expected=1, env=dict(self.env, AI_WATCHDOG_NOW=str(start + 1800)), timeout=SHORT_TIMEOUT)
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_legacy_active_stall(self):
+        self.setup_project()
+        self.watchdog_phase('implementing')
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        start = time.time()
+        # An older watchdog already announced this stall and recorded no stall_seen_ns.
+        state.write_text(json.dumps({'active': ['stalled'], 'notified_at_ns': int(start * 1e9) - 1}) + '\n')
+        for offset in (0, 360):
+            self.watchdog('--diagnose', expected=1, AI_WATCHDOG_NOW=str(start + offset))
+            self.assertEqual(self.watchdog_state()['active'], ['stalled'])
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((self.project / '.ai/local/diagnosis.md').exists())
+        # Once it clears and returns, it is a new stall that needs confirmation again.
+        self.watchdog_phase('ready_for_review')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 720))
+        self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        self.watchdog_phase('implementing')
+        self.watchdog(AI_WATCHDOG_NOW=str(start + 1080))
+        self.assertEqual(self.notifications(), '')
+        self.watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1440))
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_watchdog_confirm_dedupe_record_versions(self):
+        self.setup_project()
+        state = self.project / '.ai/local/watchdog.json'
+        state.parent.mkdir(exist_ok=True)
+        state.write_text('{"active": [], "notified_at_ns": 0}\n')  # previous version
+        self.watchdog()
+        state.write_text('{"active": [], "notified_at_ns": 0, "stall_seen_ns": "x"}\n')
+        result = self.watchdog(expected=2)
+        self.assertIn('invalid dedupe record', result.stderr)
 
     def test_watchdog_hung_activity_sources_and_new_incident(self):
         import time
@@ -677,7 +891,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.setup_project()
         self.watchdog('--stale-minutes', '0', expected=2)
         self.watchdog('--unknown', expected=2)
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
         self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
         self.watchdog('--diagnose', '--diagnosis-agent', 'claude', expected=1)
@@ -764,7 +978,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_diagnosis_defaults_to_codex(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         self.watchdog('--diagnose', expected=1)
         self.assertIn('Codex: the runner was killed.', self.notifications())
         self.assertIn('Evidence follows.', (self.project / '.ai/local/diagnosis.md').read_text())
@@ -777,8 +991,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         host = self.base / 'host-bin'
         if not host.exists():
             shutil.copytree(self.project / '.ai/bin', host)
+        # --recover runs the resumed pipeline through the mock systemd-run
         return self.run_cmd([str(host / 'ai-watchdog'), str(self.project), *args], expected=expected,
-                            env=dict(self.env, **env))
+                            env=dict(self.env, **env),
+                            timeout=PIPELINE_TIMEOUT if '--recover' in args else COMMAND_TIMEOUT)
 
     def approve_run(self):
         digest = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
@@ -809,6 +1025,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         launched = (self.base / 'systemd-run.log').read_text()
         self.assertIn('--user --collect --quiet --service-type=exec', launched)
         self.assertIn('--setenv=AI_STATE_DIR=', launched)
+        self.assertIn('--setenv=AI_DASHBOARD_IGNORE=1 ', launched)  # a resumed fixture stays hidden
         self.assertNotIn('AI_WATCHDOG_NOW', launched)
         self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage crash', launched)
         self.assertIn('killed', (self.project / '.ai/local/last-error').read_text())
@@ -1101,7 +1318,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_diagnosis_timeout_and_concurrent_dedupe(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'claude').write_text(
             '#!/usr/bin/env bash\nprintf "call\\n" >> "$MOCK_STATE_DIR/timeout-calls"\nsleep 30\n')
         command = [str(self.project / '.ai/bin/ai-watchdog'), '--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude']
@@ -1109,7 +1326,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             self.watchdog('--diagnose', '--diagnosis-timeout', '1', '--diagnosis-agent', 'claude', expected=1)
-            first.communicate(timeout=15)
+            first.communicate(timeout=SHORT_TIMEOUT * 1.5)
             self.assertEqual(first.returncode, 1)
         finally:
             if first.poll() is None:
@@ -1127,10 +1344,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -c "assert 2 + 2 == 4"\n')
         self.commit('approved plan and real fixture gate')
 
-    def tool(self, name, *args, expected=0, **env):
+    def tool(self, name, *args, expected=0, timeout=None, **env):
+        if timeout is None:
+            timeout = command_timeout(name)
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
-                            env=dict(self.env, **env),
-                            timeout=PIPELINE_TIMEOUT if name == 'ai-pipeline' else COMMAND_TIMEOUT)
+                            env=dict(self.env, **env), timeout=timeout)
 
     def test_setup_dry_run_preservation_and_repeatability(self):
         (self.project / 'CLAUDE.md').write_text('human instructions\n')
@@ -1369,14 +1587,38 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_permissions_template_excludes_network_installs_and_writers(self):
         commands = [entry[5:-1] for entry in self.permissions_template_entries() if entry.startswith('Bash(')]
         self.assertTrue(commands)
-        programs = ('curl', 'wget', 'ssh', 'scp', 'rm', 'sed', 'rg', 'find', 'xargs', 'chmod',
+        programs = ('curl', 'wget', 'ssh', 'scp', 'rm', 'sed', 'rg', 'find', 'xargs',
                     'sudo', 'sh', 'python', 'python3')
         phrases = ('npm install', 'npm i ', 'pip install', 'git push', 'git reset --hard', 'bash -c')
         for command in commands:
             with self.subTest(command=command):
                 self.assertNotIn(command.split()[0], programs)
+                if command.startswith('chmod'):
+                    self.assertEqual(command, 'chmod +x *')
                 for phrase in phrases:
                     self.assertNotIn(phrase, command + ' ')
+
+    def test_permissions_chmod_template_has_only_plus_x(self):
+        entries = self.permissions_template_entries()
+        self.assertEqual(entries.count('Bash(chmod +x *)'), 1)
+        self.assertEqual([e for e in entries if e.startswith('Bash(chmod')], ['Bash(chmod +x *)'])
+
+    def test_permissions_chmod_installed_and_passed_to_runner(self):
+        self.ready()
+        self.assertIn('Bash(chmod +x *)', (self.project / '.ai/permissions.allow').read_text().splitlines())
+        self.tool('ai-run', '--approved')
+        calls = (self.project / '.ai/local/mock-args').read_text().splitlines()
+        self.assertTrue(any('Bash(chmod +x *)' in call for call in calls))
+
+    def test_permissions_chmod_runner_prompt_rule(self):
+        section = ' '.join(self.prompt_section('runner').split())
+        self.assertIn('chmod +x', section)
+        self.assertIn('inside this checkout', section)
+        self.setup_old(self.old_toolkit())
+        self.upgrade('--apply')
+        installed = ' '.join((self.project / '.ai/prompts/runner.md').read_text().split())
+        self.assertIn('chmod +x', installed)
+        self.assertIn('inside this checkout', installed)
 
     def test_runner_detects_even_committed_gate_changes_before_untrusted_helpers(self):
         self.ready()
@@ -1518,7 +1760,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_observation_notify_watchdog_notification_is_logged_and_symlink_safe(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         other = self.base / 'other'
         other.mkdir()
         self.watchdog_runner(other)
@@ -1532,7 +1774,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.project / '.ai/local/notifications.log').unlink()
         self.watchdog_phase('ready_for_review')
         self.watchdog()
-        self.watchdog_phase('fixing_review')
+        self.watchdog_stalled('fixing_review')
         self.watchdog(expected=1)
         self.assertEqual(self.logged_notifications(), self.notifications().splitlines()[1:])
 
@@ -1932,6 +2174,219 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
         self.helper('tasks', 'complete')
 
+    def invalid_queue(self):
+        return task('T001', dependencies='T002') + '\n' + task('T002')
+
+    def test_queue_check_command(self):
+        self.ready()
+        result = self.tool('ai-task', 'check')
+        self.assertEqual(result.stdout.strip(), 'Task queue OK: 1 tasks, 0 DONE')
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(self.invalid_queue())
+        before = queue.read_text()
+        result = self.tool('ai-task', 'check', expected=1)
+        self.assertIn('dependencies must exist earlier in the queue: T002', result.stderr)
+        self.assertEqual(queue.read_text(), before)
+
+    def night_queue(self):
+        fence = '```\n## T009 — not a heading\n```\n\n'
+        return ('# Task queue\n\nPreamble text.\n\n' + task('T001', dependencies='T011') + task('T002')
+                + task('T003', status='DONE') + task('T004') + task('T005', dependencies='T014')
+                + task('T011').replace('Pending.\n', 'Pending.\n' + fence)
+                + task('T014') + '## Notes\nTrailer text.\n')
+
+    def queue_blocks(self, text):
+        blocks = {}
+        for part in re.split(r'(?m)^(?=## T(?!009)\d{3} — )', text)[1:]:
+            blocks[part[3:7]] = part.split('## Notes')[0].rstrip('\n')
+        return blocks
+
+    def test_queue_reorder_night_case(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        original = self.night_queue()
+        queue.write_text(original)
+        self.helper('tasks', 'check', expected=1)
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): '
+                         'T011 T001 T002 T003 T004 T014 T005')
+        self.helper('tasks', 'check')
+        text = queue.read_text()
+        self.assertEqual(re.findall(r'(?m)^## (T(?!009)\d{3}) — ', text),
+                         ['T011', 'T001', 'T002', 'T003', 'T004', 'T014', 'T005'])
+        self.assertEqual(self.queue_blocks(text), self.queue_blocks(original))
+        self.assertTrue(text.startswith('# Task queue\n\nPreamble text.\n\n'))
+        self.assertTrue(text.endswith('## Notes\nTrailer text.\n'))
+        self.assertIn('## T009 — not a heading', self.queue_blocks(text)['T011'])
+
+    def test_queue_reorder_valid_queue_is_untouched(self):
+        self.ready(task('T001') + task('T002', dependencies='T001'))
+        queue = self.project / '.ai/tasks.md'
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_queue_reorder_keeps_done_tasks(self):
+        self.ready(task('T001', dependencies='T003') + task('T002', status='DONE') + task('T003'))
+        self.helper('tasks', 'reorder')
+        self.helper('plan-keeps-done', 'HEAD')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+
+    def test_queue_reorder_rejects_what_it_cannot_repair(self):
+        two = task('T001').replace('Dependencies: none\n', 'Dependencies: none\nDependencies: none\n')
+        cases = [
+            (task('T001', dependencies='T002') + task('T002', dependencies='T001'),
+             'dependency cycle: T001 -> T002 -> T001'),
+            (task('T001', dependencies='T001'), 'dependency cycle: T001 -> T001'),
+            (task('T001', dependencies='T009'), 'T001: dependency T009 is not a task in the queue'),
+            (task('T001') + task('T002', dependencies='T001 (after the API lands)'),
+             'T002: Dependencies: must be "none" or task IDs'),
+            (task('T001') + task('T002') + task('T003', dependencies='T001 and T002'),
+             'T003: Dependencies: must be "none" or task IDs'),
+            (two, 'T001: expected exactly one Dependencies: line'),
+            (task('T001') + task('T001'), 'Duplicate task IDs.'),
+            (task('T001', dependencies='T002') + '## Notes\nx\n\n' + task('T002'),
+             'cannot reorder: section "## Notes" sits between tasks'),
+        ]
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        for text, message in cases:
+            queue.write_text(text)
+            result = self.helper('tasks', 'reorder', expected=1)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(queue.read_text(), text)
+
+    def test_queue_reorder_preamble_sections_are_kept(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        preamble = '# Queue\n\n## Context\nKeep this intro.\n\n'
+        queue.write_text(preamble + task('T001', dependencies='T002') + task('T002'))
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): T002 T001')
+        text = queue.read_text()
+        self.assertTrue(text.startswith(preamble + '## T002 — '))
+        self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text), ['T002', 'T001'])
+        self.helper('tasks', 'check')
+
+    def test_queue_reorder_tab_after_hashes(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        first = task('T001', dependencies='T002').replace('## T001', '##\tT001', 1)
+        queue.write_text(first + task('T002'))
+        self.helper('tasks', 'check', expected=1)
+        result = self.helper('tasks', 'reorder')
+        self.assertEqual(result.stdout.strip(), 'Task queue reordered (dependencies first): T002 T001')
+        text = queue.read_text()
+        self.assertIn('\n##\tT001 — ', text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith('##\t')],
+                         [line for line in first.splitlines() if line.startswith('##\t')])
+        self.assertLess(text.index('## T002 — '), text.index('##\tT001 — '))
+        self.helper('tasks', 'check')
+
+    def test_queue_reorder_command(self):
+        self.ready()
+        (self.project / '.ai/tasks.md').write_text(self.night_queue())
+        result = self.tool('ai-task', 'reorder')
+        self.assertIn('Task queue reordered (dependencies first): T011 T001', result.stdout)
+        self.tool('ai-task', 'check')
+
+    def test_queue_check_empty_template_queue_fails(self):
+        self.setup_project()
+        result = self.tool('ai-task', 'check', expected=1)
+        self.assertIn('No real tasks', result.stderr)
+
+    def test_queue_check_invalid_queue_stops_plan_review(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        error = (self.project / '.ai/local/last-error').read_text()
+        # ai_die prefixes the stage ("Pipeline stopped during plan review: ").
+        self.assertIn('Task queue is invalid:', error)
+        self.assertIn('T002', error)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('Task queue is invalid', notes)
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
+
+    def test_queue_check_invalid_queue_escalates_without_recovery_session(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'recover-calls').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertIn('Task queue is invalid', self.notifications())
+
+    def test_queue_check_done_task_still_skips_plan_review(self):
+        self.ready(task('T001', 'DONE') + '\n' + task('T002'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+
+    def test_queue_check_invalid_queue_stops_with_skip_plan_review(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
+                  expected=1)
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.assertIn('during implementation: Task queue is invalid:',
+                      (self.project / '.ai/local/last-error').read_text())
+        stopped = self.observation()
+        self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
+                  expected=1, AI_AUTO_RECOVER='1')
+        self.assertFalse((self.base / 'recover-calls').exists())
+
+    def test_queue_check_plan_prompt_mentions_the_command(self):
+        text = (ROOT / 'templates/.ai/prompts/plan.md').read_text()
+        self.assertIn('.ai/bin/ai-task check', text)
+
+    def budget_queue(self, todo, done=0):
+        return '\n'.join([task(f'T{n:03}', 'DONE') for n in range(1, done + 1)] +
+                         [task(f'T{n:03}', 'TODO', f'T{n - 1:03}' if n > done + 1 else 'none')
+                          for n in range(done + 1, done + todo + 1)])
+
+    def test_session_budget_covers_the_unfinished_queue(self):
+        self.ready(self.budget_queue(20))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 22 (default: 20 unfinished tasks + 2, at least 16)', result.stdout)
+
+    def test_session_budget_has_a_floor_of_16(self):
+        self.ready(self.budget_queue(3))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 16 (default: 3 unfinished tasks + 2, at least 16)', result.stdout)
+
+    def test_session_budget_ignores_done_tasks(self):
+        self.ready(self.budget_queue(19, done=1))
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertIn('Session budget: 21 (default: 19 unfinished tasks + 2', result.stdout)
+
+    def test_session_budget_explicit_sessions_wins(self):
+        self.ready(task('T001') + '\n' + task('T002'))
+        result = self.tool('ai-run', '--approved', '--sessions', '1', expected=1)
+        self.assertIn('Session budget: 1 (--sessions)', result.stdout)
+        self.assertIn('Session limit reached', result.stderr)
+
+    def test_session_budget_end_to_end_runs_past_session_16(self):
+        self.ready(self.budget_queue(17))
+        result = self.tool('ai-run', '--approved', timeout=LONG_RUN_TIMEOUT)
+        self.assertIn('Session budget: 19', result.stdout)
+        self.assertIn('Iteration 17/19', result.stdout)
+        self.assertIn('Tasks complete and validation passed', result.stdout + result.stderr)
+        self.assertNotIn('Session limit reached', result.stdout + result.stderr)
+
+    def test_session_budget_end_to_end_explicit_16_stops(self):
+        self.ready(self.budget_queue(17))
+        result = self.tool('ai-run', '--approved', '--sessions', '16', expected=1, timeout=LONG_RUN_TIMEOUT)
+        self.assertIn('Session limit reached', result.stdout + result.stderr)
+        self.assertNotIn('Iteration 17/', result.stdout + result.stderr)
+
+    def test_session_budget_not_printed_for_triage_and_revise_plan(self):
+        self.ready()
+        for flag in ('--triage', '--revise-plan'):
+            result = self.tool('ai-run', '--approved', flag, expected=None)
+            self.assertNotIn('Session budget', result.stdout)
+
     def test_plan_review_is_bound_and_tracks_the_whole_tree(self):
         self.ready(task('T001', 'BLOCKED') + '\n' + task('T002'))
         # A BLOCKED task doesn't lift the gate for the untouched rest of the queue.
@@ -2246,9 +2701,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 file.write_text(original)
         self.helper('plan-revision-scope', start)
 
-    def revise_ready(self, findings='P1|Gap in tests'):
+    def revise_ready(self, findings='P1|Gap in tests', queue=None):
         """A MAJOR plan review recorded by hand; returns HEAD (the revision's START)."""
-        self.ready()
+        self.ready(queue)
         self.plan_round(findings, 1)
         return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
 
@@ -2434,6 +2889,325 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.revision_commits(), 3)
         self.assertEqual(len(self.revision_args()), 3)
         self.assertIn('Previous plan review rounds', (self.base / 'revision-prompts.log').read_text())
+
+    # ---------------------------------------------------------------- planning session (DB-04)
+    def plan_ready(self):
+        """An installed project on a feature branch with the template queue; returns the prompt file."""
+        self.setup_project()
+        self.commit('bootstrap')
+        self.run_cmd(['git', 'switch', '-c', 'feature/test'])
+        objective = self.base / 'objective.md'
+        objective.write_text('Build a tiny CLI that greets the user.\n')
+        return objective
+
+    def plan(self, *args, expected=0, **env):
+        return self.tool('ai-run', '--plan', str(self.base / 'objective.md'), *args, expected=expected, **env)
+
+    def plan_args(self):
+        log = self.base / 'plan-args.log'
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def plan_prompt(self):
+        return (self.base / 'plan-prompts.log').read_text().split('=== PROMPT ===')[-1]
+
+    def assert_plan_stopped(self, result, text):
+        self.assertIn(text, result.stderr)
+        self.assertIn(text, (self.project / '.ai/local/last-error').read_text())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('planning', 'stopped'))
+        self.assertIn(text, record['note'])
+        self.assertEqual(self.notifications().count('⛔'), 1)
+
+    def test_plan_session_writes_the_plan_without_committing(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan()
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        self.assertIn('limit 3600s', result.stdout)
+        args = self.plan_args()[0]
+        self.assertEqual(args[args.index('--tools') + 1], 'Read,Glob,Grep,Edit,Write')
+        self.assertEqual(args[args.index('--permission-mode') + 1], 'dontAsk')
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        start = args.index('--allowedTools') + 1
+        end = next(i for i in range(start, len(args)) if args[i].startswith('--'))
+        self.assertEqual(args[start:end], self.helper('plan-allowlist').stdout.splitlines())
+        self.assertFalse(any('Bash' in arg for arg in args[start:end]))
+        prompt = self.plan_prompt()
+        self.assertIn('OBJECTIVE (from objective.md):\nBuild a tiny CLI that greets the user.', prompt)
+        self.assertIn('PLANNING CONTRACT', prompt)
+        self.assertNotIn('keep DONE tasks', prompt)
+        during = self.seen()[-1]
+        self.assertEqual((during['stage'], during['state'], during['detail']),
+                         ('planning', 'active', 'opus · first plan'))
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '2 tasks'))
+        registry = [json.loads(p.read_text()) for p in (self.base / 'host-state/pipelines').glob('*.json')]
+        self.assertIn(os.path.realpath(self.project), [os.path.realpath(e['checkout']) for e in registry])
+        self.assertIn('📝 PLANNING on feature/test (opus, first plan).', self.notifications())
+        self.assertIn('📝 Plan ready on feature/test: 2 tasks.', self.notifications())
+        self.assertNotIn('⛔', self.notifications())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        changed = self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout
+        self.assertIn('.ai/tasks.md', changed)
+        self.assertIn('.ai/project-spec.md', changed)
+        # A revision on top of the uncommitted plan: another model and session limit.
+        result = self.plan('--revision', '--model', 'sonnet', '--session-timeout', '900')
+        self.assertIn('limit 900s', result.stdout)
+        args = self.plan_args()[1]
+        self.assertEqual(args[args.index('--model') + 1], 'sonnet')
+        self.assertIn('keep DONE tasks', self.plan_prompt())
+        self.assertEqual(self.seen()[-1]['detail'], 'sonnet · revision')
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_plan_session_prompt_file_paths(self):
+        self.plan_ready()
+        self.assertIn('Prompt file not found', self.tool('ai-run', '--plan', 'missing.md', expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        notes = self.project / 'notes'
+        notes.mkdir()
+        (notes / 'objective.md').write_text('Objective from a subdirectory.\n')
+        self.commit('objective')
+        result = subprocess.run([str(self.project / '.ai/bin/ai-run'), '--plan', 'objective.md'], cwd=notes,
+                                env=self.env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Objective from a subdirectory.', self.plan_prompt())
+
+    def test_plan_session_invalid_queue_stops_and_keeps_the_file(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        self.assert_plan_stopped(result, 'task queue is invalid')
+        self.assertIn('dependency cycle', result.stderr)
+        self.assertIn('Dependencies: T002', (self.project / '.ai/tasks.md').read_text())
+
+    def test_plan_session_outside_the_plan_records_stops(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-outside')
+        self.assert_plan_stopped(result, 'src.txt')
+        self.assertTrue((self.project / 'src.txt').exists())
+
+    def test_plan_session_gate_change_runs_no_helper(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-gate')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.base / 'UNTRUSTED_HELPER_RAN').exists())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state']), ('planning', 'active'))
+
+    def test_plan_session_error_result_stops(self):
+        self.plan_ready()
+        self.assert_plan_stopped(self.plan(expected=1, MOCK_CLAUDE='plan-error'), 'Claude session failed')
+
+    def test_plan_session_refusals_run_no_session(self):
+        import fcntl
+        self.plan_ready()
+        self.assertIn('runs outside a pipeline', self.plan(expected=1, AI_PIPELINE='1').stderr)
+        self.assertIn('--triage does not apply', self.plan('--triage', expected=1).stderr)
+        self.assertIn('--sessions does not apply', self.plan('--sessions', '2', expected=1).stderr)
+        self.assertIn('--sessions does not apply', self.plan('--sessions', '16', expected=1).stderr)
+        self.assertIn('--revision only applies', self.tool('ai-run', '--revision', expected=1).stderr)
+        (self.project / 'src.txt').write_text('uncommitted work\n')
+        result = self.plan(expected=1)
+        self.assertIn('Planning', result.stderr)
+        self.assertIn('src.txt', result.stderr)
+        (self.project / 'src.txt').unlink()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with (self.project / '.ai/local/workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIn('Another runner/reviewer owns this checkout', self.plan(expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+
+    def test_plan_session_usage_limit_pauses_then_completes(self):
+        self.plan_ready()
+        self.plan(MOCK_CLAUDE='limit-once', AI_SLEEP=str(self.pause_probe()))
+        during = json.loads((self.base / 'during.json').read_text())
+        self.assertEqual((during['state'], during['stage']), ('paused', 'planning'))
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '2 tasks'))
+
+    # ---------------------------------------------------------------- plan keeps DONE tasks (T011)
+    def keeps_done(self, start_queue, queue, expected=0, baseline=None):
+        """Commit START_QUEUE (None: no queue at START), write QUEUE (None: removed), run the check
+        (with --baseline BASELINE when given)."""
+        path = self.project / '.ai/tasks.md'
+        path.parent.mkdir(exist_ok=True)
+        (self.project / 'README.md').write_text('fixture\n')
+        if start_queue is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(start_queue)
+        self.run_cmd(['git', 'add', '--all'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'start'])
+        if queue is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(queue)
+        extra = ('--baseline', str(baseline)) if baseline else ()
+        return self.helper('plan-keeps-done', 'HEAD', *extra, expected=expected)
+
+    def test_plan_keeps_done_passes_when_done_blocks_are_unchanged(self):
+        start = '# Task queue\n\n' + task('T001', 'DONE') + task('T002') + task('T003')
+        edited = task('T002').replace('Write a local', 'Write another local')
+        self.keeps_done(start, '# Task queue\n\n' + task('T001', 'DONE') + edited + task('T004'))
+
+    def test_plan_keeps_done_ignores_trailing_blank_lines_of_the_last_done_task(self):
+        start = '# Task queue\n\n' + task('T001', 'DONE').rstrip('\n') + '\n'
+        self.keeps_done(start, '# Task queue\n\n' + task('T001', 'DONE') + '\n\n' + task('T002'))
+        self.keeps_done(start + '\n\n\n', start)
+
+    def test_plan_keeps_done_fails_naming_the_task(self):
+        start = '# Task queue\n\n' + task('T001') + task('T002', 'DONE') + task('T003', 'DONE')
+        changes = {
+            'removed': task('T001') + task('T003', 'DONE'),
+            'set to TODO': task('T001') + task('T002') + task('T003', 'DONE'),
+            'result changed': (task('T001') + task('T002', 'DONE').replace('Pending.', 'Passed.')
+                               + task('T003', 'DONE').replace('Pending.', 'Passed.')),
+        }
+        for name, queue in changes.items():
+            with self.subTest(name):
+                result = self.keeps_done(start, '# Task queue\n\n' + queue, expected=1)
+                self.assertIn('DONE task T002 was changed or removed', result.stderr)
+        result = self.keeps_done(start, None, expected=1)
+        self.assertIn('DONE task T002 was changed or removed', result.stderr)
+
+    def test_plan_keeps_done_compares_fenced_lines(self):
+        fenced = task('T001', 'DONE').replace('Pending.', 'Pending.\n```\nRan 3 tests\nOK\n```')
+        start = '# Task queue\n\n' + fenced
+        result = self.keeps_done(start, start.replace('Ran 3 tests', 'Ran 4 tests'), expected=1)
+        self.assertIn('DONE task T001 was changed or removed', result.stderr)
+        # A "## " line inside a fence belongs to the block too.
+        start = '# Task queue\n\n' + fenced.replace('OK\n', 'OK\n## not a heading\n')
+        self.keeps_done(start, start)
+        self.keeps_done(start, start.replace('## not a heading', '## changed'), expected=1)
+
+    def test_plan_keeps_done_passes_without_done_tasks_at_start(self):
+        self.keeps_done(None, '# Task queue\n\n' + task('T001'))
+        self.keeps_done('# Task queue\n\n' + task('T001') + task('T002', 'IN_PROGRESS'), None)
+        self.assertIn('Malformed task heading', self.keeps_done('## T01 broken\n', None, expected=1).stderr)
+        self.assertIn('Unknown commit', self.helper('plan-keeps-done', 'no-such-ref', expected=1).stderr)
+
+    def test_plan_keeps_done_uncommitted_baseline_is_checked_too(self):
+        baseline = self.base / 'baseline.md'
+        start = '# Task queue\n\n' + task('T001') + task('T002', 'DONE')
+        baseline.write_text('# Task queue\n\n' + task('T001', 'DONE') + task('T002', 'DONE'))
+        check = lambda queue, expected=0: self.keeps_done(start, queue, expected, baseline=baseline)
+        result = check('# Task queue\n\n' + task('T001') + task('T002', 'DONE'), expected=1)
+        self.assertIn('DONE task T001 was changed or removed', result.stderr)
+        result = check('# Task queue\n\n' + task('T001', 'DONE') + task('T002'), expected=1)
+        self.assertIn('DONE task T002 was changed or removed', result.stderr)
+        check('# Task queue\n\n' + task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
+        # A task DONE in both must match the baseline block (the queue the session started from).
+        baseline.write_text(baseline.read_text().replace('Pending.', 'Passed.'))
+        check(baseline.read_text())
+        # A missing baseline (no working-tree queue) keeps the START-only check.
+        baseline.unlink()
+        check('# Task queue\n\n' + task('T001') + task('T002', 'DONE'))
+        baseline.write_text('## T01 broken\n')
+        self.assertIn('Malformed task heading', check(start, expected=1).stderr)
+        self.assertIn('Usage: plan-keeps-done START [--baseline FILE]',
+                      self.helper('plan-keeps-done', 'HEAD', '--base', str(baseline), expected=1).stderr)
+
+    def test_plan_keeps_done_raw_leaves_parsed_lines_unchanged(self):
+        text = ('# Task queue\n\n' + task('T001', 'DONE').replace('Pending.', 'Pending.\n```\nStatus: TODO\n```')
+                + '## Notes\nnot a task\n')
+        code = (f'import json, sys; sys.path.insert(0, {str(ROOT / "scripts/lib")!r}); import workflow; '
+                'print(json.dumps(workflow.task_blocks(sys.stdin.read())))')
+        result = subprocess.run(['python3', '-c', code], input=text, capture_output=True, text=True, check=True)
+        [block] = json.loads(result.stdout)
+        self.assertEqual(block['lines'], task('T001', 'DONE').splitlines()[1:])
+        self.assertEqual(block['raw'], text.split('\n## Notes')[0].splitlines()[3:] + [''])
+        self.assertIn('Status: TODO', block['raw'])
+        self.assertNotIn('Status: TODO', block['lines'])
+
+    def done_queue_ready(self):
+        self.plan_ready()
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n' + task('T001', 'DONE') + task('T002'))
+        self.commit('plan with a DONE task')
+
+    def test_plan_session_revision_malformed_start_queue_runs_no_session(self):
+        self.plan_ready()
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n## T01 broken heading\n')
+        self.commit('broken queue')
+        result = self.plan('--revision', expected=1)
+        self.assertIn('Malformed task heading', result.stderr)
+        self.assertEqual(self.plan_args(), [])
+
+    def test_plan_session_revision_dropping_a_done_task_stops(self):
+        self.done_queue_ready()
+        result = self.plan('--revision', expected=1, MOCK_CLAUDE='plan-revision-drops-done')
+        self.assert_plan_stopped(result, 'DONE task T001 was changed or removed')
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertNotIn('Status: DONE', queue)
+        self.assertIn('## T003', queue)
+
+    def test_plan_session_revision_flag_missing_still_refuses_the_drop(self):
+        self.done_queue_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-revision-drops-done')
+        self.assert_plan_stopped(result, 'DONE task T001 was changed or removed')
+
+    def test_plan_session_revision_keeping_done_tasks_completes(self):
+        self.done_queue_ready()
+        result = self.plan('--revision', MOCK_CLAUDE='plan-revision-ok')
+        self.assertIn('Plan ready on feature/test: 3 tasks', result.stdout)
+        self.assertIn('the host stops the run when a DONE task was changed or removed', self.plan_prompt())
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '3 tasks'))
+        self.assertNotIn('⛔', self.notifications())
+
+    def uncommitted_done_ready(self):
+        """Committed HEAD has TODO T001; the working tree has it DONE (uncommitted) at entry."""
+        self.plan_ready()
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n' + task('T001') + task('T002'))
+        self.commit('plan without DONE tasks')
+        (self.project / '.ai/tasks.md').write_text('# Task queue\n\n' + task('T001', 'DONE') + task('T002'))
+        tmp = self.base / 'tmp'
+        tmp.mkdir()
+        return tmp
+
+    def uncommitted_done_stops(self, mode, written, *flags):
+        """WRITTEN: text the session left in T001's block (None: T001 removed)."""
+        tmp = self.uncommitted_done_ready()
+        result = self.plan(*flags, expected=1, MOCK_CLAUDE=mode, TMPDIR=str(tmp))
+        self.assert_plan_stopped(result, 'Planning: DONE task T001 was changed or removed')
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertIn('## T003', queue)  # left as the session wrote it
+        if written is None:
+            self.assertNotIn('## T001', queue)
+        else:
+            self.assertIn(written, queue.split('## T002')[0])
+        self.assertEqual(list(tmp.iterdir()), [])  # the host baseline is removed
+
+    def test_plan_keeps_done_uncommitted_status_flip_stops(self):
+        self.uncommitted_done_stops('plan-revision-drops-done', 'Status: TODO')
+
+    def test_plan_keeps_done_uncommitted_status_flip_stops_with_revision(self):
+        self.uncommitted_done_stops('plan-revision-drops-done', 'Status: TODO', '--revision')
+
+    def test_plan_keeps_done_uncommitted_removal_stops(self):
+        self.uncommitted_done_stops('plan-revision-removes-done', None)
+
+    def test_plan_keeps_done_uncommitted_removal_stops_with_revision(self):
+        self.uncommitted_done_stops('plan-revision-removes-done', None, '--revision')
+
+    def test_plan_keeps_done_uncommitted_result_edit_stops(self):
+        self.uncommitted_done_stops('plan-revision-edits-done', 'Passed.')
+
+    def test_plan_keeps_done_uncommitted_result_edit_stops_with_revision(self):
+        self.uncommitted_done_stops('plan-revision-edits-done', 'Passed.', '--revision')
+
+    def uncommitted_done_kept(self, *flags):
+        tmp = self.uncommitted_done_ready()
+        result = self.plan(*flags, MOCK_CLAUDE='plan-revision-ok', TMPDIR=str(tmp))
+        self.assertIn('Plan ready on feature/test: 3 tasks', result.stdout)
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '3 tasks'))
+        self.assertIn(task('T001', 'DONE').rstrip('\n'), (self.project / '.ai/tasks.md').read_text())
+        self.assertEqual(list(tmp.iterdir()), [])
+
+    def test_plan_keeps_done_uncommitted_kept_identical_completes(self):
+        self.uncommitted_done_kept()
+
+    def test_plan_keeps_done_uncommitted_kept_identical_completes_with_revision(self):
+        self.uncommitted_done_kept('--revision')
 
     def test_plan_dispositions_pending_accepts_only_the_host_header(self):
         self.revise_ready()
@@ -2809,6 +3583,179 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.implementation_calls(), 0)
         self.assertTrue(self.open_stage().startswith('plan-revision '))
 
+    # ---------------------------------------------------------------- host queue repair (FL-24)
+    def queue_ids(self, text):
+        return re.findall(r'^## (T\d+)', text, re.M)
+
+    def test_queue_repair_revision_prerequisite_is_reordered_and_runs(self):
+        self.ready()
+        result = self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-prereq')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('⛔', self.notifications())
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        committed = self.run_cmd(['git', 'show', f'{revision}:.ai/tasks.md']).stdout
+        self.assertEqual(self.queue_ids(committed), ['T002', 'T001'])
+        self.assertIn('Dependencies: T002', committed)
+        self.helper('tasks', 'complete')
+
+    def test_queue_repair_revision_cycle_escalates_without_rerun(self):
+        self.ready()
+        self.supervised('--no-pr', expected=1, AI_AUTO_RECOVER='1', MOCK_CODEX_PLAN='major-once',
+                        MOCK_CLAUDE='revise-accept-cycle')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage: task queue is invalid', error)
+        self.assertIn('dependency cycle', error)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.implementation_calls(), 0)
+        self.assertEqual(self.revision_commits(), 0)
+
+    def test_queue_repair_planning_session_reorders_without_committing(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-out-of-order')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state']), ('planning', 'done'))
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertIn('rejects cycles, unknown IDs and prose', self.plan_prompt())
+
+    def test_queue_repair_planning_preamble_section_reorders(self):
+        self.plan_ready()
+        result = self.plan(MOCK_CLAUDE='plan-preamble-section')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertTrue(queue.startswith('# Task queue\n\n## Context\nKeep this intro.\n\n## T002 — '))
+        self.assertEqual(self.queue_ids(queue), ['T002', 'T001'])
+        after = self.observation()
+        self.assertEqual((after['stage'], after['state']), ('planning', 'done'))
+
+    def test_queue_repair_planning_cycle_stops_and_keeps_the_file(self):
+        self.plan_ready()
+        result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        self.assert_plan_stopped(result, 'Planning: task queue is invalid')
+        self.assertIn('dependency cycle', result.stderr)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T002'])
+        self.assertIn('Dependencies: T002', queue)
+
+    def test_queue_repair_planning_revision_keeps_done_tasks(self):
+        self.done_queue_ready()
+        done = task('T001', 'DONE').rstrip('\n')
+        result = self.plan('--revision', MOCK_CLAUDE='plan-revision-prereq')
+        self.assertIn('Task queue reordered (dependencies first): T001 T003 T002', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T003', 'T002'])
+        self.assertIn(done, queue)
+        self.helper('tasks', 'check')
+
+    def test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline(self):
+        self.ready(self.invalid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Task queue is invalid:', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+
+    def test_queue_repair_revision_prompt_places_new_tasks_first(self):
+        start = self.revise_ready()
+        self.revise('--since', start)
+        prompt = (self.base / 'revision-prompts.log').read_text()
+        self.assertIn('placed before the first task that depends on them', prompt)
+        self.assertIn('placed before the first task that depends on them',
+                      (ROOT / 'templates/.ai/prompts/plan-revision.md').read_text().replace('\n  ', ' '))
+
+    # ---------------------------------------------------------------- interrupted revision queue (FL-24)
+    def queue_recovery_crash(self, mode):
+        """A revision session wrote an out-of-order queue, then the machine died before the host's checks."""
+        self.ready()
+        self.crash_supervised(MOCK_REVISION_CRASH='after', MOCK_CLAUDE=mode)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+
+    def assert_queue_recovered(self, result):
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assert_resumed_once()
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        self.assertEqual(self.queue_ids(self.run_cmd(['git', 'show', f'{revision}:.ai/tasks.md']).stdout), ['T002', 'T001'])
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_queue_recovery_session_crash_human_rerun(self):
+        self.queue_recovery_crash('revise-accept-prereq')
+        self.assert_queue_recovered(self.resume('human', MOCK_CLAUDE='revise-accept-prereq'))
+
+    def test_queue_recovery_session_crash_watchdog(self):
+        self.queue_recovery_crash('revise-accept-prereq')
+        self.assert_queue_recovered(self.resume('watchdog', MOCK_CLAUDE='revise-accept-prereq'))
+
+    def test_queue_recovery_cycle_escalates_without_a_second_session(self):
+        self.queue_recovery_crash('revise-accept-cycle')
+        self.resume('watchdog', expected=1, MOCK_CLAUDE='revise-accept-cycle')
+        error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('Plan revision stage: task queue is invalid', error)
+        self.assertIn('dependency cycle', error)
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 0)
+        self.assertFalse((self.base / 'recover-calls').exists())
+
+    def out_of_order(self, *extra):
+        """The working-tree queue an interrupted revision left: T001 now depends on the appended T002."""
+        queue = self.project / '.ai/tasks.md'
+        text = queue.read_text().replace('Dependencies: none', 'Dependencies: T002', 1)
+        queue.write_text(text.rstrip('\n') + '\n\n' + ''.join(extra or (task('T002'),)))
+        return queue.read_text()
+
+    def assert_repair_noop(self, queue):
+        result = self.helper('revision-queue-repair')
+        self.assertEqual(result.stdout, '')
+        self.assertEqual((self.project / '.ai/tasks.md').read_text(), queue)
+
+    def test_queue_recovery_helper_repairs_an_interrupted_revision(self):
+        self.revise_ready()
+        self.out_of_order()
+        result = self.helper('revision-queue-repair')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        self.helper('tasks', 'check')
+        self.assert_repair_noop((self.project / '.ai/tasks.md').read_text())  # nothing left to move
+
+    def test_queue_recovery_helper_cycle_fails_with_the_reorder_message(self):
+        self.revise_ready()
+        queue = self.out_of_order(task('T002', dependencies='T001'))
+        self.assertIn('dependency cycle', self.helper('revision-queue-repair', expected=1).stderr)
+        self.assertEqual((self.project / '.ai/tasks.md').read_text(), queue)
+
+    def test_queue_recovery_helper_leaves_a_committed_queue(self):
+        self.revise_ready()
+        queue = self.out_of_order()
+        self.commit('out-of-order queue')
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_a_dirty_file_outside_the_records(self):
+        self.revise_ready()
+        queue = self.out_of_order()
+        (self.project / 'src.txt').write_text('not a plan record\n')
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_a_done_task_at_head(self):
+        self.revise_ready(queue=task('T001', 'DONE') + task('T002'))
+        queue = task('T001', 'DONE') + task('T002', dependencies='T003') + task('T003')
+        (self.project / '.ai/tasks.md').write_text(queue)
+        self.assert_repair_noop(queue)
+
+    def test_queue_recovery_helper_ignores_an_already_revised_review(self):
+        start = self.revise_ready()
+        self.revise('--since', start)
+        self.assertEqual(self.revision_commits(), 1)
+        self.assert_repair_noop(self.out_of_order(task('T003')))
+
+    def test_queue_recovery_revise_plan_with_a_done_task_still_stops(self):
+        start = self.revise_ready(queue=task('T001', 'DONE') + task('T002'))
+        self.assertIn('a task is already DONE', self.revise('--since', start, expected=1).stderr)
+
     # ---------------------------------------------------------------- supervised plan resume (T007)
     def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):
         # A fake host ai-run/ai-pipeline whose child calls crash_kill in the fixture: outside the
@@ -2821,7 +3768,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             fake.chmod(0o755)
             for cwd, killed in ((self.base, False), (self.project, True)):
                 result = subprocess.run([str(fake), str(self.project), code], cwd=cwd,
-                                        capture_output=True, text=True, timeout=25)
+                                        capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
                 self.assertEqual(result.returncode == -9, killed, (name, cwd, result.stdout + result.stderr))
                 self.assertEqual('survived' in result.stdout, not killed)
 
@@ -3324,7 +4271,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 break
             time.sleep(0.05)
         recover.terminate()
-        out = recover.communicate(timeout=60)[0].decode()
+        out = recover.communicate(timeout=MEDIUM_TIMEOUT)[0].decode()
         self.assertEqual(self.notifications().count('⛔') - before, 1, out + self.notifications())
         self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
         self.assertFalse(marker.exists())
@@ -3339,6 +4286,56 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Started without those settings (as a detached service would be), it uses the approved ones.
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
+
+    def held_and_hidden(self, command, **env):
+        """Start COMMAND with a session held in MOCK_CLAUDE=hold; once it holds, the host dashboard
+        (real /proc, this fixture's base) lists nothing, though a reader blind to the marker would.
+        Returns (runner, session pid); the caller releases or kills them."""
+        local = self.project / '.ai/local'
+        for name in ('mock-session.pid', 'mock-release'):
+            (local / name).unlink(missing_ok=True)
+        runner = subprocess.Popen(command, cwd=self.project, env=dict(self.env, MOCK_CLAUDE='hold', **env),
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            deadline = time.monotonic() + PIPELINE_TIMEOUT
+            while not ((local / 'mock-session.pid').exists() and (local / 'mock-session.pid').read_text()):
+                if runner.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the session never started')
+                time.sleep(0.05)
+            session = int((local / 'mock-session.pid').read_text())
+            self.assertIn(b'AI_DASHBOARD_IGNORE=1', Path(f'/proc/{session}/environ').read_bytes().split(b'\0'))
+            spec = importlib.util.spec_from_file_location('dashboard_view', ROOT / 'scripts/lib/dashboard.py')
+            dashboard = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(dashboard)
+
+            class Blind(dashboard.ProcSource):
+                def environ(self, pid):
+                    return None
+
+            with mock.patch.dict(os.environ, {'AI_DASHBOARD_ROOT': str(self.base), 'AI_DASHBOARD_PROC': '/proc',
+                                              'AI_STATE_DIR': str(self.base / 'dashboard-state')}):
+                self.assertEqual(dashboard.snapshot()['runs'], [])
+                self.assertIn(os.path.realpath(self.project),
+                              [run['checkout'] for run in dashboard.snapshot(source=Blind())['runs']])
+            return runner, session
+        except BaseException:
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.communicate()
+            raise
+
+    def test_dashboard_ignore_fixture_pipeline_is_hidden(self):
+        self.ready()
+        runner, _ = self.held_and_hidden([str(self.project / '.ai/bin/ai-pipeline'), '--approved', '--base', 'main',
+                                          '--no-pr'], AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        (self.project / '.ai/local/mock-release').touch()
+        output = runner.communicate(timeout=PIPELINE_TIMEOUT)[0].decode(errors='replace')
+        self.assertEqual(runner.returncode, 1, output)
+        # The same for the pipeline ai-recover resumes in its own process (what the watchdog starts).
+        runner, session = self.held_and_hidden([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
+                                               MOCK_RECOVER='rerun')
+        os.killpg(runner.pid, signal.SIGKILL)
+        os.kill(session, signal.SIGKILL)  # GNU timeout runs the session in its own process group
+        runner.communicate()
 
     def test_resume_ignores_user_config_the_approved_run_did_not_have(self):
         self.ready()
@@ -4020,7 +5017,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_codex_diagnosis_does_not_fall_back(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\ntouch "$MOCK_STATE_DIR/claude-called"\n')
         self.watchdog('--diagnose', '--diagnosis-agent', 'codex', expected=1)
@@ -4249,7 +5246,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         self.fail('the session never started')
                     runner.send_signal(sig)  # the runner only: GNU timeout leaves the session's group
                     (local / 'mock-release').touch()
-                    runner.communicate(timeout=20)
+                    runner.communicate(timeout=SHORT_TIMEOUT * 2)
                 finally:
                     if runner.poll() is None:
                         os.killpg(runner.pid, signal.SIGKILL)
@@ -4322,7 +5319,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet(self):
         self.setup_project()
-        self.watchdog_phase('implementing')
+        self.watchdog_stalled('implementing')
         (self.mock_bin / 'codex').write_text('#!/usr/bin/env bash\necho "usage limit"; exit 1\n')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env python3\nimport os, sys\n'
                                               'a = sys.argv[1:]\n'
@@ -4774,6 +5771,132 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1)
             self.assertIn('Another runner/reviewer owns this checkout', result.stderr)
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    # ---------------------------------------------------------------- lock owner hint (FL-19)
+    def lock_owner(self, name, through_bash=False):
+        """A process holding the checkout lock with pipeline.active naming it: argv
+        `<name> 30` (exec -a), or `bash …/<name>` when through_bash."""
+        import time
+        script = self.base / 'owner-bin' / name
+        script.parent.mkdir(exist_ok=True)
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        tail = 'sleep 30 9>&-\n' if through_bash else f'exec -a {name} sleep 30\n'
+        script.write_text('#!/usr/bin/env bash\nexec 9>.ai/local/workflow.lock\nflock 9\n'
+                          'printf "%s\\n" $$ > .ai/local/pipeline.active\n' + tail)
+        script.chmod(0o755)
+        command = ['bash', str(script)] if through_bash else [str(script)]
+        process = subprocess.Popen(command, cwd=self.project, env=self.env)
+        self.addCleanup(lambda: (process.kill(), process.wait()) if process.poll() is None else None)
+        marker = self.project / '.ai/local/pipeline.active'
+        for _ in range(500):
+            cmdline = Path(f'/proc/{process.pid}/cmdline').read_bytes()
+            ready = marker.exists() and marker.read_text() == f'{process.pid}\n'
+            if ready and (through_bash or cmdline.startswith(name.encode() + b'\0')):
+                return process
+            time.sleep(0.01)
+        self.fail(f'lock owner {name} did not start')
+
+    def rejected(self, name, *args):
+        """Run a tool that must be refused by the lock: exit 1 within SHORT_TIMEOUT (10 s unscaled)."""
+        return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=1, timeout=SHORT_TIMEOUT)
+
+    def test_lock_owner_recovery_hint_changes_nothing(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        owner = self.lock_owner('ai-recover')
+        (local / 'last-error').write_text('Session limit reached; 16 sessions used.\n')
+        (local / 'observation.json').write_text('{"state": "recovering", "attempt": "1/2"}\n')
+        (local / 'notifications.log').write_text('')
+        names = ('last-error', 'pipeline.active', 'observation.json', 'notifications.log')
+        before = {name: (local / name).read_bytes() for name in names}
+        result = self.rejected('ai-pipeline', '--approved', '--sessions', '20')
+        self.assertIn('Another runner/reviewer owns this checkout', result.stderr)
+        self.assertIn(f'auto-recovery (PID {owner.pid})', result.stderr)
+        self.assertIn(f'kill {owner.pid}', result.stderr)
+        self.assertEqual({name: (local / name).read_bytes() for name in names}, before)
+        self.assertFalse((local / 'last-error.notified').exists())
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((local / 'mock-invocations').exists())
+        self.assertFalse((self.base / 'codex-calls').exists())
+
+    def test_lock_owner_recovery_through_bash_and_other_tools(self):
+        self.ready()
+        owner = self.lock_owner('ai-recover', through_bash=True)
+        for name, args in (('ai-pipeline', ('--approved',)), ('ai-run', ('--approved',)),
+                           ('ai-review', ('--base', 'main'))):
+            result = self.rejected(name, *args)
+            self.assertIn('Another runner/reviewer owns this checkout: auto-recovery '
+                          f'(PID {owner.pid})', result.stderr, name)
+            self.assertIn(f'kill {owner.pid}', result.stderr, name)
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
+    def test_lock_owner_pipeline_hint(self):
+        self.ready()
+        owner = self.lock_owner('ai-pipeline')
+        result = self.rejected('ai-pipeline', '--approved')
+        self.assertIn(f'Another runner/reviewer owns this checkout: a pipeline (PID {owner.pid}) '
+                      'is running here', result.stderr)
+        self.assertNotIn('auto-recovery', result.stderr)
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+
+    def test_lock_owner_unknown_owner_gets_the_plain_message(self):
+        import fcntl
+        self.ready()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        marker = local / 'pipeline.active'
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        runner = self.watchdog_runner(name='ai-pipeline')  # a runner the marker must not reach
+        target = self.base / 'elsewhere-marker'
+        target.write_text(f'{runner.pid}\n')
+        cases = {'no marker': None, 'dead PID': f'{dead.pid}\n', 'non-runner': f'{os.getpid()}\n',
+                 'garbage': 'ai-recover\n', 'fifo': os.mkfifo, 'symlink': target}
+        with (local / 'workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for label, plant in cases.items():
+                if marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                if isinstance(plant, str):
+                    marker.write_text(plant)
+                elif isinstance(plant, Path):
+                    marker.symlink_to(plant)
+                elif plant is not None:
+                    plant(marker)
+                result = self.rejected('ai-pipeline', '--approved')
+                # ai_root refuses any symlink under .ai before the lock; the hint's own guard
+                # is covered by test_lock_owner_hint_never_follows_a_symlink_or_fifo.
+                expected = ('Error: Unsafe symlink in workflow path' if label == 'symlink' else
+                            'Error: Another runner/reviewer owns this checkout.\n')
+                self.assertIn(expected, result.stderr, label)
+                self.assertNotIn('PID', result.stderr, label)
+                self.assertFalse((local / 'last-error').exists(), label)
+        self.assertEqual(self.notifications(), '')
+        self.assertFalse((local / 'mock-invocations').exists())
+
+    def test_lock_owner_hint_never_follows_a_symlink_or_fifo(self):
+        self.ready()
+        owner = self.lock_owner('ai-recover')
+        local = self.project / '.ai/local'
+        marker = local / 'pipeline.active'
+        target = self.base / 'elsewhere-marker'
+        target.write_text(f'{owner.pid}\n')
+        hint = ['bash', '-c', 'source "$1"; ai_lock_owner_hint', '_',
+                str(self.project / '.ai/bin/lib/common.sh')]
+        self.assertIn(f'(PID {owner.pid})', self.run_cmd(hint, timeout=SHORT_TIMEOUT).stdout)
+        for label, plant in (('symlink', lambda: marker.symlink_to(target)),
+                             ('fifo', lambda: os.mkfifo(marker))):
+            marker.unlink()
+            plant()
+            self.assertEqual(self.run_cmd(hint, timeout=SHORT_TIMEOUT).stdout, '.', label)
+
+    def test_lock_owner_quiet_recovery_rejection_unchanged(self):
+        self.ready()
+        self.lock_owner('ai-recover')
+        result = self.rejected('ai-recover', '--stage', 'implementation')
+        self.assertEqual(result.stderr, 'Another runner owns this checkout; nothing to recover.\n')
 
     def test_hook_on_host_review_commit_cannot_run_modified_helper(self):
         self.ready()
@@ -7295,7 +8418,7 @@ class ReviewHistoryTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='ai-review-history-')
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        self.env = git_fixture_env()
         for command in (['init', '-q', '-b', 'main'], ['config', 'user.name', 'T'],
                         ['config', 'user.email', 't@example.invalid'], ['config', 'commit.gpgsign', 'false']):
             self.git(*command)
@@ -7410,6 +8533,9 @@ class ParallelRunnerTest(unittest.TestCase):
     """FL-11: tests/run_parallel.py shards the suite without changing what is tested."""
 
     RUNNER = ROOT / 'tests/run_parallel.py'
+    # How long a stop may take: well under the sleepers' LONG_RUN_TIMEOUT, with room for
+    # stop()'s TERMINATE_GRACE (5 s) on top.
+    STOP_BOUND = SHORT_TIMEOUT + 10
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='ai-parallel-test-')
@@ -7431,7 +8557,7 @@ class ParallelRunnerTest(unittest.TestCase):
         if workers is not None:
             env['AI_TEST_WORKERS'] = workers
         result = subprocess.run([sys.executable, str(self.RUNNER), *args], cwd=cwd or ROOT, env=env,
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=PIPELINE_TIMEOUT)
         if expected is not None:
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -7442,7 +8568,7 @@ class ParallelRunnerTest(unittest.TestCase):
         for cwd in (ROOT, self.elsewhere):
             result = self.runner('--start-dir', str(self.suite), cwd=cwd)
             self.assertIn('Ran 3 tests', result.stdout)
-            self.assertIn('2 shards, 3 collected', result.stdout)
+            self.assertIn('3 batches on 2 workers, 3 collected', result.stdout)
             self.assertNotIn('ModuleNotFoundError', result.stdout)
         relative = self.runner('--start-dir', 'suite', cwd=self.base)
         self.assertIn('Ran 3 tests', relative.stdout)
@@ -7453,8 +8579,60 @@ class ParallelRunnerTest(unittest.TestCase):
         result = self.runner('--start-dir', str(self.suite), expected=1)
         self.assertIn('Traceback', result.stdout)
         self.assertIn('distinctive failure', result.stdout)
-        self.assertIn('FAILED (failing shards:', result.stdout)
+        self.assertIn('FAILED (failing batches:', result.stdout)
         self.assertNotIn('count mismatch', result.stdout)
+        # The failing batch is named by its test IDs, not by a number only.
+        self.assertRegex(result.stdout, r'Tests in this batch:\n(?:  \S+\n)*  test_one\.Sample\.test_b\n')
+
+    def test_parallel_runner_reports_slowest_tests_and_worker_time(self):
+        body = ''.join(f'    def test_slow{n}(self): __import__("time").sleep(0.3)\n' for n in range(3))
+        body += ''.join(f'    def test_fast{n}(self): pass\n' for n in range(9))
+        self.write('test_one.py', body)
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertIn('Ran 12 tests', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+        self.assertRegex(result.stdout, r'Test time: .* across 2 workers; worker busy: [\d.]+–[\d.]+ s')
+        if sys.version_info < (3, 12):
+            self.skipTest('unittest --durations needs Python 3.12+')
+        listed = re.findall(r'^ +[\d.]+s  (\S+)', result.stdout, re.M)
+        self.assertEqual(sorted(listed[:3]), ['test_slow0', 'test_slow1', 'test_slow2'], result.stdout)
+        self.assertGreaterEqual(float(re.search(r'Test time: ([\d.]+) s', result.stdout).group(1)), 0.85)
+
+    def test_parallel_runner_interleaves_batches_of_adjacent_slow_tests(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        for count, workers in ((4, 2), (12, 2), (50, 3), (700, 8), (5, 1)):
+            ids = [f'mod.Class.test_{n:04d}' for n in range(count)]
+            batches = run_parallel.make_batches(ids, workers)
+            with self.subTest(count=count, workers=workers):
+                self.assertEqual(sorted(sum(batches, [])), ids)
+                self.assertEqual(len(batches), min(count, workers * run_parallel.BATCHES_PER_WORKER))
+                where = {test_id: number for number, batch in enumerate(batches) for test_id in batch}
+                for first, second in zip(ids, ids[1:]):
+                    self.assertNotEqual(where[first], where[second], (first, second))
+        self.write('test_one.py', ''.join(f'    def test_sleep{n}(self): __import__("time").sleep(1)\n'
+                                          for n in range(4)))
+        started = time.monotonic()
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertLess(time.monotonic() - started, 3.5 * TIMEOUT_SCALE, result.stdout)
+        self.assertIn('Ran 4 tests', result.stdout)
+        self.assertIn('4 batches on 2 workers', result.stdout)
+
+    def test_parallel_runner_durations_parse_tolerates_format_drift(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        output = ('0.900s     test_noise (outside.the.block)\n'
+                  'Slowest test durations\n' + '-' * 70 + '\n'
+                  '0.302s     test_a (m.C.test_a)\n'
+                  'garbled line\n'
+                  '\x1b[1m1.5s test_b (m.C.test_b)\x1b[0m\n'
+                  '\n(durations < 0.001s were hidden; use -v to show these durations)\n'
+                  'Ran 3 tests in 1.9s\n\nOK\n')
+        self.assertEqual(run_parallel.durations(output),
+                         [(0.302, 'test_a (m.C.test_a)'), (1.5, 'test_b (m.C.test_b)')])
+        self.assertEqual(run_parallel.durations('Ran 1 test in 0.1s\n\nOK\n'), [])
 
     def colour_env(self, **colours):
         for name in ('NO_COLOR', 'FORCE_COLOR', 'PYTHON_COLORS'):
@@ -7519,6 +8697,295 @@ class ParallelRunnerTest(unittest.TestCase):
         result = self.runner('--collect-only', cwd=self.elsewhere)
         self.assertEqual(result.stdout.strip(), f'Collected {expected} tests')
 
+    # Review M3: a stopped batch must take the subprocesses its tests started with it, or one
+    # holding the batch's output pipe keeps the dispatcher waiting.
+    def write_sleeper(self):
+        """A batch whose test starts a long sleep that inherits the batch's stdout, publishes
+        its PID and waits for it."""
+        self.pidfile = self.base / 'sleeper.pid'
+        self.addCleanup(self.kill_sleeper)
+        self.write('test_sleeper.py',
+                   '    def test_sleep(self):\n'
+                   '        import subprocess\n'
+                   f'        child = subprocess.Popen(["sleep", "{int(LONG_RUN_TIMEOUT)}"])\n'
+                   f'        path = {str(self.pidfile)!r}\n'
+                   '        open(path + ".tmp", "w").write(str(child.pid))\n'
+                   '        os.replace(path + ".tmp", path)\n'
+                   '        child.wait()\n')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+
+    def sleeper_pid(self):
+        deadline = time.monotonic() + MEDIUM_TIMEOUT
+        while not self.pidfile.exists():
+            if time.monotonic() > deadline:
+                raise AssertionError('the sleeper test never started')
+            time.sleep(0.05)
+        return int(self.pidfile.read_text())
+
+    def sleeper_gone(self, pid):
+        """True once the PID is gone or a zombie waiting for its new parent to reap it."""
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            try:
+                if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                    return True
+            except (OSError, IndexError):
+                pass
+            time.sleep(0.05)
+        return False
+
+    def kill_sleeper(self):
+        try:
+            os.kill(int(self.pidfile.read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+    def run_dispatcher(self, dispatcher):
+        """Run the dispatcher on a named thread (so a regression fails instead of hanging the
+        suite); return (finished, the exception it raised)."""
+        outcome = {}
+
+        def target():
+            try:
+                dispatcher.run()
+            except BaseException as error:
+                outcome['error'] = error
+        thread = threading.Thread(target=target, name='dispatcher-run', daemon=True)
+        thread.start()
+        pid = self.sleeper_pid()
+        thread.join(self.STOP_BOUND)
+        return not thread.is_alive(), outcome.get('error'), pid
+
+    def dispatcher(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        self.write_sleeper()
+        batches = [['test_sleeper.Sample.test_sleep'], ['test_other.Sample.test_a']]
+        return run_parallel, run_parallel.Dispatcher(batches, 2, self.suite)
+
+    def test_parallel_runner_worker_error_kills_batch_descendants(self):
+        run_parallel, dispatcher = self.dispatcher()
+        real_popen = subprocess.Popen
+
+        def popen(command, *args, **kwargs):
+            if 'test_other.Sample.test_a' in command:
+                self.sleeper_pid()  # fail only once the other batch has its subprocess
+                raise OSError('injected launch failure')
+            return real_popen(command, *args, **kwargs)
+        with mock.patch.object(run_parallel.subprocess, 'Popen', popen):
+            finished, error, pid = self.run_dispatcher(dispatcher)
+        self.assertTrue(finished, 'Dispatcher.run() still blocked after the worker error')
+        self.assertIsInstance(error, OSError)
+        self.assertIn('injected launch failure', str(error))
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the stop')
+
+    def test_parallel_runner_interrupt_kills_batch_descendants(self):
+        run_parallel, dispatcher = self.dispatcher()
+        real_join = threading.Thread.join
+        interrupted = []
+
+        def join(thread, timeout=None):
+            if threading.current_thread().name == 'dispatcher-run' and not interrupted:
+                interrupted.append(True)
+                self.sleeper_pid()
+                raise KeyboardInterrupt
+            return real_join(thread, timeout)
+        with mock.patch.object(threading.Thread, 'join', join):
+            finished, error, pid = self.run_dispatcher(dispatcher)
+        self.assertTrue(finished, 'Dispatcher.run() still blocked after the interrupt')
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the stop')
+
+    def test_parallel_runner_sigterm_kills_batch_descendants(self):
+        # ai-check's `timeout` signals its own process group, which no longer holds the batches.
+        self.write_sleeper()
+        process = subprocess.Popen([sys.executable, str(self.RUNNER), '--start-dir', str(self.suite)],
+                                   cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(process.kill)
+        pid = self.sleeper_pid()
+        process.terminate()
+        output, _ = process.communicate(timeout=self.STOP_BOUND)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the SIGTERM')
+
+
+class TestHarnessTimeoutsTest(unittest.TestCase):
+    def scale(self, **env):
+        base = {k: v for k, v in os.environ.items() if k not in ('CI', 'AI_TEST_TIMEOUT_SCALE')}
+        return subprocess.run([sys.executable, '-I', '-c',
+                               'import sys; sys.path.insert(0, sys.argv[1]); import timeouts; print(timeouts.TIMEOUT_SCALE)',
+                               str(ROOT / 'tests')],
+                              env=dict(base, **env), capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+
+    def test_test_harness_timeouts_pipeline_commands_get_the_pipeline_bound(self):
+        for name in ('ai-pipeline', 'ai-recover'):
+            self.assertEqual(command_timeout(name), PIPELINE_TIMEOUT, name)
+        self.assertEqual(command_timeout('ai-check'), COMMAND_TIMEOUT)
+        self.assertGreater(PIPELINE_TIMEOUT, COMMAND_TIMEOUT)
+
+    def test_test_harness_timeouts_scale_rule(self):
+        for env, expected in (({}, 1.0), ({'CI': 'true'}, 2.0), ({'CI': 'false'}, 1.0),
+                              ({'AI_TEST_TIMEOUT_SCALE': '3'}, 3.0),
+                              ({'CI': 'true', 'AI_TEST_TIMEOUT_SCALE': '3'}, 3.0)):
+            with self.subTest(env=env):
+                result = self.scale(**env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(float(result.stdout), expected)
+        for bad in ('0', 'x', '-1'):
+            with self.subTest(bad=bad):
+                result = self.scale(AI_TEST_TIMEOUT_SCALE=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('AI_TEST_TIMEOUT_SCALE', result.stderr)
+
+    def test_test_harness_timeouts_no_literal_timeout_numbers(self):
+        for name in ('test_workflow.py', 'test_dashboard.py', 'test_observation.py'):
+            source = (ROOT / 'tests' / name).read_text()
+            self.assertNotRegex(source, r'timeout\s*=\s*\d', name)
+
+    def test_test_harness_timeouts_timed_out_command_shows_its_output(self):
+        case = ToolkitTest('run_cmd')
+        case.project = ROOT
+        case.env = dict(os.environ)
+        bound = 1  # deliberately tiny and unscaled: the command must time out
+        with self.assertRaises(AssertionError) as caught:
+            case.run_cmd(['bash', '-c', 'echo started; sleep 30'], timeout=bound)
+        message = str(caught.exception)
+        self.assertIn('started', message)
+        self.assertIn(f'timed out after {bound} s', message)
+
+
+class FixtureIoTest(unittest.TestCase):
+    """FL-23: fixtures skip git syncs and run_parallel puts batch temp files on tmpfs."""
+
+    RUNNER = ROOT / 'tests/run_parallel.py'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ai-fixture-io-')
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+
+    def git_config(self, env, name):
+        result = subprocess.run(['git', 'config', '--get', name], cwd=self.base, env=env,
+                                capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+        return result.stdout.strip()
+
+    def test_fixture_io_git_config_disables_fsync_and_gc(self):
+        case = ToolkitTest('run_cmd')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        for name, expected in (('core.fsync', 'none'), ('gc.auto', '0')):
+            result = subprocess.run(['git', 'config', '--get', name], cwd=case.project, env=case.env,
+                                    capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+            self.assertEqual(result.stdout.strip(), expected, name)
+
+    def test_fixture_io_git_config_keeps_an_outer_config_count(self):
+        outer = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'user.signingkey', 'GIT_CONFIG_VALUE_0': 'x'}
+        env = git_fixture_env(dict(os.environ, **outer))
+        self.assertEqual(env['GIT_CONFIG_COUNT'], '3')
+        for name, expected in (('user.signingkey', 'x'), ('core.fsync', 'none'), ('gc.auto', '0')):
+            self.assertEqual(self.git_config(env, name), expected, name)
+
+    def suite(self):
+        suite = self.base / 'suite'
+        suite.mkdir(exist_ok=True)
+        (suite / 'test_tmp.py').write_text(
+            'import os, stat, subprocess, tempfile, unittest\n\n\n'
+            'class Sample(unittest.TestCase):\n'
+            '    def test_tmp(self):\n'
+            '        directory = tempfile.gettempdir()\n'
+            '        script = os.path.join(directory, "run-me.sh")\n'
+            '        with open(script, "w") as handle:\n'
+            '            handle.write("#!/bin/sh\\necho ran-here\\n")\n'
+            '        os.chmod(script, 0o700)\n'
+            '        out = subprocess.run([script], capture_output=True, text=True)\n'
+            '        with open(os.environ["TMP_REPORT"], "w") as handle:\n'
+            '            handle.write(directory + "\\n" + out.stdout.strip() + "\\n" + str(out.returncode))\n')
+        return suite
+
+    def run_suite(self, **env):
+        report = self.base / 'report.txt'
+        base = {k: v for k, v in os.environ.items()
+                if k not in ('TMPDIR', 'AI_TEST_TMPFS', 'AI_TEST_TMPFS_DIR', 'PYTHONPATH')}
+        base.update(AI_TEST_WORKERS='1', TMP_REPORT=str(report))
+        base.update(env)
+        result = subprocess.run([sys.executable, str(self.RUNNER), '--start-dir', str(self.suite())],
+                                cwd=ROOT, env=base, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=PIPELINE_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        directory, ran, code = report.read_text().split('\n')
+        self.assertEqual((ran, code), ('ran-here', '0'), result.stdout)
+        return result, directory
+
+    def shm_usable(self):
+        shm = '/dev/shm'
+        if not (os.path.isdir(shm) and os.access(shm, os.W_OK | os.X_OK)):
+            return False
+        stats = os.statvfs(shm)
+        return stats.f_bavail * stats.f_frsize >= (1 << 30) and not stats.f_flag & os.ST_NOEXEC
+
+    def test_fixture_io_batches_use_tmpfs_and_remove_it(self):
+        if not self.shm_usable():
+            self.skipTest('/dev/shm is not a writable, executable directory with 1 GiB free')
+        result, directory = self.run_suite()
+        self.assertTrue(directory.startswith('/dev/shm/ai-tests-'), directory)
+        self.assertIn(f'Temp dir: {directory} (tmpfs)', result.stdout)
+        self.assertFalse(os.path.exists(directory))
+
+    def test_fixture_io_tmpfs_can_be_disabled_or_overridden_by_tmpdir(self):
+        result, directory = self.run_suite(AI_TEST_TMPFS='0')
+        self.assertFalse(directory.startswith('/dev/shm/ai-tests-'), directory)
+        self.assertNotIn('Temp dir:', result.stdout)
+        given = self.base / 'given'
+        given.mkdir()
+        result, directory = self.run_suite(TMPDIR=str(given))
+        self.assertEqual(Path(directory).resolve(), given.resolve())
+        self.assertNotIn('Temp dir:', result.stdout)
+
+    def test_fixture_io_unusable_candidate_falls_back_and_is_removed(self):
+        import run_parallel
+        candidate = self.base / 'candidate'
+        candidate.mkdir()
+
+        class Stats:
+            f_bavail, f_frsize, f_flag = 1 << 30, 4096, 0
+
+        class NoExec(Stats):
+            f_flag = os.ST_NOEXEC
+
+        def raising(directory):
+            raise PermissionError(directory)
+
+        for label, probe, statvfs in (('probe false', lambda directory: False, lambda path: Stats()),
+                                      ('probe raises', raising, lambda path: Stats()),
+                                      ('noexec mount', lambda directory: True, lambda path: NoExec())):
+            with self.subTest(label), contextlib.redirect_stdout(io.StringIO()) as shown:
+                self.assertIsNone(run_parallel.choose_temp_dir(candidate, probe=probe, statvfs=statvfs))
+                self.assertEqual(list(candidate.iterdir()), [])
+                self.assertIn('Temp dir: default', shown.getvalue())
+        with self.subTest('usable'):
+            chosen = run_parallel.choose_temp_dir(candidate, probe=lambda directory: True, statvfs=lambda path: Stats())
+            self.assertEqual(Path(chosen).parent, candidate)
+            self.assertTrue(Path(chosen).name.startswith('ai-tests-'))
+        with self.subTest('too little space'):
+            Stats.f_bavail = 1
+            self.assertIsNone(run_parallel.choose_temp_dir(candidate, probe=lambda directory: True,
+                                                           statvfs=lambda path: Stats()))
+        self.assertTrue(run_parallel.exec_probe(self.base))
+
+    def test_fixture_io_toolkit_does_not_set_core_fsync(self):
+        for folder in ('scripts', 'templates'):
+            for path in (ROOT / folder).rglob('*'):
+                if path.is_file() and '__pycache__' not in path.parts:
+                    self.assertNotIn('core.fsync', path.read_text(errors='ignore'), str(path))
+
 
 class DocsConsistencyTest(unittest.TestCase):
     """R10: README.md and docs/workflow.md must describe what the code does."""
@@ -7549,7 +9016,7 @@ class DocsConsistencyTest(unittest.TestCase):
         'needs you',
         'covered by automated tests',
         'context only',
-        'round-robin into `ai_test_workers` shards',
+        'interleaved batches pulled by `ai_test_workers` workers',
         'convergence',
         'convergence: <text>',
     )

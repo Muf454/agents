@@ -1,6 +1,6 @@
 # Review dispositions (Claude)
 
-Review HEAD: 2afe05af1f82efb46ed95aa7fba166449065ba2f
+Review HEAD: c9d092bf5eab8ad3c4398292651afc5fd784f77c
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
@@ -9,6 +9,5 @@ with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. 
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
-| M1 | accepted | Confirmed in `scripts/lib/dashboard.py:625`: an empty snapshot sets `selected = None`; the next pass evaluates `min(None, len(runs) - 1)` → `TypeError` once runs appear (auto-refresh after starting a pipeline, or `a` toggling between empty and non-empty). The refresh branch (`:639–643`) keeps `None` because `current` is `None`. The pty tests (`tests/test_dashboard.py` curses tests) only use a fixed non-empty run list. | T011 |
-| N1 | accepted | Confirmed: with no/malformed `observation.json`, `inspect` uses `observed = 0.0` (`dashboard.py:268`), so any `last-error` makes the run `needs_you`; `position` (`:366–378`) tests `needs_you` before `index is None` and returns `(None, 'stopped')`, and `marker_text` (`:402–409`) prints "⛔ stopped before Plan check". The spec reserves that wording for a recorded `stage=none`; un-upgraded projects (handoff human todo) hit this path. Cheap and in scope. | T012 |
-| N2 | accepted | Confirmed: `discover` (`dashboard.py:125–134`) uses `watchdog.is_runner`, which matches a runner basename in any of `args[:3]` (`watchdog.py:85–87`), so `vim scripts/ai-run` in a checkout with `.ai/` adds a runner and `liveness` (`:170–171`) returns `alive` when there is no marker. Real runners start through `#!/usr/bin/env bash`, so their argv is `bash <script> …` (or the script itself): a stricter dashboard-only predicate is cheap. The watchdog's own use is left unchanged. | T013 |
+| M3 | accepted | Confirmed in source: `tests/run_parallel.py:192` starts each batch with `subprocess.Popen(...)` without `start_new_session`/process group; `stop()` (:224–234) calls `terminate()`/`kill()` only on that direct child; `run_batch` blocks in `communicate()` (:197) until EOF, which a surviving grandchild holding the inherited stdout pipe never sends; `run()` then joins threads without a bound (:242–247). Many suite tests spawn fixture pipelines (`ai-run`, git, mock agents), so descendants are realistic. T004 required terminating running batches and joining every worker on interrupt/worker error. | T014 |
+| N6 | accepted | Confirmed: `queue_segments()` gates on the literal `line.startswith('## ')` (`scripts/lib/workflow.py:477`) while `task_blocks()` uses `^##\s+` (:409), so a `##<TAB>T001 — …` heading is a task to the validator but not a segment; `tasks_reorder()` then does `by_id[task_id]` (:539) → `KeyError` traceback. Cheap, in scope (T001 required the same heading/fence rules). | T015 |

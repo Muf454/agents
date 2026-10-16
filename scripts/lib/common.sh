@@ -243,8 +243,35 @@ ai_lock() {
   if ! flock -n 9; then
     # A second recovery must not overwrite the real stop reason in last-error.
     [[ -z "${AI_LOCK_QUIET:-}" ]] || { printf '%s\n' 'Another runner owns this checkout; nothing to recover.' >&2; exit 1; }
-    ai_die 'Another runner/reviewer owns this checkout.'
+    # Not ai_die: a rejected process owns nothing, so it writes nothing (no last-error,
+    # marker, observation or notification); the owner's records stay intact.
+    printf 'Error: Another runner/reviewer owns this checkout%s\n' "$(ai_lock_owner_hint)" >&2
+    exit 1
   fi
+}
+# Best-effort hint naming the lock owner from pipeline.active (a regular file only, so a
+# FIFO or symlink can never block us). Prints '.' when the owner is unknown.
+ai_lock_owner_hint() {
+  local marker=.ai/local/pipeline.active pid='' name='' arg argv=()
+  if [[ -f "$marker" && ! -L "$marker" ]]; then
+    { IFS= read -r -n 32 pid < "$marker"; } 2>/dev/null || true
+  fi
+  if [[ "$pid" =~ ^[0-9]+$ ]] && { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null \
+     && (( ${#argv[@]} )); then
+    # Runner identity as dashboard.is_runner: argv[0], or a shell's first non-option argument.
+    name=${argv[0]##*/}
+    if [[ "$name" == bash || "$name" == sh ]]; then
+      name=''
+      for arg in "${argv[@]:1}"; do
+        [[ -z "$arg" || "$arg" == -* ]] || { name=${arg##*/}; break; }
+      done
+    fi
+  fi
+  case "$name" in
+    ai-recover) printf ': auto-recovery (PID %s) is deciding whether to resume the pipeline itself. Wait for its 🔧 Recovered or ⛔ STOPPED notification (ai-dashboard shows it as recovering), or stop it with kill %s before relaunching.' "$pid" "$pid" ;;
+    ai-pipeline) printf ': a pipeline (PID %s) is running here; watch it with ai-dashboard or stop it first.' "$pid" ;;
+    *) printf '.' ;;
+  esac
 }
 ai_branch() {
   local branch

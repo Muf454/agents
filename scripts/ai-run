@@ -5,8 +5,11 @@ usage() {
 Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeout SECONDS]
               [--model NAME] [--knowledge-dir DIRECTORY] [--triage [--since COMMIT]]
               [--revise-plan [--since COMMIT] [--base REF]]
+       ai-run --plan PROMPT_FILE [--revision] [--model NAME] [--session-timeout SECONDS]
+              [--knowledge-dir DIRECTORY]
 Run Claude on the approved plan, one recoverable task per fresh session.
-Defaults: 16 sessions, 1800 seconds/session, 14400 seconds/run. Rerun to resume.
+Defaults: sessions = unfinished tasks + 2 (at least 16; recomputed on every call, so fix-round
+tasks are covered), 1800 seconds/session, 14400 seconds/run. Rerun to resume.
 --model sets the Claude model (default: AI_MODEL or the CLI default); a task's
 optional "Model:" line overrides it. --triage runs one session that evaluates the
 current Codex review and turns accepted findings into new tasks (no implementation),
@@ -23,17 +26,35 @@ commit (its run-log line included) and a host record; a complete but uncommitted
 recorded without a session, and a plan review that was already revised is refused. --base
 (default main) is where plan-review rounds start. A needs-human row stops supervision until
 you answer it, commit, and run ai-review --plan again (a new report clears the decision).
+--plan writes the plan in one headless Claude session (default model opus, default limit
+3600 seconds; the watchdog's "hung" warning may still fire after 45 quiet minutes) from the
+objective in PROMPT_FILE (a regular file, at most 200 KB). The session may only read and
+Edit/Write .ai/project-spec.md, current-plan.md, tasks.md, state.md, handoff.md and
+reviews/dispositions.md (no shell; no project allowlist, so --approved is not needed). The host
+then checks the scope and the task queue, shows the stage on ai-dashboard and leaves the plan
+uncommitted for you to review. --revision says an earlier plan exists (keep DONE tasks).
+--plan runs outside ai-pipeline and refuses --triage, --revise-plan, --since, --base,
+--sessions and --run-timeout.
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
 Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
 (time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
 EOF
 }
-sessions=16; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
+sessions=''; sessions_given=no; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
 model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
+plan_file=''; plan_revision=no; session_timeout_given=no; run_timeout_given=no
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
+    --plan)
+      (( $# >= 2 )) && [[ -n "$2" ]] || ai_die 'Missing --plan PROMPT_FILE'
+      # Resolved now: ai_root changes to the checkout root before the prompt is read.
+      [[ -f "$2" && -r "$2" ]] || ai_die "Prompt file not found or unreadable: $2"
+      (( $(stat -c %s -- "$2") <= 204800 )) || ai_die "Prompt file is larger than 200 KB: $2"
+      plan_file=$(cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+      shift 2 ;;
+    --revision) plan_revision=yes; shift ;;
     --triage) triage=yes; shift ;;
     --revise-plan) revise_plan=yes; shift ;;
     --since)
@@ -56,15 +77,27 @@ while (( $# )); do
       (( $# >= 2 )) || ai_die "Missing value for $1"
       [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die "Invalid limit: $2"
       case "$1" in
-        --sessions) sessions=$2 ;; --session-timeout) session_timeout=$2 ;;
-        --run-timeout) run_timeout=$2 ;;
+        --sessions) sessions=$2; sessions_given=yes ;;
+        --session-timeout) session_timeout=$2; session_timeout_given=yes ;;
+        --run-timeout) run_timeout=$2; run_timeout_given=yes ;;
       esac
       shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; ai_die "Unknown argument: $1" ;;
   esac
 done
-[[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
+[[ "$plan_revision" == no || -n "$plan_file" ]] || ai_die '--revision only applies to --plan.'
+if [[ -n "$plan_file" ]]; then
+  # Refusals use the "given" flags, never the values, so a default can never slip through.
+  [[ -z "${AI_PIPELINE:-}" ]] || ai_die 'ai-run --plan runs outside a pipeline.'
+  for refused in "--triage:$triage" "--revise-plan:$revise_plan" "--since:${since:+yes}" \
+      "--base:${base:+yes}" "--sessions:$sessions_given" "--run-timeout:$run_timeout_given"; do
+    [[ "${refused#*:}" != yes ]] || ai_die "${refused%%:*} does not apply to --plan."
+  done
+  # An opus first plan on a real repository can take longer than a task session.
+  [[ "$session_timeout_given" == yes ]] || session_timeout=3600
+fi
+[[ "$approved" == yes || -n "$plan_file" ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
 [[ "$triage" == no || "$revise_plan" == no ]] || ai_die '--triage and --revise-plan are exclusive.'
 [[ -z "$since" || "$triage" == yes || "$revise_plan" == yes ]] || \
   ai_die '--since only applies to --triage and --revise-plan.'
@@ -80,11 +113,37 @@ rm -f .ai/local/last-error
 AI_START_BRANCH=$(git symbolic-ref --quiet --short HEAD) || ai_die 'Detached HEAD.'
 ai_branch
 git rev-parse --verify HEAD >/dev/null 2>&1 || ai_die 'Create an initial Git commit first.'
-# Triage and plan revision check their own leftovers below (an interrupted one may leave
-# workflow records).
-[[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
-  ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
-ai_helper tasks check
+# A planning session may only touch the plan records (committed or not); its error already
+# starts with "Planning" unless git itself failed.
+plan_scope() {
+  local error
+  error=$(ai_helper plan-scope "$1" 2>&1) || {
+    error=${error#Error: }
+    [[ "$error" == Planning* ]] || error="Planning: $error"
+    ai_die "$error"
+  }
+}
+if [[ -n "$plan_file" ]]; then
+  # A first plan starts from the template queue, so the queue is checked after the session;
+  # the START and working-tree queues are parsed here so a malformed heading stops before a
+  # session is spent.
+  plan_scope HEAD
+  keep_error=$(ai_helper plan-keeps-done HEAD --baseline .ai/tasks.md 2>&1 >/dev/null) || \
+    ai_die "Planning: ${keep_error#Error: }"
+else
+  # Triage and plan revision check their own leftovers below (an interrupted one may leave
+  # workflow records).
+  [[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+    ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+  # An interrupted revision's uncommitted queue is repaired as its session's would have been
+  # (the helper decides; a committed or non-revision queue is left to the checks).
+  if [[ "$revise_plan" == yes ]]; then
+    repair_out=$(ai_helper revision-queue-repair 2>&1) || \
+      ai_die "Plan revision stage: task queue is invalid: ${repair_out#Error: }"
+    [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
+  fi
+  ai_helper tasks check
+fi
 # Authoritative baseline stays in shell memory, not an agent-editable file.
 AI_APPROVED_GATE=$(ai_guard_digest) || ai_die 'Cannot approve missing/unsafe workflow gate.'
 readonly AI_APPROVED_GATE
@@ -92,8 +151,11 @@ printf 'Approved workflow gate SHA-256: %s\n' "$AI_APPROVED_GATE"
 printf '%s\n' "$AI_APPROVED_GATE" > .ai/local/approved-gate.sha256
 knowledge_args=()
 if [[ -n "$knowledge_dir" ]]; then knowledge_args=(--add-dir "$knowledge_dir"); fi
-mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/permissions.allow)
-(( ${#allowed[@]} )) || ai_die 'Empty permission allowlist.'
+allowed=()
+if [[ -z "$plan_file" ]]; then
+  mapfile -t allowed < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' .ai/permissions.allow)
+  (( ${#allowed[@]} )) || ai_die 'Empty permission allowlist.'
+fi
 all_tools=Read,Glob,Grep,Edit,Write,Bash
 started=$SECONDS
 active_task=none
@@ -106,6 +168,7 @@ attempt_open=no
 session_code=
 on_exit() {
   local code=$?
+  [[ -z "${plan_baseline:-}" ]] || rm -f -- "$plan_baseline"
   # Never run a project helper after the approved gate changed: a stop for that reason logs
   # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
   local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
@@ -116,6 +179,9 @@ on_exit() {
     fi
   fi
   if [[ "$finished" != yes ]]; then
+    if [[ "$active_task" == planning && "$gate_ok" == yes ]]; then
+      ai_observe stop plan "$(head -n 1 .ai/local/last-error 2>/dev/null || echo "exit $code")"
+    fi
     if [[ -n "${revision_started:-}" && "$gate_ok" == yes ]]; then
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
         2>/dev/null || true
@@ -222,6 +288,60 @@ claude_session() {
   done
 }
 
+if [[ -n "$plan_file" ]]; then
+  # A headless planning session: writes the plan records only, never commits, never implements.
+  active_task=planning
+  since=$(git rev-parse HEAD)
+  plan_model=${explicit_model:-opus}
+  plan_kind='first plan'
+  if [[ "$plan_revision" == yes ]]; then plan_kind=revision; fi
+  ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \
+    printf 'Warning: could not register this checkout for ai-dashboard.\n' >&2
+  ai_observe step planning "$plan_model · $plan_kind"
+  ai_notify "📝 PLANNING on $AI_START_BRANCH ($plan_model, $plan_kind)."
+  prompt=''
+  if [[ -f .ai/prompts/plan.md ]]; then prompt=$(cat .ai/prompts/plan.md)$'\n\n'; fi
+  prompt+="OBJECTIVE (from $(basename -- "$plan_file")):"$'\n'"$(cat -- "$plan_file")"
+  prompt+=$'\n\nPLANNING CONTRACT: Write the plan for the objective above. You may Edit/Write only '
+  prompt+='.ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/state.md, .ai/handoff.md and '
+  prompt+='.ai/reviews/dispositions.md. You have no shell. Do not commit and do not implement anything. '
+  prompt+='After you finish, the host reorders .ai/tasks.md into dependency order (each task placed after '
+  prompt+='the tasks it depends on; it rejects cycles, unknown IDs and prose in Dependencies:) and validates '
+  prompt+='it with the same rules as .ai/bin/ai-task check: exactly one Status: and one Dependencies: line '
+  prompt+='per task, and the required sections.'
+  prompt+=' Keep every DONE task block exactly as it is (status, text and results); the host stops '
+  prompt+='the run when a DONE task was changed or removed.'
+  if [[ "$plan_revision" == yes ]]; then
+    prompt+=' An earlier plan exists: keep DONE tasks, their status and results unchanged.'
+  fi
+  prompt+=$(knowledge_prompt)
+  mapfile -t plan_allowed < <(ai_helper plan-allowlist)
+  # DONE tasks of the working-tree queue (committed or not) are protected too: the host keeps
+  # its own copy outside the checkout, where the session cannot edit it (removed on exit).
+  plan_baseline=$(mktemp "${TMPDIR:-/tmp}/ai-plan-queue.XXXXXXXX") || ai_die 'Planning: cannot copy the task queue.'
+  if [[ -f .ai/tasks.md ]]; then cp -- .ai/tasks.md "$plan_baseline" || ai_die 'Planning: cannot copy the task queue.'
+  else rm -f -- "$plan_baseline"
+  fi
+  claude_session "$prompt" "$plan_model" Read,Glob,Grep,Edit,Write "${plan_allowed[@]}"
+  ai_branch
+  plan_scope "$since"
+  keep_error=$(ai_helper plan-keeps-done "$since" --baseline "$plan_baseline" 2>&1 >/dev/null) || \
+    ai_die "Planning: ${keep_error#Error: }"
+  # Dependencies first; the reorder keeps every block's text, so DONE tasks stay as checked.
+  reorder_out=$(ai_helper tasks reorder 2>&1) || \
+    ai_die "Planning: task queue is invalid: ${reorder_out#Error: }"
+  [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
+  queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
+    ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
+  read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'
+  ai_observe planned "$plan_total tasks"
+  ai_notify "📝 Plan ready on $AI_START_BRANCH: $plan_total tasks. Review and commit it, then start ai-pipeline --approved."
+  finished=yes
+  printf 'Plan ready on %s: %s tasks. Review and commit it, then start ai-pipeline --approved.\n' \
+    "$AI_START_BRANCH" "$plan_total"
+  exit 0
+fi
+
 if [[ "$revise_plan" == yes ]]; then
   # Answer the current plan review in the round's plan-dispositions section. No implementation.
   active_task=plan-revision
@@ -283,8 +403,10 @@ if [[ "$revise_plan" == yes ]]; then
     prompt=$(cat .ai/prompts/plan-revision.md)
     prompt+=$'\n\nREVISION CONTRACT: This is plan review round '"$revision_round"'. Evaluate .ai/reviews/plan.md '
     prompt+='(read-only: never edit it). Fill ONLY the last section of .ai/reviews/plan-dispositions.md, headed "'
-    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (append new '
-    prompt+='TODO tasks with new IDs to .ai/tasks.md and reference them), rejected (concrete evidence) or '
+    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (add new '
+    prompt+='TODO tasks with new IDs to .ai/tasks.md, placed before the first task that depends on them (the '
+    prompt+='host reorders the queue into dependency order and rejects cycles, unknown IDs and prose in '
+    prompt+='Dependencies:), and reference them), rejected (concrete evidence) or '
     prompt+='needs-human (only for a decision only the human can make; the question in the Evidence column). '
     prompt+='Keep the header, the "Plan review HEAD:" line and everything above the section unchanged. You may '
     prompt+='edit only .ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/reviews/plan-dispositions.md '
@@ -307,7 +429,13 @@ if [[ "$revise_plan" == yes ]]; then
   fi
   [[ "$(sha256sum .ai/reviews/plan.md | cut -d' ' -f1)" == "$plan_report" ]] || \
     ai_die 'A Claude session modified .ai/reviews/plan.md; inspect and restore the plan review.'
-  ai_helper tasks check
+  # A prerequisite added after its dependents is repaired here (committed with the revision);
+  # a cycle, unknown ID or prose stops: ai-recover always escalates "Plan revision stage".
+  reorder_out=$(ai_helper tasks reorder 2>&1) || \
+    ai_die "Plan revision stage: task queue is invalid: ${reorder_out#Error: }"
+  [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
+  queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
   revision_scope 'Plan revision stage: '
   counts=$(ai_helper plan-dispositions-check "${check_args[@]}" 2>&1) || \
     ai_die "Plan revision incomplete: ${counts#Error: }"
@@ -418,6 +546,16 @@ if [[ -f .ai/prompts/runner.md ]]; then
   base_prompt=$(cat .ai/prompts/runner.md)
 else
   base_prompt=$(cat .ai/prompts/resume.md .ai/prompts/implement.md)
+fi
+
+if [[ "$sessions_given" == yes ]]; then
+  printf 'Session budget: %s (--sessions)\n' "$sessions"
+else
+  read -r budget_done budget_total < <(ai_helper tasks counts) || ai_die 'Cannot count tasks for the session budget.'
+  sessions=$(( budget_total - budget_done + 2 ))
+  (( sessions >= 16 )) || sessions=16
+  printf 'Session budget: %s (default: %s unfinished tasks + 2, at least 16)\n' \
+    "$sessions" "$(( budget_total - budget_done ))"
 fi
 
 # Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,

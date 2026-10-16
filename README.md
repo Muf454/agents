@@ -120,6 +120,34 @@ and validation. It asks only for critical ambiguities and does not start coding.
 Tell it which scope is approved after inspecting the plan, and record that in
 the plan's Authorization section. Planning and implementation are separate phases.
 
+### Plan with a headless session
+
+To write the plan without an interactive session (for example from mission control), put the
+objective in a file (a regular file of at most 200 KB) and run:
+
+```bash
+.ai/bin/ai-run --plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS]
+```
+
+One Claude session (default model `opus`, default limit 3600 seconds; the watchdog's `hung`
+warning may still fire after 45 quiet minutes) gets `.ai/prompts/plan.md`, the objective and a
+planning contract. Its tools are `Read`, `Glob`, `Grep`, `Edit` and `Write`, and it may only
+write `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, `.ai/state.md`,
+`.ai/handoff.md` and `.ai/reviews/dispositions.md`: no shell and no project allowlist, so
+`--approved` is not needed. The run starts from a feature branch with no uncommitted changes
+outside those records, registers the checkout for `ai-dashboard` (stage `planning` from the
+first second, `📝 PLANNING` notification), then checks that only the plan records changed,
+reorders `.ai/tasks.md` so every task comes after its dependencies (`ai-task reorder`; a cycle,
+unknown ID or prose in `Dependencies:` stops with `Planning: task queue is invalid`) and checks
+that it passes `ai-task check`. On success the record says `planned` with the task
+count and `📝 Plan ready` is sent; otherwise the run stops with the reason (⛔, record `stopped`)
+and leaves the session's edits as written. It never commits: review the plan, commit it, then
+start `ai-pipeline --approved`. `--revision` tells the session an earlier plan exists (keep DONE
+tasks). With or without `--revision`, a task that was DONE when the session started (committed or not) must keep
+its block unchanged: otherwise the run stops with `Planning: DONE task T00x was changed or
+removed`. `--plan` refuses to run inside a pipeline and refuses `--triage`, `--revise-plan`,
+`--since`, `--base`, `--sessions` and `--run-timeout`.
+
 Before leaving an implementation session unattended:
 
 1. Review `.ai/project-spec.md`, `.ai/current-plan.md`, and `.ai/tasks.md`.
@@ -127,8 +155,14 @@ Before leaving an implementation session unattended:
    in `.ai/validation-candidates.md`; inspect scripts before executing them. The
    supplied validation placeholder deliberately fails with exit 78.
 3. Add necessary local commands to `.ai/permissions.allow` after inspecting them.
-   Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
+   The template already allows `Bash(chmod +x *)` (no other chmod form) so a runner
+   session can make a script it created executable; existing projects add that line by
+   hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
+   `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
+   check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
+   task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
+   prose in `Dependencies:`.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write
@@ -163,8 +197,12 @@ For the recoverable bounded runner, start from a clean committed feature branch:
 
 ```bash
 .ai/bin/ai-status
-.ai/bin/ai-run --approved --sessions 16 --session-timeout 1800 --run-timeout 14400
+.ai/bin/ai-run --approved --session-timeout 1800 --run-timeout 14400
 ```
+
+Without `--sessions` the session budget is `max(16, unfinished tasks + 2)`, recomputed on every
+`ai-run` call (so fix-round tasks added by triage are covered); `Session budget: N` is printed
+first. `--sessions N` sets it explicitly.
 
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
@@ -214,6 +252,7 @@ commands not yet authorized. The bounded runner is the no-prompt unattended path
 | Mode | Started by | May do | May not do |
 | --- | --- | --- | --- |
 | Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
+| ai-run --plan | you or mission control, `ai-run --plan objective.md` | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
 | ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
 | ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
 | ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
@@ -238,7 +277,12 @@ tmux new -s my-app-ai
    the plan reviewed again with the earlier rounds as context. It stops for you when a
    revision asks you a question (`plan review needs your decision`, also after a crash),
    after `AI_SUPERVISE_PLAN_ROUNDS` revisions in one run (`supervision limit reached`) or
-   when a revision leaves its scope; from review round `AI_SUPERVISE_ESCALATE_ROUND` the
+   when a revision leaves its scope. The host reorders the queue after each revision, so a
+   new task appended after the tasks that depend on it still runs first; a cycle, unknown ID
+   or prose in `Dependencies:` stops at once (`Plan revision stage: task queue is invalid`,
+   no recovery attempt). A revision interrupted after its session wrote such a queue (crash,
+   restart) resumes the same way: the host repairs the uncommitted queue before any queue
+   check and records the revision without a second session. From review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass
    `--skip-plan-review` (on every rerun) to proceed anyway. A question a revision recorded
@@ -557,7 +601,10 @@ conversation context. Full CLI/validation logs are ignored under `.ai/local/`;
 compact state, tasks, handoff, and run log are checkpointed in Git. Do not run a
 second implementation agent in the same checkout. The tools use a per-checkout
 kernel lock; it releases when the process exits. A copied `workflow.lock` file is
-not a stale lock to delete.
+not a stale lock to delete. Relaunching while auto-recovery holds the lock is refused
+without touching its records; the message names `auto-recovery (PID n)`, so wait for its
+🔧 Recovered or ⛔ STOPPED notification or `kill n` first. (A recovery the watchdog started
+after a crash gets the plain "Another runner/reviewer owns this checkout" message.)
 
 Do not rely on this to survive machine shutdown or sleep as a live process. It
 survives those events through saved files/checkpoints and a new session. No daemon
@@ -570,8 +617,12 @@ checkout's `.ai/bin/` or from `scripts/ai-dashboard` in this toolkit (a symlink 
 too). It lists the pipelines registered in the host state directory and the runners
 alive now, one card per checkout:
 
-- The flow is eight boxes in order: Plan check (Codex), Plan revision (Claude), Setup
-  (script), Build (Claude), Checks (script), Review (Codex), Triage (Claude), PR (script).
+- The flow is nine boxes in order: Plan (Claude), Plan check (Codex), Plan revision
+  (Claude), Setup (script), Build (Claude), Checks (script), Review (Codex), Triage
+  (Claude), PR (script). Plan is ticked ✓ as soon as any pipeline record exists (a
+  pipeline start marks it); a card with no record, an old record or an older toolkit
+  leaves Plan unticked ("stage unknown"), never failed. A finished `ai-run --plan` shows
+  the status `planned` with a `📝 <n> tasks` line and Plan check as the next box.
   The active box is double-bordered in its role colour (orange Claude, blue Codex, grey
   script); a ✓ under each finished box. Re-check shares the Triage box and is drawn in
   Codex's colour. The Build box is labelled with its task count (`Build 2/5`). The marker
@@ -582,14 +633,32 @@ alive now, one card per checkout:
   first box (for example, the base moved) is marked `stopped before Plan check`.
 - Keys in the terminal view: ↑↓ move, Enter shows or hides a card's details, `a` toggles
   old finished and idle runs, `r` refreshes, `q` quits and restores the terminal.
-- The boxes need 120 columns; below that each card becomes one compact line.
+- The boxes, joined by `─`, need 120 columns; below that each card becomes one compact line.
 - `ai-dashboard --once` prints the same view once (also used when output is piped).
   `--json` prints the snapshot (`state_root` and the runs) for other tools. `--all` shows
   finished or idle runs older than 24 hours; by default they are hidden, while crashed and
   needs-you runs are never hidden.
+- Each run in `--json` also carries `pr` (the pull request URL from `.ai/state.md`'s
+  `Next action:` line, else the last `pull request ready:` run-log line, else `''`) and
+  `reviews`: `{'plan': …, 'code': …}`, each `{'blocker', 'major', 'minor', 'head'}` from the
+  review report's single `Finding counts:` line (`head` is the short reviewed commit), or
+  `null` when the report is missing, unreadable or ambiguous. Informational only; the
+  details view (Enter) shows `pr:` and `reviews:` lines.
+- `ai-dashboard --wait` blocks until a run changes (status, stage, observation state or a new
+  notification line; edits to `tasks.md` alone do not count) and prints JSON
+  `{state_root, cursor, timed_out, runs}` with only the changed runs; a checkout that
+  appeared since the baseline counts, one that vanished does not, and runs hidden by the 24 h
+  rule are still watched. `--timeout SECONDS` (default 3600), `--interval SECONDS` (default 2,
+  at least 0.1). Exit 0 on a change, 1 on timeout (`timed_out: true`), 130 on Ctrl-C, 2 on a
+  usage error. Pass the printed cursor back with `--since` so nothing between two calls is
+  lost (a change made in between returns at once):
+  `cursor=$(ai-dashboard --wait | jq -r .cursor); …; ai-dashboard --wait --since "$cursor"`.
+  `--wait` cannot be combined with `--once`; it writes nothing.
 - Run it with the same `AI_STATE_DIR` or `XDG_STATE_HOME` as the pipelines and the
   watchdog timer: it only lists the registry of that state root. The default is
   `~/.local/state/ai-toolkit`.
+- A runner started with `AI_DASHBOARD_IGNORE=1` in its environment is not listed unless its
+  checkout is registered; the toolkit's own test suite sets it so its fixture runs stay hidden.
 - Keep it in tmux beside your runs: `tmux new -s dash ai-dashboard`.
 
 The dashboard is read-only and advisory. It writes no file, takes no lock and changes no
@@ -760,20 +829,43 @@ project before trusting long unattended execution.
 ## Running the tests
 
 ```bash
-python3 tests/run_parallel.py                 # parallel shards, works from any directory
+python3 tests/run_parallel.py                 # parallel batches, works from any directory
 AI_TEST_WORKERS=4 python3 tests/run_parallel.py
 python3 tests/run_parallel.py --collect-only  # print the number of tests only
 python3 -m unittest discover -s tests         # serial, what the gate runs today
 python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 ```
 
-`tests/run_parallel.py` discovers the same tests as the serial command and splits them
-round-robin into `AI_TEST_WORKERS` shards (default: the CPU count, at most 8). Each shard
-runs as `python3 -m unittest` in its own process. The runner fails when a shard fails or
-crashes, when it collects no tests, or when the shards ran a different number of tests than
-it collected. Shards always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
-`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching `.ai/validate` to the parallel runner is a gate change that a human
-approves.
+`tests/run_parallel.py` discovers the same tests as the serial command and deals the sorted
+IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the CPU count, at
+most 8; six batches per worker, so neighbouring and often similarly slow tests land in
+different batches and no worker idles while another works through a slow cluster). Each
+batch runs as `python3 -m unittest` in its own process. The runner fails when a batch fails
+or crashes (listing that batch's test IDs), when it collects no tests, or when the batches
+ran a different number of tests than it collected. Batches always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
+`PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching
+`.ai/validate` to the parallel runner is a gate change that a human approves.
+
+Every run ends with a timing report before the `Ran N tests …` line: on Python 3.12+ the
+batches run with `--durations 0` and the runner lists the 15 slowest tests with their
+seconds, then `Test time: <sum> s across <workers> workers; worker busy: <min>–<max> s`
+(the busy range shows how evenly the batches spread). Older Pythons get the busy range
+only. Duration lines that do not parse are ignored.
+
+Fixture I/O is kept cheap: test fixture repositories run git with `core.fsync=none` and
+`gc.auto=0` (test harness only; the toolkit scripts never set them), and when the caller sets
+no `TMPDIR` and `/dev/shm` is a writable tmpfs with 1 GiB free, `run_parallel.py` gives every
+batch a temp directory there (`Temp dir: /dev/shm/ai-tests-… (tmpfs)`, removed after the run).
+The directory is probed by running a script from it; a `noexec` mount falls back to the
+default temp dir. `AI_TEST_TMPFS=0` turns it off (`AI_TEST_TMPFS_DIR` replaces `/dev/shm`, for
+the tests only).
+
+Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
+when set (a number greater than 0, otherwise the tests stop with an error), else 2 when
+`CI=true` (GitHub's runners are several times slower than a workstation), else 1.
+`ai-pipeline` and `ai-recover` (which execs the resumed pipeline) run under the longer
+pipeline timeout. A command that times out fails with its command line and the tail of its
+output.
 
 ## Deliberately manual for now
 
@@ -796,7 +888,8 @@ without AI and stays silent when healthy. It notifies through `AI_NOTIFY_CMD` wh
 - `ai-pipeline` is gone without finishing or reporting a stop (killed, crashed or
   machine restarted), in any phase, even if an orphaned `ai-run` child survives;
 - an implementing/fixing_review checkout has no runner and no recorded stop
-  (e.g. a killed standalone `ai-run`);
+  (e.g. a killed standalone `ai-run`), still so at a probe at least 5 minutes after the
+  first one that saw it (a planning session is never stalled);
 - an alive runner has no log activity for `--stale-minutes` (default 45), not
   counting a usage-limit pause until its announced resume time or logs from before
   the current run started;
@@ -824,6 +917,11 @@ Run it every 10 minutes with a systemd user timer (one per checkout):
 systemctl --user list-timers 'ai-watchdog-*'
 .ai/bin/ai-watchdog --uninstall-timer              # stops and removes them
 ```
+
+The first probe runs 2 minutes after the timer starts (after boot or after
+`--install-timer`), so installing it just before starting a pipeline raises no alarm.
+Timers installed before this change fire at once after install: run `--install-timer`
+again to update the host copy and unit.
 
 `ai-watchdog --timer-status` prints `installed`, `missing (reason)` or `unknown (reason)`
 (exit 0, 1, 2); `installed` needs both unit files, `enabled` and `active`. `ai-pipeline`

@@ -399,12 +399,18 @@ def task_blocks(text):
                 fence = value
             elif value[0] == fence[0] and len(value) >= len(fence):
                 fence = None
+            if current is not None:
+                current['raw'].append(line)
             continue
         if fence:
+            if current is not None:
+                current['raw'].append(line)
             continue
         heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
         if heading:
-            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': []}
+            # raw: every source line of the block, fenced lines included (plan-keeps-done).
+            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': [],
+                       'heading': line, 'raw': []}
             blocks.append(current)
         elif re.match(r'^##\s+T\d', line):
             fail(f'Malformed task heading: {line}')
@@ -412,11 +418,12 @@ def task_blocks(text):
             current = None
         elif current is not None:
             current['lines'].append(line)
+            current['raw'].append(line)
     return blocks
 
 
-def tasks():
-    blocks = task_blocks(Path('.ai/tasks.md').read_text())
+def tasks(text=None):
+    blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
         fail('Duplicate task IDs.')
@@ -455,7 +462,99 @@ def tasks():
     return blocks
 
 
+def queue_segments(text):
+    """Split the queue into ('pre'|'task'|'section', key, lines) segments, same heading and fence rules as task_blocks."""
+    segments = [('pre', '', [])]
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence:
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading:
+                segments.append(('task', heading.group(1), []))
+            elif re.match(r'^##\s', line):
+                segments.append(('section', line.strip(), []))
+        segments[-1][2].append(line)
+    return segments
+
+
+def tasks_reorder():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    blocks = task_blocks(text)
+    ids = [task['id'] for task in blocks]
+    if len(ids) != len(set(ids)):
+        fail('Duplicate task IDs.')
+    deps = {}
+    for task in blocks:
+        values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith('Dependencies:')]
+        if len(values) != 1:
+            fail(f"{task['id']}: expected exactly one Dependencies: line")
+        value = values[0]
+        if value != 'none' and not re.fullmatch(r'T\d{3,}(\s*,\s*T\d{3,})*', value):
+            fail(f'{task["id"]}: Dependencies: must be "none" or task IDs separated by commas, found "{value}"')
+        listed = [] if value == 'none' else [x.strip() for x in value.split(',')]
+        for dep in listed:
+            if dep not in ids:
+                fail(f"{task['id']}: dependency {dep} is not a task in the queue")
+        if len(listed) != len(set(listed)):
+            fail(f"{task['id']}: duplicate dependencies")
+        deps[task['id']] = sorted(listed, key=ids.index)
+    order, state, stack = [], {}, []
+
+    def visit(task_id):
+        if state.get(task_id) == 'done':
+            return
+        if state.get(task_id) == 'active':
+            cycle = stack[stack.index(task_id):] + [task_id]
+            fail('dependency cycle: ' + ' -> '.join(cycle))
+        state[task_id] = 'active'
+        stack.append(task_id)
+        for dep in deps[task_id]:
+            visit(dep)
+        stack.pop()
+        state[task_id] = 'done'
+        order.append(task_id)
+
+    for task_id in ids:
+        visit(task_id)
+    if order == ids:
+        return
+    segments = queue_segments(text)
+    positions = [index for index, segment in enumerate(segments) if segment[0] == 'task']
+    first, last = positions[0], positions[-1]
+    for segment in segments[first:last]:
+        if segment[0] == 'section':
+            fail(f'cannot reorder: section "{segment[1]}" sits between tasks')
+    by_id = {key: lines for kind, key, lines in segments if kind == 'task'}
+    # Everything before the first task (including ordinary ## sections) is the preamble, kept as is.
+    out = [line for segment in segments[:first] for line in segment[2]]
+    for position, task_id in enumerate(order):
+        lines = list(by_id[task_id])
+        if position < len(order) - 1 or last < len(segments) - 1:
+            if not lines[-1].endswith('\n'):
+                lines[-1] += '\n'
+            if lines[-1].strip():
+                lines.append('\n')
+        out.extend(lines)
+    for segment in segments[last + 1:]:
+        out.extend(segment[2])
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue reordered (dependencies first): ' + ' '.join(order))
+
+
 def task_command(arguments):
+    if arguments[0] == 'reorder':
+        tasks_reorder()
+        return
     blocks = tasks()
     action = arguments[0]
     if action == 'check':
@@ -2478,6 +2577,69 @@ def plan_revision_allowlist(arguments):
     print('\n'.join(['Read', 'Glob', 'Grep'] + [f'Edit(./{path})' for path in PLAN_REVISION_EDITABLE]))
 
 
+# The records a planning session may edit (Edit and Write, no Bash). run-log.md is written by
+# ai-run's exit handler, never by the session, so only the scope check allows it.
+PLAN_EDITABLE = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/state.md',
+                 '.ai/handoff.md', '.ai/reviews/dispositions.md')
+
+
+def plan_allowlist(arguments):
+    """--allowedTools entries for the planning session, one per line: read tools and Edit/Write
+    of the plan records. Nothing from .ai/permissions.allow, no Bash."""
+    entries = ['Read', 'Glob', 'Grep']
+    for path in PLAN_EDITABLE:
+        entries += [f'Edit(./{path})', f'Write(./{path})']
+    print('\n'.join(entries))
+
+
+def plan_scope(arguments):
+    """Since START, only the plan records (and the run log) changed (committed or not)."""
+    if len(arguments) != 1:
+        fail('Usage: plan-scope START')
+    records_scope(arguments[0], PLAN_EDITABLE + ('.ai/run-log.md',), 'Planning')
+
+
+def plan_keeps_done(arguments):
+    """Every task DONE in START's .ai/tasks.md, or in BASELINE (the host's copy of the working-tree
+    queue when planning started, committed or not), is still in the working tree, block unchanged.
+    A task DONE in both must match the BASELINE block, the queue the session actually started from."""
+    if len(arguments) not in (1, 3) or (len(arguments) == 3 and arguments[1] != '--baseline'):
+        fail('Usage: plan-keeps-done START [--baseline FILE]')
+    start = arguments[0]
+    try:
+        git('rev-parse', '--verify', '--quiet', f'{start}^{{commit}}')
+    except subprocess.CalledProcessError:
+        fail(f'Unknown commit: {start}')
+    queues = []
+    if subprocess.run(['git', 'cat-file', '-e', f'{start}:.ai/tasks.md'],
+                      stderr=subprocess.DEVNULL).returncode == 0:
+        queues.append(git('show', f'{start}:.ai/tasks.md').decode(errors='replace'))
+    if len(arguments) == 3 and Path(arguments[2]).is_file():
+        queues.append(Path(arguments[2]).read_text(errors='replace'))
+    done = {}
+    for before in [task_blocks(text) for text in queues]:
+        for task in before:
+            if any(line.startswith('Status:') and line.split(':', 1)[1].strip() == 'DONE'
+                   for line in task['lines']):
+                done[task['id']] = task
+    if not done:
+        return
+    path = Path('.ai/tasks.md')
+    after = {}
+    for task in task_blocks(path.read_text()) if path.is_file() else []:
+        after.setdefault(task['id'], task)
+
+    def block(task):
+        raw = list(task['raw'])
+        while raw and not raw[-1].strip():
+            raw.pop()
+        return [task['heading'], *raw]
+
+    for task in done.values():
+        if task['id'] not in after or block(after[task['id']]) != block(task):
+            fail(f"DONE task {task['id']} was changed or removed")
+
+
 def plan_revisions_store():
     """Host-side plan revision records of the current branch (agents can't write here)."""
     branch = current_branch()
@@ -2581,6 +2743,28 @@ def plan_revisions(arguments):
         print(record['questions'])
     elif action == 'outcome':
         print(record['round'], record['accepted'], record['rejected'], record['needs_human'])
+
+
+def revision_queue_repair(arguments):
+    """Reorder the uncommitted queue of an interrupted plan revision (as `tasks reorder`) before
+    any queue check, only when: .ai/tasks.md differs from HEAD's, only plan revision records are
+    dirty, HEAD's queue is valid with no DONE task, and the verified current plan review is not
+    revised yet. Otherwise do nothing: the usual checks reject the queue as before."""
+    if arguments:
+        fail('Usage: revision-queue-repair')
+    path = Path('.ai/tasks.md')
+    committed = committed_file('HEAD', str(path))
+    if not path.is_file() or path.read_text() == committed:
+        return
+    try:
+        records_scope('HEAD', PLAN_REVISION_RECORDS, 'Plan revision')
+        before = tasks(committed)
+        record, verified, _ = plan_revision_lookup()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        return
+    if not before or any(task['status'] == 'DONE' for task in before) or not verified or record:
+        return
+    tasks_reorder()
 
 
 def plan_stage_verify(start, digest):
@@ -3095,12 +3279,13 @@ NOTIFICATIONS_LIMIT = 256 * 1024
 NOTIFICATIONS_KEEP = 200
 SMALL_LIMIT = 4 * 1024
 TASKS_LIMIT = 1024 * 1024
-BOX_KEYS = ('plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
+BOX_KEYS = ('planning', 'plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
             'recheck', 'pr')
 OBSERVATION_STATES = ('active', 'paused', 'recovering', 'stopped', 'done')
 # ai-pipeline's stop labels: (box keys the label covers, stage when the recorded one is outside).
 STOP_LABELS = {
     'start': ((), 'none'),
+    'plan': (('planning',), 'planning'),
     'plan review': (('plan_review', 'plan_revision'), 'plan_review'),
     'plan revision': (('plan_revision',), 'plan_revision'),
     'implementation': (('setup', 'build', 'checks'), 'build'),
@@ -3351,6 +3536,9 @@ def observation_update(record, action, values):
     if action == 'done':
         needs((1, 1), 'done NOTE')
         return {**record, 'stage': 'pr', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
+    if action == 'planned':
+        needs((1, 1), 'planned NOTE')
+        return {**record, 'stage': 'planning', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
     raise RecordError(f'unknown observe action: {action}')
 
 
@@ -3584,8 +3772,16 @@ def main():
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':
         plan_revision_allowlist(arguments)
+    elif command == 'plan-allowlist':
+        plan_allowlist(arguments)
+    elif command == 'plan-scope':
+        plan_scope(arguments)
+    elif command == 'plan-keeps-done':
+        plan_keeps_done(arguments)
     elif command == 'plan-revisions':
         plan_revisions(arguments)
+    elif command == 'revision-queue-repair':
+        revision_queue_repair(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
     elif command == 'claude-text':

@@ -1,189 +1,131 @@
 # Handoff
 
 ## What has been implemented?
-T001 (2026-10-09): `scripts/lib/workflow.py` safe record I/O (pinned no-follow directory
-descriptors, bounded nonblocking reads incl. tail mode, bounded flock, temp + rename writes,
-`git_branch` without git) and the writers `observe`, `notify-log`, `pipeline-register`
-(always exit 0, warning on failure), plus `tasks counts`. No caller yet (T002–T005).
-Tests in `tests/test_observation.py`. Also: the `tests/test_workflow.py` fixture now drops
-the `AI_SUPERVISE_*` limits a supervised pipeline exports (they leaked into two tests).
-T010 (2026-10-09): gate-broken guard in `scripts/lib/common.sh` (`ai_gate_check`,
-`AI_GATE_BROKEN` set by every gate comparison incl. `ai_guard_verify` and `ai_deps`; record
-helpers `ai_observe` and `ai_notify_log` skip themselves once it is set; no callers until
-T002). ai-run `on_exit`, ai-pipeline `stop()` and its approval/resume gate stops, and every
-ai-recover comparison set it; ai-run's EXIT handler also no longer writes the plan-revision
-outcome line after a gate change. Messages and exit codes unchanged.
-T002 (2026-10-09): `ai_notify` also writes every message to `.ai/local/notifications.log` (via
-`ai_notify_log`, also without `AI_NOTIFY_CMD`; what is sent is unchanged); `ai_limit_pause`
-records `observe pause`/`resume`. Covers the watchdog, ai-review and pipeline notifications.
-T003 (2026-10-09): `ai-pipeline` stage records, stops, finish note and checkout registration.
-T004 (2026-10-09): `ai_deps` records Setup; `ai-run` records Build (with task id, model, count),
-Checks (post-task and final), the checkpointed Build detail and standalone triage/revise-plan;
-`ai-review` records the `format retry` detail.
-T005 (2026-10-09): `ai-recover` records `recovering` (attempt/max, stopped stage kept), `plan_revision`
-for a stored decision, `checks` during leftover validation; `escalate` and the unexpected-exit
-handler record a stop that keeps the substage (gate escalations record nothing, T010).
-T006 (2026-10-09): new read-only `scripts/lib/dashboard.py`: `ProcSource` (`/proc` or the
-test-only `AI_DASHBOARD_PROC` fixture tree), `discover` (host registry + live runners' cwd,
-realpath dedupe, test-only `AI_DASHBOARD_ROOT` filter), `liveness` (watchdog semantics on the
-bounded marker read: alive/crashed/gone) and `sanitize` (escapes, controls, bidi, cap). No
-caller yet (T007). Tests in `tests/test_dashboard.py`.
-T007 (2026-10-09): snapshot model, `--once`/`--json`/`--all`, `ai-dashboard` wrapper, setup installs both files.
-T008 (2026-10-09): shared pure renderer (eight flow boxes from 120 columns, compact line below,
-active box double-bordered in its role style, ✓ under passed boxes, detail or stop note on the
-marker line, latest event), `--once` and pipes use it, and the curses TUI (`ai-dashboard` on a TTY:
-↑↓ Enter a r q, resize, scrolling, 256-colour or basic/bold/reverse).
-T009 (2026-10-09): docs audit. README "Watch all pipelines" (keys, flags, box layout, state root,
-read-only), `ai-dashboard` rows in the Components and Modes tables; `docs/workflow.md` "Observation
-records and the dashboard" (records, host registry, read-only rule, test-only `AI_DASHBOARD_PROC` and
-`AI_DASHBOARD_ROOT`, watchdog needs no gate guard). Vault hub Decisions and Log, human todos and the
-backlog DB-01 status updated. No code change.
-
-Plan: Branch `feature/dashboard` (master e9354d9 merged in) plans the pipeline
-dashboard Zack asked for on 2026-10-07: safe record writers and readers (T001), the
-gate-broken guard (T010, runs second), stage writers in common.sh (T002), ai-pipeline (T003),
-ai-run/`ai_deps`/ai-review (T004) and ai-recover (T005), discovery and liveness (T006), a
-read-only snapshot of all pipelines (T007), a curses TUI showing the flow as eight boxes with
-the active stage highlighted (T008), docs (T009). Revised after Codex plan review 1 (P1–P10),
-2 (P11–P18) 3 (P19–P22) 4 (P23–P25) 5 (P26–P27) 6 (P28–P29) and 7 (P30–P31), all accepted;
-round 8 clean. Revision 9 (2026-10-09) rebases it on master e9354d9 (FL-04 supervisor,
-FL-14–17): Plan revision box, stored decision, extra fix round, format retry, base-moved
-stop, box layout from 120 columns. Revision 10 (2026-10-09, plan review 9 by the Claude
-fallback reviewer, P32–P38 all accepted): no project helper runs after the approved gate
-changed (T010), deterministic `/proc` discovery in tests, Build recorded again after the
-post-task gate, plus four minor record details. Revision 11 (2026-10-09, plan review 10 by
-the Claude fallback reviewer, P39–P45 all accepted): T005's gate test made possible (no
-sentinel in `workflow.py`; ai-recover runs the checkout helper before it compares the gate),
-the flag also on the pipeline's pre-step gate stops and never in a command substitution,
-the watchdog note corrected, `done` → `stage=pr`, a `needs_you` run with an active record
-renders as stopped, `tasks counts`; see the top of `.ai/current-plan.md`. See also
-`.ai/project-spec.md`, `.ai/tasks.md`.
+T001 DONE (2026-10-14): `workflow.py tasks reorder` and `ai-task reorder`. T002 DONE
+(2026-10-14): `ai-run --plan` and `ai-run --revise-plan` run the reorder before `tasks check`;
+an unrepairable queue stops with `Planning: / Plan revision stage: task queue is invalid`.
+T011 DONE (2026-10-15): `workflow.py revision-queue-repair`, called by `ai-run --revise-plan`
+and `ai-pipeline` before their queue checks, repairs an interrupted revision's uncommitted
+out-of-order queue so the resume records the revision without a second session.
+T003 DONE: scaled test timeouts (`tests/timeouts.py`). T004 DONE (2026-10-15):
+`tests/run_parallel.py` runs interleaved batches (6 per worker) from a shared queue and prints
+the 15 slowest tests, the summed test time and the worker busy range (Python 3.12+).
+T005 DONE (2026-10-15): fixture git has `core.fsync=none`/`gc.auto=0`; `run_parallel.py` uses an
+exec-probed `/dev/shm/ai-tests-*` TMPDIR (`AI_TEST_TMPFS=0` off; test-only `AI_TEST_TMPFS_DIR`).
+T006 removed from the batch (BLOCKED: the runner may not run profiling commands) and deferred to
+the vault backlog as the FL-23 follow-up; no test was changed for it. T007 DONE (2026-10-15): dashboard
+discovery skips a runner whose `/proc/<pid>/environ` holds `AI_DASHBOARD_IGNORE=1` (bounded,
+non-blocking regular-file read; registered checkouts still listed); `ToolkitTest` sets it.
+T012 DONE (2026-10-15, review M2): `tasks reorder` keeps ordinary `## ` sections before the first
+task as preamble; only a section between two tasks blocks reordering.
+T013 DONE (2026-10-15, review N4, N5): the dashboard reads the reviewed HEAD from genuine plan
+reports (`Plan review of plan digest …; HEAD …;`); a count over six digits leaves that side `null`.
+T014 DONE (2026-10-15, review M3): each `run_parallel.py` batch runs in its own process group;
+a worker error, interrupt or SIGTERM terminates every running group (SIGTERM, grace, SIGKILL),
+and a stopped batch's pipe is abandoned after 10 s, so `run()` returns instead of hanging.
+Branch `fix/flow-batch-3` (from `origin/fix/night-stops`, open PR #27, at
+5894c2b) plans flow batch 3 (2026-10-14, Claude planning session), in priority order:
+- T001–T002 FL-24: `workflow.py tasks reorder` / `ai-task reorder` (stable dependency order,
+  block text never changed; cycles, unknown IDs and prose in `Dependencies:` rejected), run by
+  the host after `ai-run --plan` and `ai-run --revise-plan`; an unrepairable queue stops with
+  `Plan revision stage: task queue is invalid: …`, which recovery escalates at once.
+- T011 FL-24: an interrupted revision's uncommitted out-of-order queue is repaired before the
+  pipeline's and ai-run's queue checks (guarded `revision-queue-repair`), so recovery resumes
+  without a second revision session.
+- T003–T006 FL-23: pipeline-running test commands (`ai-recover` included) get the pipeline
+  timeout; every test bound scaled (`AI_TEST_TIMEOUT_SCALE`, default 2 under `CI=true`);
+  run_parallel timing report and balanced batches; no git fsync in fixtures and test temp dirs
+  on tmpfs; the slowest tests made cheaper (measured).
+- T007 DB-05: the dashboard ignores runners started with `AI_DASHBOARD_IGNORE=1` (set by the
+  test harness).
+- T008 DB-02: `pr` and `reviews` (plan/code finding counts) in `ai-dashboard --json` and the
+  details view.
+- T009 DB-03: `ai-dashboard --wait [--since CURSOR] [--timeout S]`.
+- T010: docs/handoff audit.
+See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-2026-10-09 after T009: `-k Docs` Ran 3 OK; `.ai/bin/ai-check` OK (541 tests, 8 shards) on the second run. The first
-full run had one failure in shard 2 (the failing test was not captured in the output kept; the rerun passed).
-2026-10-09 after T008: `.ai/bin/ai-check` OK (541 tests, 8 shards); targeted `-k dashboard_render`: 15 OK.
-2026-10-09 after T006: `.ai/bin/ai-check` OK (495 tests, 8 shards); targeted
-`-k dashboard_liveness`: 10 OK, `-k dashboard_sanitize`: 3 OK.
-2026-10-09 after T010: `.ai/bin/ai-check` OK (440 tests, 8 shards); targeted
-`-k observation_gate`: 6 OK, `-k gate_changes`: 2 OK, `-k observation_writer` (T001): 23 OK.
+T001: `.ai/bin/ai-check` passed (624 tests). T002: see the task result. T011: passed (641 tests). T004: passed, baseline `Ran 648 tests in 381.8s (48 batches on 8 workers)`, test time 2841.7 s on 16 CPUs (details in the T004 result). T004–T006 record the suite timings (baseline and after). T007: passed, `Ran 667 tests in 371.4s`. T009: passed (679 tests). T010: see the task result
+(final gate run after the docs audit). T012: passed (681 tests). T013: passed (682 tests). T014: passed (685 tests).
 
 ## Assumptions
-- Finished/stopped/idle runs older than 24 h are hidden by default (`--all` shows them).
-- The dashboard is advisory and read-only; `.ai/local/` records are agent-writable.
-- Eight boxes need up to 112 columns, so the box layout starts at 120 columns (compact
-  line below); the plan revision box label is "Plan revision" ("Revise" in the compact line).
-- A stop caused by a changed gate records no observation (the record helpers are project
-  code); the dashboard still shows `needs_you` from `last-error` and draws the last recorded
-  box as stopped with that line. The watchdog notifies through its own installed copy and
-  needs no guard.
-- `AI_DASHBOARD_PROC` and `AI_DASHBOARD_ROOT` are test-only; the dashboard must run with the
-  same `AI_STATE_DIR`/XDG settings as the pipelines.
+- Prose in `Dependencies:` is rejected, not rewritten; reorder runs only on the planning and
+  plan-revision paths (ai-pipeline's own queue check still stops on a committed out-of-order
+  queue).
+- Reorder is depth first (prerequisites pulled up before their first dependent), like mission
+  control's `reorder-queue.py`; a valid queue is left untouched.
+- `CI=true` defaults the test timeout scale to 2; an explicit `AI_TEST_TIMEOUT_SCALE` wins.
+- DB-02 counts are read from the reports, not verified against the host binding (the reviewed
+  HEAD is shown); no CI status (no network).
+- DB-03 exit codes: 0 change, 1 timeout, 2 usage/cursor error; polling every 2 s by default.
+- The fixture marker is `AI_DASHBOARD_IGNORE=1` (environment), not a temp-path rule.
 
 ## Flow chart
-Flow chart updated: vault `agents-flow.md` has a note under "Phone notifications" (T002):
-notifications are mirrored to `.ai/local/notifications.log` for `ai-dashboard`; stage records
-in `.ai/local/observation.json` follow with T003–T005 (the note is extended then). The flow
-itself is unchanged.
+Flow chart updated (T002, 2026-10-14): `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` Plan
+box and the revision node ("Scripts: host reorders the queue (dependencies first), commit +
+host record"), the plan stop ("queue cycle / unknown ID / prose"), the recovery hard-rules box
+("also queue invalid after a revision"), a "Host queue repair" bullet; `updated:` 2026-10-14;
+hub Log line.
+Flow chart updated (T011, 2026-10-15): recovery box "interrupted revision: host repairs the
+queue first" and an "Interrupted revision with an out-of-order queue" bullet; `updated:`
+2026-10-15; hub Log line. T003–T009: flow unchanged (unless a task notes a dashboard
+description in the chart).
 
 ## Manual testing for the human
 
 ### Needs you
-1. Look and feel in a real terminal, with two runs at once: start two pipelines (two checkouts,
-   each under `ai-pipeline --approved`, or one running and one stopped) in tmux, then in a
-   third tmux window run `scripts/ai-dashboard` (or `.ai/bin/ai-dashboard`). Expected: one card
-   per pipeline, eight boxes in flow order, the active box double-bordered in orange (Claude),
-   blue (Codex) or grey (script), ✓ under finished boxes, a stopped run's box red with the
-   reason; runs that need you sort above running ones.
-   Keys: ↑↓ moves between cards, Enter shows or hides a card's details, `a` toggles old runs,
-   `r` refreshes, `q` quits and the terminal is back to normal (cursor, scrollback).
-   Resize: widen the window to 120 columns or more for the boxes, then narrow it below 120: the
-   cards become one compact line. Expected: no garbled lines and no crash at either width.
-2. After T011–T013 (review round 1 fixes): open `ai-dashboard` in tmux with **no** pipeline
-   running, then start `ai-pipeline --approved` in another checkout. Expected: the card appears
-   within 2 s and the dashboard stays up. Then open `vim scripts/ai-run` in `~/Projects/agents`
-   (no pipeline there): that checkout must not show up as running.
+1. CI time: on this PR's GitHub Actions run, the self-check finishes well under 10 minutes
+   (and green). Compare with PR #27's ~24 min; note the runner's CPU count from the log
+   (`Ran … (B batches on N workers, …)` line, `Test time:` and the slowest-tests list).
+2. A real supervised plan revision that adds a prerequisite task at the end
+   (e.g. a scratch project, `AI_SUPERVISE=1`, a plan review with one MAJOR finding): the run
+   continues with `Task queue reordered` in the log and no ⛔; the committed queue has the new
+   task before its dependent.
+3. While the agents test suite runs (`bash .ai/validate` in one tmux window), `ai-dashboard`
+   in another shows no fixture cards (`ai-toolkit-test-*` in the default temp dir, or
+   `ai-tests-*` under `/dev/shm`); your real pipelines are still listed.
+4. `ai-dashboard --json` on a checkout with an open PR shows its URL and the last plan/code
+   review counts; `ai-dashboard --wait --timeout 600` returns when a running pipeline moves
+   to its next stage, and `--since <cursor>` loses nothing between two calls.
 
 ### Covered by automated tests
-- Renderer and TUI (`test_dashboard_render_*`): golden boxes at 140/120/119/60, worst-case row,
-  stopped/finished, plan revision/decision/extra round/format retry, re-check, stop at start,
-  `last-error` stop (`test_dashboard_render_needs_you_with_active_record_and_last_error`), writer
-  output for all twelve stop labels and pause/recovery overlays
-  (`test_dashboard_render_writer_to_renderer_stops_and_overlays`), legacy/malformed, line widths
-  40–200, empty state, expanded events, and under a pty `test_dashboard_render_curses_smoke`,
-  `test_dashboard_render_curses_interaction` (scroll, Enter, resize, quit) and
-  `test_dashboard_render_curses_failure_restores_the_terminal`; the run list changing between
-  empty and non-empty (review M1): `test_dashboard_render_curses_runs_appear_and_disappear`,
-  `test_dashboard_render_curses_all_toggle_with_only_old_runs`; a legacy or malformed-record
-  checkout with a `last-error` says "older toolkit" plus the error, not "before Plan check"
-  (review N1): `test_dashboard_render_legacy_checkout_with_last_error`.
-- Observation record actions, schema, pause/resume, `detail`, `done`, `pid`/`branch`:
-  `test_observation_writer_actions_and_schema`, `test_observation_writer_detail_only_on_recorded_stage`,
-  `test_observation_writer_done_records_pr`, `test_observation_writer_pid_and_branch`.
-- Stop label → box mapping and recovery stage: `test_observation_writer_stop_labels`,
-  `test_observation_writer_recovering`.
-- Symlink, swapped-directory, hard-link, FIFO and held-lock safety (exit 0, warning, outside
-  files unchanged, bounded time): `test_observation_writer_refuses_symlinked_directories`,
-  `test_observation_writer_replaces_symlinked_record`, `test_observation_writer_preplanted_temp_symlink`,
-  `test_observation_writer_local_swapped_after_validation`, `test_observation_writer_hard_links_untouched`,
-  `test_observation_writer_fifos_and_held_locks_return`, `test_observation_writer_notify_log_symlinks`.
-- Bounded readers and Git metadata: `test_observation_writer_read_record_bounds`,
-  `test_observation_writer_read_record_tail`, `test_observation_writer_git_branch`,
-  `test_observation_writer_checkout_fds`.
-- Notification log trimming and concurrency: `test_observation_writer_notify_log_keeps_last_200`,
-  `test_observation_writer_notify_log_concurrent`.
-- Host registry: `test_observation_writer_pipeline_register`,
-  `test_observation_writer_pipeline_register_keeps_replaced_entry`,
-  `test_observation_writer_pipeline_register_unusable_directory`.
-- `tasks counts`: `test_observation_writer_tasks_counts`.
-- Notification mirror and pause overlay: `test_observation_notify_log_mirrors_what_was_sent`,
-  `test_observation_notify_watchdog_notification_is_logged_and_symlink_safe`,
-  `test_observation_notify_fifo_log_and_held_lock_do_not_block_the_run`,
-  `test_observation_notify_usage_limit_pause_marks_the_stage_paused`,
-  `test_observation_notify_codex_pause_marks_the_stage_paused`,
-  `test_observation_notify_gate_changed_stop_notifies_but_logs_nothing`.
-- No project helper after a changed gate: `test_observation_gate_flag_skips_record_helpers`,
-  `test_observation_gate_check_sets_flag_on_changed_or_unreadable_gate`,
-  `test_observation_gate_ok_form_sets_flag_in_calling_shell`,
-  `test_observation_gate_pipeline_resume_gate_stop_unchanged`,
-  `test_observation_gate_deps_installer_changing_gate_sets_flag`,
-  `test_observation_gate_runner_tamper_stop_runs_no_helper`, and the existing
-  `test_runner_detects_even_committed_gate_changes_before_untrusted_helpers`.
-- Pipeline stage records and registration (`test_observation_pipeline_*`): normal run to `done` with
-  the PR URL, `--no-pr`/local-only finish notes, review and plan-review stops, supervised plan
-  revision detail, stored needs-human decision, extra fix round detail, base moved, clean-check
-  death, resume gate stop leaves the record untouched, hook-changed gate runs no helper, registry
-  on start/resume and an unusable registry only warns.
-- Runner, setup and review records (`test_observation_runner_*`): build/checks during a run, failing
-  post-task/final gate ends on checks, failing install on setup, no Setup with current dependencies,
-  recovery install `setup`/`recovering`, session limit between tasks on build, pipeline triage detail
-  kept, standalone triage/revise-plan, format retry on both review boxes and a by-hand retry leaving
-  another stage alone.
-
-- Recovery records (`test_observation_recovery_*`): kept stage and resumed-pipeline replacement,
-  validation on checks and its failure, later-stop labels, TERM and failing-command exits (one ⛔),
-  recovery install on setup, stored decision, base moved, changed gate (no stop record, no log line).
-- Discovery and liveness (`test_dashboard_liveness_*`): real `ai-pipeline`/`ai-recover` processes
-  alive (`real_pipeline_and_recover`), reused PID crashed, marker removed mid-snapshot gone,
-  orphaned `ai-run` crashed, legacy runner alive / nothing gone, root filter, FIFO marker and
-  symlinked `.ai/local` (bounded, gone), registry/process skips and merge, nothing written;
-  an editor, pager or git naming a runner script is not a runner
-  (`test_dashboard_liveness_ignores_non_runner_processes`).
-- Terminal-safe text (`test_dashboard_sanitize_*`): CSI, OSC 8/52, DCS/APC/PM/SOS, 8-bit C1,
-  bare ESC, CR/backspace, DEL, bidi overrides removed; UTF-8 kept; length cap.
+Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its tests.
+- `test_queue_reorder_*` (T001), `test_queue_repair_*` (T002), `test_queue_recovery_*` (T011).
+  A `## Context` section before the first task is kept (T012):
+  `test_queue_reorder_preamble_sections_are_kept`, `test_queue_repair_planning_preamble_section_reorders`.
+- `test_test_harness_timeouts_*` (T003), `test_parallel_runner_*` (T004), `test_fixture_io_*` (T005).
+  Stopping kills test subprocesses (T014): `test_parallel_runner_worker_error_kills_batch_descendants`,
+  `test_parallel_runner_interrupt_kills_batch_descendants`, `test_parallel_runner_sigterm_kills_batch_descendants`.
+  `test_fixture_cache_*` (T006) was not added: T006 is deferred.
+- `test_dashboard_ignore_*` (T007): `test_dashboard_ignore_marked_runner_unless_registered`,
+  `test_dashboard_ignore_other_environments_are_discovered`, `test_dashboard_ignore_environ_reader`,
+  `test_dashboard_ignore_real_processes`, `test_dashboard_ignore_fixture_pipeline_is_hidden`; the
+  watchdog forwarding it is in `test_watchdog_recover_starts_ai_recover_after_a_crash`.
+- `test_dashboard_pr_review_*` (T008): `_url_sources`, `_counts_and_heads`, `_unsafe_entries`,
+  `_json_every_run`, `_expanded_lines`; genuine plan-report HEAD in `_counts_and_heads` and a
+  5,000-digit count in `test_dashboard_pr_review_oversized_count` (T013).
+- `test_dashboard_wait_*` (T009).
 
 ## Human todos
-- Optional: `ln -s ~/Projects/agents/scripts/ai-dashboard ~/.local/bin/` so `ai-dashboard` runs
-  from any directory (it works through a symlink already).
-- Optional: upgrade each project's `.ai/bin` (`setup-project --upgrade --apply`) so its runs
-  record their stages. Runs on older copies show "stage unknown (older toolkit)".
-
-## Review round 1 (2026-10-09)
-Claude fallback review (Codex usage limit): MAJOR=1 (M1 TUI crash when runs go from empty to
-non-empty), MINOR=2 (N1 legacy checkout with `last-error` labelled "before Plan check", N2 editors
-naming a runner script count as runners). All accepted → T011, T012, T013; see
-`.ai/reviews/dispositions.md`.
+- Deferred FL-23 follow-up (T006, cheaper slowest tests): profiling needs commands the runner may
+  not run; the notes and measurements are in the vault backlog (FL-23). Decide whether to run it
+  by hand or as a supervised task.
+- Merge order: PR #27 (`fix/night-stops`) first; then rebase or retarget this branch's PR onto
+  master.
+- Optional CI workflow change (gate file `.github/workflows/self-check.yml`, yours to edit):
+  set `env: AI_TEST_TIMEOUT_SCALE` only if 2 (the `CI=true` default) proves wrong; you may
+  lower `timeout-minutes` from 40 once the run time is confirmed.
+- Other projects: `setup-project --upgrade --apply` so `.ai/bin` and `.ai/prompts` get the
+  reorder, the revision prompt sentence and the dashboard changes.
+- Mission control: retire `~/Projects/wt/plans/sessions/reorder-queue.py` after this merges
+  (use `ai-task reorder`; it rejects prose dependencies instead of rewriting them), and switch
+  its watcher to `ai-dashboard --wait`.
+- Vault: backlog status lines for FL-23, FL-24, DB-02, DB-03, DB-05 (sessions do not tick
+  them).
 
 ## Next action
-Runner: implement T011, T012, T013, then re-review. Human afterwards: the live terminal checks
-under "Needs you" and the PR review.
+T001–T005 and T007–T013 are DONE (T006 deferred, see Human todos). Review round 2 triaged
+(`.ai/reviews/dispositions.md`): M3 accepted → T014 (dispatcher kills batch process trees),
+N6 accepted → T015 (tab after `##` in reorder). T014 DONE. Next: implement T015, then another
+independent review. Human afterwards: the checks under
+"Needs you", the merge order and the PR review.

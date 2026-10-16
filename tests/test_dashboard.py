@@ -21,8 +21,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / 'scripts/lib'
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
 BOUND = 5 * TIMEOUT_SCALE
+COMMAND_TIMEOUT = 30 * TIMEOUT_SCALE
 CLOCK_TICKS = os.sysconf('SC_CLK_TCK')
 BTIME = 1_700_000_000
 
@@ -38,14 +40,14 @@ dash = load_dashboard()
 
 
 class FakeProc:
-    """A fixture process tree: `stat` with btime plus `<pid>/{stat,cmdline,cwd}` entries."""
+    """A fixture process tree: `stat` with btime plus `<pid>/{stat,cmdline,cwd,environ}` entries."""
 
     def __init__(self, root):
         self.root = root
         root.mkdir()
         (root / 'stat').write_text(f'cpu 1 2 3 4\nbtime {BTIME}\nprocesses 9\n')
 
-    def add(self, pid, args, cwd, started=None, state='S', stat=True):
+    def add(self, pid, args, cwd, started=None, state='S', stat=True, environ=None):
         entry = self.root / str(pid)
         entry.mkdir()
         started = time.time() - 60 if started is None else started
@@ -55,6 +57,8 @@ class FakeProc:
             (entry / 'stat').write_text(f'{pid} (odd) name) {state} ' + ' '.join(fields) + '\n')
         (entry / 'cmdline').write_bytes(b'\0'.join(os.fsencode(arg) for arg in args) + b'\0')
         os.symlink(str(cwd), entry / 'cwd')
+        if environ is not None:
+            (entry / 'environ').write_bytes(b'\0'.join(os.fsencode(item) for item in environ) + b'\0')
         return entry
 
 
@@ -99,16 +103,20 @@ class DashboardTest(unittest.TestCase):
         runners = dict(dash.discover(source)).get(str(checkout), [])
         return dash.liveness(self.local_fd(checkout), runners, source)
 
-    def spawn(self, name, checkout):
-        """A real process named NAME (a symlink to a sleeping script) working in CHECKOUT."""
+    def spawn(self, name, checkout, env=None):
+        """A real process named NAME (a symlink to a sleeping script) working in CHECKOUT, with
+        ENV, else this environment without the dashboard ignore marker (discovery must see it)."""
+        if env is None:
+            env = {key: value for key, value in os.environ.items() if key != 'AI_DASHBOARD_IGNORE'}
         bin_dir = self.base / 'bin'
         bin_dir.mkdir(exist_ok=True)
         script = bin_dir / 'runner.sh'
         script.write_text('#!/usr/bin/env bash\nsleep 120\n:\n')  # argv is `bash <link>`, as for the real runners
         script.chmod(0o755)
         link = bin_dir / name
+        link.unlink(missing_ok=True)
         link.symlink_to(script)
-        process = subprocess.Popen([str(link)], cwd=checkout, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen([str(link)], cwd=checkout, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
@@ -260,11 +268,78 @@ class DashboardTest(unittest.TestCase):
                 '    fds = view["checkout_fds"](checkout)\n'
                 '    print(checkout, view["liveness"](fds[2], runners))\n')
         result = subprocess.run([sys.executable, '-c', code, str(lib / 'dashboard.py')],
-                                capture_output=True, text=True, timeout=30 * TIMEOUT_SCALE)
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f'{checkout} alive\n')
         self.assertEqual(listing(), before)
         self.assertFalse((lib / '__pycache__').exists())
+
+    def test_dashboard_ignore_marked_runner_unless_registered(self):
+        checkout = self.checkout('fixture')
+        self.proc.add(4242, ['bash', '/opt/x/.ai/bin/ai-pipeline'], checkout,
+                      environ=['HOME=/x', 'AI_DASHBOARD_IGNORE=1'])
+        self.mark(checkout, 4242)
+        self.assertEqual(dash.discover(), [])
+        self.assertEqual(dash.snapshot()['runs'], [])
+        self.register('fixture.json', checkout)
+        self.assertEqual(dash.discover(), [(str(checkout), [])])
+        run, = dash.snapshot()['runs']
+        self.assertEqual((run['checkout'], run['liveness'], run['status']), (str(checkout), 'alive', 'running'))
+
+    def test_dashboard_ignore_other_environments_are_discovered(self):
+        oversized = ['AI_DASHBOARD_IGNORE=1', 'X=' + 'x' * dash.ENVIRON_LIMIT]
+        cases = (('zero', ['AI_DASHBOARD_IGNORE=0']), ('prefixed', ['XAI_DASHBOARD_IGNORE=1']),
+                 ('suffixed', ['AI_DASHBOARD_IGNORE=1 ']), ('missing', None),
+                 ('unreadable', ['AI_DASHBOARD_IGNORE=1']), ('fifo', None),
+                 ('directory', None), ('oversized', oversized))
+        for pid, (case, environ) in enumerate(cases, 5000):
+            with self.subTest(case=case):
+                checkout = self.checkout(case)
+                entry = self.proc.add(pid, ['bash', '/opt/x/.ai/bin/ai-run'], checkout, environ=environ)
+                if case == 'unreadable':
+                    (entry / 'environ').chmod(0)
+                    if os.access(entry / 'environ', os.R_OK):
+                        self.skipTest('running as root: mode 000 is still readable')
+                elif case == 'fifo':
+                    os.mkfifo(entry / 'environ')
+                elif case == 'directory':
+                    (entry / 'environ').mkdir()
+                started = time.monotonic()
+                self.assertEqual([found for found, _ in dict(dash.discover())[str(checkout)]], [pid])
+                self.assertLess(time.monotonic() - started, BOUND)
+
+    def test_dashboard_ignore_environ_reader(self):
+        source = dash.ProcSource()
+        self.proc.add(1, ['ai-run'], self.base, environ=['A=1', 'B=x=y'])
+        self.assertEqual(source.environ(1), {b'A=1', b'B=x=y'})
+        self.assertIsNone(source.environ(2))
+        entry = self.proc.add(3, ['ai-run'], self.base)
+        os.symlink(self.proc.root / '1/environ', entry / 'environ')
+        self.assertIsNone(source.environ(3))
+        exact = self.proc.add(4, ['ai-run'], self.base)
+        (exact / 'environ').write_bytes(b'A=1\0' + b'x' * (dash.ENVIRON_LIMIT - 4))
+        self.assertEqual(source.environ(4), {b'A=1', b'x' * (dash.ENVIRON_LIMIT - 4)})
+        (exact / 'environ').write_bytes(b'A=1\0' + b'x' * (dash.ENVIRON_LIMIT - 3))
+        self.assertIsNone(source.environ(4))
+
+    def test_dashboard_ignore_real_processes(self):
+        real = dash.ProcSource('/proc')
+        if real.environ(os.getpid()) is None:
+            self.skipTest('/proc/<pid>/environ is not readable here')
+        hidden = self.checkout('hidden')
+        shown = self.checkout('shown')
+        environment = {key: value for key, value in os.environ.items() if key != 'AI_DASHBOARD_IGNORE'}
+        ignored = self.spawn('ai-pipeline', hidden, dict(environment, AI_DASHBOARD_IGNORE='1'))
+        listed = self.spawn('ai-pipeline', shown)
+        for process in (ignored, listed):
+            for _ in range(200):  # until the exec: environ is the parent's copy before it
+                if (real.process(process.pid) or ((),))[0][1:2] == [os.fsencode(self.base / 'bin/ai-pipeline')]:
+                    break
+                time.sleep(0.01)
+        self.assertIn(b'AI_DASHBOARD_IGNORE=1', real.environ(ignored.pid))
+        found = dict(dash.discover(real))
+        self.assertNotIn(str(hidden), found)
+        self.assertEqual([pid for pid, _ in found[str(shown)]], [listed.pid])
 
 
 class DashboardSanitizeTest(unittest.TestCase):
@@ -347,6 +422,209 @@ class SnapshotTest(DashboardTest):
         data = json.loads(self.run_cli('--json', *options).stdout)
         return {run['project']: run for run in data['runs']}
 
+    def inspect_run(self, checkout):
+        return dash.inspect(str(checkout), [], time.time())
+
+    def report(self, counts=((0, 1, 2),), head='abc1234def'):
+        text = f'<!-- Host evidence: HEAD {head}; merge-base {head}; saved now. -->\n\n' if head else ''
+        return text + ''.join(f'Finding counts: BLOCKER={b} MAJOR={m} MINOR={n}\n' for b, m, n in counts)
+
+    def test_dashboard_pr_review_url_sources(self):
+        url = 'https://github.com/o/r/pull/27'
+        checkout = self.plant('pr')
+        self.assertEqual(self.inspect_run(checkout)['pr'], '')
+        (checkout / '.ai/run-log.md').write_text(
+            f'- pull request ready: https://github.com/o/r/pull/3\n- pull request ready: {url}\n- other\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], url)
+        (checkout / '.ai/state.md').write_text(
+            'Next action: Human: test and merge the pull request https://github.com/o/r/pull/99\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], 'https://github.com/o/r/pull/99')
+        (checkout / '.ai/state.md').write_text(
+            f'Next action: merge \x1b[31m{url}\n')
+        self.assertEqual(self.inspect_run(checkout)['pr'], url)
+        self.assertNotIn('\x1b', json.dumps(self.inspect_run(checkout)))
+
+    def test_dashboard_pr_review_counts_and_heads(self):
+        checkout = self.plant('rev')
+        reviews = checkout / '.ai/reviews'
+        reviews.mkdir()
+        (reviews / 'plan.md').write_text(
+            f'<!-- Plan review of plan digest {"e" * 64}; HEAD 1234567890; saved now. -->\n\n'
+            'Finding counts: BLOCKER=0 MAJOR=1 MINOR=2\n')
+        (reviews / 'current.md').write_text(self.report(((3, 0, 4),)))
+        run = self.inspect_run(checkout)
+        self.assertEqual(run['reviews']['plan'], {'blocker': 0, 'major': 1, 'minor': 2, 'head': '1234567'})
+        self.assertEqual(run['reviews']['code'], {'blocker': 3, 'major': 0, 'minor': 4, 'head': 'abc1234'})
+        (reviews / 'plan.md').write_text(self.report(((0, 1, 2), (1, 1, 1))))
+        (reviews / 'current.md').write_text('no counts here\n')
+        run = self.inspect_run(checkout)
+        self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+        self.assertEqual(run['branch'], 'main')
+        self.assertEqual(run['tasks']['total'], 3)
+        (reviews / 'plan.md').write_text(self.report(head=''))
+        self.assertEqual(self.inspect_run(checkout)['reviews']['plan'],
+                         {'blocker': 0, 'major': 1, 'minor': 2, 'head': ''})
+
+    def test_dashboard_pr_review_oversized_count(self):
+        checkout = self.plant('huge')
+        (checkout / '.ai/reviews').mkdir()
+        (checkout / '.ai/reviews/plan.md').write_text(self.report(((0, 1, 2),)))
+        (checkout / '.ai/reviews/current.md').write_text(
+            f'Finding counts: BLOCKER={"9" * 5000} MAJOR=0 MINOR=0\n')
+        self.plant('other', 'build')
+        for run in (dash.inspect(str(checkout), [], time.time()),
+                    next(run for run in dash.snapshot(all_runs=True)['runs'] if run['project'] == 'huge')):
+            self.assertIsNone(run['reviews']['code'])
+            self.assertEqual(run['reviews']['plan'], {'blocker': 0, 'major': 1, 'minor': 2, 'head': 'abc1234'})
+        runs = self.runs('--all')
+        self.assertIsNone(runs['huge']['reviews']['code'])
+        self.assertEqual(runs['huge']['reviews']['plan']['minor'], 2)
+        self.assertEqual(runs['other']['branch'], 'main')
+
+    def test_dashboard_pr_review_unsafe_entries(self):
+        fifo = self.plant('fifo')
+        os.mkfifo(fifo / '.ai/reviews')
+        start = time.time()
+        run = self.inspect_run(fifo)
+        self.assertLess(time.time() - start, BOUND)
+        self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+        self.assertEqual(run['branch'], 'main')
+        link = self.plant('link')
+        real = self.base / 'elsewhere'
+        real.mkdir()
+        (real / 'plan.md').write_text(self.report())
+        os.symlink(real, link / '.ai/reviews')
+        self.assertEqual(self.inspect_run(link)['reviews'], {'plan': None, 'code': None})
+        files = self.plant('files')
+        (files / '.ai/reviews').mkdir()
+        os.mkfifo(files / '.ai/reviews/plan.md')
+        os.symlink(real / 'plan.md', files / '.ai/reviews/current.md')
+        self.assertEqual(self.inspect_run(files)['reviews'], {'plan': None, 'code': None})
+
+    def test_dashboard_pr_review_json_every_run(self):
+        self.plant('good', 'build')
+        (self.base / 'bad').mkdir()
+        self.register('bad.json', self.base / 'bad')
+        runs = self.runs()
+        self.assertTrue(runs)
+        for run in runs.values():
+            self.assertEqual(run['pr'], '')
+            self.assertEqual(run['reviews'], {'plan': None, 'code': None})
+
+    # --wait (T009)
+
+    def wait_cli(self, *options, expected=0):
+        result = self.run_cli('--wait', '--interval', '0.1', *options, expected=expected)
+        return json.loads(result.stdout)
+
+    def start_wait(self, *options):
+        process = subprocess.Popen([sys.executable, '-B', str(LIB / 'dashboard.py'), '--wait', '--interval', '0.1',
+                                    '--timeout', str(20 * TIMEOUT_SCALE), *options], cwd=self.base,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.addCleanup(process.communicate)
+        time.sleep(1 * TIMEOUT_SCALE)
+        self.assertIsNone(process.poll())
+        return process
+
+    def finish_wait(self, process, expected=0):
+        out, err = process.communicate(timeout=BOUND * 3)
+        self.assertEqual(process.returncode, expected, out + err)
+        return json.loads(out)
+
+    def observe(self, checkout, stage):
+        path = checkout / '.ai/local/observation.json'
+        record = json.loads(path.read_text())
+        record['stage'] = stage
+        path.write_text(json.dumps(record))
+
+    def notify(self, checkout, message, ts='2026-10-09T10:00:00Z'):
+        with open(checkout / '.ai/local/notifications.log', 'a') as log:
+            log.write(json.dumps({'ts': ts, 'message': message}) + '\n')
+
+    def test_dashboard_wait_stage_change_reports_only_that_run(self):
+        first = self.plant('one', 'build')
+        self.plant('two', 'build')
+        process = self.start_wait()
+        self.observe(first, 'checks')
+        data = self.finish_wait(process)
+        self.assertEqual([run['project'] for run in data['runs']], ['one'])
+        self.assertEqual(data['runs'][0]['stage'], 'checks')
+        self.assertFalse(data['timed_out'])
+        self.assertTrue(data['cursor'])
+        self.assertNotIn('notifications_mark', data['runs'][0])
+
+    def test_dashboard_wait_notification_changes_but_tasks_edit_does_not(self):
+        checkout = self.plant('one', 'build')
+        process = self.start_wait()
+        self.notify(checkout, 'hello')
+        self.assertEqual([run['project'] for run in self.finish_wait(process)['runs']], ['one'])
+        process = subprocess.Popen([sys.executable, '-B', str(LIB / 'dashboard.py'), '--wait', '--interval', '0.1',
+                                    '--timeout', '2'], cwd=self.base, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.addCleanup(process.communicate)
+        time.sleep(0.5 * TIMEOUT_SCALE)
+        (checkout / '.ai/tasks.md').write_text('# Tasks\n\n## T001 — x\nStatus: DONE\n')
+        data = self.finish_wait(process, expected=1)
+        self.assertTrue(data['timed_out'])
+        self.assertEqual(data['runs'], [])
+
+    def test_dashboard_wait_lookalike_notifications_change(self):
+        checkout = self.plant('one', 'build')
+        long = 'x' * 400
+        self.notify(checkout, long + 'a')
+        before = self.inspect_run(checkout)
+        first = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.notify(checkout, long + 'b')
+        after = self.inspect_run(checkout)
+        self.assertEqual(before['events'][-1], after['events'][-1])
+        self.assertNotEqual(before['notifications_mark'], after['notifications_mark'])
+        data = self.wait_cli('--since', first, '--timeout', '5')
+        self.assertEqual([run['project'] for run in data['runs']], ['one'])
+        # the same line again, same second: identical bytes still change the mark
+        mid = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.notify(checkout, long + 'b')
+        again = self.inspect_run(checkout)
+        self.assertEqual(after['events'][-1], again['events'][-1])
+        self.assertNotEqual(after['notifications_mark'], again['notifications_mark'])
+        self.assertEqual(len(self.wait_cli('--since', mid, '--timeout', '5')['runs']), 1)
+        self.assertNotIn('notifications_mark', next(iter(self.runs().values())))
+
+    def test_dashboard_wait_since_cursor(self):
+        checkout = self.plant('one', 'build')
+        cursor = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        data = self.wait_cli('--since', cursor, '--timeout', '0.3', expected=1)
+        self.assertTrue(data['timed_out'])
+        self.observe(checkout, 'review')
+        data = self.wait_cli('--since', cursor, '--timeout', '5')
+        self.assertEqual(data['runs'][0]['stage'], 'review')
+
+    def test_dashboard_wait_new_checkout_reported_removed_not(self):
+        self.plant('one', 'build')
+        self.plant('two', 'build')
+        cursor = self.wait_cli('--timeout', '0.3', expected=1)['cursor']
+        self.plant('three', 'build')
+        data = self.wait_cli('--since', cursor, '--timeout', '5')
+        self.assertEqual([run['project'] for run in data['runs']], ['three'])
+        cursor = data['cursor']
+        (self.state / 'pipelines' / 'two.json').unlink()
+        data = self.wait_cli('--since', cursor, '--timeout', '0.5', expected=1)
+        self.assertTrue(data['timed_out'])
+
+    def test_dashboard_wait_usage_errors(self):
+        for options in (('--wait', '--since', 'garbage'), ('--since', 'abc'), ('--wait', '--once'),
+                        ('--wait', '--timeout', '0'), ('--timeout', '5'), ('--interval', '1'),
+                        ('--wait', '--interval', '0.01')):
+            self.run_cli(*options, expected=2)
+
+    def test_dashboard_wait_reports_a_hidden_old_run(self):
+        checkout = self.plant('old', 'pr', 'done', age=3 * 86400)
+        self.assertEqual(self.runs(), {})
+        process = self.start_wait()
+        self.observe(checkout, 'review')
+        self.assertEqual([run['project'] for run in self.finish_wait(process)['runs']], ['old'])
+
     def test_dashboard_snapshot_empty_state_names_state_root(self):
         data = json.loads(self.run_cli('--json').stdout)
         self.assertEqual(data, {'state_root': str(self.state), 'runs': []})
@@ -387,6 +665,12 @@ class SnapshotTest(DashboardTest):
         order = [run['status'] for run in json.loads(self.run_cli('--json').stdout)['runs']]
         ranks = [dash.RANK[status] for status in order]
         self.assertEqual(ranks, sorted(ranks))
+
+    def test_observation_writer_plan_dashboard_snapshot(self):
+        self.plant('planning', 'planning', detail='opus · first plan')
+        runs = self.runs()
+        self.assertIn('planning', runs)
+        self.assertEqual(runs['planning']['stage'], 'planning')
 
     def test_dashboard_snapshot_real_process_through_symlink(self):
         checkout = self.plant('real', 'build')
@@ -446,7 +730,7 @@ class SnapshotTest(DashboardTest):
         result = self.run_cli('--once')
         self.assertLess(time.monotonic() - start, BOUND)
         self.assertIn('healthy · main', result.stdout)
-        self.assertEqual(result.stdout.count('✓'), 4)  # the four boxes before Checks, healthy run only
+        self.assertEqual(result.stdout.count('✓'), 5)  # the five boxes before Checks, healthy run only
         runs = self.runs()
         self.assertEqual(runs['healthy']['stage'], 'checks')
         self.assertEqual(runs['hostile']['stage'], 'unknown')
@@ -524,7 +808,7 @@ class SnapshotTest(DashboardTest):
 
 
 def fake_run(stage='build', state='active', status='running', detail='T003 · sonnet · 12m', note='',
-             tasks=(2, 7), last_error='', observed=True, events=None):
+             tasks=(2, 7), last_error='', observed=True, events=None, pr='', reviews=None):
     """A snapshot run dict, as `inspect` would return it."""
     if events is None:
         events = [{'ts': '2026-10-09T10:00:00Z', 'message': '🔁 Round 2'}]
@@ -532,6 +816,7 @@ def fake_run(stage='build', state='active', status='running', detail='T003 · so
     return {'project': 'demo', 'checkout': '/x/demo', 'branch': 'feature/x', 'liveness': 'alive',
             'observation': observation if observed else None, 'events': events, 'last_error': last_error,
             'tasks': {'done': tasks[0], 'total': tasks[1], 'current': ''} if tasks else None,
+            'pr': pr, 'reviews': reviews or {'plan': None, 'code': None},
             'status': status, 'stage': stage if observed else 'unknown', 'since': '', 'updated': 0.0}
 
 
@@ -546,11 +831,11 @@ def styles(lines):
 
 HEADER = 'AI pipelines  1 running · 0 needs you · 0 finished  00:00  ↑↓ ⏎ a r q'
 WIDE_BOXES = [
-    '  ┌────────────┐  ┌───────────────┐  ┌───────┐  ╔═══════════╗  ┌────────┐  ┌────────┐  ┌────────┐  ┌────┐',
-    '  │ Plan check │──│ Plan revision │──│ Setup │──║ Build 3/7 ║──│ Checks │──│ Review │──│ Triage │──│ PR │',
-    '  └────────────┘  └───────────────┘  └───────┘  ╚═══════════╝  └────────┘  └────────┘  └────────┘  └────┘',
+    '  ┌──────┐ ┌────────────┐ ┌───────────────┐ ┌───────┐ ╔═══════════╗ ┌────────┐ ┌────────┐ ┌────────┐ ┌────┐',
+    '  │ Plan │─│ Plan check │─│ Plan revision │─│ Setup │─║ Build 3/7 ║─│ Checks │─│ Review │─│ Triage │─│ PR │',
+    '  └──────┘ └────────────┘ └───────────────┘ └───────┘ ╚═══════════╝ └────────┘ └────────┘ └────────┘ └────┘',
 ]
-WIDE_MARKS = '    ✓' + ' ' * 15 + '✓' + ' ' * 18 + '✓' + ' ' * 8 + 'T003 · sonnet · 12m'
+WIDE_MARKS = '    ✓' + ' ' * 8 + '✓' + ' ' * 14 + '✓' + ' ' * 17 + '✓' + ' ' * 7 + 'T003 · sonnet · 12m'
 WRITER_STAGES = {'start': None, 'plan review': 'plan_review', 'plan revision': 'plan_revision',
                  'implementation': 'build', 'validation': 'checks', 'review': 'review',
                  'triage': 'triage', 're-check': 'recheck', 'pull request preparation': 'pr',
@@ -589,11 +874,11 @@ class RenderTest(DashboardTest):
         self.assertEqual(wide, [HEADER, '', '  demo · feature/x · running · 2/7 tasks', *WIDE_BOXES,
                                 WIDE_MARKS, '  10:00 🔁 Round 2'])
         self.assertEqual(plain(self.view(fake_run(), 120)), wide)
-        compact = ['  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2']
+        compact = ['  ✓Plan ✓PlanCheck ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2']
         self.assertEqual(plain(self.view(fake_run(), 119))[2:], ['  demo · feature/x · running · 2/7 tasks',
                                                                 *compact])
         narrow = plain(self.view(fake_run(), 60))
-        self.assertEqual(narrow[3], '  ✓Plan ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Review ·Triage ·…')
+        self.assertEqual(narrow[3], '  ✓Plan ✓PlanCheck ✓Revise ✓Setup ▶Build 3/7 ·Checks ·Revie…')
         self.assertTrue(all(dash.cols(line) <= 60 for line in narrow))
 
     def test_dashboard_render_styles_of_the_active_box(self):
@@ -608,8 +893,9 @@ class RenderTest(DashboardTest):
             self.assertNotIn('…', line)
         self.assertIn('║ Plan revision ⏸ ║', lines[4])
         self.assertLessEqual(max(dash.cols(line) for line in lines), 120)
-        longest = ['Plan check', 'Plan revision ⏸', 'Setup', 'Build 99/99', 'Checks', 'Review', 'Re-check', 'PR']
-        self.assertLessEqual(sum(dash.cols(label) + 4 for label in longest) + 14 + 2, 120)
+        longest = ['Plan', 'Plan check', 'Plan revision ⏸', 'Setup', 'Build 99/99', 'Checks', 'Review', 'Re-check',
+                   'PR']
+        self.assertLessEqual(sum(dash.cols(label) + 4 for label in longest) + 8 + 2, 120)
         lines = plain(self.view(fake_run('build', tasks=(99, 120)), 120))
         self.assertIn('Build 100/…', lines[4])
 
@@ -619,7 +905,7 @@ class RenderTest(DashboardTest):
         self.assertIn('⛔ 2 blockers', plain(stopped)[6])
         self.assertFalse([s for s in styles(stopped) if s[1].startswith('active_')])
         done = plain(self.view(fake_run('pr', 'done', 'finished', note='PR open')))
-        self.assertEqual(done[6].count('✓'), 8)
+        self.assertEqual(done[6].count('✓'), 9)
         self.assertEqual(done[7], '  🏁 PR open')
 
     def test_dashboard_render_plan_revision_stored_decision_extra_round_format_retry(self):
@@ -630,9 +916,9 @@ class RenderTest(DashboardTest):
         self.assertIn(('║ Plan revision ║', 'stopped'), styles(decision))
         self.assertIn('⛔ Which database?', plain(decision)[6])
         extra = plain(self.view(fake_run('triage', detail='round 3 · extra (5 → 3 → 1)')))[6]
-        self.assertEqual(extra.index('round 3'), 83)  # the Triage box column; Build is short here
+        self.assertEqual(extra.index('round 3'), 86)  # the Triage box column; Build is short here
         retry = plain(self.view(fake_run('review', detail='format retry')))[6]
-        self.assertEqual(retry.index('format retry'), 71)
+        self.assertEqual(retry.index('format retry'), 75)
 
     def test_dashboard_render_recheck_is_the_triage_box(self):
         lines = self.view(fake_run('recheck'))
@@ -641,9 +927,10 @@ class RenderTest(DashboardTest):
 
     def test_dashboard_render_stop_at_start_highlights_no_box(self):
         lines = self.view(fake_run('none', 'stopped', 'needs_you', note='base moved', detail=''))
-        self.assertFalse([s for s in styles(lines) if s[1] in ('stopped', 'done') and '│' in s[0]])
+        self.assertEqual([s for s in styles(lines) if s[1] in ('stopped', 'done') and '│' in s[0]],
+                         [('│ Plan │', 'done')])  # the pipeline got past planning
         self.assertNotIn('╔', ''.join(plain(lines)))
-        self.assertEqual(plain(lines)[6], '  ⛔ stopped before Plan check · base moved')
+        self.assertEqual(plain(lines)[6], '    ✓ ⛔ stopped before Plan check · base moved')
 
     def test_dashboard_render_needs_you_with_active_record_and_last_error(self):
         run = fake_run('build', 'active', 'needs_you', last_error='gate broken', detail='T003')
@@ -746,8 +1033,147 @@ class RenderTest(DashboardTest):
         self.assertIn('▶PR ⚠', crashed[3])
         paused = plain(self.view(runs[1], 119))
         self.assertIn('▶Revise ⏸', paused[3])
-        stopped = plain(self.view(runs[4], 60))
+        stopped = plain(self.view(runs[4], 80))
         self.assertIn('✗Re-check', stopped[3])
+
+    def planned_checkout(self, name, *steps, age=0):
+        """A registered checkout whose observation is written by `workflow.py observe`."""
+        checkout = self.checkout(name)
+        self.register(name + '.json', checkout)
+        for step in steps:
+            self.observe(checkout, *step)
+        if age:
+            then = time.time() - age
+            for path in checkout.rglob('*'):
+                if path.is_file():
+                    os.utime(path, (then, then))
+        return checkout
+
+    def json_runs(self, *options):
+        data = json.loads(self.run_cli('--json', *options).stdout)
+        return {run['project']: run for run in data['runs']}
+
+    def test_dashboard_plan_running_session_golden_widths(self):
+        planning = fake_run('planning', detail='opus · first plan', tasks=None)
+        wide = plain(self.view(planning))
+        self.assertEqual(wide[3:], [
+            '  ╔══════╗ ┌────────────┐ ┌───────────────┐ ┌───────┐ ┌───────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────┐',
+            '  ║ Plan ║─│ Plan check │─│ Plan revision │─│ Setup │─│ Build │─│ Checks │─│ Review │─│ Triage │─│ PR │',
+            '  ╚══════╝ └────────────┘ └───────────────┘ └───────┘ └───────┘ └────────┘ └────────┘ └────────┘ └────┘',
+            '  opus · first plan', '  10:00 🔁 Round 2'])
+        self.assertNotIn('✓', ''.join(wide))
+        self.assertIn(('║ Plan ║', 'active_claude'), styles(self.view(planning)))
+        self.assertEqual(plain(self.view(planning, 120)), wide)
+        self.assertEqual(plain(self.view(planning, 119))[3:], [
+            '  ▶Plan ·PlanCheck ·Revise ·Setup ·Build ·Checks ·Review ·Triage ·PR', '  10:00 🔁 Round 2'])
+        narrow = plain(self.view(planning, 60))
+        self.assertEqual(narrow[3], '  ▶Plan ·PlanCheck ·Revise ·Setup ·Build ·Checks ·Review ·T…')
+        self.assertTrue(all(dash.cols(line) <= 60 for line in narrow))
+
+    def test_dashboard_plan_running_build_ticks_plan(self):
+        wide = plain(self.view(fake_run()))
+        self.assertEqual(wide[3:6], WIDE_BOXES)
+        self.assertEqual(wide[6], WIDE_MARKS)
+        self.assertEqual(wide[6].index('✓'), 4)  # under the Plan box
+
+    def test_dashboard_plan_nine_boxes_fit_120_without_truncation(self):
+        runs = [fake_run('plan_revision', 'paused', 'paused', note='limit', tasks=(98, 99)),
+                fake_run('recheck', tasks=(98, 99)), fake_run('planning', detail='opus · first plan'),
+                fake_run('planning', 'done', 'planned', note='7 tasks'),
+                fake_run('planning', 'stopped', 'needs_you', note='Task queue is invalid: x' * 20),
+                fake_run('none', 'active'), fake_run('none', 'stopped', 'needs_you', note='z' * 300)]
+        for number, run in enumerate(runs):
+            lines = plain(self.view(run, 120))
+            with self.subTest(run=number):
+                for line in lines[3:6]:
+                    self.assertNotIn('…', line)
+                self.assertEqual(lines[4].count('│') + lines[4].count('║'), 18)
+            for width in range(40, 201):
+                for line in plain(render_lines(run, width, expanded=frozenset({'/x/demo'}))):
+                    self.assertLessEqual(dash.cols(line), width, (width, line))
+        build = plain(self.view(fake_run('build', tasks=(98, 99)), 120))
+        self.assertIn('Build 99/99', build[4])
+        recheck = plain(self.view(runs[1], 120))
+        self.assertIn('Re-check', recheck[4])
+        self.assertEqual(dash.BOX_OF['recheck'], dash.BOX_OF['triage'])
+
+    def test_dashboard_plan_planned_status(self):
+        planned = self.planned_checkout('planned', ('planned', '7 tasks'))
+        running = self.planned_checkout('running', ('step', 'build'))
+        self.proc.add(6001, ['bash', '/x/.ai/bin/ai-pipeline'], running)
+        self.mark(running, 6001)
+        self.planned_checkout('finished', ('done', 'PR open'))
+        runs = self.json_runs()
+        self.assertEqual((runs['planned']['status'], runs['planned']['stage']), ('planned', 'planning'))
+        self.assertEqual(runs['planned']['observation']['note'], '7 tasks')
+        self.assertEqual(list(runs), ['running', 'planned', 'finished'])
+        lines = plain(self.view(dash.inspect(str(planned), [], time.time())))
+        self.assertEqual(lines[6][:5], '    ✓')
+        self.assertNotIn('╔', ''.join(lines))
+        self.assertTrue(lines[6].endswith('📝 7 tasks'))
+        self.assertEqual(lines[6].index('📝'), 11)  # under the Plan check box
+        self.assertIn('planned', lines[2])
+        compact = plain(self.view(dash.inspect(str(planned), [], time.time()), 100))
+        self.assertTrue(compact[3].startswith('  ✓Plan ·PlanCheck ·Revise'))
+        self.assertNotIn('▶', compact[3])
+        self.assertEqual(len(compact), 5)
+
+    def test_dashboard_plan_planned_hidden_after_a_day(self):
+        self.planned_checkout('old', ('planned', '3 tasks'), age=25 * 3600)
+        self.planned_checkout('new', ('planned', '3 tasks'))
+        self.assertEqual(sorted(self.json_runs()), ['new'])
+        self.assertEqual(sorted(self.json_runs('--all')), ['new', 'old'])
+
+    def test_dashboard_plan_stopped_planning_needs_you(self):
+        stopped = self.planned_checkout('stopped', ('step', 'planning', 'opus · first plan'),
+                                        ('stop', 'plan', 'Task queue is invalid: T002 has no Goal'))
+        runs = self.json_runs()
+        self.assertEqual((runs['stopped']['status'], runs['stopped']['stage']), ('needs_you', 'planning'))
+        run = dash.inspect(str(stopped), [], time.time())
+        self.assertIn(('║ Plan ║', 'stopped'), styles(self.view(run)))
+        self.assertIn('⛔ Task queue is invalid: T002 has no Goal', plain(self.view(run))[6])
+        compact = plain(self.view(run, 100))
+        self.assertTrue(compact[3].startswith('  ✗Plan ·PlanCheck'))
+
+    def test_dashboard_plan_pipeline_start_record_ticks_plan(self):
+        checkout = self.planned_checkout('started', ('start',))
+        self.proc.add(6002, ['bash', '/x/.ai/bin/ai-pipeline'], checkout)
+        self.mark(checkout, 6002)
+        run = dash.inspect(str(checkout), dash.discover(dash.ProcSource())[0][1], time.time())
+        self.assertEqual((run['status'], run['stage']), ('running', 'none'))
+        segments = styles(self.view(run))
+        self.assertIn(('│ Plan │', 'done'), segments)
+        self.assertFalse([s for s in segments if s[1].startswith('active_') or s[1] == 'stopped'])
+        self.assertNotIn('╔', ''.join(plain(self.view(run))))
+        stopped = self.planned_checkout('start-stop', ('start',), ('stop', 'start', 'base moved'))
+        run = dash.inspect(str(stopped), [], time.time())
+        self.assertIn(('│ Plan │', 'done'), styles(self.view(run)))
+        self.assertEqual(plain(self.view(run))[6], '    ✓ ⛔ stopped before Plan check · base moved')
+
+    def test_dashboard_plan_old_records_and_legacy(self):
+        checkout = self.checkout('old')
+        (checkout / '.ai/local/observation.json').write_text(json.dumps(
+            {'stage': 'build', 'state': 'active', 'detail': 'T003', 'note': '', 'since': ''}))
+        run = dash.inspect(str(checkout), [(1, '1')], time.time())
+        self.assertIn(('│ Plan │', 'done'), styles(self.view(run)))
+        legacy = plain(self.view(fake_run(observed=False, tasks=None)))
+        segments = styles(self.view(fake_run(observed=False, tasks=None)))
+        self.assertEqual(legacy[6], '  stage unknown (older toolkit)')
+        self.assertIn(('│ Plan │', 'pending'), segments)
+        self.assertFalse([s for s in segments if s[1] in ('stopped', 'done')])
+
+    def test_dashboard_plan_live_ai_run_plan_is_running_on_plan(self):
+        checkout = self.planned_checkout('live', ('step', 'planning', 'opus · first plan'))
+        self.proc.add(6003, ['bash', '/x/.ai/bin/ai-run', '--plan', 'p.md'], checkout)
+        runs = self.json_runs()
+        self.assertEqual((runs['live']['status'], runs['live']['stage']), ('running', 'planning'))
+        self.assertIn('║ Plan ║', self.run_cli('--once').stdout)
+
+    def test_dashboard_plan_recheck_stays_in_the_triage_box(self):
+        lines = self.view(fake_run('recheck'))
+        self.assertIn(('║ Re-check ║', 'active_codex'), styles(lines))
+        self.assertNotIn('Triage', plain(lines)[4])
+        self.assertEqual(plain(lines)[4].index('Re-check'), 88)
 
     def test_dashboard_render_empty_state_and_expanded_events(self):
         empty = plain(dash.render([], 140, now=0, state_root='/some/root'))
@@ -758,6 +1184,21 @@ class RenderTest(DashboardTest):
         shown = [line for line in lines if line.startswith('  10:00 m')]
         self.assertEqual([line[8:] for line in shown], ['m11'] + [f'm{n}' for n in range(4, 12)])
         self.assertIn('  path: /x/demo', lines)
+
+    def test_dashboard_pr_review_expanded_lines(self):
+        expanded = frozenset({'/x/demo'})
+        lines = plain(self.view(fake_run(), expanded=expanded))
+        self.assertNotIn('  pr:', ' '.join(line[:5] for line in lines))
+        self.assertIn('  reviews: none yet', lines)
+        reviews = {'plan': {'blocker': 0, 'major': 1, 'minor': 2, 'head': 'abc1234'},
+                   'code': {'blocker': 3, 'major': 0, 'minor': 0, 'head': ''}}
+        lines = plain(self.view(fake_run(pr='https://github.com/o/r/pull/27', reviews=reviews),
+                                expanded=expanded))
+        self.assertIn('  pr: https://github.com/o/r/pull/27', lines)
+        self.assertIn('  reviews: plan B0 M1 m2 @abc1234 · code B3 M0 m0', lines)
+        reviews['plan'] = None
+        lines = plain(self.view(fake_run(reviews=reviews), expanded=expanded))
+        self.assertIn('  reviews: code B3 M0 m0', lines)
 
     def pty_run(self, argv, rows=30, columns=140):
         """Start ARGV on a pty of the given size; returns (pid, master fd)."""

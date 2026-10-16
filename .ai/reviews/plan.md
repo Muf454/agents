@@ -1,27 +1,64 @@
-<!-- Plan review of plan digest 82b968621215fd7b7798ff2b762ce21f4cb24a60aa619dcd695c7296844b94a2; HEAD 3dc8c7c48218a4f07acfc159f1e8599b64f0b114; saved 2026-10-09T09:35:19Z. -->
+<!-- Plan review of plan digest 05325f13c3f01979619cc830282272c6a83602e0c903e5dfb3c2a145f92d1e3e; HEAD e5e68b0b75e0ed3812d63ba0fec5049b9a121652; saved 2026-10-14T21:18:05Z. -->
 
-> **Reviewer: Claude fallback (claude-fable-5-1, effort high; Codex usage limit). Codex catch-up review pending: see .ai/reviews/fallback-log.md.**
+# Plan review
 
-# Plan review — round 11 (HEAD 3dc8c7c)
+Scope: HEAD `e5e68b0b75e0ed3812d63ba0fec5049b9a121652`, round 2.
 
-## Overall verdict
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=3
-
-The round-10 revision holds against the code. P39 is fixed correctly: T005's gate test now keeps `workflow.py` intact and changes `.ai/validate` as `test_recovery_never_passes_a_changed_gate_or_hard_stop` does (`tests/test_workflow.py:2999-3013`); with T005's `ai_observe recovering` placed after `max` (`scripts/ai-recover:94-95`) and before the gate comparison (`:97-99`), and T010 setting `AI_GATE_BROKEN` on that `escalate`, the final record is the `recovering` one and `last-error` (written by `escalate` at `:40`) is newer, which is exactly T007's P44 `needs_you` input. P40–P45 were verified: `watchdog.py:478-480` sources its own `common.sh` and `start_recovery` (`:286-305`) checks the digest with its own copy; ai-pipeline's two pre-step gate stops (`:125`, `:129-130`) are after the marker (`:84`) and now set the flag; `ai_guard_verify` is never invoked inside a command substitution anywhere under `scripts/` (grep), so the plain-variable flag reaches every caller; `done` → `stage=pr` covers the `--no-pr` finish at `:555-561` and the no-origin finish at `:564-567`, both before `step 'Pull request'` (`:563`); `tasks count`/`progress` (`workflow.py:480-488`) print no bare counts, so the new `tasks counts` action is needed. All line anchors in T003/T004/T005/T006/T007 match the current source (ai-run `:430/441/459/461/478/485/494/501/513/522`, ai-pipeline step/stop sites, watchdog `:65-111`, workflow `:302-305/388/1016/1038/1058`); every named fixture test exists; `--sessions` is forwarded to ai-run (`ai-pipeline:57-59`) so T004's session-limit case is reachable. Model lines are present and fit the risk on every task.
+Overall verdict: Suitable for implementation with the minor plan improvements below.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
 ## BLOCKER findings
+
 None.
 
 ## MAJOR findings
+
 None.
 
 ## MINOR findings
-- P46: `.ai/tasks.md` T010, ai-recover bullet ("~97 … sets `AI_GATE_BROKEN=1` before its `escalate`, ~98 and the others become `ai_gate_check "$approved_gate" || escalate …`"). As written, line 97 keeps `current_gate=$(ai_guard_digest)` and line 98 calls `ai_gate_check`, which runs `ai_guard_digest` again (`common.sh:113-154` walks and hashes all of `.ai/bin`, `.ai/prompts`, …), so every recovery pays the digest twice and `current_gate` becomes dead. Plan change: for lines 97–99 only, write the form out as `current_gate=$(ai_guard_digest) || { AI_GATE_BROKEN=1; escalate '…missing or unsafe…'; }` then `[[ "$current_gate" == "$approved_gate" ]] || { AI_GATE_BROKEN=1; escalate '…changed since you approved…'; }` (messages unchanged, one digest); keep `ai_gate_check` for the four later single-comparison sites (`:160`, `:187`, `:197`, `:207`).
-- P47: `.ai/tasks.md` T004, ai-run bullet (`read -r done total < <(ai_helper tasks counts)` … "on a helper failure skip the record"). ai-run runs under `set -euo pipefail` (`common.sh:3`); a bare `read` that gets no line returns 1 and `set -e` would exit the runner, i.e. a helper failure would stop the run instead of skipping the record (the P45 goal "observation writers never change a run's outcome"). Plan change: write the guarded form out, as T010 does for `gate_ok`: `if read -r done total < <(ai_helper tasks counts 2>/dev/null); then ai_observe step build "…"; fi`, and add one `observation_runner_*` case where `tasks counts` is made to fail (e.g. a wrapper helper) and the run's exit code and stderr are unchanged.
-- P48: `.ai/tasks.md` T003 acceptance, "gate changed by a post-commit hook (fixture as the existing pipeline hook test ~4585 …): `observation.json` unchanged since the last step". The fixture is `test_hook_on_host_review_commit_cannot_run_modified_helper` (`tests/test_workflow.py:4583-4593`); its hook fires on the "record independent review" host commit, so the pipeline dies in `host_commit` → `ai_guard_verify` (`ai-pipeline:162-166`) right after `step 'Independent review …'` (`:490`). "Unchanged since the last step" needs a captured copy from inside a mock; the expected record is fully known. Plan change: name the test and assert the record concretely: `stage=review, state=active` (no `stopped` record, `since` from the review step), `last-error` newer than `observation.json`, `notifications.log` without the ⛔ line, exit code, stderr (`Approved workflow gate changed`) and the absent sentinel unchanged.
 
-## Missing coverage
-Checked against the checklist: (1) lock order — only two new locks, `notifications.lock` and `pipelines/.lock`, each `LOCK_NB` with a 2 s deadline and never held together with `workflow.lock` (T001); (3) attribution — `pid`/`branch`/`updated` are set by the helper, not passed by callers (T001, P38); (4) stale results — single writer per checkout (pipeline, or ai-recover by `exec`, or a waiting child), temp + `os.replace`; (5) refresh wiring — every stop site has a writer (ai-pipeline `stop()`/`ai_die`/`finish`, ai-run via the pipeline's `stop implementation`, ai-recover `escalate`/`on_exit`), the gate-broken paths deliberately none (P44 covers how the dashboard shows them); (6)/(7) isolation and roles — read-only dashboard, `AI_DASHBOARD_ROOT`/`AI_STATE_DIR` scoping tested in T006/T007; (8) hidden rows — `needs_you`/`crashed` never hidden by the 24 h filter (T007); (10) irreversible operations — none; the registry prune deletes only invalid or orphaned entries re-read under the lock (T001). No gap found beyond P46–P48.
+- P8: Correct the notification-log assumption and test retention rollover.
 
-## Security concerns
-The gate-broken guard was re-traced on every stop path at this HEAD: `ai_guard_verify` (`common.sh:156-161`) → `ai_die` → T002/T003 helpers skipped by the flag; ai-run `on_exit` (`ai-run:107-128`) with the written-out `gate_ok` form; ai-pipeline `stop()` (`:143-157`) with the hoisted comparison and its two pre-step gate stops (`:125`, `:129-130`); `ai_deps` (`common.sh:187`); ai-recover `:97-99`, `:160`, `:187`, `:197`, `:207`. The watchdog needs no guard (`watchdog.py:478`, `:298-305`). The remaining pre-comparison window (ai-recover `:29-77`, ai-pipeline `:75-129`) is today's behaviour and is now stated as such in T010, the spec and the plan's Risks. Terminal sanitising (T006) and no-follow, descriptor-pinned I/O (T001) are specified with tests. No new concern.
+  **Location:** `.ai/tasks.md:641`; `scripts/lib/workflow.py:3496`.
+
+  T009 describes the log as append-only and says every notification changes its size. The actual writer atomically replaces the log and retains only 200 lines. Once retention fills, repeated identical notifications can leave its size and content unchanged.
+
+  The proposed inode/mtime fingerprint already accommodates replacement, so this does not reopen P3.
+
+  **Concrete plan change:** Describe the existing replacement and retention behavior accurately. Add a regression using `notify-log` on a full 200-line log with repeated identical messages and unchanged timestamps, asserting that the fingerprint changes despite unchanged displayed events and file size.
+
+- P9: Add coverage for the concurrent runner’s cleanup requirement.
+
+  **Location:** `.ai/tasks.md:354`; `.ai/tasks.md:363`.
+
+  T004 explicitly requires terminating running batch processes and joining threads on interruption or worker exceptions. Its acceptance tests cover ordinary failures, discovery errors and count mismatches, but none exercises these new cleanup paths. Those tests could pass while interruption leaves workers or subprocesses running.
+
+  **Concrete plan change:** Add deterministic tests with blocked batches: interrupt the runner and separately inject a worker launch exception. Require bounded termination, a failing exit status and cleanup of the running batch processes.
+
+## Previous findings re-evaluated
+
+P1–P7 are addressed by the current plan:
+
+- T011 repairs interrupted revision queues before the queue-dependent checks.
+- T005 adds execution probing, fallback and cleanup for tmpfs selection.
+- T009 fingerprints notification identity independently of displayed text.
+- T004 specifies `opus`.
+- The handoff now declares `Flow unchanged`; T002 updates it when the flow changes.
+- T004 explicitly updates the documentation consistency contract.
+- T006 preserves existing test IDs while permitting additional tests.
+
+## Validation observed and limitations
+
+Inspected the instructions, spec, plan, queue, dispositions, state, handoff, relevant source, tests, documentation and `.ai/validate`.
+
+Observed:
+
+- HEAD matches the requested scope; working tree is clean.
+- Task queue validation passes.
+- Shell syntax checks pass for 13 files.
+- All three documentation consistency tests pass.
+- Test discovery collects 619 tests.
+
+The full `./scripts/ai-check`, fixture integration tests and CI timing measurements were not run because this sandbox permits only filesystem reads. Implementation must still satisfy the planned regression tests and full gate; the performance target requires the documented human CI check.
+
+No additional security, authorization or data-integrity findings were identified in the inspected plan. This review is not human acceptance.

@@ -16,8 +16,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'scripts/lib/workflow.py'
-TIMEOUT_SCALE = float(os.environ.get('AI_TEST_TIMEOUT_SCALE', '1'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
 BOUND = 5 * TIMEOUT_SCALE
+COMMAND_TIMEOUT = 30 * TIMEOUT_SCALE
+WORKER_TIMEOUT = 120 * TIMEOUT_SCALE
 GIT = ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
        '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main']
 
@@ -56,7 +59,7 @@ class ObservationWriterTest(unittest.TestCase):
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(HELPER), *args], cwd=cwd or self.checkout,
                                 env=env or self.env, capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, timeout=timeout or 30 * TIMEOUT_SCALE)
+                                stdin=subprocess.DEVNULL, timeout=timeout or COMMAND_TIMEOUT)
         result.elapsed = time.monotonic() - started
         return result
 
@@ -130,7 +133,7 @@ class ObservationWriterTest(unittest.TestCase):
     def test_observation_writer_pid_and_branch(self):
         command = f'{sys.executable} {HELPER} observe step build; echo $$'
         result = subprocess.run(['bash', '-c', command], cwd=self.checkout, env=self.env,
-                                capture_output=True, text=True, timeout=30 * TIMEOUT_SCALE)
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record()
         self.assertEqual(record['pid'], int(result.stdout.strip()))
@@ -415,7 +418,7 @@ class ObservationWriterTest(unittest.TestCase):
         workers = [subprocess.Popen([sys.executable, '-c', script, str(HELPER), str(self.checkout), name],
                                     stderr=subprocess.PIPE, text=True) for name in ('a', 'b')]
         for worker in workers:
-            _, stderr = worker.communicate(timeout=120 * TIMEOUT_SCALE)
+            _, stderr = worker.communicate(timeout=WORKER_TIMEOUT)
             self.assertEqual((worker.returncode, stderr), (0, ''))
         messages = [entry['message'] for entry in self.log_lines()]
         self.assertEqual(sorted(messages), sorted(f'{name} {n}' for name in 'ab' for n in range(100)))
@@ -492,6 +495,71 @@ class ObservationWriterTest(unittest.TestCase):
         self.assertEqual((counts.returncode, counts.stderr), (count.returncode, count.stderr))
         self.assertIn('Malformed task heading', counts.stderr)
 
+    # plan stage (DB-04)
+
+    def test_observation_writer_plan_stage_records(self):
+        self.observe('step', 'planning', 'opus · first plan')
+        record = self.record()
+        self.assertEqual((record['stage'], record['state'], record['detail']),
+                         ('planning', 'active', 'opus · first plan'))
+        self.observe('pause', 'claude until 10:00')
+        self.assertEqual((self.record()['stage'], self.record()['state']), ('planning', 'paused'))
+        self.observe('resume')
+        self.assertEqual((self.record()['stage'], self.record()['state']), ('planning', 'active'))
+        self.observe('planned', '7 tasks')
+        done = self.record()
+        self.assertEqual((done['stage'], done['state'], done['detail'], done['note']),
+                         ('planning', 'done', '', '7 tasks'))
+        self.assertRegex(done['since'], r'^\d{4}-\d\d-\d\dT')
+        self.assertEqual(self.helper('observe', 'planned').returncode, 0)  # usage warning only
+        self.assertEqual(self.record()['note'], '7 tasks')
+
+    def test_observation_writer_plan_stop_label(self):
+        self.observe('step', 'planning')
+        self.observe('stop', 'plan', 'Task queue is invalid: x')
+        stopped = self.record()
+        self.assertEqual((stopped['stage'], stopped['state'], stopped['note']),
+                         ('planning', 'stopped', 'Task queue is invalid: x'))
+        self.observe('step', 'build')
+        self.observe('stop', 'plan', 'failed')
+        self.assertEqual(self.record()['stage'], 'planning')
+        self.observe('step', 'planning')
+        self.observe('stop', '', 'reason')
+        self.assertEqual(self.record()['stage'], 'planning')
+
+    def test_observation_writer_plan_allowlist(self):
+        result = self.helper('plan-allowlist')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/state.md',
+                   '.ai/handoff.md', '.ai/reviews/dispositions.md')
+        expected = ['Read', 'Glob', 'Grep'] + [f'{tool}(./{path})' for path in records
+                                               for tool in ('Edit', 'Write')]
+        self.assertEqual(result.stdout.splitlines(), expected)
+        self.assertEqual(len(expected), 15)
+        self.assertNotIn('Bash', result.stdout)
+        self.assertNotIn('permissions.allow', result.stdout)
+
+    def test_observation_writer_plan_scope(self):
+        records = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/state.md',
+                   '.ai/handoff.md', '.ai/reviews/dispositions.md', '.ai/run-log.md')
+        for name in (*records, 'src.txt', '.ai/reviews/plan.md'):
+            path = self.checkout / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('base\n')
+        subprocess.run([*GIT, 'add', '-A'], cwd=self.checkout, check=True)
+        subprocess.run([*GIT, 'commit', '-q', '-m', 'base'], cwd=self.checkout, check=True)
+        start = subprocess.run([*GIT, 'rev-parse', 'HEAD'], cwd=self.checkout, check=True,
+                               capture_output=True, text=True).stdout.strip()
+        for name in records:
+            (self.checkout / name).write_text('planned\n')
+        self.assertEqual(self.helper('plan-scope', start).returncode, 0)
+        for outside in ('src.txt', '.ai/reviews/plan.md'):
+            (self.checkout / outside).write_text('edited\n')
+            result = self.helper('plan-scope', start)
+            self.assertEqual(result.returncode, 1, outside)
+            self.assertIn(outside, result.stderr)
+            (self.checkout / outside).write_text('base\n')
+        self.assertEqual(self.helper('plan-scope', start).returncode, 0)
 
 if __name__ == '__main__':
     unittest.main()
