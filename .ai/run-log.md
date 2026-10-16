@@ -308,3 +308,4 @@
 | 2026-10-16T20:11:09Z | runner | plan-revision | plan revised (round 1): accepted 5, rejected 0, needs-human 0 | n/a | ae6a0c7 | Plan review runs again |
 | 2026-10-16T20:17:00Z | runner | plan-revision | plan revised (round 2): accepted 2, rejected 0, needs-human 0 | n/a | 1597dbe | Plan review runs again |
 | 2026-10-16T20:30:30Z | claude | T001 | done: run_parallel child subreaper + reap_adopted by pid; 3 subreaper tests | PASS (ai-check, 689 tests) | parent 71a5330 | Mutation check: reap off fails the adopts test |
+| 2026-10-16T20:38:25Z | runner | T001 | completed | PASS | 5b1b033 | Claude checkpointed; continuing queue |
