@@ -5532,6 +5532,68 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
         self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
 
+    def catchup_report(self, rows, extra_files=()):
+        self.setup_project()
+        paths = []
+        for index, group in enumerate([rows, *extra_files]):
+            path = self.base / f'catchup{index}.jsonl'
+            path.write_text(''.join(json.dumps({'project': 'p', 'branch': 'b', **row}) + '\n' for row in group))
+            paths.append(str(path))
+        return self.tool('ai-status', '--outcomes', *paths).stdout
+
+    def claude_review(self, time, mode='code', **extra):
+        return {'kind': 'review', 'reviewer': 'claude-fallback', 'mode': mode, 'model': 'm', 'time': time,
+                'head': 'a' * 40, **extra}
+
+    def test_outcome_catchup_later_codex_review_covers(self):
+        report = self.catchup_report([self.claude_review('2026-01-01T00:00:01Z'),
+                                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+        self.assertIn('1 Claude review(s) covered', report)
+
+    def test_outcome_catchup_earlier_other_branch_or_family_does_not_cover(self):
+        claude = self.claude_review('2026-01-01T00:00:05Z')
+        for later in ({'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:01Z'},
+                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:09Z', 'branch': 'o'},
+                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'plan', 'time': '2026-01-01T00:00:09Z'}):
+            self.assertIn('Codex catch-up pending', self.catchup_report([claude, later]))
+
+    def test_outcome_catchup_recheck_and_plan_families(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'recheck'), self.claude_review('2026-01-01T00:00:01Z', 'plan'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertIn('plan HEAD', report.split('Codex catch-up pending')[1])
+        self.assertNotIn('recheck HEAD', report)
+        self.assertIn('1 Claude review(s) covered', report)
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'plan'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'plan', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+
+    def test_outcome_catchup_done_command_records_and_covers(self):
+        self.setup_project()
+        state = self.base / 'host-state/outcomes.jsonl'
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({**self.claude_review('2026-01-01T00:00:01Z'), 'project': 'project with spaces',
+                                     'branch': 'feature/x'}) + '\n')
+        out = self.tool('ai-status', '--catch-up-done', 'feature/x').stdout
+        self.assertIn('Recorded Codex catch-up for feature/x', out)
+        record = self.outcome_rows()[-1]
+        self.assertEqual((record['kind'], record['branch'], record['project']),
+                         ('catchup', 'feature/x', 'project with spaces'))
+        self.assertTrue(record['time'])
+        self.assertNotIn('Codex catch-up pending', self.tool('ai-status', '--outcomes').stdout)
+        with state.open('a') as log:
+            log.write(json.dumps({**self.claude_review('2999-01-01T00:00:00Z'), 'project': 'project with spaces',
+                                  'branch': 'feature/x'}) + '\n')
+        self.assertIn('Codex catch-up pending', self.tool('ai-status', '--outcomes').stdout)
+
+    def test_outcome_catchup_equal_times(self):
+        t = '2026-01-01T00:00:01Z'
+        self.assertNotIn('Codex catch-up pending', self.catchup_report([self.claude_review(t), {'kind': 'catchup', 'time': t}]))
+        self.assertIn('Codex catch-up pending', self.catchup_report([{'kind': 'catchup', 'time': t}, self.claude_review(t)]))
+        self.assertIn('Codex catch-up pending', self.catchup_report([self.claude_review(t)], [[{'kind': 'catchup', 'time': t}]]))
+
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []

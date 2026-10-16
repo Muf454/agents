@@ -899,7 +899,11 @@ MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `wit
 `withdrawn_major`) and the full SHA the re-checked review covered (`reviewed_head`), read from the
 verified `recheck.md`. If that cannot be verified the line is still written without these
 fields. `ai-status --outcomes` sums them in "Re-checks by reviewer"; re-checks are not listed
-under "Reviews by reviewer", but Claude re-checks still appear under "Codex catch-up pending".
+under "Reviews by reviewer", but a Claude re-check still appears under "Codex catch-up pending" until covered. A Claude
+review (any mode) is covered by a LATER record of the same project and branch that is a Codex
+review of the same family (plan covers plan; code covers code and re-check) or a `catchup`
+record, which `ai-status --catch-up-done BRANCH...` appends. "Later" orders by `time`; equal
+times count only within one file, by line order. Covered reviews are summarised as a count.
 
 An attempt opens immediately before the implementation session's `claude` call (after the
 dependency step and the remaining-time check; `--triage` never opens one) and closes with

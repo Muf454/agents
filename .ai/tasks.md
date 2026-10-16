@@ -800,7 +800,7 @@ Bash tool moved it to the background, and it finished with exit 0. Flow unchange
 
 
 ## T009 — Outcome report: covered Claude reviews leave "Codex catch-up pending" (CU-2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -856,6 +856,10 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17. `read_outcomes` records `_at` (file, line); `outcomes_report` lists only uncovered Claude
+reviews plus a covered count; `outcome catchup BRANCH`; `ai-status --catch-up-done BRANCH...`; README and
+docs/workflow.md updated. 5 `test_outcome_catchup_*` tests; `-k outcome` 21 OK; `.ai/bin/ai-check` PASS (736 tests).
+`ai-status` is not on any agent allowlist. Flow unchanged.
 
 
 ## T010 — Docs, handoff and final audit for the batch

@@ -2980,18 +2980,20 @@ def task_category(title):
 
 
 def read_outcomes(paths):
+    """Records in file order; each carries `_at` = (file index, line index), its write position."""
     records = []
-    for path in paths:
+    for file_index, path in enumerate(paths):
         try:
             lines = Path(path).read_text().splitlines()
         except OSError:
             continue
-        for line in lines:
+        for line_index, line in enumerate(lines):
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
             if isinstance(record, dict):
+                record['_at'] = (file_index, line_index)
                 records.append(record)
     return records
 
@@ -3025,7 +3027,8 @@ def recheck_counts(answers, levels):
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
-    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)"""
+    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
+    | catchup BRANCH (the human recorded a Codex catch-up of that branch)"""
     kind, *rest = arguments
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
@@ -3066,6 +3069,10 @@ def outcome(arguments):
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
         record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
+    elif kind == 'catchup':
+        if len(rest) != 1 or not rest[0]:
+            fail('Usage: outcome catchup BRANCH')
+        record['branch'] = rest[0]
     else:
         fail(f'Unknown outcome kind: {kind}')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3162,11 +3169,31 @@ def outcomes_report(arguments):
                          f'{total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
     fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-    if fallback:
+    family = lambda mode: 'plan' if mode == 'plan' else 'code'  # code covers code and recheck
+
+    def covered(claude):
+        for later in records:
+            if (later.get('project'), later.get('branch')) != (claude.get('project'), claude.get('branch')):
+                continue
+            is_codex = later.get('kind') == 'review' and later.get('reviewer') == 'codex' \
+                and family(later.get('mode')) == family(claude.get('mode'))
+            if not (is_codex or later.get('kind') == 'catchup'):
+                continue
+            if str(later.get('time')) > str(claude.get('time')) or (
+                    later.get('time') == claude.get('time') and later['_at'][0] == claude['_at'][0]
+                    and later['_at'][1] > claude['_at'][1]):
+                return True
+        return False
+
+    pending = [r for r in fallback if not covered(r)]
+    if pending:
         lines += ['## Claude-only reviews (Codex catch-up pending)', '']
         lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
-                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in pending]
         lines.append('')
+    if len(fallback) > len(pending):
+        lines += [f'{len(fallback) - len(pending)} Claude review(s) covered by a later Codex review or '
+                  'catch-up record.', '']
     print('\n'.join(lines).rstrip('\n'))
 
 
