@@ -979,8 +979,19 @@ def review_format_check(arguments):
         sys.exit(2)
 
 
+# A table cell: a backslash is only ever consumed together with the character after it, so `\|`
+# can never be split into a cell ending in `\` plus a separator (letting `[^|\n]` eat the
+# backslash on backtracking would do that). An unescaped `|` still ends the cell.
+TABLE_CELL = r'((?:\\.|[^\\|\n])*?)'
+
+
+def table_cell(text):
+    """A captured table cell as a value: `\\|` is a pipe, surrounding space is dropped."""
+    return text.replace('\\|', '|').strip()
+
+
 DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)(?:\s*\((?:BLOCKER|MAJOR|MINOR)\))?\s*\|\s*(accepted|rejected|deferred)\s*\|'
-                             r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+                             r'\s*' + TABLE_CELL + r'\s*\|\s*' + TABLE_CELL + r'\s*\|', re.M | re.I)
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -1019,7 +1030,8 @@ def triage_check(arguments):
     bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
     if not bound or bound.group(1) != head.group(1):
         fail('Dispositions belong to a different review.')
-    rows = {m.group(1): (m.group(2).lower(), m.group(3), m.group(4)) for m in DISPOSITION_ROW.finditer(text)}
+    rows = {m.group(1): (m.group(2).lower(), table_cell(m.group(3)), table_cell(m.group(4)))
+            for m in DISPOSITION_ROW.finditer(text)}
     queue = {t['id']: t['status'] for t in tasks()}
     accepted = deferred = 0
     for level in ('BLOCKER', 'MAJOR'):
@@ -1094,7 +1106,7 @@ def review_rounds(base, head):
                            'rows': None})
         elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
             text = committed_file(sha, '.ai/reviews/dispositions.md')
-            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                   for m in DISPOSITION_ROW.finditer(text)}
     return rounds
 
@@ -1541,7 +1553,7 @@ def rejected_rows():
     for match in DISPOSITION_ROW.finditer(text):
         if match.group(1) in rows:
             fail(f'Finding {match.group(1)} has more than one disposition.')
-        rows[match.group(1)] = (match.group(2).lower(), match.group(3))
+        rows[match.group(1)] = (match.group(2).lower(), table_cell(match.group(3)))
     rejected = [(finding, level, rows[finding][1])
                 for level in ('BLOCKER', 'MAJOR') for finding in finding_ids(review, level)
                 if finding in rows and rows[finding][0] == 'rejected']
@@ -2399,7 +2411,7 @@ PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
     r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
-    r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+    r'\s*' + TABLE_CELL + r'\s*\|\s*' + TABLE_CELL + r'\s*\|', re.M | re.I)
 
 
 def plan_history(arguments):
@@ -2434,7 +2446,7 @@ def plan_history(arguments):
                     seen.add(match.group(1))
                     findings.append((match.group(1), level, finding_title(body, match)))
         body = sections.get(record['report_digest'])
-        rows = None if body is None else {m.group(1): (m.group(2).lower(), m.group(4))
+        rows = None if body is None else {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                           for m in PLAN_DISPOSITION_ROW.finditer(body)}
         rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
     if rounds:
@@ -2582,7 +2594,7 @@ def plan_dispositions_check(arguments):
             fail(f'Row for {finding}, which is not a finding of plan review round {number}.')
         if finding in rows:
             fail(f'Finding {finding} has more than one row in the round {number} section.')
-        rows[finding] = (row.group(2).lower(), row.group(3), row.group(4))
+        rows[finding] = (row.group(2).lower(), table_cell(row.group(3)), table_cell(row.group(4)))
     for finding in required:
         if finding not in rows:
             fail(f'Finding {finding} has no row in the round {number} section.')

@@ -397,7 +397,7 @@ revision paths, prints its line, and the three contracts carry the format senten
 flow chart and hub Log updated. Limitation: the "dispositions already complete" triage path is unchanged.
 
 ## T005 — Escaped pipes inside disposition and plan-disposition cells (FL-25 b)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -448,7 +448,11 @@ Targeted: `python3 -m unittest discover -s tests -k triage_severity_suffix` (mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+Done. `TABLE_CELL` and `table_cell()` in scripts/lib/workflow.py; both row patterns use the cell
+pattern and every read site applies `table_cell`. Six `test_disposition_pipes_*` tests pass
+(`-k disposition_pipes` Ran 6 OK; `-k triage_severity_suffix` Ran 3 OK); `.ai/bin/ai-check`
+PASS (712 tests). Writers unchanged; the recheck record is escaped once. docs/workflow.md has
+one sentence. Flow unchanged.
 
 ## T006 — Template prompts show the exact task format and the pipe rule (FL-25, prompts)
 Status: TODO

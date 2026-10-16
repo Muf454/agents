@@ -448,7 +448,8 @@ Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
 deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
-decorations do not match. Triage sessions may change only `.ai/tasks.md`,
+decorations do not match. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+as `\|`; it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that
 lacks `### Likely affected modules` or `### Result / notes` gets it; the line `Task queue: added

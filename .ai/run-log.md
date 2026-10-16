@@ -317,3 +317,4 @@
 | 2026-10-16T21:30:57Z | runner | T003 | completed | PASS | 63a25e4 | Claude checkpointed; continuing queue |
 | 2026-10-16T22:20Z | claude (sonnet) | T004 | done: ai-run fills missing task sections after triage, planning and revision sessions; contracts say to copy the task format; 4 task_sections_host tests; docs, vault chart and Log | PASS (ai-check, 706 tests; -k triage 29 OK) | parent 63a25e4 | |
 | 2026-10-16T21:49:26Z | runner | T004 | completed | PASS | 7b9da3f | Claude checkpointed; continuing queue |
+| 2026-10-16T22:50Z | claude (sonnet) | T005 | done: TABLE_CELL + table_cell() read `\|` in disposition and plan-disposition cells; 6 disposition_pipes tests; docs line | PASS (ai-check, 712 tests; -k triage_severity_suffix 3 OK) | parent 73612b6 | |

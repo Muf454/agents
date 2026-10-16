@@ -93,6 +93,7 @@ tests (the groups are added by the tasks named).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005).
+- `test_disposition_pipes_*` (T005).
 - `test_scratch_clear_*` (T011), `test_scratch_dir_*` (T007).
 - `test_recovery_decision_scan_*` (T012), `test_recovery_decision_prose_*` (T008).
 - `test_outcome_catchup_*` (T009).

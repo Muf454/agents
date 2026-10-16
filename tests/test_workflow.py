@@ -7038,6 +7038,62 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             (self.project / '.ai/reviews/dispositions.md').read_text())]
         self.assertEqual(rows, ['rejected', 'accepted'])
 
+    def test_disposition_pipes_escaped_pipe_in_evidence_keeps_the_task_cell(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        piped = rows.replace('defect confirmed in the fixture', 'use `--yes \\| --no`')
+        dispositions.write_text(piped)
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+        wf = self.recheck_module()
+        row = wf.DISPOSITION_ROW.search(piped)
+        self.assertEqual((wf.table_cell(row.group(3)), wf.table_cell(row.group(4))), ('use `--yes | --no`', 'T001'))
+        # An unescaped pipe still splits the row: the Task cell is then misread.
+        dispositions.write_text(rows.replace('defect confirmed in the fixture', 'use --yes | --no'))
+        self.helper('triage-check', '--fresh', expected=1)
+
+    def test_disposition_pipes_rejected_row_with_escaped_pipe_passes(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace(
+            '| accepted | defect confirmed in the fixture | T001 |',
+            '| rejected | the flag reads `--yes \\| --no` in the fixture | none |'))
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=0 deferred=0')
+
+    def test_disposition_pipes_missing_task_cell_is_malformed(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace('| accepted | defect confirmed in the fixture | T001 |',
+                                             '| accepted | discussion of fix \\| T001 |'))
+        result = self.helper('triage-check', '--fresh', expected=1)
+        self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_disposition_pipes_table_cell_pattern(self):
+        wf = self.recheck_module()
+        cell = re.compile('^' + wf.TABLE_CELL + r'\|')
+        self.assertEqual(cell.match('a \\| b|').group(1), 'a \\| b')
+        self.assertEqual(cell.match('C:\\path|').group(1), 'C:\\path')
+        self.assertEqual(wf.table_cell(' a \\| b '), 'a | b')
+        self.assertEqual(wf.table_cell('C:\\path'), 'C:\\path')
+
+    def test_disposition_pipes_plan_dispositions_read_the_task_cell(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        rows = ('| P1 | accepted | flag `--no\\|--yes` needs a test | T002 |\n'
+                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+        path.write_text(path.read_text() + rows)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        malformed = '| P1 | accepted | discussion of fix \\| T002 |\n'
+        path.write_text(path.read_text().replace(rows.splitlines(True)[0], malformed))
+        self.plan_check(start, expected=1)
+
+    def test_disposition_pipes_round_trip_through_the_recheck_record(self):
+        self.rejected_review(['| M1 | rejected | the flag reads `--yes \\| --no` in the fixture | none |\n',
+                              '| M2 | accepted | real defect | T002 |\n'], fix_task=True)
+        self.helper('triage-check', '--fresh')
+        self.tool('ai-review', '--recheck')
+        self.assertIn('the flag reads `--yes | --no` in the fixture',
+                      (self.base / 'codex-recheck-calls').read_text())
+        recheck = (self.project / '.ai/reviews/recheck.md').read_text()
+        self.assertIn('the flag reads `--yes \\| --no` in the fixture', recheck)
+        self.assertNotIn('\\\\|', recheck)
+
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
         ids = ['M1', 'M2']
