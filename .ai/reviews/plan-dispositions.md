@@ -102,3 +102,10 @@ Plan review HEAD: 8376944dc205c469ae23c411a0efb96493369e74
 | P3 | accepted | Verified: "at each `{`, next `{` after a decode error" reconsiders the inner objects of a malformed outer object or a prose-prefixed array. T008 now scans line-anchored candidates only (`{` first on its line, object ends its line), escalates on a malformed line-start object and on unbalanced `{[`/`}]` before a candidate, and treats inline/quoted objects as prose; negative tests for both reproductions, a multi-line array, a quoted and an inline backticked example. Side effect: `test_recovery_decision_parsing_is_strict` (tests/test_workflow.py:4156–4182) now passes unchanged (inline `Decision: {…}` at :4170 stays escalate); plan Risk and spec updated. | T008 |
 | P4 | accepted | Verified: `stop()` (tests/run_parallel.py:256–272) has no completion check and T001's reap loop would run while a worker executes `stop()` outside the lock. T002 now has one shutdown owner (first `stop()` caller; others wait on `stop_done`), `reap_adopted()` is a no-op while termination runs, a bounded `FINAL_WAIT` confirms every descendant is gone or a zombie (else survivors named on stderr, non-zero exit), and tests for a detached SIGTERM-ignoring descendant with closed output, a fork during shutdown, the barrier failure path and concurrent stop/reaping. Stays opus. Plan diagram and spec updated. | T002 |
 | P5 | accepted | Verified: `now()` (scripts/lib/workflow.py:25–26) has whole seconds. T009 now orders by `(time, file index, line index)`: equal times cover only within the same file at a later line (append-only log), across files never; tests for an earlier and a later Claude review sharing the catch-up's second and for two files. | T009 |
+
+## Plan review round 2 (report 0bfd9f226ea91d257f41e1002344bde27a08b4e1d2669aba55edea38503032ca)
+
+Plan review HEAD: 92167cd19a262f8581a177a44343b0a59797820d
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
