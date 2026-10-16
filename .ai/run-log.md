@@ -320,3 +320,4 @@
 | 2026-10-16T22:50Z | claude (sonnet) | T005 | done: TABLE_CELL + table_cell() read `\|` in disposition and plan-disposition cells; 6 disposition_pipes tests; docs line | PASS (ai-check, 712 tests; -k triage_severity_suffix 3 OK) | parent 73612b6 | |
 | 2026-10-16T22:03:52Z | runner | T005 | completed | PASS | 7065e84 | Claude checkpointed; continuing queue |
 | 2026-10-17 | claude (haiku) | T006 | DONE: triage, plan-revision and plan prompts show the exact task format and the `\|` pipe rule; tasks template says Result / notes starts empty; test `test_task_sections_prompts_show_the_format` | PASS (ai-check, 713 tests; -k task_sections 8 OK; -k tool_contract 3 OK) | see git log | installed .ai/prompts unchanged; flow unchanged |
+| 2026-10-16T22:18:47Z | runner | T006 | completed | PASS | 6e003bf | Claude checkpointed; continuing queue |
