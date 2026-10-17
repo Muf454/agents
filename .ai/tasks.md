@@ -46,7 +46,10 @@ still does not match says which line was wrong and what to write.
   1–4 (ID, disposition, evidence, task) are unchanged; flags stay `re.M | re.I`. Readers at
   ~1036, ~1112, ~1555, ~2483, ~2624, ~3386 need no change; check each still gets the right group.
 - `unmatched_cell_hint(text, finding)`: for the first line starting with `|` whose first cell
-  contains `finding` as a word (`\b…\b`) and which is not a matched row, return
+  contains `finding` not preceded by `[A-Za-z0-9-]` and not followed by a digit
+  (`(?<![A-Za-z0-9-])` + `re.escape(finding)` + `(?!\d)`, diagnostic only, so glued text such as
+  `M1x` or `**M1**` is found while `M10`/`XM1` are not; those rows stay rejected) and which is
+  not a matched row, return
   ` (the row starting "| <first cell, max 60 chars> |" does not match; write "| <finding> | <disposition> | <evidence> | <task> |")`,
   else `''`. Append it to `MAJOR/BLOCKER finding X has no disposition.` (triage_check ~1042) and
   `Finding X has no row in the round N section.` (~2633), after the existing text (the
@@ -128,9 +131,73 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
-## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+## T007 — Outcome log I/O: readable append descriptor, complete-write check, per-line UTF-8 reader (CU-5, part 0)
 Status: TODO
 Dependencies: none
+Model: opus
+
+### Goal
+Every outcome line is appended through one helper that can read the log's last byte, never
+reports a partial write as success, and the reader keeps every valid record even when the log
+ends in a torn line cut inside a multibyte UTF-8 character. (Plan review round 1, P1–P3.)
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "CU-5 — attempt marker + reconcile", "Log I/O". In
+  `scripts/lib/workflow.py`, next to `read_outcomes` (~2984).
+- `append_outcome(path, record) -> bool`: `path.parent.mkdir(parents=True, exist_ok=True)`;
+  `fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)` (READ-write: `os.pread` on
+  an `O_WRONLY` descriptor raises EBADF, P1); in `try/finally: os.close(fd)`: size from
+  `os.fstat(fd).st_size`; prefix `b'\n'` when `size > 0` and `os.pread(fd, 1, size - 1) != b'\n'`;
+  `data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()`;
+  `written = os.write(fd, data)` (ONE call); `if written != len(data): return False` (no retry
+  of the remainder: another checkout may have appended in between; the next append's newline
+  guard isolates the fragment); `os.fsync(fd)`; return True. OSError propagates to the caller.
+  Comment the three rules (readable fd for the guard, short write is a failure, why no retry).
+- `outcome()` (~3080–3082) uses it for every kind instead of `path.open('a')`: on `False` or
+  `OSError` → `fail('Could not append the outcome line completely: <path>.')` (exit 1, as an
+  OSError exits non-zero today; `ai-run` ~210 and `ai-review` ~280 already treat a failed
+  `outcome` call as best-effort, check both).
+- `read_outcomes` (~2984–3000): read bytes (`Path(path).read_bytes()`, OSError → skip the
+  file as today), split on `b'\n'` only, decode each line with strict `'utf-8'`; a
+  `UnicodeDecodeError` or JSON `ValueError` skips that line only (P2). `_at` keeps the line
+  index of the split. Comment why (a torn tail can end inside a multibyte character; the old
+  whole-file `read_text()` raised before any line was parsed; `str.splitlines` also split on
+  U+2028 inside `ensure_ascii=False` records).
+- No marker, no `ai-run` change here (T003/T004).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_outcome_log_io_*` in tests/test_workflow.py (with `AI_STATE_DIR` in the
+  test's temp dir as the existing outcome tests do; unit cases import the module as other unit
+  tests do):
+  - two `outcome review …` (or `task`) calls on an empty log, then a third: three records read
+    back (regression for P1: appending to a non-empty log succeeds);
+  - non-empty log WITHOUT a final newline (`{"time": "x", "kin`): the next append starts on a
+    new line, `read_outcomes` returns the earlier valid records and the new one, not the fragment;
+    same with a log WITH its final newline: no empty line inserted;
+  - torn multibyte tail: a valid record line, then the bytes `{"title": "caf\xc3` (no newline):
+    `read_outcomes` returns the earlier record (no exception), a following append is readable,
+    and `ai-status --outcomes` renders;
+  - a record whose title contains U+2028 reads back as one record;
+  - short write (unit, `os.write` patched to write the first half of `data` for real and return
+    that count): `append_outcome` returns False and does not fsync; the `outcome` command exits 1
+    with `Could not append the outcome line completely`; a following real append is readable and
+    the fragment is skipped.
+- All existing `outcome` tests pass unchanged (`-k outcome`).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k outcome_log_io` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+Status: TODO
+Dependencies: T007
 Model: opus
 
 ### Goal
@@ -150,22 +217,26 @@ without ever losing or duplicating a line.
   last `)` (comm can hold spaces, parentheses, non-UTF-8: see `tests/run_parallel.py`
   `parse_stat`).
 - `outcome task TASK RESULT MODEL SECONDS [--attempt ID]`: the record gets `attempt_id` when
-  given; after the append, unlink the marker only if its `id` equals ID (fsync the directory).
-  A marker with another id is left alone.
-- Append (every kind, one helper `append_outcome(path, record)`): `os.open(path,
-  O_WRONLY|O_APPEND|O_CREAT, 0o644)`; if the file is non-empty and its last byte is not `\n`
-  (`os.pread` of the last byte), prefix the line with `\n`; ONE `os.write` of prefix + line;
-  `os.fsync`; close. Comment why (a torn last line from a killed writer must not swallow the next
-  record; `read_outcomes` skips the fragment).
+  given; after a SUCCESSFUL append (T007's `append_outcome` returned True), unlink the marker
+  only if its `id` equals ID (fsync the directory). A marker with another id is left alone; a
+  failed or short append keeps the marker (the `outcome` call fails as T007 defines).
+- Append: every write goes through T007's `append_outcome` (readable `O_RDWR|O_APPEND`
+  descriptor, newline guard, complete-write check, fsync); `read_outcomes` is T007's per-line
+  reader. Do not add a second append path.
 - `outcome attempt-reconcile`: no marker → silent exit 0. Unreadable or invalid marker → unlink,
   stderr `Note: discarded an unreadable attempt marker.`. Runner alive (pid exists and its
   current start time equals `pid_start`; `pid_start` null → pid exists) → leave it, silent.
   Otherwise: if any task record in the log has `attempt_id == id` → only unlink. Else append a
   task record with `result: "crashed"`, task/model/project/branch from the marker (not the
   current branch), `seconds: null`, `attempt` numbered as `outcome task` does, `first_pass:
-  false`, `attempt_id`, and title/category as today; then unlink. stderr `Note: logged a crashed
+  false`, `attempt_id`, and title/category as today; then unlink ONLY if `append_outcome`
+  returned True (a short write keeps the marker, stderr `Note: could not log the crashed
+  attempt completely; will retry at the next start.`). stderr `Note: logged a crashed
   attempt of <task> (the runner was killed without its exit handler).` Never raises: any
-  `OSError`/`ValueError` → stderr note, exit 0.
+  `OSError`/`ValueError` → stderr note, exit 0, marker kept.
+- Known limit (comment + T004 docs): a short write of a normal `outcome task --attempt` line
+  keeps the marker, so the next start logs that attempt as `crashed` (storage was full; the
+  conservative record).
 - `outcome attempt-path`: prints the marker path (for T004's `on_exit`).
 - `outcomes_report` (~3085): check `crashed` rows with `seconds: null` are counted as not done
   and add 0 minutes (it uses `r.get('seconds') or 0`); the per-model attempts table counts them.
@@ -192,6 +263,14 @@ scripts/lib/workflow.py, tests/test_workflow.py
   - a garbage marker → unlinked with the note, exit 0, nothing appended;
   - torn tail: the log ends with `{"time": "x", "kin` (no newline); the next `outcome` append
     starts on a new line and `read_outcomes` returns the new record (and not the fragment);
+  - torn multibyte tail (P2): a valid record, then `{"title": "caf\xc3` (no newline), and a dead
+    runner's marker: reconcile appends exactly one readable `crashed` record, earlier records
+    stay readable, a second reconcile appends nothing;
+  - short write during reconcile (P3; unit, `os.write` patched as in T007 to write half and
+    return that count): nothing readable appended, the marker is kept, the note is printed,
+    exit 0; a later unpatched reconcile appends one complete `crashed` record after the
+    fragment and removes the marker; `outcome task … --attempt <id>` with a short write keeps
+    the marker;
   - `outcome task --attempt X` with a marker of another id leaves the marker;
   - `ai-status --outcomes` on a log with a `crashed` row (seconds null) renders without error
     and counts it as not done.
@@ -287,6 +366,10 @@ the full text is in `.ai/local/recovery-decision.txt` and the notification says 
 - `scripts/ai-recover` `escalate` (~37–42): when `.ai/local/recovery-decision.txt` exists,
   append ` Full text: .ai/local/recovery-decision.txt` to the ⛔ notification. `last-error`
   keeps the original stop reason (unchanged).
+- `scripts/ai-recover`: right after `ai_lock` (~31), `rm -f -- .ai/local/recovery-decision.txt`
+  (plain shell, no helper, so it is safe before the gate check) with a comment: escalations
+  before `recover-decision` (~59–171) must never point at a previous invocation's text
+  (plan review P4).
 - `bounded_questions` (~2564–2569): `shorten(…, QUESTION_CAP)` instead of `[:QUESTION_CAP]` (no
   file: the pointer line already names `plan-dispositions.md`).
 - README (Auto-recovery) and `docs/workflow.md` (recovery decision, needs-human questions): one
@@ -309,6 +392,9 @@ scripts/lib/workflow.py, scripts/ai-recover, tests/test_workflow.py, README.md, 
   - an end-to-end `ai-recover` escalation with a long mock reason (extend an existing
     `MOCK_RECOVER` mode, e.g. `escalate-long`): the recorded ⛔ notification ends with
     `Full text: .ai/local/recovery-decision.txt` and no word is cut before the `…`;
+  - stale sidecar (P4): after that long-decision escalation, a second `ai-recover` that escalates
+    early (e.g. `AI_AUTO_RECOVER=0`) sends a ⛔ without `Full text:` and leaves no
+    `recovery-decision.txt`;
   - `bounded_questions` with a 400-character question ends with `…` at a word boundary.
 - `test_recovery_decision_*` and all other existing tests pass (any test that asserted a hard
   300-character cut is updated on purpose and named in the result).
@@ -323,7 +409,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T006 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T003, T004, T005
+Dependencies: T001, T002, T007, T003, T004, T005
 Model: haiku
 
 ### Goal
@@ -351,7 +437,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   `.ai/local/recovery-decision.txt`; `docs/workflow.md` states the finding-cell rule for both
   tables.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names `test_finding_cell_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
+- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
   `test_recovery_reason_shorten_*` under "Covered by automated tests", and every group exists
   (`python3 -m unittest discover -s tests -k <group>` runs ≥ 1 test each).
 

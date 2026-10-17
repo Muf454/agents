@@ -348,3 +348,6 @@
 | 2026-10-17T01:23:41Z | runner | T017 | completed | PASS | dcc02bf | Claude checkpointed; continuing queue |
 | 2026-10-17T01:30:17Z | runner | none | queue complete; ready for independent review | PASS | fda736b | Human acceptance remains |
 | 2026-10-17T01:33:12Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/29 | PASS | 5235203 | Human acceptance and merge remain |
+| 2026-10-17T01:45:44Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 7bec6f1 | No merge or deployment performed |
+| 2026-10-17T01:45:47Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 7bec6f1 | No merge or deployment performed |
+| 2026-10-17T01:46:34Z | runner | plan-revision | plan revised (round 1): accepted 5, rejected 0, needs-human 0 | n/a | 7bec6f1 | Plan review runs again |

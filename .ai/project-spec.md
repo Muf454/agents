@@ -67,8 +67,11 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   an attempt marker (unique id, task, model, branch, start time, runner pid and its `/proc`
   start time) atomically and durably (temp file, fsync, rename, directory fsync) into the
   checkout's host state directory. The normal outcome line carries the attempt id and is written
-  in one `write` on an append descriptor and fsynced, with a newline first when the log's last
-  byte is not one (a torn line never swallows the next record); the marker is removed after it.
+  in one `write` on a readable append descriptor and fsynced, with a newline first when the
+  log's last byte is not one (a torn line never swallows the next record); a write that returns
+  fewer bytes than the line is a failure; the marker is removed only after a complete append.
+  The reader decodes each line on its own, so a torn tail (also inside a multibyte UTF-8
+  character) skips only that line.
   At the next `ai-run --approved` start (under the checkout lock) a leftover marker whose runner
   is not alive (pid gone or start time different) is reconciled: exactly one `crashed` outcome
   for that attempt (seconds unknown), never a second one when the log already has its id, then

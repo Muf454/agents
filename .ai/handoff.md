@@ -56,8 +56,10 @@ Each group below is a name prefix; `python3 -m unittest discover -s tests -k <gr
 tests (the groups are added by the tasks named).
 - `test_finding_cell_*` (T001: severity suffix and title accepted in both tables, decorations
   still rejected with a hint; T002: `test_finding_cell_prompts_show_the_row`).
+- `test_outcome_log_io_*` (T007: append to a non-empty log, newline guard, torn multibyte tail
+  skipped, short write reported as failure).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
-  runner kept, garbage marker, torn last line).
+  runner kept, garbage marker, torn last line, short write keeps the marker).
 - `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, normal
   paths unchanged, gate-broken stop leaves no marker).
 - `test_recovery_reason_shorten_*` (T005: boundary cuts, full-text file, ⛔ notification names it).

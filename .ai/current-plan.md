@@ -19,7 +19,8 @@ found already done are in `.ai/project-spec.md` ("Verified against the code").
   alternation `(?:\\.|[^\\|\n])`). The text is ignored.
 - Diagnostics: a helper `unmatched_cell_hint(text, finding)` returns ` (the row starting
   "| <first cell> |" does not match; write "| M1 | accepted | … | T012 |")` when a `|` line's
-  first cell contains the ID as a word but no row matched it. Appended to "MAJOR finding M1 has
+  first cell contains the ID (not preceded by a letter, digit or `-`, not followed by a digit,
+  so glued forms like `M1x` get the hint too) but no row matched it. Appended to "MAJOR finding M1 has
   no disposition." and "Finding P1 has no row in the round N section." (prefixes unchanged, so
   existing `assertIn` checks hold).
 - Prompts/contracts (T002): show `| M1 | accepted | <evidence> | T012 |` and
@@ -47,9 +48,15 @@ sequenceDiagram
 - Liveness: pid alive AND `/proc/<pid>/stat` start time equal to the recorded one → a live
   runner owns it: leave it (should not happen under the lock; comment). Unknown start time
   recorded (no `/proc`) → treat a live pid as alive.
-- Torn tail: before each append (every kind), if the log is non-empty and its last byte is not
-  `\n`, the one `os.write` on an `O_APPEND` fd starts with `\n`. Concurrent writers from other
-  checkouts can at worst produce an empty line (skipped by `read_outcomes`).
+- Log I/O (T007, plan review round 1 P1–P3): one `append_outcome` for every kind opens the log
+  `O_RDWR|O_APPEND|O_CREAT` (the newline guard `pread`s the last byte; a write-only fd cannot);
+  if the log is non-empty and its last byte is not `\n`, the one `os.write` starts with `\n`;
+  a return count below the encoded length is a failure (no fsync, no retry, marker kept, the
+  next append's guard isolates the fragment). `read_outcomes` splits bytes on `\n` and decodes
+  each line on its own, so a tail cut inside a multibyte character skips only that line.
+  Concurrent writers from other checkouts can at worst produce an empty line (skipped).
+  Known limit: a short write of a normal task line keeps the marker, so that attempt is later
+  logged `crashed` (storage full; the conservative record).
 - `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
   branch/task/model from the marker, `attempt` numbered as today.
 - Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker path once at
@@ -63,7 +70,8 @@ sequenceDiagram
   full (collapsed, at most 4000 characters each) to `.ai/local/recovery-decision.txt`
   (`atomic`); it removes a stale file at the start of every call. Output stays three TSV fields.
 - `ai-recover` `escalate`: when the file exists, the ⛔ notification ends with
-  `Full text: .ai/local/recovery-decision.txt`.
+  `Full text: .ai/local/recovery-decision.txt`. `ai-recover` removes the file right after its
+  lock, so an early escalation never names a previous invocation's text (plan review P4).
 - `bounded_questions` uses `shorten(…, QUESTION_CAP)` (no file: the questions' full text is in
   `plan-dispositions.md`, which the existing pointer line names).
 
@@ -72,10 +80,11 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | T001 | FL-16 finding cell pattern + hint | sonnet | none |
 | T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
-| T003 | CU-5 helper: marker, reconcile, safe append | opus | none |
+| T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
+| T003 | CU-5 helper: marker, reconcile (uses T007's append) | opus | T007 |
 | T004 | CU-5 ai-run wiring, SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
