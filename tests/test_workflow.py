@@ -7411,6 +7411,40 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(wf.table_cell(' a \\| b '), 'a | b')
         self.assertEqual(wf.table_cell('C:\\path'), 'C:\\path')
 
+    def test_disposition_pipes_missing_task_before_next_row(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace(
+            '| accepted | defect confirmed in the fixture | T001 |',
+            '| accepted | defect confirmed in the fixture |\n| M9 | rejected | other | none |'))
+        self.helper('triage-check', '--fresh', expected=1)
+        wf = self.recheck_module()
+        found = [m.group(1) for m in wf.DISPOSITION_ROW.finditer(dispositions.read_text())]
+        self.assertNotIn('M1', found)
+        self.assertIn('M9', found)
+
+    def test_disposition_pipes_missing_task_before_next_plan_row(self):
+        wf = self.recheck_module()
+        plan = '| P1 | accepted | note |\n| P2 | rejected | covered in docs/x.md:1 | |\n'
+        self.assertEqual([m.group(1) for m in wf.PLAN_DISPOSITION_ROW.finditer(plan)], ['P2'])
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + plan)
+        self.plan_check(start, expected=1)
+
+    def test_disposition_pipes_literal_backslash_round_trip(self):
+        wf = self.recheck_module()
+        for decoded in ('literal regex | is required', 'a \\\\ b', 'ends with \\', 'C:\\path | x', 'a \\| b'):
+            with self.subTest(decoded):
+                encoded = ' '.join(decoded.split()).replace('\\', '\\\\').replace('|', '\\|')
+                row = f'| M1 | accepted | {encoded} | T001 |\n'
+                match = wf.DISPOSITION_ROW.search(row)
+                self.assertEqual((wf.table_cell(match.group(3)), wf.table_cell(match.group(4))), (decoded, 'T001'))
+        self.assertEqual(wf.table_cell('literal regex \\| is required'), 'literal regex | is required')
+        self.assertEqual(wf.table_cell('a \\\\\\\\ b'), 'a \\\\ b')
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace('defect confirmed in the fixture', 'literal regex \\| is required'))
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
     def test_disposition_pipes_plan_dispositions_read_the_task_cell(self):
         start = self.open_plan_section()
         path = self.project / '.ai/reviews/plan-dispositions.md'

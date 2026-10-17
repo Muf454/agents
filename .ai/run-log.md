@@ -340,3 +340,4 @@
 | 2026-10-17T00:26:18Z | runner | T014 | completed | PASS | a52b5ea | Claude checkpointed; continuing queue |
 | 2026-10-17 | claude (sonnet) | T015 | DONE: catch-up `covers` map (Codex recheck covers only recheck; code covers code and recheck); 2 new `test_outcome_catchup_*` tests; README/docs line | PASS (ai-check, 741 tests; -k outcome_catchup 7 OK) | parent d636931 | flow unchanged |
 | 2026-10-17T00:40:05Z | runner | T015 | completed | PASS | bd4a419 | Claude checkpointed; continuing queue |
+| 2026-10-17 | claude (sonnet) | T016 | DONE: disposition row regexes use `[ \t]*`; writers escape `\` then `\|`; `table_cell()` decodes `\\`/`\|` in one pass; 3 new `test_disposition_pipes_*` tests; docs/workflow.md | PASS (ai-check, 744 tests; -k disposition_pipes 9 OK, -k triage_severity_suffix 3 OK) | parent 29c653e | flow unchanged |

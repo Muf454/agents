@@ -1011,7 +1011,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 DONE. `covered()` in `scripts/lib/workflow.py` uses an explicit `covers` map (Codex plan→plan; code→code, recheck; recheck→recheck). Added `test_outcome_catchup_recheck_does_not_cover_code` and `test_outcome_catchup_code_covers_recheck`; README and docs/workflow.md updated. Evidence: `-k outcome_catchup` Ran 7 OK; `.ai/bin/ai-check` Ran 741 tests OK. Flow unchanged.
 
 ## T016 — Disposition rows: one physical line per row and a lossless backslash/pipe encoding (review P7, N1; FL-25 b)
-Status: TODO
+Status: DONE
 Dependencies: T005
 Model: sonnet
 
@@ -1052,3 +1052,4 @@ Targeted: `python3 -m unittest discover -s tests -k triage_severity_suffix` (mus
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. Row regexes use `[ \t]*` (no newline crossing); writers escape `\` then `|`; `table_cell()` decodes `\\`/`\|` in one pass. Tests `test_disposition_pipes_missing_task_before_next_row`, `..._next_plan_row`, `..._literal_backslash_round_trip`. Targeted: disposition_pipes 9 OK, triage_severity_suffix 3 OK; ai-check PASS (744 tests). docs/workflow.md updated.

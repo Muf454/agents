@@ -986,12 +986,14 @@ TABLE_CELL = r'((?:\\.|[^\\|\n])*?)'
 
 
 def table_cell(text):
-    """A captured table cell as a value: `\\|` is a pipe, surrounding space is dropped."""
-    return text.replace('\\|', '|').strip()
+    """A captured table cell as a value: `\\\\` is a backslash, `\\|` a pipe (one left-to-right
+    pass, other backslashes kept), surrounding space is dropped."""
+    return re.sub(r'\\([\\|])', r'\1', text).strip()
 
 
-DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)(?:\s*\((?:BLOCKER|MAJOR|MINOR)\))?\s*\|\s*(accepted|rejected|deferred)\s*\|'
-                             r'\s*' + TABLE_CELL + r'\s*\|\s*' + TABLE_CELL + r'\s*\|', re.M | re.I)
+# `[ \t]*`, not `\s*`: a row's match must never cross a newline into the next row.
+DISPOSITION_ROW = re.compile(r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
+                             r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -1643,7 +1645,7 @@ def publish_recheck(arguments):
     if tuple(current) != (head, digest, rows_hash):
         fail('Re-check: the review or the rejected rows changed during the re-check; run it again.')
     answers, notes = parse_recheck(Path(source).read_text(), [finding for finding, _, _ in rows])
-    cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
+    cell = lambda value: ' '.join(value.split()).replace('\\', '\\\\').replace('|', '\\|')
     lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
              f'reviewed HEAD {head}; saved {now()}. -->', '',
              f"# Re-check of rejected findings ({os.environ.get('AI_REVIEW_BY') or 'Codex'})", '',
@@ -2441,8 +2443,8 @@ def plan_rounds(arguments):
 PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
-    r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
-    r'\s*' + TABLE_CELL + r'\s*\|\s*' + TABLE_CELL + r'\s*\|', re.M | re.I)
+    r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
+    r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 
 
 def plan_history(arguments):
@@ -2942,7 +2944,7 @@ def fallback_record(arguments):
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
         branch = 'detached'
-    cell = lambda value: ' '.join(str(value).split()).replace('|', '\\|') or '-'
+    cell = lambda value: ' '.join(str(value).split()).replace('\\', '\\\\').replace('|', '\\|') or '-'
     text = FALLBACK_LOG.read_text() if FALLBACK_LOG.exists() else (
         '# Claude fallback reviews (Codex catch-up pending)\n\n'
         'Reviews written by the Claude fallback while Codex could not review. Codex reviews all of\n'
