@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 99bb21f4737908f8f0fbfd58184c2a088c4de212db6913731ae5cd4ef6560c8f; HEAD ff863489dfa650550a5b6d46caacabede8fdebda; saved 2026-10-17T07:16:19Z. -->
+<!-- Plan review of plan digest 7abd705ecfc63bce079b0e82a0551c2467c728c003281bfec6466adec247c9a3; HEAD 0fcb163092dcf7627f8ae611aa85280fd2ae1827; saved 2026-10-17T07:27:43Z. -->
 
 # Plan review
 
-Reviewed HEAD: `ff863489dfa650550a5b6d46caacabede8fdebda`
+Reviewed HEAD: `0fcb163092dcf7627f8ae611aa85280fd2ae1827`
 
 Overall verdict: CHANGES REQUIRED before unattended implementation.
-Finding counts: BLOCKER=0 MAJOR=7 MINOR=0
+Finding counts: BLOCKER=0 MAJOR=4 MINOR=0
 
 ## BLOCKER findings
 
@@ -13,61 +13,37 @@ None.
 
 ## MAJOR findings
 
-- P1: Terminal recovery failures leave a due schedule eligible for repeated launches.
+- P3: Preserved work still cannot resume when the limited session already marked the last task DONE.
 
-  **Location:** `.ai/tasks.md:120`, `.ai/tasks.md:178`; `scripts/ai-recover:103`.
+  **Location:** `.ai/tasks.md:338`, `.ai/tasks.md:346`; `scripts/ai-pipeline:499`, `scripts/ai-pipeline:507`.
 
-  T002 launches recovery whenever the schedule is due and no runner or marker exists. T003 consumes the schedule only after existing checks that can escalate. For example, switching branches during the wait makes recovery escalate at the branch check, remove its marker, and leave the schedule due. Every subsequent watchdog probe launches recovery again. The relaunch count remains unchanged, so its cap does not bound these launches.
+  T011 assumes the resumed pipeline reaches an implementation session. A session can mark its last task DONE and then hit the limit before committing—the existing runner explicitly supports validated checkpoints of uncommitted DONE work. On relaunch, `tasks complete` skips `ai-run`, so the arm is never consumed. The review/publish path subsequently refuses the dirty checkout. The new IN_PROGRESS-only regression does not cover this case.
 
-  **Plan change:** Define a terminal schedule state or cancellation action for escalated relaunches. Add a regression that schedules, switches branches, and probes twice: one escalation, no second recovery launch.
+  **Plan change:** Define how an armed resume reconciles the interrupted task when no runnable task remains. Preserve validation and checkpoint safeguards, and add a regression where the last task is marked DONE with uncommitted source before the limit; relaunch must complete without a recovery decision session.
 
-- P2: An interrupted scheduling handoff can retry before the reset or consume the cap twice.
+- P4: Failed ownership revocation can still let a later run override human `--draft` intent.
 
-  **Location:** `.ai/tasks.md:190`, `.ai/current-plan.md:129`; `scripts/lib/watchdog.py:437`.
+  **Location:** `.ai/tasks.md:680`, `.ai/tasks.md:686`.
 
-  The plan calls a crash between scheduling and exit harmless, but `pipeline.active` remains until cleanup. If recovery dies after `limit-schedule`, today’s watchdog detects a crashed pipeline and launches recovery immediately. With the original limit files intact, recovery schedules again and increments the count; after error-file removal, it can instead enter ordinary crash recovery before the reset. T002’s scheduled path explicitly excludes checkouts with a marker.
+  The revision clears ownership during `--draft`, but explicitly treats a failed clear as a warning. If deletion fails while the old record remains readable, the run can finish successfully with that ownership intact. A subsequent clean run reads the matching record and un-drafts the PR. The three-run test covers only successful deletion.
 
-  **Plan change:** Make scheduling idempotent across interruption. Recovery must recognize an existing future schedule, restore the waiting state, and avoid another reservation or early retry. Test interruptions immediately after scheduling and during cleanup.
+  **Plan change:** Require durable revocation before reporting a successful `--draft` run. If revocation cannot be persisted, stop with an explicit state-repair requirement. Add fault injection for a failed clear with an existing readable record, followed by a clean run, and verify human draft intent remains protected.
 
-- P3: Ordinary edits made before a usage limit prevent the promised automatic resume.
+- P8: The detached launcher’s predictable log redirection can truncate another file or block.
 
-  **Location:** `.ai/tasks.md:181`, `.ai/tasks.md:211`; `scripts/ai-run:148`.
+  **Location:** `.ai/tasks.md:521`.
 
-  The due path commits only state, run-log, and handoff leftovers, then requires a clean checkout. A real implementation session can mark `.ai/tasks.md` IN_PROGRESS or edit source before hitting its limit. Those preserved changes cause escalation after the reset. The proposed `limit-far` mock returns before making such edits, so the acceptance test misses this common case.
+  T006 prescribes a second-resolution filename and `>"$log"` before the child performs its checkout checks. A planted symlink at that path redirects the write outside the checkout; a FIFO can block startup. Two launches within the same second also reuse and truncate the same log, including when the second child subsequently fails to acquire the lock. T001’s safe limit-record writer does not protect this separate write.
 
-  **Plan change:** Specify a gated resume path that reconciles preserved task work in the normal implementation session, retaining validation and checkpoint safeguards. Add a regression where the session updates task status and source before reporting its limit; the scheduled resume must preserve and reconcile that work without a recovery decision session.
+  **Plan change:** Create each detached log exclusively through a safe `.ai/local` directory, and redirect through the already-open descriptor. Add sentinel-symlink, FIFO, unsafe-directory and simultaneous-launch regressions; logs must remain distinct and outside files unchanged.
 
-- P4: A human `--draft` request does not revoke existing pipeline ownership.
+- P9: The preserved-work exception identifies a commit, not the preserved tree.
 
-  **Location:** `.ai/tasks.md:503`, `.ai/tasks.md:541`.
+  **Location:** `.ai/tasks.md:80`, `.ai/tasks.md:331`; `.ai/current-plan.md:60`; `scripts/ai-run:689`.
 
-  T009 says an already-draft PR receives “no record change.” Sequence: a policy run drafts and records the PR; a later human run passes `--draft`; a subsequent clean run omits that flag. The old record still matches, so the pipeline un-drafts the PR despite the intervening explicit human choice. The planned `--draft` test starts without an ownership record and cannot catch this.
+  Both `limit-arm` and `limit-armed` compare only HEAD. Scheduling releases the checkout lock, potentially for days. Human edits made during that wait leave HEAD unchanged and therefore pass the exception. The resumed session can modify those edits, and its validated automatic checkpoint stages all remaining files. This breaks the stated promise to admit exactly the limited session’s preserved work and removes the existing protection against absorbing unrelated human changes.
 
-  **Plan change:** Clear pipeline ownership whenever `--draft` asserts human draft intent. Add the three-run regression above and require the final run to leave the PR draft.
-
-- P5: The dashboard treats killed usage-limit waits as scheduled relaunches.
-
-  **Location:** `.ai/tasks.md:247`, `.ai/tasks.md:267`; `scripts/lib/common.sh:108`.
-
-  T004 maps every gone runner with observation state `paused` to status `paused`. Existing standalone runners and planning sessions also write that state during ordinary limit sleeps, without scheduling a relaunch. Killing such a planning session leaves `stage: planning, state: paused`, so the proposed rule displays an indefinite pause instead of the required planning stop. Its ordering also lets stale pause telemetry hide a newer error.
-
-  **Plan change:** Require evidence of a current scheduled relaunch before treating a gone runner as waiting. Preserve newer-error precedence. Add killed-during-pause planning and standalone-runner cases without schedules.
-
-- P6: The new predictable temporary-file write follows symlinks.
-
-  **Location:** `.ai/tasks.md:39`.
-
-  The prescribed `printf … > .ai/local/limit-stop.tmp && mv -f` follows an existing `limit-stop.tmp` symlink and truncates its target. `.ai/local` is explicitly agent-writable. Rejecting symlinks when subsequently reading `limit-stop` happens after the destructive write; a FIFO at the temporary path can also block the stop.
-
-  **Plan change:** Use exclusive temporary-file creation and safe directory handling, then atomically replace the record. Add regressions with a temporary-path symlink pointing to a sentinel file and a FIFO; the sentinel must remain unchanged and the stop must return promptly.
-
-- P7: T005 assigns a permissions-boundary change to `sonnet`.
-
-  **Location:** `.ai/tasks.md:288`.
-
-  T005 changes Claude’s accessible directories and constructs permission rules while promising that external references remain read-only. This is security/authorization work, which the review’s explicit model rule requires to use `opus`.
-
-  **Plan change:** Set T005’s `Model:` to `opus` and update the plan’s model table. Keep its path-validation and unchanged edit-permission acceptance criteria.
+  **Plan change:** Bind the resume exception to the preserved index/worktree contents when scheduling, and verify that binding after reacquiring the lock, accounting explicitly for host bookkeeping. Add a regression that edits or adds an unrelated file during the wait without changing HEAD; recovery must preserve it and refuse automatic reconciliation.
 
 ## MINOR findings
 
@@ -75,13 +51,15 @@ None.
 
 ## Scope and validation
 
-Inspected repository instructions, spec, plan, all ten tasks, state, handoff, relevant documentation, affected scripts/helpers, installation logic, test fixtures, and `.ai/validate`. These findings concern proposed behavior; implementation has not begun.
+Inspected repository instructions, spec, revised plan and all eleven tasks, dispositions, state, handoff, relevant documentation, affected scripts/helpers, installation logic, test fixtures and `.ai/validate`.
+
+The revised plan covers P1, P2, P5, the original P6 limit-record write, and P7. P3 and P4 remain incomplete in the cases above.
 
 Observed checks passed:
 
 - Task queue validation.
-- Documentation consistency tests: **3 tests**.
-- Shell syntax checks for the affected existing shell scripts and `.ai/validate`.
-- Python AST parsing for affected helpers, tests, and the parallel test runner.
+- Documentation consistency: **3 tests**.
+- Shell syntax: **13 files**.
+- Python AST parsing: **6 files**.
 
-The full gate and fixture-based integration tests were not run because they require writes unavailable in this read-only review. Passing current syntax and documentation checks does not validate the proposed behavior. No files were modified, and no network or MCP integrations were invoked.
+The full gate and fixture-based integration tests were not run because they require writes unavailable in this read-only review. These checks validate the existing baseline, not the proposed behavior. No files were modified; no network or MCP integrations were invoked.
