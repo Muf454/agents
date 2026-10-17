@@ -94,7 +94,7 @@ changed on purpose: `M1 (MAJOR) x` moved to the matched cases
 
 
 ## T002 — Prompts and host contracts show the exact disposition row (FL-16, prompts)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: haiku
 
@@ -135,6 +135,20 @@ Targeted: `python3 -m unittest discover -s tests -k tool_contract` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Triage and plan-revision prompts (`templates/.ai/prompts/triage.md`, `plan-revision.md`) show
+the ID-alone row `| M1 | accepted | <evidence> | T012 |` / `| P1 | …`, with "the finding ID alone in
+the first cell". `scripts/ai-run` TRIAGE and REVISION CONTRACTs and the host comments
+(`start_dispositions`, `PLAN_DISPOSITIONS_PREAMBLE`) carry the same example, mid-line so the
+row regex (line-anchored) never reads it as a row. Shared "How to work here" block untouched.
+Test: `test_finding_cell_prompts_show_the_row` (new); the triage test
+`test_task_sections_host_triage_adds_the_missing_sections` and `test_revise_plan_accept_commits_once_and_leaves_a_clean_checkout`
+assert the phrase in the recorded prompts.
+Test-side change, on purpose: the mock triage in `tests/test_workflow.py` decided "rows already
+recorded" with `'| M1 |' in dispositions`; the example in a fresh file made it skip writing M1
+(broke `test_observation_pipeline_extra_fix_round_detail`, `test_extra_fix_round_flat_counts_*`).
+It now matches a row line: `re.search(r'^\| M1 \|', …, re.M)`.
+Evidence: `-k finding_cell` 7 OK; `-k tool_contract` 3 OK; `.ai/bin/ai-check` 753 tests OK (387.3 s).
+Limitation: the installed `.ai/prompts` copy changes only after `setup-project --upgrade --apply` (handoff).
 
 
 ## T007 — Outcome log I/O: readable append descriptor, complete-write check, per-line UTF-8 reader (CU-5, part 0)

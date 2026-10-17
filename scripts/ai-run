@@ -414,7 +414,7 @@ if [[ "$revise_plan" == yes ]]; then
     prompt=$(cat .ai/prompts/plan-revision.md)
     prompt+=$'\n\nREVISION CONTRACT: This is plan review round '"$revision_round"'. Evaluate .ai/reviews/plan.md '
     prompt+='(read-only: never edit it). Fill ONLY the last section of .ai/reviews/plan-dispositions.md, headed "'
-    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (add new '
+    prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional) with the finding ID alone in the first cell, e.g. "| P1 | accepted | evidence | T012 |", disposition accepted (add new '
     prompt+='TODO tasks with new IDs to .ai/tasks.md, placed before the first task that depends on them (the '
     prompt+='host reorders the queue into dependency order and rejects cycles, unknown IDs and prose in '
     prompt+='Dependencies:), and reference them; copy the task format of .ai/tasks.md exactly, with every ### '
@@ -520,7 +520,7 @@ if [[ "$triage" == yes ]]; then
     git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
     ai_guard_verify
     prompt=$(cat .ai/prompts/triage.md)
-    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Copy the task format of .ai/tasks.md exactly: the heading, Status:, Dependencies:, Model: and every ### section (Goal, Implementation notes, Likely affected modules, Acceptance criteria, Validation, an empty Result / notes); the host adds a missing Likely affected modules or Result / notes, anything else missing stops the run. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md, with the finding ID alone in the first cell, e.g. "| M1 | accepted | evidence | T012 |". Append new TODO tasks with new IDs for accepted findings and reference them. Copy the task format of .ai/tasks.md exactly: the heading, Status:, Dependencies:, Model: and every ### section (Goal, Implementation notes, Likely affected modules, Acceptance criteria, Validation, an empty Result / notes); the host adds a missing Likely affected modules or Result / notes, anything else missing stops the run. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
     # Same routine as triage-check --fresh, so the prompt and the check agree on the round.
     rounds=$(ai_helper review-history --current --count) || ai_die 'Triage stage: cannot count the earlier review rounds.'
     history=$(ai_helper review-history --current) || ai_die 'Triage stage: cannot summarise the earlier review rounds.'

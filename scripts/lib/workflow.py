@@ -1029,7 +1029,8 @@ def start_dispositions(arguments):
 
 Review HEAD: {head}
 
-<!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
+<!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
+e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
 explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
 with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
@@ -2514,7 +2515,8 @@ PLAN_DISPOSITIONS_PREAMBLE = """# Plan review dispositions (Claude)
 
 <!-- The host appends one section per plan-review round; fill only the last one and never edit
 earlier sections or .ai/reviews/plan.md. One row per BLOCKER/MAJOR finding of that round's plan
-review (MINOR optional). Disposition: accepted (Task: the new TODO task IDs that answer it),
+review (MINOR optional), the finding ID alone in the first cell, e.g. "| P1 | accepted | evidence | T012 |".
+Disposition: accepted (Task: the new TODO task IDs that answer it),
 rejected (concrete evidence) or needs-human (the question for the human in the Evidence column).
 From plan-review round 3 on, the section also needs a line starting with "Convergence:". -->
 """

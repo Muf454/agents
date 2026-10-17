@@ -316,7 +316,7 @@ if 'TRIAGE CONTRACT' in prompt:
     text = tasks_file.read_text()
     review = pathlib.Path('.ai/reviews/dispositions.md')
     convergence = os.environ.get('MOCK_CONVERGENCE')
-    if convergence is not None and '| M1 |' in review.read_text():
+    if convergence is not None and re.search(r'^\| M1 \|', review.read_text(), re.M):
         # Resuming a triage whose rows are recorded: only the convergence line is missing.
         review.write_text(review.read_text() + convergence + '\n')
         subprocess.run(['git','add','--','.ai/reviews/dispositions.md'],check=True)
@@ -2998,6 +2998,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.assertIn(entry, ('Read', 'Glob', 'Grep'))
         prompt = (self.base / 'revision-prompts.log').read_text()
         self.assertIn('REVISION CONTRACT: This is plan review round 1', prompt)
+        self.assertIn('ID alone in the first cell', prompt)
         self.assertIn('Do not commit; the host validates the section and commits it.', prompt)
         self.assertNotIn('Convergence:', prompt.split('REVISION CONTRACT')[1])
         # The same report again: refused, no second commit or record.
@@ -6766,6 +6767,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.open_stage(), '')
         prompt = (self.base / 'triage-prompts.log').read_text()
         self.assertIn('Copy the task format of .ai/tasks.md exactly', prompt)
+        self.assertIn('ID alone in the first cell', prompt)
 
     def test_task_sections_host_triage_missing_goal_still_stops(self):
         self.ready()
@@ -7417,6 +7419,20 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         path = self.project / '.ai/reviews/plan-dispositions.md'
         path.write_text(path.read_text() + '| P1 (MAJOR) about P2 | accepted | real | T002 |\n')
         self.assertIn('Finding P2 has no row', self.plan_check(start, expected=1).stderr)
+
+    def test_finding_cell_prompts_show_the_row(self):
+        for name, row in (('triage', '| M1 | accepted |'), ('plan-revision', '| P1 | accepted |')):
+            with self.subTest(name):
+                text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()
+                self.assertIn(row, text)
+                self.assertIn('ID alone in the first cell', text)
+        contract = (ROOT / 'scripts/ai-run').read_text()
+        self.assertIn('| M1 | accepted | evidence | T012 |', contract)
+        self.assertIn('| P1 | accepted | evidence | T012 |', contract)
+        self.ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-dispositions', head)
+        self.assertIn('| M1 | accepted |', (self.project / '.ai/reviews/dispositions.md').read_text())
 
     def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
         self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
