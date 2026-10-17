@@ -1,37 +1,34 @@
-<!-- Host evidence: HEAD 784048818167f38d41b230f188dd845f9c2a9722; merge-base 5894c2b23e0fc29fe3ab225a2bda707889967f91; saved 2026-10-15T08:06:31Z. -->
+<!-- Host evidence: HEAD afa91c0d1e2c738010fc15ab683f0b45069806c2; merge-base 7d22939e12957f9ba744f563498161f970fe31ab; saved 2026-10-17T00:07:00Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED. Queue fixes are verified; M3 is only partially resolved because GNU `timeout` descendants survive dispatcher shutdown.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=0
+Overall verdict: CHANGES REQUIRED.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=2
 
-Reviewed HEAD: `784048818167f38d41b230f188dd845f9c2a9722`
+Reviewed HEAD: `afa91c0d1e2c738010fc15ab683f0b45069806c2`
 
-Supplied base and verified merge-base: `5894c2b23e0fc29fe3ab225a2bda707889967f91`
+Supplied base and verified merge-base: `7d22939e12957f9ba744f563498161f970fe31ab`
 
 ## Scope and validation
 
-Inspected repository instructions, spec, plan, tasks, state, handoff, review dispositions, relevant documentation, scoped Git history/diff, changes since `c9d092b`, and affected source/tests. The vault flow chart contains the planning/recovery changes and `updated: 2026-10-15`.
-
-The checkout was clean. No files were written, and no network or MCP integrations were invoked.
+Inspected repository instructions, specification, plan, tasks, state, handoff, previous reviews/dispositions, relevant documentation, complete scoped diff/history, and affected source/tests. The checkout was clean.
 
 Validation evidence observed:
 
-- `.ai/local/validation.json`: PASS at `2026-10-15T08:02:12Z`, recorded at `26fb3ee`.
-- Referenced log: **686 tests passed in 348.5 seconds**, using 48 batches on eight workers.
-- `workflow.py stamp verify` confirms the validation fingerprint matches this checkout. The final commit changes only excluded bookkeeping.
+- `.ai/local/validation.json`: PASS at `2026-10-17T00:02:40Z`, recorded at `0eefd412`.
+- Referenced log: **736 tests passed in 398.2 seconds**, across 48 batches on eight workers.
+- Independent `stamp verify`: the fingerprint matches the reviewed checkout.
 
 Checks independently run:
 
-- Current queue validation and discovery of 686 tests.
-- Eight documentation, sanitization and timeout-policy tests: passed.
-- Shell syntax checks for 13 files and Python AST parsing for seven changed files: passed.
-- Existing test methods retained across the three changed test modules.
-- In-memory queue regressions, review extraction, oversized-count handling, batch partitioning and timeout scaling.
-- Process cleanup reproduction described below.
+- Task queue validation, discovery of 736 tests, and comparison confirming no existing test IDs were removed.
+- Three documentation consistency tests: passed.
+- Python AST parsing for three changed Python files and shell syntax checks for 13 scripts/templates: passed.
 - `git diff --check`: passed.
+- In-memory task-filling, recovery parsing, catch-up ordering, and disposition parsing checks.
+- Real-process cleanup checks described below.
 
-The full `./scripts/ai-check` was not rerun because it writes validation records and fixture checkouts. Four-CPU CI performance remains unverified.
+The full `./scripts/ai-check` and fixture integration tests were not rerun because they write files. Process reproductions were explicitly cleaned up. No files were written and no network/MCP integrations were invoked.
 
 ## BLOCKER findings
 
@@ -39,68 +36,122 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M3 — Dispatcher shutdown leaves GNU `timeout` descendants running
+### M1 — Non-UTF-8 process names abort descendant cleanup
 
-**Location:** `tests/run_parallel.py:263`, `tests/run_parallel.py:272`, `tests/run_parallel.py:231`. Relevant callers: `scripts/ai-run:265`, `scripts/ai-review:167`.
+**Location:** `tests/run_parallel.py:205`, `tests/run_parallel.py:219`, `tests/run_parallel.py:389`.
 
-**Requirement:** T014 requires terminating every running batch, including subprocesses its tests started, when a worker fails or execution is interrupted.
+**Requirement:** FL-27 requires terminating descendants before shutdown returns or re-raises.
 
-**Problem:** Cleanup signals only the batch’s process group. GNU `timeout`, used throughout fixture pipelines, creates a separate process group. Its monitored command therefore escapes both group signals. The bounded drain now lets the dispatcher return, but closing its output pipe does not terminate those surviving processes.
+**Problem:** `/proc/<pid>/stat` contains the process name as arbitrary bytes. `proc_stat()` reads it with strict text decoding and catches only `OSError`. A non-UTF-8 name raises `UnicodeDecodeError`. Because the scanner reads every visible process, an unrelated process can also trigger this.
 
-**Evidence/reproduction:** A read-only reproduction exercised the actual `Dispatcher` with a synthetic batch launching `timeout 120 sleep 120`:
+**Evidence:** A child set its Linux process name using `prctl(PR_SET_NAME, b"\xff")`. Calling the actual `Dispatcher.stop()` with subreaping enabled produced:
 
-1. The batch and GNU `timeout` had different process groups.
-2. `Dispatcher.stop()` terminated the batch.
-3. The dispatcher returned after approximately **10.49 seconds**.
-4. GNU `timeout` and its sleeping child remained alive; the child’s `/proc` state was `S`.
+```text
+stop raised: UnicodeDecodeError
+child alive after stop: True
+stop_done: True
+```
 
-The reproduction processes were explicitly cleaned up. No descendant called `setsid`; ordinary GNU `timeout` was sufficient.
+The initial descendant scan fails before batch-group termination. The dispatcher nevertheless marks shutdown complete, preventing another caller from retrying cleanup.
 
-**Impact:** Interrupted or failed self-checks can leave fixture commands executing after batch shutdown and temporary-directory cleanup. The new tests cover a plain `sleep` child in the batch’s group, so they miss the process structure used by actual toolkit commands.
+**Impact:** The new scanner can crash an otherwise ordinary self-check and leave fixture processes alive—the failure FL-27 is intended to eliminate. This is introduced by this range.
 
-**Recommended direction:** Track and terminate descendant process groups before their parents disappear, or provide equivalent process-tree ownership. Retain bounded output draining as a fallback. Add regressions using GNU `timeout` around a sleeping child for worker failure and interruption/SIGTERM.
+**Recommended direction:** Parse the numeric stat fields from bytes, or use lossless/error-tolerant decoding. Ensure a scan failure cannot skip batch termination while marking cleanup complete. Add a real-process regression with a non-UTF-8 process name.
 
-**Baseline distinction:** Descendant leakage existed before this range. This remains the accepted M3 cleanup requirement; T014 fixes the unbounded wait and same-group descendants but does not complete process-tree termination.
+### M2 — A targeted Codex re-check falsely covers a full Claude review
+
+**Location:** `scripts/lib/workflow.py:3172`, `scripts/lib/workflow.py:3178`.
+
+**Requirement:** CU-2 should remove Claude reviews from catch-up pending when Codex has covered their work.
+
+**Problem:** Mapping every non-plan mode to the `code` family lets a later Codex `recheck` cover an earlier full Claude code review. However, `templates/.ai/prompts/recheck.md:4` explicitly restricts re-checks to rejected findings and prohibits reviewing accepted/deferred findings or raising new ones.
+
+**Evidence:** Supplying the actual report function with these same-project/branch records:
+
+1. Claude fallback, `mode=code`, at t1.
+2. Codex, `mode=recheck`, at t2.
+
+removes the pending entry and prints:
+
+```text
+1 Claude review(s) covered by a later Codex review or catch-up record.
+```
+
+**Impact:** Catch-up tracking silently reports a full independent review as completed after Codex examined only selected findings. This is introduced by this range; the plan’s symmetric family assumption is too broad for the existing re-check contract.
+
+**Recommended direction:** Require a full Codex code review to cover code-family work, or establish narrower coverage using the actual reviewed scope. Add a regression proving that a targeted re-check leaves the preceding full Claude review pending.
 
 ## MINOR findings
 
-None found in the inspected scope.
+### P7 — Literal backslashes before pipes still shift table columns
+
+**Location:** `scripts/lib/workflow.py:985`, `scripts/lib/workflow.py:990`.
+
+**Problem:** The retained pipe-only writers and new paired-backslash parser lack a consistent encoding/decoding contract. This remains the previous plan-review finding P7; no rejection or implementation resolving it was found.
+
+**Evidence:** Encoding evidence containing the literal text `literal regex \| is required` with the existing writer produces:
+
+```text
+| P7 | accepted | literal regex \\| is required | T030 |
+```
+
+Both actual disposition regexes read `is required` as the Task cell.
+
+**Impact:** Evidence discussing escape syntax can still stop triage/revision or corrupt parsed columns.
+
+**Recommended direction:** Define matching backslash-and-pipe encoding and decoding. Extend round-trip coverage to a literal backslash before a pipe and multiple consecutive backslashes.
+
+### N1 — Missing Task cells can consume the following row
+
+**Location:** `scripts/lib/workflow.py:994`, `scripts/lib/workflow.py:2445`.
+
+**Requirement:** FL-25(b) explicitly requires rows with a missing Task cell to remain malformed.
+
+**Problem:** Surrounding `\s*` expressions cross newlines, despite `TABLE_CELL` excluding them. A row without its Task cell can consume the next row’s opening pipe as an empty Task cell.
+
+**Evidence:** An in-memory call to the actual `triage_check --fresh` accepted a rejected MAJOR row lacking its Task column when an optional MINOR row followed it. The regex matched only the MAJOR row, consumed the following opening pipe, and validation returned `accepted=0 deferred=0`.
+
+**Impact:** Malformed records can pass validation and swallow subsequent optional dispositions; subsequent required rows instead cause misleading missing-disposition stops.
+
+**Baseline distinction:** Cross-line whitespace matching predates this range, but remains an unmet explicit FL-25 requirement.
+
+**Recommended direction:** Constrain row whitespace to spaces/tabs and parse each physical row independently. Test missing Task cells both at EOF and before another row.
 
 ## Previous findings re-evaluated
 
-- **M2 fixed:** Non-task preamble sections survive reordering, and the repaired queue validates.
-- **M3 partially fixed:** Shutdown is bounded, but descendants in GNU `timeout` groups survive.
-- **N6 fixed:** Tab-separated task headings reorder successfully and remain unchanged.
-- **N4/N5 fixes retained:** The actual plan report yields HEAD `e5e68b0`; oversized counts are rejected without crashing.
+- Previous code-review **M3**: ordinary GNU `timeout` descendant cleanup is fixed. An independent real-process check terminated all three descendants. M1 identifies a separate remaining cleanup failure.
+- Plan findings **P1–P6**: the descriptor-based deletion, escaped-pipe protection, recovery scanner redesign, shutdown ownership/barrier, timestamp ordering, and protected startup loop are present with relevant regression tests.
+- Plan finding **P7** remains reproducible.
+- The vault flow chart contains the queue-filling and scratch-clearing steps with `updated: 2026-10-17`; corresponding hub log entries exist.
 
-T006 was explicitly deferred in commit `cb69048`; it is not counted as missing implementation.
+## Missing coverage
 
-## Missing test coverage
+Add regressions for M1, M2, P7, and N1. Existing tests cover ordinary process names, full code/plan catch-up reviews, bare escaped pipes, and missing Task cells at EOF; those cases do not expose the reported defects.
 
-- Cleanup of descendants moved into GNU `timeout` process groups, as demonstrated in M3.
-- Notification-retention rollover through the real notification writer; current wait tests append directly.
+The independent recovery checks passed 15 representative acceptance/rejection cases. Task-filling checks confirmed canonical insertion, idempotence, and preservation of non-TODO tasks.
 
 ## Security concerns
 
-M3 concerns process cleanup and availability. The inspected dashboard additions retain bounded, pinned readers and advisory review counts. No additional demonstrated authentication or authorization defect was found.
+M1 affects local availability and process cleanup. M2 affects audit-status accuracy; status remains advisory under AD-5.
+
+The inspected scratch deletion uses pinned descriptors and no-follow directory opens. No additional demonstrated authentication/authorization defect was found in the inspected changes.
 
 ## Architecture concerns
 
-Dependencies remain minimal and host authority boundaries are preserved. Process-group isolation needs to account for nested groups created by existing toolkit commands.
+Dependencies remain limited to the standard library. Gate files, installed tooling, and permissions were preserved. Catch-up coverage needs to respect the different scopes of full reviews and targeted re-checks.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Confirm the self-check passes well under ten minutes on the intended four-CPU CI runner.
-- Exercise supervised plan revision and crash/resume in a scratch project.
-- Confirm fixture pipelines stay hidden while real pipelines remain visible.
-- Check dashboard review details and cursor-based waiting during live runs.
+- After fixes and acceptance, refresh installed tooling/prompts using the documented upgrade process.
+- Interrupt a real self-check on the intended host and inspect for leftover fixture processes.
+- Compare catch-up output with the real review history, particularly branches containing targeted Codex re-checks.
 
 ### Covered by automated tests
 
-- Existing coverage addresses queue ordering, cycles, DONE preservation, revision recovery, discovery filtering, review parsing and wait transitions.
-- Extend cleanup tests to nested GNU `timeout` groups and verify descendants terminate.
-- Add notification-retention rollover coverage using the real writer.
+- Retain the process-tree, startup-interruption, task-format, scratch-symlink, recovery, and catch-up regression groups.
+- Add the four missing cases above.
+- Rerun `./scripts/ai-check` after fixes.
 
 Reviewing does not constitute human acceptance.
