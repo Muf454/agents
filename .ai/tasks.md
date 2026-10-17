@@ -843,7 +843,7 @@ DONE 2026-10-17.
   armed tree with `Start from a clean checkpoint`. Flow chart unchanged (T011 updates it).
 
 ## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T014, T017
 Model: opus
 

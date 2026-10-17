@@ -123,6 +123,20 @@ plan_scope() {
     ai_die "$error"
   }
 }
+# A resume (a human start drops the arm), the checkout exactly the armed tree, no stage open.
+armed_resume() {
+  local stage
+  [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && stage=$(ai_helper run-manifest stage 2>/dev/null) && \
+    [[ -z "$stage" ]] && ai_helper run-manifest limit-armed 2>/dev/null
+}
+# The one acceptance of a dirty tree before the first session; `armed` records that the armed
+# exception admitted it (the consumer below then owes the preserved work its route).
+armed=no
+clean_or_armed() {
+  [[ -n "$(git status --porcelain --untracked-files=all)" ]] || return 0
+  armed_resume || return 1
+  armed=yes
+}
 # A task attempt whose runner was killed (SIGKILL, no exit handler) left its marker; log it as
 # `crashed` once, before the clean-checkpoint refusal below: `ai_helper state implementing`
 # dirties tracked .ai/state.md before every session, so a killed runner always leaves a dirty
@@ -144,9 +158,11 @@ if [[ -n "$plan_file" ]]; then
     ai_die "Planning: ${keep_error#Error: }"
 else
   # Triage and plan revision check their own leftovers below (an interrupted one may leave
-  # workflow records).
-  [[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+  # workflow records). The usage-limit relaunch's resume may start from exactly the preserved
+  # task work it armed (consumed once, below, before the first act).
+  if [[ "$triage" == no && "$revise_plan" == no ]] && ! clean_or_armed; then
     ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+  fi
   # An interrupted revision's uncommitted queue is repaired as its session's would have been
   # (the helper decides; a committed or non-revision queue is left to the checks).
   if [[ "$revise_plan" == yes ]]; then
@@ -603,9 +619,81 @@ else
     "$sessions" "$(( budget_total - budget_done ))"
 fi
 
+# Records the runner bookkeeping of TASK's DONE or BLOCKED checkpoint in its own commit (never
+# application files); an accepted DONE checkpoint must hold exactly the validated bytes.
+# Usage: runner_checkpoint TASK STATUS.
+runner_checkpoint() {
+  ai_helper state implementing 'Continue queue; see task results for any blockers'
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m "chore(ai): record $1 runner checkpoint" >/dev/null
+  ai_helper run-manifest task-clear 2>/dev/null || true
+  ai_guard_verify
+  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
+  if [[ "$2" == DONE ]]; then
+    verify_checkpoint "$1"
+    ai_notify "✅ Done: $(ai_helper tasks progress "$1")"
+  fi
+}
+
+# TASK is DONE in the working queue: the full gate, then the tier-1 commit of whatever its session
+# left uncommitted, then the runner checkpoint. Used after every session and for the preserved
+# work of a usage-limit stop whose task was DONE before the limit. Usage: checkpoint_done TASK.
+checkpoint_done() {
+  local task=$1 new_files=''
+  remaining=$(remaining_time)
+  (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
+  ai_observe step checks "$task"
+  if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+    ai_guard_verify
+    task_outcome validation_failed
+    ai_helper tasks set "$task" IN_PROGRESS
+    ai_helper state blocked "Validation failed after $task; inspect validation log"
+    ai_die "Validation failed; $task returned to IN_PROGRESS."
+  fi
+  ai_guard_verify
+  if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
+    ai_observe step build "$task · checkpointed · $counts_done/$counts_total"
+  fi
+  if [[ -n "$(dirty_beyond_records)" ]]; then
+    # Tier-1 recovery: the session finished and the full gate just passed on exactly
+    # this content (gate files verified unchanged), but it didn't commit. Commit it.
+    # The session started from a clean tree, or an armed resume from its own preserved task
+    # work, so everything new is its own output. Stage it all (git still skips ignored
+    # files), but never a secret-looking file.
+    git add --all -- .
+    if ! new_files=$(ai_helper checkpoint-guard); then
+      git reset -q
+      ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
+    fi
+    git commit -q -m "chore(ai): checkpoint $task (validated; the session did not commit)"
+    ai_guard_verify
+    # A commit hook must not have slipped unvalidated content into that checkpoint.
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+      ai_helper committed-matches-worktree || \
+      ai_die "The checkpoint of $task differs from the validated content (commit hook?)."
+    ai_notify "🔧 $task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
+  fi
+  task_outcome done
+  ai_log "$task" 'completed' PASS 'Claude checkpointed; continuing queue'
+  runner_checkpoint "$task" DONE
+}
+
+# Preserved task work of a usage-limit stop (the relaunch armed it; admitted above). Every check
+# here runs while the manifest is still armed, so each stop is terminal for recovery; only the
+# act (the armed checkpoint or the bound task's session) follows the disarm.
+bound='' route=''
+if [[ "$armed" == yes ]]; then
+  bound=$(ai_helper run-manifest limit-task 2>/dev/null) || \
+    ai_die 'Cannot read the task of the preserved work in the run manifest.'
+  newly=$(ai_helper tasks newly-done HEAD 2>&1) || ai_die "Cannot compare the task queue with HEAD: ${newly#Error: }"
+  [[ -z "$newly" || "$newly" == "$bound" ]] || \
+    ai_die 'Preserved work marks another task DONE; inspect it before continuing.'
+fi
+
 # Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,
-# once, before a task runs. Dependencies a task changes mid-run wait for the next start.
-if [[ "$(ai_helper tasks next)" != none ]]; then
+# once, before a task runs (or the preserved work's checkpoint validates). Dependencies a task
+# changes mid-run wait for the next start.
+if [[ "$(ai_helper tasks next)" != none || -n "$bound" ]]; then
   deps_limit=${AI_DEPS_TIMEOUT:-1200}
   [[ "$deps_limit" =~ ^[1-9][0-9]{0,6}$ ]] || ai_die "Dependency setup: invalid AI_DEPS_TIMEOUT: $deps_limit"
   remaining=$(remaining_time)
@@ -613,9 +701,39 @@ if [[ "$(ai_helper tasks next)" != none ]]; then
   ai_deps "$AI_APPROVED_GATE" "$deps_limit" || ai_die "$AI_DEPS_ERROR"
 fi
 
+if [[ -n "$bound" ]]; then
+  # The route, by the bound task's status in the working queue (DONE in HEAD or only here alike).
+  bound_status=$(ai_helper tasks status "$bound" 2>/dev/null) || \
+    ai_die "Preserved work belongs to $bound, which is not in the task queue; inspect the queue."
+  case "$bound_status" in
+    DONE) route=checkpoint ;;
+    IN_PROGRESS|TODO)
+      next_task=$(ai_helper tasks next)
+      [[ "$next_task" == "$bound" ]] || \
+        ai_die "Preserved work belongs to $bound, but the next task is $next_task; inspect the queue."
+      route=session ;;
+    BLOCKED) ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.' ;;
+    *) ai_die "Preserved work belongs to $bound, whose status $bound_status is unknown; inspect the queue." ;;
+  esac
+  # The loop head's checks, once more while armed.
+  ai_guard_verify
+  ai_branch
+  ai_helper tasks check
+  ai_helper run-manifest limit-disarm || ai_die 'Cannot consume the preserved work in the run manifest.'
+  printf 'Resuming preserved work of the usage-limit stop (%s).\n' "$bound"
+fi
+
 # The run's task record (host manifest) names the task a usage-limit stop's preserved work
 # belongs to. A stale one from an interrupted run must never bind a later stop.
 ai_helper run-manifest task-clear 2>/dev/null || true
+
+if [[ "$route" == checkpoint ]]; then
+  # The armed checkpoint: no session; the outcome log gets a `done` line without an attempt.
+  active_task=$bound
+  task_model=$(ai_helper tasks model "$bound")
+  task_started=$SECONDS
+  checkpoint_done "$bound"
+fi
 
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_guard_verify
@@ -674,59 +792,15 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")
   case "$task_status" in
-    DONE)
-      remaining=$(remaining_time)
-      (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
-      ai_observe step checks "$active_task"
-      if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
-        ai_guard_verify
-        task_outcome validation_failed
-        ai_helper tasks set "$active_task" IN_PROGRESS
-        ai_helper state blocked "Validation failed after $active_task; inspect validation log"
-        ai_die "Validation failed; $active_task returned to IN_PROGRESS."
-      fi
-      ai_guard_verify
-      if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
-        ai_observe step build "$active_task · checkpointed · $counts_done/$counts_total"
-      fi
-      if [[ -n "$(dirty_beyond_records)" ]]; then
-        # Tier-1 recovery: the session finished and the full gate just passed on exactly
-        # this content (gate files verified unchanged), but it didn't commit. Commit it.
-        # The session started from a clean tree, so everything new is its own output. Stage it
-        # all (git still skips ignored files), but never a secret-looking file.
-        git add --all -- .
-        if ! new_files=$(ai_helper checkpoint-guard); then
-          git reset -q
-          ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
-        fi
-        git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
-        ai_guard_verify
-        # A commit hook must not have slipped unvalidated content into that checkpoint.
-        [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
-          ai_helper committed-matches-worktree || \
-          ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
-        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
-      fi
-      task_outcome done
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
+    DONE) checkpoint_done "$active_task" ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
       task_outcome blocked
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
-      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
+      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks"
+      runner_checkpoint "$active_task" BLOCKED ;;
     *) task_outcome no_checkpoint
        ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
-  ai_helper state implementing 'Continue queue; see task results for any blockers'
-  # Commit runner bookkeeping separately; never stage application files here.
-  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
-  git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
-  ai_helper run-manifest task-clear 2>/dev/null || true
-  ai_guard_verify
-  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
-  if [[ "$task_status" == DONE ]]; then
-    verify_checkpoint "$active_task"
-    ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")"
-  fi
 done

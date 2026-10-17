@@ -752,8 +752,37 @@ task loop, and leaves it in place when the session stops at a limit. `limit-sche
 into `limit_task`; `limit-arm` arms only with a `limit_task` and records it in `limit_resume`
 (`limit-task` prints it, read only). Without one, (c) escalates `the usage-limit stop left
 uncommitted changes with no task recorded; nothing was committed.` with the same `Next:` and
-leaves the checkout as found. The resumed run's use of the bound task is not wired yet: it still
-refuses the armed tree with `Start from a clean checkpoint`.
+leaves the checkout as found.
+
+**How the resumed run continues preserved work.** A limit stop keeps the session's uncommitted
+work and the relaunch continues it once, in the normal implementation session or the normal
+validated checkpoint, never in a recovery decision or a recovery commit; any change during the
+wait escalates (above). `ai-pipeline` and `ai-run` admit a dirty tree through one predicate,
+`clean_or_armed`: an empty `git status --porcelain --untracked-files=all`, or `armed_resume`
+(a resume with `AI_RECOVERY_ATTEMPT` set, no stage open, and `run-manifest limit-armed`
+finding HEAD and the tree digest equal to `limit_resume`). It stands at every clean-checkout
+check between the resume and ai-run's first act: ai-pipeline's start, both tests of the dispute
+reconciliation and ai-run's start. A human `ai-pipeline --approved` is never a resume, so it
+refuses a dirty tree with `Start from a clean checkpoint` as before (and its `run-manifest
+start` drops the arm). While armed the host writes nothing: a pending re-check or an
+uncommitted `.ai/reviews/recheck.md`, `disputes.md` or `fallback-log.md` stops before the
+re-check or commit (`Re-check of rejected findings: preserved task work carries uncommitted
+review records; inspect them.`), and the plan-revision queue repair is skipped. ai-pipeline
+runs ai-run while armed even when every task is DONE. ai-run then, still armed, reads the bound
+task (`limit-task`), checks that `tasks newly-done HEAD` prints nothing or exactly that task
+(else `Preserved work marks another task DONE; inspect it before continuing.`), runs the
+dependency setup (also when `tasks next` is `none`), and routes by the bound task's status in
+the working queue: DONE (in HEAD or only in the tree) → the armed checkpoint; IN_PROGRESS or
+TODO → its session, which `tasks next` must name (else `Preserved work belongs to T…, but the
+next task is T…; inspect the queue.`); BLOCKED → `Blocked task was not checkpointed`; an ID not
+in the queue stops too. It repeats the loop head's checks, then `limit-disarm` (its only call
+site), prints `Resuming preserved work of the usage-limit stop (T…).`, clears the task record
+and acts: the armed checkpoint is `checkpoint_done`, the same function the loop runs after a
+DONE session (full `ai-check`, failure → task back to IN_PROGRESS and stop; the tier-1 commit
+`chore(ai): checkpoint T… (validated; the session did not commit)` with `checkpoint-guard`,
+stamp and `committed-matches-worktree`; the outcome log's `done` line without an attempt; the
+bookkeeping commit; `verify_checkpoint`), then the queue continues. After the disarm the normal
+rules apply unchanged, so a later stop gets ordinary recovery, not the exception.
 
 The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
