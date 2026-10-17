@@ -1,130 +1,347 @@
-# Plan: Flow batch 4: FL-27, FL-25, FL-26, FL-12, CU-2
+# Plan: Flow batch 5: FL-16, CU-5, R13
 
-## Assessment (verified at 7d22939, 2026-10-16)
-Open: FL-27, FL-25 (a and b), FL-26, FL-12, CU-2. Already done and dropped: FL-21 (5-minute
-stall confirmation in the watchdog), CU-4 (colour variables stripped for batches, ANSI-tolerant
-summary), CU-1 (attempts credited to their own model), CU-3 (re-check severity totals).
-Evidence and line references: `.ai/project-spec.md` → "Verified against the code".
+## Assessment (verified at df0d3c2, 2026-10-17)
+Branch `fix/flow-batch-5` builds on PR #29 (`fix/flow-batch-4`, not merged). PR #29's T005/T016
+gave both disposition tables one cell pattern (`TABLE_CELL`, `table_cell`) and line-bound rows
+(`[ \t]*`); FL-16 builds on that. Details, line references and the list of backlog items
+found already done are in `.ai/project-spec.md` ("Verified against the code").
 
 ## Architecture
-Small, local changes; no new runtime dependency, no new executable, no daemon.
-1. **Process ownership in the self-check (T001, T002; opus: process handling, signals,
-   concurrency).** `run_parallel.py main()` calls `enable_subreaper()` (Linux `prctl(36, 1)`
-   through `ctypes.CDLL(None, use_errno=True)`; False elsewhere). The Dispatcher gets a
-   `reap` flag: `run()` joins its threads with a short timeout in a loop and, under the
-   dispatcher lock, reaps adopted zombies (`/proc/<pid>/stat`: ppid == own pid, state `Z`,
-   pid not a running batch) with `waitpid(pid, WNOHANG)`. Never `waitpid(-1)`: it would steal
-   a batch's exit status (Popen then reports 0). `stop()` additionally walks the `/proc` tree
-   below the runner (ppid map; `comm` parsed after the last `)`), SIGTERMs every descendant,
-   waits up to `TERMINATE_GRACE` for them to be gone or zombies, re-walks and SIGKILLs
-   survivors whose start time still matches, up to a few rounds (forks during the stop), then
-   a bounded final wait (`FINAL_WAIT`) confirms every descendant is gone or a zombie; on
-   expiry it names the survivors on stderr and the run exits non-zero. Shutdown has one owner
-   (the first `stop()` caller; later callers wait on `stop_done`), and `reap_adopted()` does
-   nothing while termination is in progress, so the reap loop never frees a PID mid-stop
-   (plan review P4). `run()`'s cleanup-protected `try:` also covers the worker start loop
-   (T013, plan review round 2 P6): an interrupt during a later `thread.start()` calls `stop()`
-   and joins only the threads that started.
-   ```mermaid
-   flowchart LR
-     M[main: enable_subreaper] --> D[Dispatcher.run: workers + reap loop]
-     D -- worker error / SIGINT / SIGTERM --> S[stop: batch groups + /proc descendant tree]
-     S --> T[SIGTERM all, grace]
-     T --> K[re-walk, SIGKILL survivors with same start time]
-     K --> W[final wait: all gone or zombies, else report + exit 1]
-     W --> R[reap adopted zombies, join, re-raise]
-   ```
-   Tests run the dispatcher in a child Python driver (the flag must never be set on a test
-   process) and the real script for SIGTERM/SIGINT, with `timeout 120 sleep 120`.
-2. **Record-format tolerance (T003–T006).** A pure helper `workflow.py tasks fill-sections`
-   (fence-aware through `queue_segments`, atomic write, TODO tasks only) runs on the host after
-   triage, planning and plan-revision sessions, before the reorder / `tasks check` there. The
-   two disposition regexes read cells as `(?:\\.|[^\\|\n])*?` (a backslash always pairs with
-   the next character, so `\|` is never split; plan review P2) and unescape `\|`; one shared
-   cell pattern for both. Prompts and contracts show the task format and the pipe rule.
-3. **Scratch files (T011 opus: deletion; T007 sonnet: prompts/docs).** `workflow.py
-   clear-scratch` pins `.ai/local` with `local_dir_fd` (no symlink followed anywhere on the
-   path) and unlinks / `shutil.rmtree(…, dir_fd=…)`s `scratch` relative to it; unsafe paths
-   warn and continue. `claude_session` calls it before each `claude` call and after the
-   post-session `ai_guard_verify` (the checkout helper is trusted only after that). A
-   path-based `rm -rf` would follow a symlinked `.ai/local` or `.ai` (plan review P1). No
-   permission change: `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
-4. **Recovery answer (T012 scanner, T008 excerpt/prompt/docs; opus: recovery authority).**
-   Design note "Recovery answer scanner" (convergence: plan review P3 hit this area in rounds
-   1 and 2, each time with a new way to hide a candidate inside an enclosing container, a
-   scan at each `{` and then character counts fooled by brackets inside JSON strings; a
-   string-aware count over prose is ill-defined because prose quotes need not balance). The
-   whole area is replaced by one rule that needs no parsing outside the object:
-   `recover_decision` keeps the strict path for a whole-text JSON value; otherwise the first
-   `{` of the text is the only candidate. It must start its line, `raw_decode` from it
-   (duplicate-key hook) must give a dict that ends its line, and the prose before and after
-   it must contain none of `{`, `}`, `[`, `]`. An enclosing container needs a bracket before
-   and after the object, so none can exist; a second object needs a `{` after it, so at most
-   one candidate exists. It is used only when it is a valid decision; everything else
-   escalates. Escalation keeps a cleaned excerpt (T008). Cost: prose with any bracket
-   escalates even before a valid decision; the prompt asks for the object alone.
-5. **Catch-up coverage (T009).** Pure report logic in `outcomes_report` plus a `catchup`
-   outcome kind written by `ai-status --catch-up-done BRANCH...`. "Later" is ordered by
-   `(time, file, line)`: equal seconds cover only within one file at a later line (P5).
+### FL-16 — one finding-cell pattern for both tables (T001, T002)
+- `scripts/lib/workflow.py`: a module constant `FINDING_CELL` (string, like `TABLE_CELL`) with
+  exactly ONE capturing group (the ID); severity suffix and title text are non-capturing. Both
+  `DISPOSITION_ROW` and `PLAN_DISPOSITION_ROW` start with `^\|[ \t]*` + `FINDING_CELL` +
+  `[ \t]*\|`, so groups 1–4 (ID, disposition, evidence, task) stay as every reader uses them.
+- Title text: after the ID (and suffix), a separator of whitespace, or `:` directly after the
+  ID/suffix, optionally followed by `—`, `–` or `-` and whitespace (a dash needs whitespace or
+  the suffix before it, so an ID like `SEC-1` or text `M1-2` is never split), then text that
+  does not start with `(` and contains no unescaped `|` and no newline (reuse the `TABLE_CELL`
+  alternation `(?:\\.|[^\\|\n])`). The text is ignored.
+- Diagnostics: a helper `unmatched_cell_hint(text, finding)` returns ` (the row starting
+  "| <first cell> |" does not match; write "| M1 | accepted | … | T012 |")` when a `|` line's
+  first cell contains the ID (not preceded by a letter, digit or `-`, not followed by a digit,
+  so glued forms like `M1x` get the hint too) but no row matched it. Appended to "MAJOR finding M1 has
+  no disposition." and "Finding P1 has no row in the round N section." (prefixes unchanged, so
+  existing `assertIn` checks hold).
+- Prompts/contracts (T002): show `| M1 | accepted | <evidence> | T012 |` and
+  `| P1 | accepted | <evidence> | T012 |`, ID alone (a severity suffix or title is tolerated).
+
+### CU-5 — attempt marker + reconcile (T003 helper, T004 wiring)
+```mermaid
+sequenceDiagram
+  participant R as ai-run
+  participant H as workflow.py outcome
+  participant S as host state (binding_dir)
+  R->>H: attempt-reconcile $$ (start, under the lock, before the clean-checkpoint check)
+  H->>S: each leftover attempts/*.json: runner dead -> confirm_recorded (strict read + sync) else append crashed (once), remove
+  R->>H: attempt-open TASK MODEL $$
+  H->>S: reconcile leftovers (own pid too), then attempts/ID.json (tmp, fsync, link, dir fsync), prints id
+  Note over R: session ... SIGKILL here leaves attempts/ID.json
+  R->>H: outcome task ... --attempt ID
+  H->>S: flock, append line (one write, fsync file + dir), then remove attempts/ID.json
+```
+- Markers: one file per attempt, `binding_dir() / 'attempts' / '<id>.json'` (per checkout,
+  host state, outside agent-write roots), never overwritten (see the round 2 redesign below).
+- Idempotence: every task outcome written with `--attempt` carries `attempt_id`; reconcile
+  appends `crashed` only when no task record with that id exists, and removes the marker only
+  through the removal gate below (round 3 redesign). A crash between append and unlink is
+  therefore harmless.
+- Liveness: pid alive AND `/proc/<pid>/stat` start time equal to the recorded one → a live
+  runner owns it: leave it (should not happen under the lock; comment). Unknown start time
+  recorded (no `/proc`) → treat a live pid as alive.
+- Log I/O (T007, plan review round 1 P1–P3): one `append_outcome` for every kind opens the log
+  `O_RDWR|O_APPEND|O_CREAT` (the newline guard `pread`s the last byte; a write-only fd cannot);
+  if the log is non-empty and its last byte is not `\n`, the one `os.write` starts with `\n`;
+  a return count below the encoded length is a failure (no fsync, no retry, marker kept, the
+  next append's guard isolates the fragment). `read_outcomes` splits bytes on `\n` and decodes
+  each line on its own, so a tail cut inside a multibyte character skips only that line.
+  (The round 1 claim that concurrent writers can at worst produce an empty line was wrong
+  without a lock: plan review round 2, P7; fixed below.)
+  Known limit: a short write of a normal task line keeps the marker, so that attempt is later
+  logged `crashed` (storage full; the conservative record).
+
+### CU-5 write protocol (round 2 redesign, T008)
+Rounds 1 and 2 both found BLOCKER/MAJOR gaps in the same area (how an outcome line and its
+marker reach disk and when the marker may go), so the area is specified once, as a whole,
+instead of per symptom:
+1. **Append** (`append_outcome`, the only writer): open `O_RDWR|O_APPEND|O_CREAT` → `flock
+   LOCK_EX` on that descriptor (every helper writer on the host, across checkouts) → tail
+   check → one `write` (short = failure) → fsync file → fsync the log's directory and the
+   parent of every directory just created → success. Any failure: no success, marker kept.
+   The lock makes tail check + write atomic for helper writers (P7). Directory syncs make a
+   new log durable before a marker can go (P8). Always prefixing `\n` was considered and
+   dropped: existing tests and readers parse `splitlines()` of the log strictly (e.g.
+   tests/test_workflow.py:2979, 5486, 5727), and blank lines would break them.
+2. **Markers**: one file per attempt, created by tmp + fsync + `link` (fails on an existing
+   name, so never overwritten) + dir fsync; removed (+ dir fsync) only after a successful
+   append of a record carrying its id, or by reconcile once such a record exists.
+3. **Reconcile** handles every marker on its own: unreadable → discard; live foreign runner →
+   keep; dead runner, or the calling runner's own earlier attempt (same pid and start time;
+   attempts are sequential under the checkout lock) → `crashed` unless its id is already in
+   the log, then remove. `attempt-open` runs it with its own pid, so a retained marker is
+   recorded at the next attempt, or at the next start at the latest, exactly once (P6).
+Invariant: a marker is removed only when the log durably holds a record with its id; no
+operation overwrites a marker. Residual: an older installed copy without the lock in another
+checkout can interleave until upgraded; its buffered append only tears on a crash or full disk.
+- `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
+  branch/task/model, `started` and `seq` from the marker (the report orders by `seq`, round 6
+  redesign), `attempt` numbered as today (count at append time, informational).
+- Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker directory once
+  at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
+  that case.
+
+### CU-5 marker-removal gate (round 3 redesign, T009)
+Round 3 (P9, P10) found the round 2 invariant ("a marker is removed only when the log durably
+holds a record with its id") broken on reconcile's decision inputs: the existing-record path
+removed without any sync, and the reader it decided on returns `[]` for an unreadable log
+(`read_outcomes`, workflow.py:2988–2991) as well as for an empty one. Third round in the
+CU-5 marker area, so the decision inputs are redesigned once instead of patched per path:
+1. **Strict read.** `read_outcomes(paths, strict=False)` keeps today's lenient mode for
+   reports (`OSError` → skip the file). `strict=True` treats only a missing file as an empty
+   log and lets every other `OSError` propagate. Reconcile and attempt numbering inside it use
+   the strict mode; a read failure keeps the marker, prints a note and appends nothing.
+2. **Confirmation.** `confirm_recorded(path, attempt_id) -> bool` is the ONLY way reconcile
+   may conclude "already recorded": open the log `O_RDWR` (missing → False, nothing created),
+   `flock LOCK_EX`, read the descriptor to EOF with the per-line decoder of T007, look for a
+   task record with that `attempt_id`; absent → False; present → `fsync` the descriptor, then
+   `fsync_dir` of the log's directory → True. Any `OSError` propagates (caller keeps the
+   marker). Rationale: a complete write whose file or directory sync failed leaves a readable
+   line and a retained marker; the retry at reconcile must finish the sync before the marker
+   may go (P9).
+3. **One removal rule.** A marker is removed after `append_outcome` returned True for a record
+   carrying its id (`outcome task --attempt`, and reconcile's `crashed` append: the append
+   already synced under the lock), or after `confirm_recorded` returned True. No other path
+   removes a readable marker. `confirm_recorded` and a following `append_outcome` take the lock
+   separately; no duplicate can slip in between because attempts of a checkout are sequential
+   under its lock, so no other writer appends that id.
+Residual (comment + Risks): after a failed `fsync` Linux may already have marked the dirty
+pages clean, so the retried sync can only persist what is still dirty; the gate guarantees a
+successful sync attempt before removal, not recovery from a kernel that dropped the data. Still
+advisory telemetry: never fatal, never a stop.
+
+### CU-5 start order in ai-run (round 3, P11)
+`ai-run:626` writes tracked `.ai/state.md` (`update_state`, workflow.py:763–785) before every
+task session, so a runner killed during a session always leaves a dirty checkout, and
+`ai-run:136–137` refuses a dirty checkout before the gate baseline at :148. The reconcile
+therefore runs right after `ai_branch` (:114), before the clean-checkpoint refusal, in every
+non-`--plan` mode: best effort, host state only, through the same checkout helper that
+`state-root-check` (:109) already runs there (no new trust class; the gate baseline stays at
+:148). The first restart after a kill logs the `crashed` attempt and then refuses with
+`Start from a clean checkpoint`; the human (or the recovery session) commits the leftovers,
+and the next start runs the task. T004's end-to-end test follows exactly this order.
+
+### CU-5 marker failure contract (round 4 redesign, T010)
+Round 4 (P12, P13) found two more marker paths whose failure outcome was unspecified: a
+transient error while READING a marker was treated like invalid content and discarded, and a
+failure of `attempt-open` AFTER the marker was linked left a marker whose id the runner had
+cleared (`|| attempt_id=`), so a finished task was later logged `crashed` and the report
+(`outcomes_report`, workflow.py:3093, last line per task wins) showed it as not done. Fourth
+round in the CU-5 marker area, so the failure semantics of every marker operation are stated
+once, as a contract, instead of per path:
+1. **Publish** (`open_attempt`, used by `outcome attempt-open` after its reconcile): choose the
+   id, PRINT it to stdout and flush, THEN publish the marker (dir, tmp, fsync, link, unlink
+   tmp, dir fsync). Any failure after the print: stderr note, exit 1, marker possibly present.
+   The runner keeps every valid id the command printed, whatever its exit status:
+   `attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true`, then
+   `[[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=`. Asymmetry that makes this safe: an
+   id WITHOUT a marker is harmless (the outcome line carries it, `remove_marker` of a missing
+   file is a no-op, nothing reconciles it), while a marker without an id in the runner
+   produces a false `crashed` line; printing first means a marker can only exist once the
+   runner has its id (a write to the closed pipe fails before the link).
+2. **Read** (`list_markers`): every `*.json` entry is classified three ways, never raising
+   for one file: a valid record; invalid content (`None`: read completely, but not JSON, missing
+   fields, or `id` different from the file name), which reconcile discards with its note (our
+   writer links only complete, fsynced files, so invalid content under the final name is
+   foreign or corrupt, never a torn marker of ours); a read error (the `OSError` instance:
+   open/read failed), which reconcile keeps, notes and skips, going on with the next marker.
+   A listing failure (`scandir` raising) is a note, exit 0, nothing touched.
+3. **Remove**: unchanged, T009's one removal rule.
+Invariant: no marker is discarded because of a transient failure, and every marker that
+exists is either held by a runner that knows its id or reconcilable as a dead runner's.
+Residual: a marker whose directory sync failed after the link may not survive a power loss;
+that loses at most a `crashed` record, never produces a false one.
+
+### CU-5 attempt ordering (round 5 redesign, T011)
+Round 5 (P15) found that the report's model of the log ("a task's last line is its result",
+`outcomes_report`, workflow.py:3093–3095; `first_row` = first line in file order, :3116) assumes
+append order = attempt order. Reconcile breaks that assumption by design: a marker kept through
+a read error (P12) or an unreadable log (P10) is recorded only at a LATER start or open, so a
+real `crashed` record of attempt A can be appended after a later attempt B's `done` of the same
+task, and the report then shows the task as not done; `outcome task`'s count-based `attempt`
+number also gives A the higher number. Fifth round in the CU-5 area, so the log's ordering
+model is redesigned once instead of patching the reconcile paths:
+1. **Every new task record carries `started`** (epoch seconds, int): `outcome task` writes
+   `int(time.time()) - seconds`; with `--attempt ID` naming a readable marker it uses the
+   marker's `started` instead (the attempt-open time, so the row and its marker agree; a
+   missing marker, P13, keeps the derived value); reconcile's `crashed` record carries the
+   marker's `started`. The marker's `started` stays `int(time.time())` at open (T003).
+2. **Logical order** (`attempt_start(record)`, `ordered_attempts(task_rows)`): a row's start
+   is its `started` when numeric, else `time` parsed as `%Y-%m-%dT%H:%M:%SZ` minus `seconds`
+   when both are present (every row the helper ever wrote has them), else unknown. Per task
+   key (project, branch, task): when every row has a start, the rows are sorted by
+   `(start, _at)`, `_at` = (file index, line index) being the tie-breaker; when any row's start
+   is unknown, that task keeps file order (compatibility: existing rows and hand-written test
+   logs without `time` behave exactly as today). Attempts of one checkout are sequential under
+   its lock, so start order is attempt order.
+3. **The report derives, never trusts**: per task, the final result is the LAST row in logical
+   order, the attempt count is the number of rows, attempt n is position n, and first-time
+   pass is "the FIRST row in logical order has `result == 'done'`". The stored `attempt` and
+   `first_pass` fields stay as written (count at append time; existing tests read them) and
+   are documented as such; the report no longer reads them. For a log with one writer and no
+   reconciled rows this gives today's numbers (file order = start order, stored fields agree).
+Invariant: a record appended late never changes which attempt counts as a task's result or
+its first attempt; reconcile stays best effort and never consults the task's later outcomes.
+Documented change: a log whose earlier attempts are missing counts its first visible attempt
+as attempt 1 (the report already did that for `attempt`; now also for first-time pass).
+Superseded in part by round 6 (below): the ORDER KEY is no longer the start time. Round 5's
+residual ("equal starts within one second are impossible for a delayed reconcile") was wrong:
+nothing enforces an interval between two opens, and B's duration does not move B's start
+(plan review round 6, P15). `started` stays on every new row and marker as information; the
+order comes from a persisted sequence. The start-time derivation (`attempt_start`, `time`
+minus `seconds`) is dropped.
+
+### CU-5 attempt sequence (round 6 redesign, T012)
+Round 6 (P15 again, P16) showed that a wall-clock key cannot order attempts: markers hold
+whole seconds, a restart or `attempt-open` can follow a crashed open within the same second,
+and the planned tie-breaker was the append position, i.e. exactly the order the design set out
+not to trust; the legacy acceptance case (P16) also contradicted the start-time rule. Sixth
+round in the CU-5 area, so the order key is redesigned once, as a whole:
+1. **One persisted sequence beside the log**: `state_root() / 'attempt-seq'` (the log is
+   `state_root() / 'outcomes.jsonl'`, workflow.py:2958–2959; both live and die together).
+   `next_attempt_seq() -> int`: open the log `O_RDWR|O_APPEND|O_CREAT` (directories created
+   as `append_outcome` does) and take its `flock LOCK_EX`, the lock every writer on the host
+   already uses, so allocators and appenders of every checkout are serialised and the lock
+   lives on a file that is never replaced (locking the counter file itself would break as soon
+   as it is replaced atomically); `n = max(counter value, highest seq of any task record in the
+   log read strictly) + 1` (counter missing or not an int → 0); persist `n` atomically (tmp in
+   the same directory, fsync, `os.replace`, `fsync_dir`); release; return `n`. Any `OSError`
+   propagates. The log scan is the self-heal for a lost or deleted counter and costs what
+   `outcome task` already pays for its `attempt` count (workflow.py:3045).
+2. **Allocation = the moment the host first records the attempt**, under the checkout lock
+   that makes a checkout's attempts sequential:
+   - `open_attempt` (T010) allocates BEFORE it prints the id; the marker carries `seq`.
+     A failed allocation prints nothing and publishes nothing (exit 1, note): the attempt runs
+     untracked, as it does today when the helper fails.
+   - `outcome task … --attempt ID` with a readable, valid marker takes the marker's `seq`
+     (and `started`); every other `outcome task` (no `--attempt`, or no readable marker)
+     allocates a fresh `seq` at append time. The attempt's open (or, without an open, its
+     append) comes after every earlier attempt's open, so the allocation order is the attempt
+     order. A failed allocation fails the command (exit 1, nothing appended): with a marker the
+     attempt is later reconciled as `crashed` with the marker's `seq` (the conservative record,
+     like the short-write limit); without one the untracked row is lost, as any `OSError` loses
+     it today. A row is never written without `seq`.
+   - reconcile's `crashed` record carries the marker's `seq` (and `started`), however late it
+     is appended.
+3. **Logical order** (`attempt_seq(record)`, `ordered_attempts(task_rows)`): `seq` when it is
+   an int (not bool), else none. Per task key (project, branch, task): rows WITHOUT `seq`
+   first, in file order (`_at`), then rows WITH `seq` by `(seq, _at)`. Why this is total and
+   right: every task row the new helper writes has a `seq` (rule 2), so rows without one are
+   pre-upgrade rows; all of them were appended before any new row, by one writer per checkout
+   in attempt order (no reconcile existed), so file order is their attempt order and "old
+   before new" is exact. Hand-written test logs have no `seq` and keep today's order.
+4. **The report derives, never trusts** (unchanged from round 5): final result = last row in
+   logical order, attempt count = rows, first-time pass = first row is `done`; the stored
+   `attempt` and `first_pass` fields stay as written and are documented as informational.
+Invariant: two attempts of one task never share an order key (one host-wide counter under one
+lock), and a record appended late never changes which attempt is a task's result or its
+first; `_at` only ever orders pre-upgrade rows. The sequence is host-wide, so one task's
+numbers have gaps: it is an order key, not a count (`attempt` is the count).
+Residuals (comment + Risks): a counter lost after a power loss continues after the highest
+RECORDED seq, so markers allocated but not yet recorded may duplicate a seq; `_at` breaks that
+tie. A `done` whose append failed only because the counter could not be written is recorded
+`crashed` by the next reconcile (documented limit, same class as the short write).
+Regression that pins P15: B `done` (`seq` 2) appended before A `crashed` (`seq` 1), both
+`started` 1000 → done 1, not done 0, 2 attempts, first-time pass 0/1, identical in both file
+orders (T012 in memory, T003 end to end with A unreadable through B's completion and A's
+`started` set to the current second right before B's open).
+
+### R13 — boundary cut + full text (T005)
+- `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
+  prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
+  when it keeps at least half the cap, else at the last space, else hard cut; then `…`.
+- `recover_decision`: `clean` uses it; when the reason or human action was cut, it writes both in
+  full (collapsed, at most 4000 characters each) to `.ai/local/recovery-decision.txt`
+  (`atomic`); it removes a stale file at the start of every call. Output stays three TSV fields.
+- `ai-recover` `escalate`: when the file exists, the ⛔ notification ends with
+  `Full text: .ai/local/recovery-decision.txt`. `ai-recover` removes the file right after its
+  lock, so an early escalation never names a previous invocation's text (plan review P4).
+- `bounded_questions` uses `shorten(…, QUESTION_CAP)` (no file: the questions' full text is in
+  `plan-dispositions.md`, which the existing pointer line names).
 
 ## Phases / tasks
-Priority order (the most valuable lands first if the night runs short):
-T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T013
-(interrupt during worker startup goes through `stop()`, opus) → T003
-(`tasks fill-sections`, sonnet) → T004 (host runs it after sessions, sonnet; flow chart) → T005
-(escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T011 (scratch deletion through
-pinned descriptors, opus; placed before T007 in the queue) → T007 (scratch prompts/docs, sonnet;
-flow chart) → T012 (recovery answer scanner, opus) → T008 (recovery excerpt, prompt, docs,
-opus; flow chart if it describes the answer) → T009 (CU-2, sonnet) → T010 (docs/handoff
-audit, haiku).
-Dependencies: T002 needs T001; T013 needs T002; T004 needs T003; T006 needs T004 and T005 (it
-describes them); T007 needs T011; T008 needs T012; T010 needs all. New tasks sit right after
-their dependency (the queue check wants dependencies earlier in the file). T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
-regression there shows up at once in every later gate run.
-The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 switches it to
-`Flow chart updated` (`test_pr_body_flow_this_repo_declares_the_flow_chart` needs one of them).
+| Task | Item | Model | Depends |
+| --- | --- | --- | --- |
+| T001 | FL-16 finding cell pattern + hint | sonnet | none |
+| T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
+| T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
+| T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
+| T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
+| T010 | CU-5 marker failure contract: three-way marker read, id printed before publish (round 4 redesign) | opus | T009 |
+| T012 | CU-5 attempt sequence: persisted `seq` allocated at open or append under the log lock, `ordered_attempts` by seq (round 6 redesign) | opus | T010 |
+| T011 | CU-5 report derives result/attempts/first pass from T012's order; `started` on task records; docs | opus | T012 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010/T012/T011) | opus | T010, T011 |
+| T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check, id kept on a failed open), SIGKILL end-to-end, docs, flow chart | opus | T003 |
+| T005 | R13 boundary cut and full recovery text | sonnet | none |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010, T011, T012 |
 
 ## Risks
-- The gate runs the changed runner (T001/T002). A reaper that steals a batch's status would
-  turn failures into passes: T001 asserts a failing batch still fails with the subreaper on.
-- Subreaper adoption keeps orphaned fixture processes as the runner's children during a normal
-  run; they are reaped when they exit and, as before, reparent to init when the runner exits.
-  Normal runs do not kill leftovers (unchanged behaviour).
-- PID reuse during a stop: start-time check before SIGKILL; zombies are not reaped until the
-  kill rounds end, so adopted PIDs cannot be reused meanwhile.
-- `test_recovery_decision_parsing_is_strict` stays unchanged: an inline `Decision: {…}` is
-  still escalated (the first `{` must start its line). Accepting prose widens what counts as a
-  decision: guarded by bracket-free prose around a single line-start object (T012), which
-  rules out enclosure without parsing prose, and duplicate-key escalation. Prose containing
-  any bracket escalates (false escalations notify the human; never a wrong action).
-- An interrupt during worker startup used to skip `stop()` entirely (T013 closes it).
-- Scratch clearing deletes on the host after an agent session: only through descriptors pinned
-  without following symlinks (T011); a symlinked parent means a warning, never a delete.
-- A descendant that cannot be confirmed gone after the final wait makes the self-check fail
-  loudly rather than leaving a silent leftover (T002).
-- Filling `### Likely affected modules` with `(not listed)` hides a planner omission; the host
-  prints which tasks it filled, so the log shows it.
-- Installed copies (`.ai/bin`, `.ai/prompts` here and in other projects) keep the old
-  behaviour until the human runs `setup-project --upgrade` (handoff).
+- FL-16 loosening could let a row meant for two findings count for one: it only ever counts
+  for its FIRST ID, and every BLOCKER/MAJOR still needs its own row, so a missing one still
+  fails. `test_triage_severity_suffix_other_decorations_stay_unmatched` changes on purpose
+  (`M1 (MAJOR) x` now matches); its other cases stay.
+- CU-5 durability: plan reviews of `fix/catchup-review` (rounds 5–7) found edge cases in a
+  larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
+  only: unique random ids, one locked write per line with a newline guard, fsync of the new
+  line, the marker and the directories they live in, one never-overwritten marker per attempt,
+  reconcile idempotent by id, marker removal only after a strict read and a successful sync,
+  markers kept on read errors and ids kept by the runner on a failed open, and a report that
+  orders attempts by a persisted sequence instead of append position
+  (designs: "CU-5 write protocol", "CU-5 marker-removal gate", "CU-5 marker failure
+  contract", "CU-5 attempt ordering", "CU-5 attempt sequence"). Durability of earlier rows is a non-goal
+  (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
+  be deferred, not grown into a redesign tonight.
+- CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
+  `confirm_recorded`'s retried sync cannot restore them; the gate only guarantees that no
+  marker is removed without a successful sync attempt (T009 comment and docs).
+- CU-5 false crash: a `crashed` line for an attempt that actually finished would hide its
+  `done`. The marker failure contract (T010) rules that out for a failed `attempt-open` (the
+  runner keeps the printed id) and for a transient marker read error (the marker is kept, not
+  discarded); the only remaining source is the documented short-write case.
+- CU-5 late crash record: a REAL `crashed` line of an earlier attempt can be appended after a
+  later attempt's `done` of the same task (marker kept through a read error or an unreadable
+  log, recorded at a later start; plan review round 5, P15). Today's report reads a task's
+  last line (workflow.py:3093) and would show the task as not done. The attempt sequence
+  design (T012, consumed by T011) makes the report derive result, attempt count and first-time
+  pass from a persisted per-host sequence allocated when the attempt opens (or, without an
+  open, when its row is appended), old rows without `seq` first in file order, so the order of
+  appends no longer matters; stored `attempt`/`first_pass` stay informational. Round 5's
+  start-time key was dropped (round 6, P15): whole-second starts collide and nothing enforces
+  an interval between opens.
+- CU-5 sequence counter: `attempt-seq` lives beside the log and is updated under the log's
+  `flock`; a lost counter continues after the highest recorded `seq` (unrecorded markers may
+  then duplicate one, `_at` decides); an allocation failure fails the `outcome task` call, so
+  a finished attempt with a marker is recorded `crashed` at the next reconcile (same class as
+  the short-write limit; T012 comment and docs).
+- CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
+  reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
+  there until the leftovers are committed; T004's test and the handoff state this order.
+- CU-5 end-to-end test kills `ai-run` with SIGKILL: its `timeout`/mock children are orphaned;
+  the test must kill them in `addCleanup` (the self-check's subreaper from PR #29 also cleans
+  up on failure).
+- Time: about 5 h until 09:00 with ~7 min per gate run; T003/T004 are the long ones.
 
 ## Validation strategy
-Each task: its targeted `-k` tests, then `.ai/bin/ai-check` (parallel; gate note in
-`.ai/tasks.md`). All tests offline (mock agents, generated suites, real `/proc` on Linux with
-skips elsewhere).
+Per task: the targeted `-k` groups in `.ai/tasks.md`, then `.ai/bin/ai-check` in the
+foreground (600000 ms tool timeout). Tests with time bounds use `tests/timeouts.py` scaling.
 
 ## Assumptions (unattended run; recorded instead of asked)
-- FL-27 uses `PR_SET_CHILD_SUBREAPER` plus a `/proc` walk, not cgroups (no systemd/root
-  dependency); non-Linux keeps the T014 behaviour.
-- FL-25 repairs only the two content-free sections, only in TODO tasks, only on the host paths
-  right after a session; an interrupted triage whose committed queue lacks them still stops
-  (rare after this fix; recorded limitation).
-- FL-25 (b): escaped pipes are accepted, unescaped pipes still split (a row cannot be
-  repaired without guessing).
-- FL-26: no permission change; the host clears `.ai/local/scratch` (gitignored, so the tier-1
-  `git add --all` never stages it).
-- FL-12: prose around one decision is accepted; no `--json-schema` (the CLI flag and the mock
-  would both change; not verifiable offline).
-- CU-2: a later Codex review of the same project and branch covers earlier Claude reviews of
-  the same family; a catch-up on another branch needs the explicit `--catch-up-done` record.
-- Sessions may edit the vault flow chart and append a hub Log line; if denied, the task
-  records it and the handoff lists the pending change.
+- FL-16: tolerating title text after the ID is acceptable (the backlog offers "accept" or
+  "show the form"; both are done). Text before the ID or unknown parenthesised words stay
+  unmatched.
+- CU-5: worth doing now in the limited form above although its backlog note says "do when
+  outcome data drives automatic decisions"; the planner judged the limited form small and safe.
+  Only implementation attempts are tracked (as today).
+- R13: the 300-character caps stay; only where the cut falls and where the full text goes change.
+- R15 is a publishing-policy decision for Zack, so it is listed as a human todo, not planned.
+- The batch builds on PR #29; if #29 changes before merging, this branch is rebased or merged
+  by the human.

@@ -30,6 +30,8 @@ ai_root
 # The lock first: a rejected second process must not touch the live run's marker.
 AI_LOCK_QUIET=1 ai_lock
 export AI_LOCK_HELD=$$
+# Escalations before recover-decision must never point at a previous invocation's full text.
+rm -f -- .ai/local/recovery-decision.txt
 branch=$(git symbolic-ref --quiet --short HEAD || printf 'detached HEAD')
 reason=$(tr '\n' ' ' < .ai/local/last-error 2>/dev/null || true)
 reason=${reason:-unknown (no last-error recorded)}
@@ -37,7 +39,7 @@ reason=${reason:-unknown (no last-error recorded)}
 escalate() {
   AI_STOP_NOTIFIED=1
   ai_observe stop '' "${reason% } (stopped during $stage)"
-  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}"
+  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}$([[ -f .ai/local/recovery-decision.txt ]] && printf ' Full text: .ai/local/recovery-decision.txt')"
   printf '%s\n' "$reason" > .ai/local/last-error
   touch .ai/local/last-error.notified 2>/dev/null || true
   # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.

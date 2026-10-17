@@ -4,6 +4,7 @@
 The shell scripts own the workflow. This module never invokes an AI agent.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -991,9 +992,30 @@ def table_cell(text):
     return re.sub(r'\\([\\|])', r'\1', text).strip()
 
 
+# The finding cell of a disposition row (FL-16: sessions write `ID (SEVERITY) title`). One
+# capturing group, the ID; a row only ever counts for its first ID. Optional severity suffix,
+# then optional title text after a separator: whitespace, or `:` right after the ID/suffix; a
+# dash (`—`, `–`, `-`) counts only after whitespace or the suffix. The title may not start with
+# `(` (so `M1 (CRITICAL)` stays unmatched) and has no unescaped `|` or newline.
+FINDING_CELL = (r'([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?'
+                r'(?:(?:[ \t]+|:[ \t]*|(?<=\))(?=[—–-]))(?![ \t]*\()(?:\\.|[^\\|\n])+)?')
+
 # `[ \t]*`, not `\s*`: a row's match must never cross a newline into the next row.
-DISPOSITION_ROW = re.compile(r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
+DISPOSITION_ROW = re.compile(r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
                              r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
+
+
+def unmatched_cell_hint(text, finding, row=None):
+    """For a finding without a row: name the first table line whose first cell mentions it but
+    that does not match the row pattern, and the row to write. Diagnostic only."""
+    row = row or DISPOSITION_ROW
+    mention = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(finding) + r'(?!\d)')
+    for line in text.splitlines():
+        cell = re.match(r'\|((?:\\.|[^\\|])*)', line)
+        if cell and mention.search(cell.group(1)) and not row.match(line):
+            return (f' (the row starting "| {cell.group(1).strip()[:60]} |" does not match; '
+                    f'write "| {finding} | <disposition> | <evidence> | <task> |")')
+    return ''
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -1008,7 +1030,8 @@ def start_dispositions(arguments):
 
 Review HEAD: {head}
 
-<!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
+<!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
+e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
 explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
 with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
@@ -1039,7 +1062,7 @@ def triage_check(arguments):
     for level in ('BLOCKER', 'MAJOR'):
         for finding in finding_ids(review, level):
             if finding not in rows:
-                fail(f'{level} finding {finding} has no disposition.')
+                fail(f'{level} finding {finding} has no disposition.' + unmatched_cell_hint(text, finding))
             disposition, evidence, task_ref = rows[finding]
             if disposition == 'accepted':
                 refs = set(re.findall(r'T\d{3,}', task_ref))
@@ -1995,6 +2018,26 @@ def _scan_decision(text):
     return decision
 
 
+def shorten(text, cap):
+    """Whitespace collapsed; longer than cap is cut at a sentence end (if that keeps at least
+    half of cap), else at a word boundary, else hard, plus '…' (total at most cap)."""
+    text = ' '.join(text.split())
+    if len(text) <= cap:
+        return text
+    room = text[:cap - 1]
+    ends = [i + 1 for i in range(len(room)) if room[i] in '.!?' and text[i + 1] == ' ']
+    if ends and ends[-1] >= cap // 2:
+        cut = room[:ends[-1]]
+    elif ' ' in room or text[cap - 1] == ' ':
+        cut = room[:room.rfind(' ')] if text[cap - 1] != ' ' else room
+    else:
+        cut = room
+    return cut.rstrip() + '…'
+
+
+RECOVERY_DECISION_FILE = '.ai/local/recovery-decision.txt'
+
+
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
@@ -2003,7 +2046,14 @@ def recover_decision(arguments):
     wrote something, the reason quotes the start of it."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
-    clean = lambda value: ' '.join(value.split())[:300]
+    Path(RECOVERY_DECISION_FILE).unlink(missing_ok=True)
+    cut = []
+
+    def clean(value):
+        short = shorten(value, 300)
+        if short != ' '.join(value.split()):
+            cut.append(True)
+        return short
     try:
         envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
@@ -2013,8 +2063,8 @@ def recover_decision(arguments):
         print(escalate)
         return
     if envelope['result'].strip():
-        escalate = ('escalate\t' + clean('the recovery session gave no valid decision; it wrote: '
-                                         + envelope['result']) + '\tinspect the stop yourself')
+        escalate = ('escalate\t' + shorten('the recovery session gave no valid decision; it wrote: '
+                                           + envelope['result'], 300) + '\tinspect the stop yourself')
     # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
@@ -2029,7 +2079,11 @@ def recover_decision(arguments):
             or not fields[1].strip():
         print(escalate)
         return
-    print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
+    reason, human_action = clean(fields[1]), clean(fields[2])
+    if cut:
+        full = lambda value: ' '.join(value.split())[:4000]
+        atomic(RECOVERY_DECISION_FILE, f'reason: {full(fields[1])}\nhuman_action: {full(fields[2])}\n')
+    print(f'{fields[0]}\t{reason}\t{human_action}')
 
 
 def committed_matches_worktree(arguments):
@@ -2443,7 +2497,7 @@ def plan_rounds(arguments):
 PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
-    r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
+    r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
     r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 
 
@@ -2493,7 +2547,8 @@ PLAN_DISPOSITIONS_PREAMBLE = """# Plan review dispositions (Claude)
 
 <!-- The host appends one section per plan-review round; fill only the last one and never edit
 earlier sections or .ai/reviews/plan.md. One row per BLOCKER/MAJOR finding of that round's plan
-review (MINOR optional). Disposition: accepted (Task: the new TODO task IDs that answer it),
+review (MINOR optional), the finding ID alone in the first cell, e.g. "| P1 | accepted | evidence | T012 |".
+Disposition: accepted (Task: the new TODO task IDs that answer it),
 rejected (concrete evidence) or needs-human (the question for the human in the Evidence column).
 From plan-review round 3 on, the section also needs a line starting with "Convergence:". -->
 """
@@ -2563,7 +2618,7 @@ def task_statuses(text):
 
 def bounded_questions(questions):
     """At most three questions, each on one line of at most 300 characters, plus a pointer to the rest."""
-    lines = [' '.join(re.sub(r'<br\s*/?>', ' ', question, flags=re.I).split())[:QUESTION_CAP]
+    lines = [shorten(re.sub(r'<br\s*/?>', ' ', question, flags=re.I), QUESTION_CAP)
              for question in questions[:QUESTION_LIMIT]]
     if len(questions) > QUESTION_LIMIT:
         lines.append(f'(+{len(questions) - QUESTION_LIMIT} more in {PLAN_DISPOSITIONS})')
@@ -2630,7 +2685,8 @@ def plan_dispositions_check(arguments):
         rows[finding] = (row.group(2).lower(), table_cell(row.group(3)), table_cell(row.group(4)))
     for finding in required:
         if finding not in rows:
-            fail(f'Finding {finding} has no row in the round {number} section.')
+            fail(f'Finding {finding} has no row in the round {number} section.'
+                 + unmatched_cell_hint(body, finding, PLAN_DISPOSITION_ROW))
     queue = {task['id']: task['status'] for task in tasks()}
     counts = {'accepted': 0, 'rejected': 0, 'needs-human': 0}
     questions = []
@@ -2981,23 +3037,405 @@ def task_category(title):
     return 'feature'
 
 
-def read_outcomes(paths):
-    """Records in file order; each carries `_at` = (file index, line index), its write position."""
+def decode_outcome_lines(data):
+    """(line index, record) for every valid JSON object line of an outcome log's bytes.
+    Each line is decoded on its own: a torn tail can end inside a multibyte character, and a
+    whole-file decode raised before any line was parsed. Splitting on b'\\n' only, because
+    str.splitlines also splits on U+2028 inside ensure_ascii=False records."""
+    records = []
+    for line_index, line in enumerate(data.split(b'\n')):
+        try:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError:  # UnicodeDecodeError is a ValueError
+            continue
+        if isinstance(record, dict):
+            records.append((line_index, record))
+    return records
+
+
+def read_outcomes(paths, strict=False):
+    """Records in file order; each carries `_at` = (file index, line index), its write position.
+    Lenient by default (an unreadable file is skipped: reports and attempt numbering). With
+    `strict`, only a missing file counts as empty and any other OSError propagates: a transient
+    read failure must not look like "no record yet", or reconcile appends a duplicate."""
     records = []
     for file_index, path in enumerate(paths):
         try:
-            lines = Path(path).read_text().splitlines()
-        except OSError:
+            data = Path(path).read_bytes()
+        except FileNotFoundError:
             continue
-        for line_index, line in enumerate(lines):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                record['_at'] = (file_index, line_index)
-                records.append(record)
+        except OSError:
+            if strict:
+                raise
+            continue
+        for line_index, record in decode_outcome_lines(data):
+            record['_at'] = (file_index, line_index)
+            records.append(record)
     return records
+
+
+def fsync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def make_dirs(directory):
+    """Create `directory` with its missing ancestors; returns the ones created, deepest first.
+    The caller syncs each one's parent (`sync_created`) once the new entries matter."""
+    directory = Path(directory)
+    created = []
+    for candidate in (directory, *directory.parents):
+        if candidate.exists():
+            break
+        created.append(candidate)
+    directory.mkdir(parents=True, exist_ok=True)
+    return created
+
+
+def sync_created(created):
+    for directory in created:  # deepest first
+        fsync_dir(directory.parent)
+
+
+def append_outcome(path, record):
+    """Append one record as one line; False when the write was short. OSError propagates,
+    including one from a file or directory sync: True means the line is durable."""
+    path = Path(path)
+    created = make_dirs(path.parent)
+    # Read-write: the newline guard reads the last byte, and os.pread on O_WRONLY raises EBADF.
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # The lock makes "tail check, then write" one step for every writer using this helper,
+        # in any checkout on the host; os.close in the finally releases it. Known limit: an
+        # older installed copy (path.open('a'), no lock) can still interleave until upgraded;
+        # its buffered write only leaves a partial line on a crash or a full disk.
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        # A torn earlier line (no final newline) must not swallow this record.
+        prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
+        data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+        # One write call; a short write is a failure, never success. No retry of the remainder:
+        # another checkout may have appended in between, and the next append's newline guard
+        # isolates the fragment instead.
+        if os.write(fd, data) != len(data):
+            return False
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # A file fsync does not persist a new directory entry: sync the log's directory on every
+    # append (no race over who created the file) and the parent of every directory created.
+    fsync_dir(path.parent)
+    sync_created(created)
+    return True
+
+
+def attempt_seq_path():
+    """The host-wide attempt counter, beside the log in the same state root."""
+    return state_root() / 'attempt-seq'
+
+
+def next_attempt_seq():
+    """Allocate the next attempt sequence number: max(counter, highest recorded seq) + 1,
+    persisted before it is returned. Every OSError propagates.
+    The lock is the log's (the one every writer takes, append_outcome), not the counter's: the
+    counter is replaced atomically, and a lock on a replaced inode no longer excludes later
+    lockers. Self-heal: a lost counter continues after the highest seq recorded in the log;
+    markers allocated but not yet recorded may then duplicate one, and `_at` breaks that tie.
+    Cost: one log read, what `outcome task` already pays for its `attempt` count."""
+    path = outcomes_path()
+    counter = attempt_seq_path()
+    created = make_dirs(path.parent)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = int(counter.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            current = 0
+        recorded = max((r['seq'] for r in read_outcomes([path], strict=True)
+                        if r.get('kind') == 'task' and attempt_seq(r) is not None), default=0)
+        n = max(current, recorded) + 1
+        temp = counter.with_name(counter.name + '.tmp')
+        try:
+            temp_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                data = str(n).encode()
+                if os.write(temp_fd, data) != len(data):
+                    raise OSError(f'Short write of attempt counter {temp}')
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+            os.replace(temp, counter)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                temp.unlink()
+            raise
+        fsync_dir(counter.parent)
+        sync_created(created)
+    finally:
+        os.close(fd)  # releases the lock
+    return n
+
+
+def attempt_seq(record):
+    """The record's attempt sequence number, or None (missing, a bool, or not an int)."""
+    seq = record.get('seq')
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
+def ordered_attempts(task_rows):
+    """{(project, branch, task): [record, ...]} in attempt order: rows without a seq first in
+    `_at` order, then the rest by (seq, `_at`). Round 6: every row the current helper writes has
+    a seq, so rows without one are pre-upgrade rows, all older than any new row and appended in
+    attempt order by one writer per checkout, so file order is exact for them; `_at` orders two
+    new rows only when the counter was lost. The sequence is host-wide (one counter per state
+    root), so a task's numbers have gaps: an order key, not a count."""
+    groups = {}
+    for r in task_rows:
+        groups.setdefault((r.get('project'), r.get('branch'), r.get('task')), []).append(r)
+    for rows in groups.values():
+        rows.sort(key=lambda r: (0, 0, r['_at']) if attempt_seq(r) is None else (1, r['seq'], r['_at']))
+    return groups
+
+
+def confirm_recorded(path, attempt_id):
+    """True when the log holds a task record with `attempt_id` and the file and its directory
+    were synced just now; False when it holds none (a missing log is not created). Other
+    OSErrors propagate. A complete write whose file or directory sync failed leaves a readable
+    line and a kept marker: this retry must finish the sync before the marker may go. Residual:
+    after a failed fsync the kernel may already have marked the dirty pages clean, so this
+    persists what is still dirty; it guarantees a successful sync attempt before removal, not
+    recovery of dropped data (advisory telemetry).
+    Removal rule: a marker is removed only after append_outcome returned True for a record
+    carrying its id, or after this returned True. This and a following append_outcome lock
+    separately; that is safe because a checkout's attempts are sequential under its lock, so
+    no other writer appends that id in between."""
+    path = Path(path)
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a writer mid-append finishes its line first
+        chunks = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        if not any(record.get('kind') == 'task' and record.get('attempt_id') == attempt_id
+                   for _, record in decode_outcome_lines(b''.join(chunks))):
+            return False
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_dir(path.parent)
+    return True
+
+
+def attempts_dir():
+    """Host-side attempt markers, one file per attempt, never overwritten."""
+    return binding_dir() / 'attempts'
+
+
+MARKER_ID = re.compile(r'^[0-9a-f]{16}$')
+
+
+def marker_path(attempt_id):
+    if not isinstance(attempt_id, str) or not MARKER_ID.match(attempt_id):
+        raise ValueError(f'Invalid attempt id: {attempt_id!r}')
+    return attempts_dir() / f'{attempt_id}.json'
+
+
+def write_marker(record):
+    """Publish one attempt marker: complete, fsynced tmp file, then a hard link to the final
+    name (fails if it exists, so a marker is never overwritten), then a directory sync."""
+    final = marker_path(record.get('id'))
+    created = make_dirs(final.parent)
+    sync_created(created)
+    temp = final.with_name(final.name + '.tmp')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            data = (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+            if os.write(fd, data) != len(data):
+                raise OSError(f'Short write of attempt marker {temp}')
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(temp, final)  # FileExistsError propagates
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+    fsync_dir(final.parent)
+    return final
+
+
+MARKER_FIELDS = ('id', 'task', 'model', 'project', 'branch', 'started', 'seq', 'pid', 'pid_start')
+
+
+def read_marker(path):
+    """(record, error): the record of a valid marker; the OSError when opening or reading it
+    failed (the marker is the only evidence of an unrecorded attempt, so a transient EIO or
+    EACCES must never look like garbage); (None, None) for content read completely but not a
+    marker. Invalid content may be discarded: our writer links only complete, fsynced files,
+    so invalid content under the final name is foreign or corrupt, never a torn marker of ours."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as error:
+        return None, error
+    try:
+        record = json.loads(data.decode('utf-8'))
+    except ValueError:
+        return None, None
+    if not isinstance(record, dict) or any(field not in record for field in MARKER_FIELDS) \
+            or record['id'] != Path(path).stem or not MARKER_ID.match(str(record['id'])) \
+            or not isinstance(record['started'], (int, float)) or isinstance(record['started'], bool) \
+            or attempt_seq(record) is None:
+        return None, None
+    return record, None
+
+
+def marker_sort_key(entry):
+    path, record, _ = entry
+    return (1, record['seq'], path.name) if record else (0, 0, path.name)
+
+
+def list_markers():
+    """[(path, record, error)] for every `*.json` marker, oldest attempt first; see read_marker.
+    One file's failure never raises; a failing directory listing does (the caller notes it
+    and touches nothing)."""
+    directory = attempts_dir()
+    try:
+        with os.scandir(directory) as listing:
+            paths = [directory / entry.name for entry in listing if entry.name.endswith('.json')]
+    except FileNotFoundError:
+        return []
+    return sorted(((path, *read_marker(path)) for path in paths), key=marker_sort_key)
+
+
+def process_start(pid):
+    """Field 22 of /proc/PID/stat (start in clock ticks since boot), or None. Read as bytes and
+    split after the last ')': the command name can hold spaces, parentheses or non-UTF-8."""
+    try:
+        return int(Path(f'/proc/{int(pid)}/stat').read_bytes().rsplit(b')', 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+class AttemptSeqError(OSError):
+    """next_attempt_seq failed inside open_attempt: nothing was printed or published."""
+
+
+def open_attempt(task, model, pid, out=None):
+    """Print a new attempt id, then publish its marker; returns the id.
+    Contract (P13): the id reaches the caller BEFORE the marker can exist, so a marker whose id
+    the runner lacks is impossible (a failed write to the pipe raises before the link, and
+    such a marker would later be logged as a false `crashed`). An id without a marker is
+    harmless: the outcome line carries it, remove_marker of a missing file is a no-op, and
+    nothing reconciles it. An OSError from write_marker propagates after the print, the
+    marker possibly present; `outcome attempt-open` (T003) turns it into a stderr note and
+    exit 1, and reconciles leftovers before calling this (this does not reconcile).
+    Runner side (T004) keeps every valid printed id whatever the exit status:
+      attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true
+      [[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=
+    Residual: a marker whose directory sync failed after the link may not survive a power
+    loss; that loses at most a `crashed` record, never produces a false one.
+    The attempt's seq is allocated before the print: an OSError from next_attempt_seq
+    propagates with nothing printed and nothing published (the attempt runs untracked)."""
+    try:
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        branch = 'detached'
+    attempt_id = os.urandom(8).hex()
+    record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
+              'branch': branch, 'started': int(time.time()), 'pid': int(pid),
+              'pid_start': process_start(pid)}
+    try:
+        record['seq'] = next_attempt_seq()
+    except OSError as error:
+        raise AttemptSeqError(*error.args) from error
+    print(attempt_id, file=out or sys.stdout, flush=True)
+    write_marker(record)
+    return attempt_id
+
+
+def remove_marker(path):
+    path = Path(path)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    with contextlib.suppress(FileNotFoundError):  # no directory: no entry to persist
+        fsync_dir(path.parent)
+
+
+def note(message):
+    print(f'Note: {message}', file=sys.stderr)
+
+
+def runner_alive(record):
+    """The marker's runner still runs: its pid exists with the recorded start time (a reused
+    pid has another), or with any start time when none was recorded."""
+    try:
+        pid = int(record['pid'])
+    except (TypeError, ValueError):
+        return False
+    if record['pid_start'] is None:
+        return pid > 0 and Path(f'/proc/{pid}').exists()
+    start = process_start(pid)
+    return start is not None and start == record['pid_start']
+
+
+def reconcile_marker(log, marker, record, own_pid):
+    """Turn one valid marker of a runner that is gone (or of the caller itself) into exactly
+    one task record, then remove it. OSError propagates with the marker kept."""
+    if runner_alive(record) and record['pid'] != own_pid:
+        return  # another runner's attempt in progress
+    # A marker of own_pid with a matching start is an earlier, finished attempt of the calling
+    # runner whose outcome append failed: attempts are sequential under the checkout lock (P6).
+    if confirm_recorded(log, record['id']):
+        remove_marker(marker)  # recorded, and its interrupted sync is finished now (P9)
+        return
+    # Strict: a transient read failure must not number (or duplicate) anything (P10).
+    earlier = [r for r in read_outcomes([log], strict=True) if r.get('kind') == 'task'
+               and (r.get('project'), r.get('branch'), r.get('task'))
+               == (record['project'], record['branch'], record['task'])]
+    title = outcome_title(record['task'])
+    row = {'time': now(), 'kind': 'task', 'project': record['project'], 'branch': record['branch'],
+           'task': record['task'], 'title': title, 'category': task_category(title),
+           'model': record['model'] or 'default', 'result': 'crashed', 'attempt': len(earlier) + 1,
+           'first_pass': False, 'seconds': None, 'started': record['started'], 'seq': record['seq'],
+           'attempt_id': record['id']}
+    if not append_outcome(log, row):
+        note('could not log the crashed attempt completely; will retry at the next start.')
+        return
+    remove_marker(marker)
+    note(f"logged a crashed attempt of {record['task']} (the runner was killed without its exit handler).")
+
+
+def reconcile_attempts(own_pid=None):
+    """Log every attempt whose runner died without its exit handler as `crashed`, once. Each
+    marker is handled on its own and kept on any failure; never raises (best effort at start).
+    Removal rule (T009): a readable marker goes only after its record is durably in the log.
+    Known limit: a short write of a normal `outcome task --attempt` line keeps its marker, so
+    that attempt is logged as `crashed` here (storage was full; the conservative record)."""
+    try:
+        entries = list_markers()
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        note('could not list the attempt markers.')
+        return
+    log = outcomes_path()
+    for marker, record, error in entries:
+        if error is not None:
+            note('could not read an attempt marker; keeping it.')  # transient: retried next start
+            continue
+        try:
+            if record is None:
+                remove_marker(marker)  # complete content, but not ours (see read_marker)
+                note('discarded an invalid attempt marker.')
+                continue
+            reconcile_marker(log, marker, record, own_pid)
+        except (OSError, ValueError):
+            note('could not read or sync the outcome log; keeping the attempt marker.')
 
 
 def outcome_title(task_id):
@@ -3030,8 +3468,39 @@ def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
-    | catchup BRANCH (the human recorded a Codex catch-up of that branch)"""
+    | catchup BRANCH (the human recorded a Codex catch-up of that branch)
+    | attempt-dir (prints the attempt marker directory)
+    | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
+    | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
+    `task … --attempt ID` takes seq and started from that attempt's marker and removes the
+    marker once the line is durably appended."""
     kind, *rest = arguments
+    if kind == 'attempt-dir':
+        if rest:
+            fail('Usage: outcome attempt-dir')
+        print(attempts_dir())
+        return
+    if kind == 'attempt-reconcile':
+        if len(rest) > 1 or (rest and not rest[0].isdigit()):
+            fail('Usage: outcome attempt-reconcile [OWN_PID]')
+        reconcile_attempts(int(rest[0]) if rest else None)
+        return
+    if kind == 'attempt-open':
+        if len(rest) != 3 or not rest[2].isdigit():
+            fail('Usage: outcome attempt-open TASK MODEL PID')
+        task_id, model, pid = rest[0], rest[1], int(rest[2])
+        reconcile_attempts(pid)
+        try:
+            open_attempt(task_id, model, pid)
+        except AttemptSeqError:
+            print('Note: could not allocate the attempt sequence.', file=sys.stderr)
+            sys.exit(1)
+        except OSError:
+            # The id is printed already: the runner keeps it, and its outcome line removes the
+            # marker if the link happened (open_attempt, P13).
+            print('Note: could not publish the attempt marker.', file=sys.stderr)
+            sys.exit(1)
+        return
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
@@ -3039,15 +3508,40 @@ def outcome(arguments):
     path = outcomes_path()
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    marker = None
     if kind == 'task':
-        task_id, result, model, seconds = rest
+        if len(rest) not in (4, 6) or (len(rest) == 6 and rest[4] != '--attempt'):
+            fail('Usage: outcome task TASK RESULT MODEL SECONDS [--attempt ID]')
+        task_id, result, model, seconds = rest[:4]
+        attempt_id = rest[5] if len(rest) == 6 else None
         title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
+        # `attempt` and `first_pass` are counted at append time and kept for readers of the log;
+        # the report no longer reads them (it derives both from the seq order).
         attempt = len(earlier) + 1
+        # The attempt's start as the runner measured it (epoch seconds; informational, never an order key).
+        started = int(time.time()) - int(seconds)
+        seq = None
+        if attempt_id is not None:
+            marker = marker_path(attempt_id)
+            opened, _ = read_marker(marker)
+            if opened:
+                # The marker's order key and open time: this row, its marker and a `crashed` row
+                # reconciled from the same marker agree. Absent or unreadable (P13): fresh seq.
+                seq, started = opened['seq'], opened['started']
+        if seq is None:
+            # A row is never written without seq: one without would sort as a pre-upgrade row,
+            # before every real attempt of the task.
+            try:
+                seq = next_attempt_seq()
+            except OSError:
+                fail(f'Could not allocate the attempt sequence: {attempt_seq_path()}.')
         record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
                       result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
-                      seconds=int(seconds))
+                      seconds=int(seconds), started=started, seq=seq)
+        if attempt_id is not None:
+            record['attempt_id'] = attempt_id
     elif kind == 'review':
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
@@ -3077,9 +3571,17 @@ def outcome(arguments):
         record['branch'] = rest[0]
     else:
         fail(f'Unknown outcome kind: {kind}')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as log:
-        log.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n')
+    try:
+        complete = append_outcome(path, record)
+    except OSError:
+        complete = False
+    if not complete:
+        fail(f'Could not append the outcome line completely: {path}.')  # the marker stays
+    if marker is not None:
+        # Only this attempt's marker, only after a durable append. A failed directory sync of
+        # the removal is harmless: a resurrected marker's record is found by confirm_recorded.
+        with contextlib.suppress(OSError):
+            remove_marker(marker)
 
 
 def outcomes_report(arguments):
@@ -3089,33 +3591,30 @@ def outcomes_report(arguments):
         print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
         return
     task_rows = [r for r in records if r.get('kind') == 'task']
-    final, spent = {}, {}
-    for r in task_rows:  # a task's last line is its result; its time is the sum of its attempts
-        key = (r.get('project'), r.get('branch'), r.get('task'))
-        final[key] = r
-        spent[key] = spent.get(key, 0) + (r.get('seconds') or 0)
+    ordered = ordered_attempts(task_rows)
+    # A task's last attempt in sequence order is its result; a crashed attempt may be appended
+    # late; rows without `seq` are pre-upgrade rows in file order. Its time is the sum of its attempts.
+    final = {key: rows[-1] for key, rows in ordered.items()}
+    first_row = {key: rows[0] for key, rows in ordered.items()}
+    spent = {key: sum(r.get('seconds') or 0 for r in rows) for key, rows in ordered.items()}
 
     def table(title, key):
         groups = {}
         for task_key, r in final.items():
-            groups.setdefault(key(r), []).append((r, spent[task_key]))
+            groups.setdefault(key(r), []).append(task_key)
         lines = [f'## Tasks by {title}', '',
                  f'| {title} | tasks | first-time pass | done | not done | avg attempts | avg minutes |',
                  '| --- | --- | --- | --- | --- | --- | --- |']
         for name in sorted(groups, key=str):
-            rows = groups[name]
-            count = len(rows)
-            first = sum(bool(r.get('first_pass')) for r, _ in rows)
-            done = sum(r.get('result') == 'done' for r, _ in rows)
-            attempts = sum(r.get('attempt', 1) for r, _ in rows) / count
-            minutes = sum(seconds for _, seconds in rows) / count / 60
+            keys = groups[name]
+            count = len(keys)
+            first = sum(first_row[k].get('result') == 'done' for k in keys)
+            done = sum(final[k].get('result') == 'done' for k in keys)
+            attempts = sum(len(ordered[k]) for k in keys) / count
+            minutes = sum(spent[k] for k in keys) / count / 60
             lines.append(f'| {name} | {count} | {first}/{count} ({100 * first // count}%) | {done} | '
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
-
-    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
-    for r in task_rows:
-        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
 
     def attempts_table(title, key):
         groups = {}
@@ -3129,7 +3628,7 @@ def outcomes_report(arguments):
             rows = groups[name]
             done = sum(r.get('result') == 'done' for r, _ in rows)
             starts = [r for r, is_first in rows if is_first]
-            first = sum(bool(r.get('first_pass')) for r in starts)
+            first = sum(r.get('result') == 'done' for r in starts)
             rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
             minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
             lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')

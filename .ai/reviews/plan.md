@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest fdd051dc935110c2232840ebab09c0aa1481afb9b654a78c1b2c5de5ad324e01; HEAD 3c8a687f261a4fd6e78842e758456405038ada9f; saved 2026-10-16T20:19:52Z. -->
+<!-- Plan review of plan digest 1ad52147bd2d4078331bd6d74e54d0cc529693bc6066dde72abc783bcd980a08; HEAD 615cbcc68605937599ae40b8644d039261ea85d9; saved 2026-10-17T02:32:14Z. -->
 
-# Plan review
+# Plan review — round 7
 
-Overall verdict: Ready for implementation with one MINOR formatting gap.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
+Reviewed HEAD: `615cbcc68605937599ae40b8644d039261ea85d9`
 
-Reviewed HEAD: `3c8a687f261a4fd6e78842e758456405038ada9f`.
+Overall verdict: PASS — no findings in the inspected plan and affected code.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
 ## BLOCKER findings
 
@@ -17,38 +17,26 @@ None.
 
 ## MINOR findings
 
-- P7: Complete the table escape contract for literal backslashes before pipes.
+None.
 
-  **Location:** `.ai/tasks.md:363–372` (T005); `scripts/lib/workflow.py:1563,2831`.
+## Revision assessment
 
-  The proposed parser consumes backslashes in pairs, while the retained writers escape only pipes. For example, encoding the literal evidence `literal regex \| is required` produces:
+- **P15 addressed:** T012 replaces wall-clock ordering with a persisted sequence allocated under the shared log lock. T003 preserves that sequence through reconciliation, and T011 derives report results from it. Regression criteria cover equal-second starts and a crash record appended after a successful retry.
+- **P16 addressed:** T011 now specifies consistent results for both file orders of legacy rows and explicitly tests mixed legacy and sequenced records.
 
-  ```text
-  | P11 | accepted | literal regex \\| is required | T030 |
-  ```
+The inspected tasks have explicit models appropriate to their risk, valid dependency ordering, and concrete regression criteria. Earlier fixes for append framing, sync failures, retained markers and restart ordering remain covered.
 
-  An in-memory reproduction using the planned regex reads `is required` as the Task cell. The planned decoder also lacks a rule for representing and recovering a literal backslash immediately before a pipe. The specified round-trip test covers only a bare pipe.
+## Scope and validation
 
-  **Concrete plan change:** Define consistent encoding and decoding for literal backslashes and pipes. Add round-trip cases containing a literal backslash followed by a pipe and multiple consecutive backslashes, while retaining the missing-Task-cell rejection tests.
+Inspected repository instructions, spec, plan, all task definitions, dispositions, state, handoff, relevant documentation, source, test fixtures, record formats and `.ai/validate`.
 
-## Previous-round assessment
+Observed validation:
 
-P3 is addressed by T012’s bracket-free surrounding-prose rule and negative cases. P6 is addressed by T013’s cleanup-protected startup loop and interruption tests. The current plan also retains coverage for P1, P2, P4 and P5.
+- Task queue check passed.
+- Documentation tests passed: **3 tests**.
+- Shell syntax checks passed for `ai-run`, `ai-recover`, `ai-check` and `.ai/validate`.
+- Python AST parsing passed for the affected workflow module, workflow tests and parallel test runner.
 
-All 13 tasks specify models; no model-risk mismatch was found.
+The full gate and fixture-based integration tests were not run because they require writes in this read-only review. The planned behavior tests remain implementation acceptance criteria; current syntax and documentation checks do not validate that future behavior.
 
-## Validation observed
-
-- Task queue validation passed.
-- Python AST parsing passed for 8 files; shell syntax checks passed for 13 files.
-- `DocsConsistencyTest`: 3 tests passed.
-- An in-memory model of T012 passed 9 representative acceptance and rejection cases.
-- An in-memory reproduction demonstrated P7.
-
-## Scope and limitations
-
-Inspected repository instructions, spec, plan, tasks, state, handoff, prior dispositions, relevant source, prompts, tests, documentation and `.ai/validate`. No other findings were identified in those inspected areas.
-
-The full gate and integration tests were not run because they write fixtures and validation artifacts in this read-only environment. Planned behavior remains unimplemented. Retain the real-process signal tests and manual self-check interruption check after implementation.
-
-No files were modified or network integrations invoked.
+Implementation should retain the documented storage-failure limits and complete the planned installed-copy upgrade and disposable-checkout crash checks. This verdict reviews the plan; it does not establish implementation correctness or human acceptance.

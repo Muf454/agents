@@ -416,7 +416,9 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    `escalate`. The answer is one JSON decision object; a diagnosis written before or after it
    still counts when the object starts its own line and the prose around it contains no `{`,
    `}`, `[` or `]`. Any other answer escalates, and the ⛔ reason quotes the start of what the
-   session wrote (`the recovery session gave no valid decision; it wrote: …`).
+   session wrote (`the recovery session gave no valid decision; it wrote: …`). A reason or
+   human action over 300 characters is cut at a sentence or word boundary (never mid-word);
+   the full text is then in `.ai/local/recovery-decision.txt` and the ⛔ says so.
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
    pipeline was killed or the machine restarted.
 
@@ -492,7 +494,13 @@ only a re-check, never a full review) exists, or you record a catch-up done on a
 `~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
-no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
+no_checkpoint, or timeout, interrupted, error for a stopped attempt, or crashed for a runner
+that was killed: logged, with unknown duration, at the next `ai-run` start other than `--plan`, before
+its clean-checkpoint check, so that start still stops with `Start from a clean checkpoint`
+until the interrupted bookkeeping (`.ai/state.md` at least) is committed or reset; only
+implementation attempts, and a checkout never started again keeps its record pending), attempt, first-time pass, duration,
+`seq` (host-wide order key, allocated when the attempt opens; gaps are normal) and `started`
+(epoch seconds, informational); for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
 line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
 `reviewed_head` instead (omitted when the re-check report cannot be verified).
@@ -500,7 +508,9 @@ line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_m
 category (per task) and per model and model/category (per attempt, each credited to the
 model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks
 per reviewer, and the
-Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
+Claude-only reviews awaiting the Codex catch-up. It orders a task's attempts by `seq`, so an
+attempt recorded late keeps its place (rows written before `seq` existed come first, in file
+order). Use it to see which categories could
 move to haiku and which keep failing on sonnet.
 
 ### Models
