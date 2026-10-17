@@ -383,3 +383,4 @@
 | 2026-10-17T06:31:46Z | runner | T005 | completed | PASS | 6224bf7 | Claude checkpointed; continuing queue |
 | 2026-10-17T06:40:26Z | claude (haiku) | T006 | DONE: docs audit against the code; README `crashed` sentence corrected to "`ai-run` start other than `--plan`" (was `--approved`); handoff (flow line, validation, Next action) and state updated; hub Log lines added; all 12 tasks DONE, Phase ready_for_review | PASS (ai-check, 817 tests, 434.3 s; -k Docs 3 OK; -k flow_this_repo 1 OK) | parent a7f0d5b | flow unchanged; installed copies still need upgrade (human) |
 | 2026-10-17T06:48:08Z | runner | T006 | completed | PASS | f189f35 | Claude checkpointed; continuing queue |
+| 2026-10-17T06:55:24Z | runner | none | queue complete; ready for independent review | PASS | 52ef5dd | Human acceptance remains |
