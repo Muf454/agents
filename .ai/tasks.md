@@ -1042,7 +1042,7 @@ Done. `shorten(text, cap)` in scripts/lib/workflow.py; `recover_decision` uses i
 
 
 ## T006 — Docs, handoff and final audit for the batch
-Status: TODO
+Status: DONE
 Dependencies: T001, T002, T007, T008, T009, T010, T012, T011, T003, T004, T005
 Model: haiku
 
@@ -1083,4 +1083,19 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- Audit: README and `docs/workflow.md` checked against the code for the sentences T001–T012
+  added. Finding cell rule (`docs/workflow.md` triage paragraph) matches `FINDING_CELL` in
+  `scripts/lib/workflow.py`. `crashed` / reconcile wording (`docs/workflow.md` attempt-marker
+  paragraph) matches `ai-run` (reconcile at every non-`--plan` start). Fixed: README's
+  `crashed` sentence said `ai-run --approved` start; now "`ai-run` start other than `--plan`".
+  `recovery-decision.txt` and `seq`/`started`/report ordering wording match the code; no other
+  contradiction found.
+- Vault: `agents-flow.md` already `updated: 2026-10-17` and has the T004 "Outcome log" bullet;
+  T005/T006 change no flow. Hub Log line added for the batch-5 planner finding.
+- Handoff: flow chart line, "Manual testing" (Needs you / Covered by automated tests naming
+  every group) and Human todos checked; Next action updated.
+- Validation: `python3 -m unittest discover -s tests -k Docs` → Ran 3 tests, OK;
+  `-k flow_this_repo` → Ran 1 test, OK; `.ai/bin/ai-check` → Ran 817 tests, OK.
+- Limitation: installed copies (`.ai/bin`, `.ai/prompts` of other projects) unchanged; upgrade
+  is a human step (handoff Human todos).
 

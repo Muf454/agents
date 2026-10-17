@@ -45,12 +45,14 @@ PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session
 - T005 R13 (sonnet): recovery reasons, human actions and needs-human questions are cut at a
   sentence or word boundary with `…`; a cut recovery decision is kept in full in
   `.ai/local/recovery-decision.txt`, named in the ⛔ notification.
-- T006 (haiku): docs, vault and handoff audit.
+- T006 (haiku): docs, vault and handoff audit; README's `crashed` sentence now says the reconcile
+  runs at the next `ai-run` start other than `--plan` (as the code does), not only `--approved`.
 Found already done and not planned (verified 2026-10-17): FL-01, FL-07, FL-09, FL-11, FL-14,
 FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage half of FL-16.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+2026-10-17 T006: `.ai/bin/ai-check` PASS (817 tests, 434.3 s on 8 workers); `-k Docs` 3 OK; `-k flow_this_repo` 1 OK.
 2026-10-17 T005: `.ai/bin/ai-check` PASS (817 tests, 434.4 s on 8 workers); `-k recovery` 65 OK.
 2026-10-17 T004: `.ai/bin/ai-check` PASS (812 tests, 442.0 s on 8 workers); `-k test_outcome_crash`
 plus the existing runner outcome/tamper tests 9 OK.
@@ -129,4 +131,5 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Continue the queue (T005 R13 recovery text cuts, then T006 docs/vault/handoff audit).
+All tasks T001–T012 are DONE. Next: independent review of the branch (`Phase: ready_for_review`),
+then your checks under "Needs you" and the merge order above.
