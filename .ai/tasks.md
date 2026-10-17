@@ -843,7 +843,7 @@ DONE 2026-10-17.
   armed tree with `Start from a clean checkpoint`. Flow chart unchanged (T011 updates it).
 
 ## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T014, T017
 Model: opus
 
@@ -1056,6 +1056,26 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE (2026-10-18; the first session timed out, its WIP `f6f7bf2` was reconciled and needed no
+code change). `armed_resume` and `clean_or_armed` in `scripts/ai-pipeline` (start-from-clean,
+both `reconcile_disputes` tests; the `pending`/dirty-review-record fail-closed stop before
+`ai-review --recheck`, `disputes-record` and `host_commit`; `revision-queue-repair` skipped while
+armed; ai-run runs while armed even when `tasks complete`) and `scripts/ai-run` (start check;
+`armed=yes` when the exception admitted the tree). ai-run consumer order: `limit-task` →
+`newly-done HEAD` consistency → dependency setup (condition widened with `-n "$bound"`) → route
+by status → `ai_guard_verify`/`ai_branch`/`tasks check` → `limit-disarm` (single call site) →
+`Resuming preserved work …` → `task-clear` → `checkpoint_done` or the loop. The loop's `DONE)`
+branch plus the bookkeeping commit and `verify_checkpoint` are now `checkpoint_done` /
+`runner_checkpoint` (BLOCKED uses `runner_checkpoint` too); the tier-1 comment names the armed
+resume. `task_outcome done` works without an attempt (no `--attempt` argument), so the armed
+checkpoint logs a `done` line. Other checks on the path not changed: `ensure_validated` and the
+review/publish steps are not reached while armed (ai-run runs first and consumes or stops);
+the `tasks untouched` plan-review gate needs no change (T015). Nothing after the first act is
+relaxed. Tests: 20 `test_limit_relaunch_preserved_*` (mock modes `limit-far-dirty`,
+`limit-far-done`, `limit-far-done-committed`, `limit-far-keep`). Validation: `-k
+limit_relaunch_preserved` Ran 20 OK; `-k recheck` Ran 32 OK; `-k recovery` Ran 65 OK;
+`.ai/bin/ai-check` PASS (879 tests, 520.3 s). Docs: docs/workflow.md "How the resumed run
+continues preserved work", README "Recovery"; vault flow chart relaunch node.
 
 
 ## T016 — Armed resume re-enters at implementation: stage-bound arm, plan review loop not entered while armed (MC-01 part 1, plan review round 5 P3 design task)

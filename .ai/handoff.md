@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T011: `-k limit_relaunch_preserved` 20 OK, `-k recheck` 32 OK, `-k recovery` 65 OK;
+`.ai/bin/ai-check` PASS (879 tests, 520.3 s).
 T014: `-k limit_relaunch_verify` 9 OK; full gate and the other groups see the task result.
 Mutation: moving the `relaunch_verify` call below the leftovers commit fails all 9.
 T012: `.ai/bin/ai-check` PASS (844 tests); `-k limit_relaunch` 27 OK, `-k recovery` 65 OK,
@@ -76,8 +78,9 @@ fails 4 of the 8 tests.
 Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path;
 T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recovering timer, cap),
 the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording; T014: the
-relaunch node verifies HEAD and tree first, else ⛔ with nothing committed). Still to
-be updated by T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
+continues uncommitted task work in its own session or the validated checkpoint). Still to
+be updated by T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -131,5 +134,6 @@ schedules a limit-only stop, restores a pending wait, and resumes a claimed rela
 verifying HEAD and the whole tree (`worktree-digest` = `tree_snapshot`, submodules included);
 `limit_resume` binds `{head, tree}`; `tasks newly-done REV` for T011; T014: that verification
 is the one site before any commit, stage resume or session, followed by a four-row transition
-table). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
-into ai-pipeline's "Start from a clean checkpoint" stop. Next: the queue's next task.
+table). T017 binds the arm to the task; T011: the resumed run admits the armed tree
+(`clean_or_armed`) and ai-run continues it once (the bound task's session, or the validated
+`checkpoint_done` when it is already DONE), no recovery decision. Next: the queue's next task.
