@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 1523cdac4a49f5e31ce3aec581fcab9762e56f9b987d59de0be8bd0181273523; HEAD b018ef0fe925529b881b012e1989ccd2a82148b7; saved 2026-10-17T02:01:58Z. -->
+<!-- Plan review of plan digest 20f0c1e5d470a3ff12616e40e2cd19662cd512c3242920c959fbdde4c0dcde66; HEAD 87943881a1a6b0e8c71f8c46c7eb4abf692ef6e8; saved 2026-10-17T02:10:42Z. -->
 
-# Plan review — round 4
+# Plan review — round 5
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
+Finding counts: BLOCKER=0 MAJOR=1 MINOR=0
 
-Reviewed HEAD: `b018ef0fe925529b881b012e1989ccd2a82148b7`
+Reviewed HEAD: `87943881a1a6b0e8c71f8c46c7eb4abf692ef6e8`
 
-The revised tasks address P1–P11, including round 3’s sync confirmation, strict log reads and startup ordering. Two additional marker failure paths remain insufficiently specified.
+The revised plan addresses P12–P14. One interaction between retained markers, successful retries and outcome reporting remains uncovered.
 
 ## BLOCKER findings
 
@@ -15,43 +15,35 @@ None.
 
 ## MAJOR findings
 
-- P12: Transient marker read failures permanently discard recoverable attempts.
+- P15: Delayed reconciliation of an older attempt can overwrite a successful retry’s reported result.
 
-  **Location:** `.ai/tasks.md:233`, `.ai/tasks.md:365`.
+  **Location:** `.ai/tasks.md:449`, `.ai/tasks.md:463`, `.ai/tasks.md:524`; `scripts/lib/workflow.py:3093`.
 
-  T008 makes `list_markers()` return `None` for both unreadable and invalid markers. T003 then unlinks either kind. A single `OSError(EIO)` while reading an otherwise valid marker therefore deletes the only durable evidence of an unrecorded attempt, without appending its outcome. The strict-read protection added for P10 covers the outcome log, but leaves this equivalent marker-side failure intact.
+  Reconciliation keeps unreadable markers and allows implementation to continue. Consider attempt A of T001, whose runner dies. A’s marker remains unreadable during startup and attempt-open reconciliation. A later attempt B of T001 succeeds and logs `done`. When A becomes readable, reconciliation appends its `crashed` record after B’s outcome.
 
-  **Concrete plan change:** Distinguish read errors from successfully read, malformed content. Keep markers on read errors, warn, and continue processing other markers. Add a regression where one marker read fails transiently: the marker remains unchanged, nothing is appended for it, and a later successful reconciliation records exactly one crash.
+  The existing report chooses the last appended record per task, so it now reports T001 as not done. Distinct, correctly preserved attempt IDs do not prevent this. Numbering attempts from existing outcome rows also assigns the older A a higher number than B.
 
-- P13: A marker publication failure can lose its ID and later turn a successful task into a reported crash.
+  **Evidence:** An in-memory invocation of the actual `outcomes_report` function with B’s `done` followed by A’s delayed `crashed` produces `done=0, not done=1` in the task summary. T003’s planned two-attempt regression uses T001 followed by T002, so it misses this same-task interaction.
 
-  **Location:** `.ai/tasks.md:231`, `.ai/tasks.md:350`, `.ai/tasks.md:479`.
-
-  Marker creation links `<id>.json` before syncing its directory. If that sync fails, the marker already exists, but the runner’s prescribed `attempt-open … || attempt_id=` clears its ID. Implementation continues because telemetry is best effort. A successful task then logs `done` without `attempt_id`, leaving the published marker behind. Subsequent reconciliation cannot associate that outcome with the marker and appends `crashed`. Since the existing report uses the last outcome per task (`scripts/lib/workflow.py:3093`), it can report the completed task as not done.
-
-  **Concrete plan change:** Specify a publication-failure contract that preserves the chosen ID in the runner even when registration fails after linking. Carry that ID into the normal outcome and marker cleanup. Add a regression injecting an attempts-directory sync failure immediately after publication, followed by successful task completion and reconciliation; require one outcome for the attempt and no false crash.
+  **Concrete plan change:** Define logical attempt ordering independently of append order for normal and reconciled outcomes, including a tie-breaker and compatibility with existing rows. Use that ordering when selecting a task’s final result and calculating attempt statistics. Preserve best-effort reconciliation. Add a regression where A’s marker remains unreadable through B’s successful completion, then becomes readable: reconciliation records A exactly once, both attempts remain counted, and T001 remains reported as done after repeated reconciliation.
 
 ## MINOR findings
 
-- P14: T008’s acceptance criteria require functionality implemented by its downstream dependency.
-
-  **Location:** `.ai/tasks.md:253`, `.ai/tasks.md:335`.
-
-  T008 requires checking that `outcome task … --attempt` retains its marker after a directory-sync failure. T003 introduces that interface and depends on T009, which depends on T008. Consequently, T008 cannot satisfy all its acceptance criteria at its own checkpoint.
-
-  **Concrete plan change:** Keep the append failure assertion in T008 and move the marker-retention assertion explicitly into T003’s acceptance criteria.
+None.
 
 ## Validation and scope
 
-Inspected the spec, plan, all nine tasks, dispositions, state, handoff, relevant documentation, source, templates, existing tests and `.ai/validate`.
+Inspected repository instructions, spec, plan, all ten tasks, prior dispositions, state, handoff, relevant source, templates, tests, documentation and `.ai/validate`.
 
 Observed passing checks:
 
 - `python3 -B scripts/lib/workflow.py tasks check`
 - Three `DocsConsistencyTest` tests
+- Python syntax parsing for four relevant files
 - Shell syntax checks for five relevant files
-- Python syntax parsing for the helper and relevant test files
 
-The full gate and integration tests were not run because they create writable fixtures and validation artifacts. The planned implementation is absent, so these checks validate the current baseline only.
+The report-ordering reproduction ran entirely in memory. The full gate and integration tests were not run because they require writable fixtures and artifacts. These checks validate the current baseline; implementation is still absent.
 
-No files were modified. No network or MCP integrations were invoked. The remaining findings concern telemetry integrity; no additional authorization issue was identified in the inspected scope.
+The remaining finding concerns telemetry integrity and missing regression coverage. No additional authorization issue was identified in the inspected scope. After implementation, manually confirm that a recovered older attempt cannot change a successfully retried task’s reported status.
+
+No files were modified. No network or MCP integrations were invoked.
