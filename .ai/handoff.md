@@ -3,7 +3,8 @@
 ## What has been implemented?
 Done so far: T001, T002, T007 (`append_outcome` + per-line `decode_outcome_lines` reader in
 `scripts/lib/workflow.py`; `outcome` fails with exit 1 on a short write), T008 (log lock,
-directory fsync, marker store), T009 (`read_outcomes(strict=True)`, `confirm_recorded`). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
+directory fsync, marker store), T009 (`read_outcomes(strict=True)`, `confirm_recorded`), T010
+(`list_markers` → `(path, record, error)`, `open_attempt` prints the id first). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
 PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session):
 - T001 FL-16 (sonnet): both disposition tables read a first cell `ID`, `ID (SEVERITY)` or
   `ID (SEVERITY) title` (also `ID — title`, `ID: title`); decoration before the ID, unknown
@@ -44,7 +45,8 @@ FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage hal
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-2026-10-17 T007: `.ai/bin/ai-check` PASS (758 tests, 417.3 s on 8 workers); `-k outcome` 28 OK.
+2026-10-17 T010: `.ai/bin/ai-check` PASS (771 tests, 414.6 s on 8 workers); `-k outcome` 41 OK;
+`-k outcome_marker_contract` 5 OK.
 PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 
 ## Assumptions
@@ -89,7 +91,7 @@ tests (the groups are added by the tasks named).
   lock).
 - `test_outcome_marker_contract_*` (T010: a marker read error is kept apart from invalid
   content, `open_attempt` prints the id before publishing, a failed publish after the link
-  leaves the marker with the printed id).
+  leaves the marker with the printed id, a failed print publishes nothing; done).
 - `test_outcome_attempt_seq_*` (T012: the counter advances per attempt and persists, heals
   from the log when lost, waits for the log lock, an allocation failure appends nothing;
   `ordered_attempts` puts rows without `seq` first in file order and the rest by `seq`).
@@ -119,4 +121,4 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Continue the queue (T010 next: marker failure contract, builds on T008's marker store).
+Continue the queue (T012 next: persisted attempt `seq`, allocated before `open_attempt`'s print).

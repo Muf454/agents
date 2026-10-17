@@ -387,7 +387,7 @@ flow unchanged (no caller yet: T003 wires it into reconcile).
 
 
 ## T010 — CU-5 marker failure contract: three-way marker read, id printed before publish (CU-5, part 0d, round 4 redesign)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: opus
 
@@ -462,6 +462,18 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17. `read_marker` returns `(record, error)` and `list_markers` `[(path, record,
+error)]` via `os.scandir` (listing failure raises; missing dir = `[]`); required fields in
+`MARKER_FIELDS`, `started` numeric; entries without a record sort first by name, then by
+(`started`, name). `process_start(pid)` (bytes, split after last `)`, field 22 or None);
+`open_attempt(task, model, pid, out=None)` prints and flushes the id before `write_marker`,
+with the P13 contract, T004 runner lines and power-loss residual in its docstring. Tests: 5
+`test_outcome_marker_contract_*` (three-way read incl. EIO patch, chmod 000 variant and
+scandir failure; invalid content; id printed before publish; dir-fsync failure after link and
+read-only dir; no publish when the print fails); `test_outcome_write_protocol_marker_store`
+updated to the 3-tuple shape with full-field markers. docs/workflow.md Outcome log updated.
+Validation: `-k outcome_marker_contract` Ran 5 OK; `-k outcome` Ran 41 OK; `.ai/bin/ai-check`
+PASS (771 tests). Flow unchanged (no caller until T003).
 
 
 ## T012 — CU-5 attempt sequence: one persisted `seq` allocated at open or append under the log lock; attempts ordered by it (CU-5, part 0e, round 6 redesign)

@@ -1,6 +1,7 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import ast
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -5771,8 +5772,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
             directory = wf.attempts_dir()
             self.assertEqual(self.helper('outcome', 'attempt-dir').stdout.strip(), str(directory))
-            later = {'id': 'b' * 16, 'started': '2026-01-01T00:00:02Z', 'task': 'T001'}
-            earlier = {'id': 'c' * 16, 'started': '2026-01-01T00:00:01Z', 'task': 'T001'}
+            later = self.marker_record('b' * 16, 2)
+            earlier = self.marker_record('c' * 16, 1)
             first = wf.write_marker(later)
             second = wf.write_marker(earlier)
             self.assertEqual(sorted(p.name for p in directory.iterdir()), [first.name, second.name])
@@ -5783,13 +5784,137 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertFalse(any(p.name.endswith('.tmp') for p in directory.iterdir()))
             garbage = directory / ('a' * 16 + '.json')
             garbage.write_text('not json')
-            self.assertEqual(wf.list_markers(), [(garbage, None), (second, earlier), (first, later)])
+            self.assertEqual(wf.list_markers(), [(garbage, None, None), (second, earlier, None), (first, later, None)])
             for bad in ('../escape0000000', 'B' * 16, 'b' * 15, None):
                 with self.assertRaises(ValueError):
                     wf.write_marker({'id': bad})
             wf.remove_marker(second)
             wf.remove_marker(second)  # already gone: fine
-            self.assertEqual([p for p, _ in wf.list_markers()], [garbage, first])
+            self.assertEqual([p for p, _, _ in wf.list_markers()], [garbage, first])
+
+    @staticmethod
+    def marker_record(attempt_id, started, **fields):
+        return dict({'id': attempt_id, 'task': 'T001', 'model': 'm', 'project': 'p', 'branch': 'b',
+                     'started': started, 'pid': 1, 'pid_start': None}, **fields)
+
+    def test_outcome_marker_contract_three_way_read(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            valid = wf.write_marker(self.marker_record('a' * 16, 1))
+            failing = wf.write_marker(self.marker_record('c' * 16, 2))
+            garbage = directory / ('b' * 16 + '.json')
+            garbage.write_text('{"id": "bbbb')
+            before = {p.name: p.read_bytes() for p in directory.iterdir()}
+            real_read_bytes = Path.read_bytes
+
+            def read_bytes(path):
+                if path == failing:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_read_bytes(path)
+
+            with mock.patch.object(Path, 'read_bytes', read_bytes):
+                entries = wf.list_markers()
+            self.assertEqual(len(entries), 3)
+            # Entries without a record sort first, by name.
+            self.assertEqual(entries[0], (garbage, None, None))
+            self.assertEqual(entries[1][:2], (failing, None))
+            self.assertIsInstance(entries[1][2], OSError)
+            self.assertEqual(entries[1][2].errno, errno.EIO)
+            self.assertEqual(entries[2], (valid, self.marker_record('a' * 16, 1), None))
+            self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+            if os.geteuid() != 0:
+                failing.chmod(0o000)
+                try:
+                    entry = next(e for e in wf.list_markers() if e[0] == failing)
+                finally:
+                    failing.chmod(0o600)
+                self.assertEqual(entry[1], None)
+                self.assertIsInstance(entry[2], PermissionError)
+            with mock.patch('os.scandir', side_effect=OSError(errno.EIO, 'Input/output error')), \
+                    self.assertRaises(OSError):
+                wf.list_markers()
+
+    def test_outcome_marker_contract_invalid_content(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            directory.mkdir(parents=True)
+            mismatch = directory / ('d' * 16 + '.json')
+            mismatch.write_text(json.dumps(self.marker_record('e' * 16, 1)))
+            missing = directory / ('f' * 16 + '.json')
+            record = self.marker_record('f' * 16, 1)
+            del record['pid_start']
+            missing.write_text(json.dumps(record))
+            self.assertEqual(wf.list_markers(), [(mismatch, None, None), (missing, None, None)])
+
+    def test_outcome_marker_contract_id_printed_before_publish(self):
+        wf = self.outcome_module()
+        out = io.StringIO()
+        real_write_marker = wf.write_marker
+        seen = []
+
+        def write_marker(record):
+            seen.append(out.getvalue())
+            return real_write_marker(record)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project), \
+                mock.patch.object(wf, 'write_marker', write_marker):
+            attempt_id = wf.open_attempt('T001', 'sonnet', os.getpid(), out=out)
+            self.assertRegex(attempt_id, r'^[0-9a-f]{16}$')
+            self.assertEqual(out.getvalue(), attempt_id + '\n')
+            self.assertEqual(seen, [attempt_id + '\n'])
+            [(path, record, error)] = wf.list_markers()
+            self.assertEqual((path.name, error), (attempt_id + '.json', None))
+            self.assertEqual((record['id'], record['task'], record['model'], record['pid']),
+                             (attempt_id, 'T001', 'sonnet', os.getpid()))
+            self.assertIsInstance(record['pid_start'], int)
+
+    def test_outcome_marker_contract_failure_after_print(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            directory.mkdir(parents=True)
+            inode = directory.stat().st_ino
+            real_fsync = os.fsync
+
+            def failing_fsync(fd):
+                if os.fstat(fd).st_ino == inode:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_fsync(fd)
+
+            out = io.StringIO()
+            with mock.patch('os.fsync', failing_fsync), self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=out)
+            attempt_id = out.getvalue().strip()
+            self.assertRegex(attempt_id, r'^[0-9a-f]{16}$')
+            self.assertEqual(json.loads((directory / f'{attempt_id}.json').read_text())['id'], attempt_id)
+            wf.remove_marker(directory / f'{attempt_id}.json')
+            if os.geteuid() != 0:
+                out = io.StringIO()
+                directory.chmod(0o500)
+                try:
+                    with self.assertRaises(OSError):
+                        wf.open_attempt('T001', 'm', os.getpid(), out=out)
+                finally:
+                    directory.chmod(0o700)
+                self.assertRegex(out.getvalue(), r'^[0-9a-f]{16}\n$')
+                self.assertEqual(list(directory.iterdir()), [])
+
+    def test_outcome_marker_contract_no_publish_when_print_fails(self):
+        wf = self.outcome_module()
+
+        class BrokenPipe(io.StringIO):
+            def write(self, text):
+                raise OSError(errno.EPIPE, 'Broken pipe')
+
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project), \
+                mock.patch.object(wf, 'write_marker', wraps=wf.write_marker) as write_marker:
+            with self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=BrokenPipe())
+            write_marker.assert_not_called()
+            directory = wf.attempts_dir()
+            self.assertEqual(list(directory.iterdir()) if directory.exists() else [], [])
 
     def test_outcome_removal_gate_strict_read(self):
         wf = self.outcome_module()

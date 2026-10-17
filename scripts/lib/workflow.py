@@ -3171,34 +3171,82 @@ def write_marker(record):
     return final
 
 
+MARKER_FIELDS = ('id', 'task', 'model', 'project', 'branch', 'started', 'pid', 'pid_start')
+
+
 def read_marker(path):
-    """The marker's record, or None for invalid content."""
+    """(record, error): the record of a valid marker; the OSError when opening or reading it
+    failed (the marker is the only evidence of an unrecorded attempt, so a transient EIO or
+    EACCES must never look like garbage); (None, None) for content read completely but not a
+    marker. Invalid content may be discarded: our writer links only complete, fsynced files,
+    so invalid content under the final name is foreign or corrupt, never a torn marker of ours."""
     try:
         data = Path(path).read_bytes()
-    except OSError:
-        return None
+    except OSError as error:
+        return None, error
     try:
         record = json.loads(data.decode('utf-8'))
     except ValueError:
-        return None
-    if not isinstance(record, dict) or record.get('id') != Path(path).stem \
-            or not MARKER_ID.match(str(record.get('id'))):
-        return None
-    return record
+        return None, None
+    if not isinstance(record, dict) or any(field not in record for field in MARKER_FIELDS) \
+            or record['id'] != Path(path).stem or not MARKER_ID.match(str(record['id'])) \
+            or not isinstance(record['started'], (int, float)) or isinstance(record['started'], bool):
+        return None, None
+    return record, None
 
 
 def marker_sort_key(entry):
-    path, record = entry
-    return (str(record.get('started', '')) if record else '', path.name)
+    path, record, _ = entry
+    return (1, record['started'], path.name) if record else (0, 0, path.name)
 
 
 def list_markers():
-    """(path, record or None) for every `*.json` marker, oldest attempt first."""
+    """[(path, record, error)] for every `*.json` marker, oldest attempt first; see read_marker.
+    One file's failure never raises; a failing directory listing does (the caller notes it
+    and touches nothing)."""
     directory = attempts_dir()
-    if not directory.is_dir():
+    try:
+        with os.scandir(directory) as listing:
+            paths = [directory / entry.name for entry in listing if entry.name.endswith('.json')]
+    except FileNotFoundError:
         return []
-    entries = [(path, read_marker(path)) for path in directory.glob('*.json')]
-    return sorted(entries, key=marker_sort_key)
+    return sorted(((path, *read_marker(path)) for path in paths), key=marker_sort_key)
+
+
+def process_start(pid):
+    """Field 22 of /proc/PID/stat (start in clock ticks since boot), or None. Read as bytes and
+    split after the last ')': the command name can hold spaces, parentheses or non-UTF-8."""
+    try:
+        return int(Path(f'/proc/{int(pid)}/stat').read_bytes().rsplit(b')', 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def open_attempt(task, model, pid, out=None):
+    """Print a new attempt id, then publish its marker; returns the id.
+    Contract (P13): the id reaches the caller BEFORE the marker can exist, so a marker whose id
+    the runner lacks is impossible (a failed write to the pipe raises before the link, and
+    such a marker would later be logged as a false `crashed`). An id without a marker is
+    harmless: the outcome line carries it, remove_marker of a missing file is a no-op, and
+    nothing reconciles it. An OSError from write_marker propagates after the print, the
+    marker possibly present; `outcome attempt-open` (T003) turns it into a stderr note and
+    exit 1, and reconciles leftovers before calling this (this does not reconcile).
+    Runner side (T004) keeps every valid printed id whatever the exit status:
+      attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true
+      [[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=
+    Residual: a marker whose directory sync failed after the link may not survive a power
+    loss; that loses at most a `crashed` record, never produces a false one."""
+    try:
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        branch = 'detached'
+    attempt_id = os.urandom(8).hex()
+    record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
+              'branch': branch, 'started': int(time.time()), 'pid': int(pid),
+              'pid_start': process_start(pid)}
+    print(attempt_id, file=out or sys.stdout, flush=True)
+    write_marker(record)
+    return attempt_id
 
 
 def remove_marker(path):

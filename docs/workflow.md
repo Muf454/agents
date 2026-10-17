@@ -923,8 +923,16 @@ marker is removed (a sync attempt, not recovery of pages the kernel already drop
 Attempt markers live one file per attempt in `outcome attempt-dir` (`<review binding
 dir>/attempts/<id>.json`, id `^[0-9a-f]{16}$`). `write_marker` writes a fsynced `<id>.json.tmp`
 and hard-links it to the final name, which fails if the name exists, so a marker is never
-overwritten; `list_markers` returns `(path, record or None)` (None for invalid content) oldest
-`started` first; `remove_marker` unlinks and syncs the directory.
+overwritten; `list_markers` returns `(path, record, error)` per marker: a valid record (all of
+`id`, `task`, `model`, `project`, `branch`, `started`, `pid`, `pid_start`, `id` equal to the file
+name), the `OSError` when opening or reading it failed (kept: a transient error never discards
+a marker), or both `None` for invalid content (discardable: the writer links only complete
+files). Entries without a record sort first by name, then valid ones oldest `started` first; a
+failing directory listing raises. `remove_marker` unlinks and syncs the directory.
+`open_attempt(task, model, pid)` prints the new id and flushes BEFORE publishing the marker, so
+a marker whose id the runner lacks cannot exist; an `OSError` after the print propagates (the
+runner keeps any valid printed id whatever the exit status). Residual: a marker whose directory
+sync failed may not survive a power loss, losing at most a `crashed` record.
 
 A `review recheck` line records, instead of finding counts, how many rejected BLOCKER and
 MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `withdrawn_blocker`,
