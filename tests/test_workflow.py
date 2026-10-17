@@ -305,6 +305,11 @@ if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before ever
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
+if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT' in prompt:
+    # The host run manifest as this session sees it (ai-run's task record).
+    copy_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
+    for manifest in pathlib.Path(os.environ['AI_STATE_DIR']).rglob('run.json'):
+        pathlib.Path(f'.ai/local/manifest-{copy_id}.json').write_bytes(manifest.read_bytes())
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
     pathlib.Path('.ai/local/mock-limit-hit').touch()
     print(json.dumps({'type':'result','subtype':'error','is_error':True,
@@ -5322,6 +5327,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '0\n')
         self.helper('run-manifest', 'limit-at', expected=1)
         self.helper('run-manifest', 'reserve-attempt')
+        self.helper('run-manifest', 'task-set', 'T001')  # the arm names its task (T017)
         self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2').stdout, '1\n')
         self.assertEqual(manifest()['attempts'], 0)
         self.assertEqual(self.helper('run-manifest', 'limit-due', '99', expected=1).stdout, '')
@@ -5354,7 +5360,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'limit-armed', expected=1)
         self.helper('run-manifest', 'limit-arm')
         self.assertEqual(manifest()['limit_resume'],
-                         {'head': manifest()['limit_head'], 'tree': manifest()['limit_tree']})
+                         {'head': manifest()['limit_head'], 'tree': manifest()['limit_tree'], 'task': 'T001'})
         self.helper('run-manifest', 'limit-armed')
         self.helper('run-manifest', 'limit-disarm')
         self.helper('run-manifest', 'limit-armed', expected=1)
@@ -5368,12 +5374,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('usage limit: already relaunched 2 time(s) in this run', capped.stderr)
         self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '2\n')
         self.helper('run-manifest', 'limit-arm')
-        fields = {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_resume'}
+        fields = {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
+                  'limit_resume', 'task'}
         self.helper('run-manifest', 'clear-attempts')
         self.assertFalse(set(manifest()) & fields)
         for action in ('limit-verify', 'limit-arm'):
             unscheduled = self.helper('run-manifest', action, expected=1)
             self.assertIn('no scheduled relaunch', unscheduled.stderr)
+        self.helper('run-manifest', 'task-set', 'T001')
         self.helper('run-manifest', 'limit-schedule', '500', '2')
         self.helper('run-manifest', 'limit-arm')
         self.approve_run()
@@ -5385,6 +5393,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                            ('limit_resume', {'head': 'a' * 40}),
                            ('limit_resume', {'head': 'a' * 40, 'tree': 'x' * 64}),
                            ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'other': 1}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'task': 'x1'}),
+                           ('limit_task', 7), ('limit_task', 'T1'),
                            ('limit_relaunches', True)):
             with self.subTest(key=key, value=value):
                 manifest_path.write_text(json.dumps(dict(manifest(), **{key: value})) + '\n')
@@ -5659,6 +5669,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
         def schedule():
             self.helper('run-manifest', 'clear-attempts')
+            self.helper('run-manifest', 'task-set', 'T001')
             self.helper('run-manifest', 'limit-schedule', '100', '2')
 
         def refused(reason):
@@ -5735,6 +5746,134 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'newly-done', 'no-such-revision', expected=1)
         queue.write_text(task('T001', 'DONE') + task('T001'))
         self.helper('tasks', 'newly-done', 'HEAD', expected=1)
+
+    # ---------------------------------------------- preserved work bound to its task (T017)
+    def test_limit_relaunch_bound_manifest_task_record_and_arm(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        self.commit('bootstrap')
+        self.approve_run()
+        path = next((self.base / 'host-state').rglob('run.json'))
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.assertEqual(self.manifest()['task'], 'T001')
+        before = path.read_bytes()
+        for bad in (('x1',), ('T1',), ()):
+            self.helper('run-manifest', 'task-set', *bad, expected=1)
+            self.assertEqual(path.read_bytes(), before)
+        for _ in range(2):  # missing is fine
+            self.helper('run-manifest', 'task-clear')
+            self.assertNotIn('task', self.manifest())
+        # Scheduled without a task: no limit_task, and the arm of the dirty tree fails closed.
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('preserved edit\n')
+        self.helper('run-manifest', 'limit-schedule', '100', '2')
+        self.assertNotIn('limit_task', self.manifest())
+        before = path.read_bytes()
+        refused = self.helper('run-manifest', 'limit-arm', expected=1)
+        self.assertIn('the usage-limit stop left uncommitted changes with no task recorded', refused.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(self.helper('run-manifest', 'limit-task', expected=1).stdout, '')
+        # Scheduled with a task: copied into limit_task, then named by the arm.
+        self.helper('run-manifest', 'clear-attempts')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2')
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        self.helper('run-manifest', 'task-clear')  # the arm reads limit_task, never task
+        self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(self.manifest()['limit_resume']['task'], 'T001')
+        self.assertEqual(self.helper('run-manifest', 'limit-task').stdout, 'T001\n')
+        self.helper('run-manifest', 'limit-task', 'x', expected=1)
+        self.helper('run-manifest', 'limit-armed')
+        self.helper('run-manifest', 'limit-disarm')
+        self.helper('run-manifest', 'limit-task', expected=1)
+        # clear-attempts and a new start drop both records.
+        for reset in (lambda: self.helper('run-manifest', 'clear-attempts'), self.approve_run):
+            self.helper('run-manifest', 'clear-attempts')
+            self.helper('run-manifest', 'task-set', 'T002')
+            self.helper('run-manifest', 'limit-schedule', '100', '2')
+            self.assertEqual((self.manifest()['task'], self.manifest()['limit_task']), ('T002', 'T002'))
+            reset()
+            self.assertFalse({'task', 'limit_task'} & set(self.manifest()))
+        # Invalid records: a task of the wrong type, an arm without its task.
+        tree = 'c' * 64
+        for key, value in (('task', 7), ('task', 'x1'), ('limit_task', 7),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree})):
+            with self.subTest(key=key, value=value):
+                self.manifest(**{key: value})
+                invalid = self.helper('run-manifest', 'limit-count', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.approve_run()
+
+    def test_limit_relaunch_bound_ai_run_records_each_session_task(self):
+        self.ready(task('T001') + task('T002'))
+        self.approve_run()
+        self.tool('ai-run', '--approved', MOCK_COPY_MANIFEST='1')
+        self.helper('tasks', 'complete')
+        local = self.project / '.ai/local'
+        for name in ('T001', 'T002'):
+            self.assertEqual(json.loads((local / f'manifest-{name}.json').read_text())['task'], name)
+        self.assertNotIn('task', self.manifest())
+
+    def test_limit_relaunch_bound_ai_run_limit_stop_keeps_the_task(self):
+        self.ready()
+        self.approve_run()
+        self.manifest(task='T009')  # a stale record from an interrupted run is cleared first
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60',
+                  MOCK_COPY_MANIFEST='1')
+        self.assertEqual(json.loads((self.project / '.ai/local/manifest-T001.json').read_text())['task'], 'T001')
+        self.assertEqual(self.manifest()['task'], 'T001')
+
+    def test_limit_relaunch_bound_standalone_ai_run_without_manifest_notes_once(self):
+        self.ready()
+        self.assertEqual(list((self.base / 'host-state').rglob('run.json')), [])
+        result = self.tool('ai-run', '--approved')
+        self.assertEqual(result.stderr.count('Note: could not record the task in the run manifest.'), 1)
+        self.helper('tasks', 'complete')
+
+    def bound_limit_stop(self, record_task):
+        # A pipeline stopped at the limit with its preserved work: the schedule is reset and the
+        # stop rewritten around an uncommitted source edit, then ai-recover schedules it again.
+        self.limit_relaunch_scheduled()
+        self.manifest(limit_relaunches=None, limit_relaunch_at=None, limit_head=None, limit_tree=None,
+                      limit_task=None, task=None)
+        if record_task:
+            self.helper('run-manifest', 'task-set', 'T001')
+        edited = self.project / 'CLAUDE.md'
+        edited.write_bytes(edited.read_bytes() + b'preserved work of the limited session\n')
+        local = self.project / '.ai/local'
+        (local / 'limit-stop').write_text(f'Claude {int(time.time()) + 3600}\n')
+        (local / 'last-error').write_text(self.LIMIT_MESSAGE + '\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=75)
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        return edited
+
+    def test_limit_relaunch_bound_relaunch_without_task_escalates_untouched(self):
+        edited = self.bound_limit_stop(record_task=False)
+        self.assertNotIn('limit_task', self.manifest())
+        head, status, content = self.git_head(), self.porcelain(), edited.read_bytes()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the usage-limit stop left uncommitted changes with no task recorded; '
+                      'nothing was committed.', stop)
+        self.assertIn('inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertEqual((self.git_head(), self.porcelain(), edited.read_bytes()), (head, status, content))
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: this stop is terminal
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_bound_relaunch_with_task_arms_it(self):
+        self.bound_limit_stop(record_task=True)
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        # The resumed run's handling of the armed tree is T011's: only the arm is asserted.
+        self.relaunch(expected=None)
+        self.assertEqual(self.manifest()['limit_resume']['task'], 'T001')
+        self.assertEqual(self.helper('run-manifest', 'limit-task').stdout, 'T001\n')
 
     # ---------------------------------------------- relaunch verification contract (T014)
     def porcelain(self):

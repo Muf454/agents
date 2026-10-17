@@ -718,7 +718,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T017 — Preserved work is bound to the interrupted task: manifest task record, task-bound arm (MC-01 part 1, plan review round 6 P3 design task)
-Status: TODO
+Status: DONE
 Dependencies: T003, T012
 Model: opus
 
@@ -816,7 +816,31 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+DONE 2026-10-17.
+- `scripts/lib/workflow.py`: manifest `task` (`^T\d{3,}$`, else invalid), `task-set ID` /
+  `task-clear` (idempotent); `limit_task` added to `LIMIT_FIELDS`; `limit-schedule` copies
+  `task` into `limit_task`; `limit-arm` without `limit_task` fails `the usage-limit stop left
+  uncommitted changes with no task recorded` before the HEAD/tree comparison, writing nothing;
+  `limit_resume = {head, tree, task}` (a resume without a valid `task` is invalid); new read-only
+  `limit-task`; `clear-attempts` and `start` drop `task` and `limit_task`. T016's STAGE argument
+  does not exist yet (T016 is TODO): the signature stays `limit-schedule AT CAP`.
+- `scripts/ai-recover`: transition (c) escalates the task reason as `…no task recorded; nothing
+  was committed.` / `inspect the checkout, commit or discard what changed, then rerun
+  ai-pipeline.`; other refusals keep the verify wording; table comment updated.
+- `scripts/ai-run`: `task-clear` once before the task loop, `task-set "$active_task"` right
+  before each implementation session (note on failure), `task-clear` after the bookkeeping commit;
+  `on_exit` untouched, so a limit stop keeps the record.
+- Tests: 6 `test_limit_relaunch_bound_*` (manifest units, ai-run records per session with a
+  `MOCK_COPY_MANIFEST` mock hook, limit stop keeps the task, standalone note once, end-to-end
+  relaunch without a task → one ⛔ and nothing touched, positive control arms `T001`). Updated
+  T001's `test_limit_relaunch_record_manifest_schedule_lifecycle` and T012's
+  `test_limit_relaunch_binding_manifest_records_and_verifies_the_tree` (task-set before
+  scheduling, `task` in `limit_resume`, new invalid cases). T003's tests needed no change (the
+  pipeline's ai-run records T001 before the limited session).
+- Validation: `-k limit_relaunch_bound` 6 OK; `-k limit_relaunch` 42 OK; `-k recovery` 65 OK;
+  `-k usage_limit` 6 OK; `.ai/bin/ai-check` PASS (859 tests).
+- Limitation: nothing consumes the binding yet (T011). The resumed pipeline still refuses the
+  armed tree with `Start from a clean checkpoint`. Flow chart unchanged (T011 updates it).
 
 ## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
 Status: TODO

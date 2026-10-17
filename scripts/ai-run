@@ -613,6 +613,10 @@ if [[ "$(ai_helper tasks next)" != none ]]; then
   ai_deps "$AI_APPROVED_GATE" "$deps_limit" || ai_die "$AI_DEPS_ERROR"
 fi
 
+# The run's task record (host manifest) names the task a usage-limit stop's preserved work
+# belongs to. A stale one from an interrupted run must never bind a later stop.
+ai_helper run-manifest task-clear 2>/dev/null || true
+
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_guard_verify
   ai_branch
@@ -659,6 +663,10 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  # Best effort: a standalone run has no manifest (and no relaunch); in a pipeline a lost record
+  # makes a later limit-arm fail closed. Kept through a limit stop (on_exit leaves it).
+  ai_helper run-manifest task-set "$active_task" 2>/dev/null || \
+    printf '%s\n' 'Note: could not record the task in the run manifest.' >&2
   track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
@@ -714,6 +722,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   # Commit runner bookkeeping separately; never stage application files here.
   git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
   git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
+  ai_helper run-manifest task-clear 2>/dev/null || true
   ai_guard_verify
   # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
   if [[ "$task_status" == DONE ]]; then

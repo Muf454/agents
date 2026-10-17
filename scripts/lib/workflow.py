@@ -1294,9 +1294,14 @@ def binding_dir():
 
 
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
-# used, the pending relaunch time, the HEAD and tree digest it was scheduled at and the armed
-# resume binding ({"head", "tree"}).
-LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_resume')
+# used, the pending relaunch time, the HEAD, tree digest and task it was scheduled at and the
+# armed resume binding ({"head", "tree", "task"}).
+LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
+                'limit_resume')
+
+
+def task_id_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'T\d{3,}', value) is not None
 
 
 def limit_fields_valid(data):
@@ -1308,9 +1313,11 @@ def limit_fields_valid(data):
     return (type(count) is int and 0 <= count <= 100 and type(at) is int and at >= 0
             and ('limit_head' not in data or hexes(data['limit_head'], 40))
             and ('limit_tree' not in data or hexes(data['limit_tree'], 64))
+            and ('limit_task' not in data or task_id_valid(data['limit_task']))
             and ('limit_resume' not in data
-                 or (isinstance(resume, dict) and set(resume) == {'head', 'tree'}
-                     and hexes(resume['head'], 40) and hexes(resume['tree'], 64))))
+                 or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
+                     and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
+                     and task_id_valid(resume['task']))))
 
 
 def limit_binding():
@@ -1367,6 +1374,10 @@ def limit_relaunch(path, data, action, arguments):
         # relaunch verifies it before it touches the checkout (ai-recover relaunch_verify).
         start, tree = limit_binding()
         data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree)
+        # The task whose output the stopped tree is (ai-run's record); absent stays absent.
+        data.pop('limit_task', None)
+        if 'task' in data:
+            data['limit_task'] = data['task']
         give_back()
         atomic(path, json.dumps(data) + '\n')
         print(count + 1)
@@ -1401,11 +1412,15 @@ def limit_relaunch(path, data, action, arguments):
             fail(f'Usage: run-manifest {action}')
         if 'limit_head' not in data or 'limit_tree' not in data:
             fail('no scheduled relaunch')
+        # Preserved work is armed only for the task it belongs to: no record fails closed.
+        if action == 'limit-arm' and 'limit_task' not in data:
+            fail('the usage-limit stop left uncommitted changes with no task recorded')
         why = limit_mismatch(data['limit_head'], data['limit_tree'])
         if why:
             fail(why)
         if action == 'limit-arm':
-            data['limit_resume'] = {'head': data['limit_head'], 'tree': data['limit_tree']}
+            data['limit_resume'] = {'head': data['limit_head'], 'tree': data['limit_tree'],
+                                    'task': data['limit_task']}
             atomic(path, json.dumps(data) + '\n')
     elif action == 'limit-armed':
         if arguments:
@@ -1413,6 +1428,13 @@ def limit_relaunch(path, data, action, arguments):
         resume = data.get('limit_resume')
         if resume is None or limit_mismatch(resume['head'], resume['tree']):
             sys.exit(1)
+    elif action == 'limit-task':
+        # Read only: the task the armed tree belongs to.
+        if arguments:
+            fail('Usage: run-manifest limit-task')
+        if 'limit_resume' not in data:
+            sys.exit(1)
+        print(data['limit_resume']['task'])
     elif action == 'limit-disarm':
         if 'limit_resume' in data:
             data.pop('limit_resume')
@@ -1461,6 +1483,7 @@ def run_manifest(arguments):
                  and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
                  and all(isinstance(a, str) for a in data['args'])
                  and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
+                 and ('task' not in data or task_id_valid(data['task']))
                  and limit_fields_valid(data))
     except (OSError, ValueError):
         valid = False
@@ -1486,9 +1509,23 @@ def run_manifest(arguments):
         print(data['attempts'])
     elif action == 'clear-attempts':
         data['attempts'] = 0
-        for key in LIMIT_FIELDS:
+        for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
         atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-set':
+        # The task of the implementation session about to start. Host state written by ai-run
+        # (host code, like `outcome attempt-open`), never read from the checkout; only
+        # limit-schedule reads it.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest task-set ID')
+        data['task'] = arguments[1]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-clear':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest task-clear')
+        if 'task' in data:
+            data.pop('task')
+            atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
         # current implementation review (triage) or the current plan review (plan-revision).

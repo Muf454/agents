@@ -242,11 +242,13 @@ shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` o
 `last-error` is exactly that one-line message and `limit-stop` names the same agent and is at
 most 120 s older (relaunch: reset + 60 s, `now + AI_LIMIT_RETRY` for reset 0, `now` once
 passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `limit_head`,
-`limit_tree` (the `worktree-digest` at scheduling) and `limit_resume` (`{"head", "tree"}`) hold
-the relaunch schedule (`run-manifest limit-schedule AT CAP`, which records HEAD and the digest itself,
+`limit_tree` (the `worktree-digest` at scheduling), `limit_task` and `limit_resume`
+(`{"head", "tree", "task"}`) hold the relaunch schedule (`run-manifest limit-schedule AT CAP`,
+which records HEAD and the digest itself and copies the run's `task` record into `limit_task`,
 `limit-due`, `limit-at`, `limit-hold`, `limit-claim`, `limit-verify`, `limit-arm`,
-`limit-armed`, `limit-disarm`, `limit-count`; schedule, hold and claim give back the attempt
-`ai-recover` reserved; a human start and `clear-attempts` drop them; cap
+`limit-armed`, `limit-task`, `limit-disarm`, `limit-count`; schedule, hold and claim give back
+the attempt `ai-recover` reserved; a human start and `clear-attempts` drop them, and the `task`
+record too; cap
 `AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
@@ -740,6 +742,18 @@ check kept); (b) dirty only in `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md
 leftovers commit → gate check → resume; (c) dirty otherwise → `limit-arm` → resume; (d) clean →
 resume. `limit-arm` refusing in (c) escalates with the verify wording; no host step between the
 verification and the arm touches the checkout, and the checkout lock is held throughout.
+
+**Which task the preserved work belongs to.** The relaunch continues the task the limited
+session was working on, named in the host manifest, never inferred from the queue. `ai-run`
+records it (`run-manifest task-set ID`, best effort: a standalone run without a manifest prints
+`Note: could not record the task in the run manifest.`) right before every implementation
+session, clears it (`task-clear`) after the iteration's bookkeeping commit and once before its
+task loop, and leaves it in place when the session stops at a limit. `limit-schedule` copies it
+into `limit_task`; `limit-arm` arms only with a `limit_task` and records it in `limit_resume`
+(`limit-task` prints it, read only). Without one, (c) escalates `the usage-limit stop left
+uncommitted changes with no task recorded; nothing was committed.` with the same `Next:` and
+leaves the checkout as found. The resumed run's use of the bound task is not wired yet: it still
+refuses the armed tree with `Start from a clean checkpoint`.
 
 The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the

@@ -221,7 +221,8 @@ if [[ "$relaunch" == yes ]]; then
   #   (a) an open stage → resume (its scope check kept);
   #   (b) dirty only in .ai/state.md, .ai/run-log.md, .ai/handoff.md → the leftovers commit →
   #       ai_gate_check → resume;
-  #   (c) dirty otherwise → limit-arm → resume (a refusal escalates with the verify wording);
+  #   (c) dirty otherwise → limit-arm → resume (a refusal escalates with the verify wording;
+  #       no task recorded at the stop → escalates with that reason, nothing committed);
   #   (d) clean → resume.
   # Nothing else is permitted: a new branch here needs this table (and docs/workflow.md) changed.
   resume_open_stage quiet
@@ -229,8 +230,14 @@ if [[ "$relaunch" == yes ]]; then
   if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
     # Preserved task work: kept uncommitted; the resumed run accepts exactly this tree once.
     # Nothing touched the checkout since the verification (we hold the lock): a refusal is an
-    # inconsistency, reported as the verification would.
-    why=$(ai_helper run-manifest limit-arm 2>&1) || relaunch_moved "$why"
+    # inconsistency, reported as the verification would. The arm also names the task the work
+    # belongs to; without one recorded at the stop, it fails closed.
+    if ! why=$(ai_helper run-manifest limit-arm 2>&1); then
+      why=${why#Error: }
+      [[ "$why" != *'no task recorded'* ]] || \
+        escalate "$why; nothing was committed." 'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
+      relaunch_moved "$why"
+    fi
   fi
   resume '' ''
 fi
