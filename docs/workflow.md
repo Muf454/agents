@@ -241,8 +241,9 @@ through the pinned `.ai/local` and an exclusive `O_NOFOLLOW|O_NONBLOCK` temp fil
 shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` only when
 `last-error` is exactly that one-line message and `limit-stop` names the same agent and is at
 most 120 s older (relaunch: reset + 60 s, `now + AI_LIMIT_RETRY` for reset 0, `now` once
-passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `limit_head` and
-`limit_resume` hold the relaunch schedule (`run-manifest limit-schedule AT CAP HEAD`,
+passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `limit_head`,
+`limit_tree` (the `worktree-digest` at scheduling) and `limit_resume` (`{"head", "tree"}`) hold
+the relaunch schedule (`run-manifest limit-schedule AT CAP`, which records HEAD and the digest itself,
 `limit-due`, `limit-at`, `limit-hold`, `limit-claim`, `limit-verify`, `limit-arm`,
 `limit-armed`, `limit-disarm`, `limit-count`; schedule, hold and claim give back the attempt
 `ai-recover` reserved; a human start and `clear-attempts` drop them; cap
@@ -695,19 +696,28 @@ relaunch`, ⏸ again), prints `Still waiting for the usage-limit relaunch after 
 exits 75; *due* (`limit-claim`) → the schedule is consumed, so whatever this relaunch hits next
 is its one terminal ⛔ and no probe starts it again. A claimed relaunch checks the checkout once,
 right after the gate and branch checks and before anything reads it to decide
-(`relaunch_verify`: `limit-verify` against the scheduled HEAD); a mismatch escalates `the branch
-moved to another commit while the usage-limit relaunch waited; nothing was committed.` and
-touches nothing. After the plan-revision decision block it then notifies `▶ RESUMED after the
+(`relaunch_verify`: `limit-verify` recomputes HEAD and `workflow.py worktree-digest`, which is
+`tree-snapshot`: HEAD, the staged diff, every non-ignored path outside `.ai/local/` with kind,
+mode and bytes, tracked bookkeeping and `.ai/reviews/` included, submodules recursively). The
+relaunch continues exactly the tree it stopped with: any change during the wait (a human edit,
+an added file, a staged change, a commit, a change inside a submodule) escalates `the branch
+moved to another commit while the usage-limit relaunch waited; nothing was committed.` (HEAD)
+or `the checkout changed while the usage-limit relaunch waited; nothing was committed.` (tree)
+and touches nothing. After the plan-revision decision block it then notifies `▶ RESUMED after the
 usage limit (relaunch k/cap): <branch>.` and resumes without a Claude session or an attempt: an
 open stage resumes as above, bookkeeping-only leftovers are committed (`record stop during usage
-limit relaunch`), other uncommitted work is armed (`limit-arm`) and kept, a clean tree resumes.
+limit relaunch`), other uncommitted work is armed (`limit-arm` recomputes both and records
+`limit_resume` only on an exact match; `limit-armed` recomputes against it) and kept, a clean
+tree resumes. `tasks newly-done REV` prints the tasks DONE in the working queue but not at REV.
 A stop whose `last-error` is exactly the limit-beyond-budget message with a matching
 `limit-stop` (`workflow.py limit-stop`) is scheduled before the hard rules: with
 `AI_LIMIT_RELAUNCH_MAX` (0–9, default 2) at 0 the hard rule escalates it as before; without a
 watchdog timer installed with `--recover` (`ai-watchdog --timer-recovers`) it escalates `the
 usage limit resets around <time>, but no watchdog timer with --recover is installed …`; past the
 cap (`limit-schedule` fails) it escalates `usage limit again after N relaunch(es) in this run.`;
-otherwise it records `limit-schedule AT CAP HEAD` (relaunch at reset + 60 s), appends `<UTC>
+otherwise it records `limit-schedule AT CAP` (relaunch at reset + 60 s; HEAD and the tree
+digest are taken here, after the stop's bookkeeping was written and before any commit, and
+after it the host writes only `.ai/local/` and host state), appends `<UTC>
 paused <AT-now>s: <Agent> usage limit relaunch (resume ~<time>)` to `pauses.log`, observes
 `relaunch AT`, notifies `⏸ PAUSED: <branch> stopped at a <Agent> usage limit during <stage>;
 relaunches by itself after <time> (relaunch k/cap).`, removes `last-error`, `limit-stop` and the

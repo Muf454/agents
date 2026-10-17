@@ -1112,8 +1112,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('bootstrap')
         self.approve_run()
         self.mock_systemd_run()
-        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
-        self.helper('run-manifest', 'limit-schedule', str(at), '2', head)
+        self.helper('run-manifest', 'limit-schedule', str(at), '2')
         self.watchdog_phase('implementing')
         (self.project / '.ai/local').mkdir(exist_ok=True)
 
@@ -1232,8 +1231,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     if run:
                         self.approve_run()
                     if run == 'finish':
-                        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
-                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2', head)
+                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2')
                         self.helper('run-manifest', 'clear-attempts')
                     self.watchdog_phase(phase)
                     self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
@@ -5313,21 +5311,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_limit_relaunch_record_manifest_schedule_lifecycle(self):
         self.setup_project()
+        self.commit('bootstrap')
         self.approve_run()
         manifest_path = next((self.base / 'host-state').rglob('run.json'))
 
         def manifest():
             return json.loads(manifest_path.read_text())
 
-        head, other = 'a' * 40, 'b' * 40
         self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '0\n')
         self.helper('run-manifest', 'limit-at', expected=1)
         self.helper('run-manifest', 'reserve-attempt')
-        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2', head).stdout, '1\n')
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2').stdout, '1\n')
         self.assertEqual(manifest()['attempts'], 0)
         self.assertEqual(self.helper('run-manifest', 'limit-due', '99', expected=1).stdout, '')
         self.assertEqual(self.helper('run-manifest', 'limit-due', '100').stdout, '100\n')
-        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', head, expected=1)
+        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', expected=1)
         self.assertIn('a relaunch is already scheduled', failed.stderr)
         self.assertEqual(manifest()['limit_relaunches'], 1)
         # Still waiting: the recovery's reservation is given back, the schedule kept.
@@ -5347,38 +5345,46 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'limit-at', expected=1)
         self.helper('run-manifest', 'limit-due', '100', expected=1)
         self.assertEqual(manifest()['attempts'], 0)
-        # The relaunch checks the checkout it resumes; verify writes nothing.
-        moved = self.helper('run-manifest', 'limit-verify', other, expected=1)
-        self.assertIn('moved to another commit', moved.stderr)
+        # The relaunch checks the checkout it resumes (the binding's own tests:
+        # test_limit_relaunch_binding_*); verify writes nothing, arm records the exact binding.
         before = manifest_path.read_bytes()
-        self.helper('run-manifest', 'limit-verify', head)
+        self.helper('run-manifest', 'limit-verify')
         self.assertEqual(manifest_path.read_bytes(), before)
-        self.helper('run-manifest', 'limit-arm', other, expected=1)
-        self.assertEqual(manifest_path.read_bytes(), before)
-        self.helper('run-manifest', 'limit-armed', head, expected=1)
-        self.helper('run-manifest', 'limit-arm', head)
-        self.helper('run-manifest', 'limit-armed', head)
-        self.helper('run-manifest', 'limit-armed', other, expected=1)
+        self.helper('run-manifest', 'limit-armed', expected=1)
+        self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(manifest()['limit_resume'],
+                         {'head': manifest()['limit_head'], 'tree': manifest()['limit_tree']})
+        self.helper('run-manifest', 'limit-armed')
         self.helper('run-manifest', 'limit-disarm')
-        self.helper('run-manifest', 'limit-armed', head, expected=1)
+        self.helper('run-manifest', 'limit-armed', expected=1)
         self.helper('run-manifest', 'limit-disarm')  # missing is fine
+        for action in ('limit-verify', 'limit-arm', 'limit-armed'):
+            self.helper('run-manifest', action, 'a' * 40, expected=1)  # no binding argument
         # The cap counts relaunches per human-started run.
-        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2', other).stdout, '2\n')
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2').stdout, '2\n')
         self.helper('run-manifest', 'limit-claim', '300')
-        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', head, expected=1)
+        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', expected=1)
         self.assertIn('usage limit: already relaunched 2 time(s) in this run', capped.stderr)
         self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '2\n')
-        self.helper('run-manifest', 'limit-arm', other)
+        self.helper('run-manifest', 'limit-arm')
+        fields = {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_resume'}
         self.helper('run-manifest', 'clear-attempts')
-        self.assertFalse(set(manifest()) & {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume'})
-        unscheduled = self.helper('run-manifest', 'limit-verify', head, expected=1)
-        self.assertIn('no scheduled relaunch', unscheduled.stderr)
-        self.helper('run-manifest', 'limit-schedule', '500', '2', head)
-        self.helper('run-manifest', 'limit-arm', head)
+        self.assertFalse(set(manifest()) & fields)
+        for action in ('limit-verify', 'limit-arm'):
+            unscheduled = self.helper('run-manifest', action, expected=1)
+            self.assertIn('no scheduled relaunch', unscheduled.stderr)
+        self.helper('run-manifest', 'limit-schedule', '500', '2')
+        self.helper('run-manifest', 'limit-arm')
         self.approve_run()
-        self.assertFalse(set(manifest()) & {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume'})
+        self.assertFalse(set(manifest()) & fields)
+        tree = 'c' * 64
         for key, value in (('limit_relaunches', '1'), ('limit_relaunch_at', '100'),
-                           ('limit_head', 'x' * 40), ('limit_resume', 7), ('limit_relaunches', True)):
+                           ('limit_head', 'x' * 40), ('limit_tree', 'a' * 40), ('limit_tree', 7),
+                           ('limit_resume', 7), ('limit_resume', 'a' * 40),
+                           ('limit_resume', {'head': 'a' * 40}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': 'x' * 64}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'other': 1}),
+                           ('limit_relaunches', True)):
             with self.subTest(key=key, value=value):
                 manifest_path.write_text(json.dumps(dict(manifest(), **{key: value})) + '\n')
                 invalid = self.helper('run-manifest', 'limit-count', expected=1)
@@ -5557,6 +5563,174 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         manifest = self.manifest()
         self.assertNotIn('limit_resume', manifest)
         self.assertNotIn('limit_relaunch_at', manifest)  # claimed: this stop is terminal
+
+    def binding_submodule(self, name='sub'):
+        # A committed submodule NAME in the fixture checkout; returns sub_git(cwd, *args).
+        origin = self.base / f'{name}-origin'
+        origin.mkdir()
+
+        def sub_git(cwd, *args):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=cwd, env=self.env,
+                           check=True, capture_output=True)
+        sub_git(origin, 'init', '-q', '-b', 'main')
+        (origin / 'file.txt').write_text('committed\n')
+        sub_git(origin, 'add', 'file.txt')
+        sub_git(origin, 'commit', '-qm', 'sub')
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), name])
+        return sub_git
+
+    def worktree_digest(self):
+        return self.helper('worktree-digest').stdout.strip()
+
+    def test_limit_relaunch_binding_worktree_digest_covers_the_whole_tree(self):
+        project = self.project
+        for name in ('.ai/reviews', '.ai/local'):
+            (project / name).mkdir(parents=True)
+        for name, text in (('a.txt', 'one\n'), ('b.txt', 'two\n'), ('.ai/state.md', 'Phase: x\n'),
+                           ('.ai/reviews/dispositions.md', '# Dispositions\n')):
+            (project / name).write_text(text)
+        (project / 'link').symlink_to('a.txt')
+        self.commit('bootstrap')
+        base = self.worktree_digest()
+        self.assertRegex(base, r'^[0-9a-f]{64}$')
+        self.assertEqual(base, self.tree_snapshot())
+        (project / '.ai/local/scratch').write_text('host only\n')
+        self.assertEqual(self.worktree_digest(), base)
+
+        def restore():
+            self.run_cmd(['git', 'reset', '-q', '--hard'])
+            (project / 'new.txt').unlink(missing_ok=True)
+
+        def link(target):
+            (project / 'link').unlink()
+            (project / 'link').symlink_to(target)
+
+        def staged_only():
+            (project / 'a.txt').write_text('staged\n')
+            self.run_cmd(['git', 'add', '--', 'a.txt'])
+            (project / 'a.txt').write_text('one\n')
+            self.assertEqual(self.run_cmd(['git', 'diff', '--name-only']).stdout, 'a.txt\n')
+
+        cases = (('tracked edit', lambda: (project / 'a.txt').write_text('edited\n')),
+                 ('state.md edit', lambda: (project / '.ai/state.md').write_text('Phase: y\n')),
+                 ('dispositions edit', lambda: (project / '.ai/reviews/dispositions.md').write_text('x\n')),
+                 ('untracked file', lambda: (project / 'new.txt').write_text('new\n')),
+                 ('deleted file', lambda: (project / 'b.txt').unlink()),
+                 ('staged only', staged_only),
+                 ('mode change', lambda: (project / 'a.txt').chmod(0o755)),
+                 ('symlink target', lambda: link('b.txt')))
+        for name, change in cases:
+            with self.subTest(change=name):
+                change()
+                self.assertNotEqual(self.worktree_digest(), base)
+                restore()
+                self.assertEqual(self.worktree_digest(), base)
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'empty'])
+        self.assertNotEqual(self.worktree_digest(), base)
+
+    def test_limit_relaunch_binding_worktree_digest_covers_submodules(self):
+        sub_git = self.binding_submodule()
+        self.commit('add submodule')
+        sub = self.project / 'sub'
+
+        def parent():
+            return (self.git_head(), self.run_cmd(['git', 'diff', '--cached', '--binary']).stdout)
+        seen, before = [self.worktree_digest()], parent()
+        for change in (lambda: (sub / 'file.txt').write_text('modified\n'),
+                       lambda: (sub_git(sub, 'add', 'file.txt'), sub_git(sub, 'commit', '-qm', 'move'))):
+            change()
+            seen.append(self.worktree_digest())
+            self.assertNotIn(seen[-1], seen[:-1])
+            self.assertEqual(parent(), before)
+
+    def test_limit_relaunch_binding_manifest_records_and_verifies_the_tree(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        sub_git = self.binding_submodule()
+        self.commit('bootstrap')
+        self.approve_run()
+        manifest_path = next((self.base / 'host-state').rglob('run.json'))
+
+        def schedule():
+            self.helper('run-manifest', 'clear-attempts')
+            self.helper('run-manifest', 'limit-schedule', '100', '2')
+
+        def refused(reason):
+            before = manifest_path.read_bytes()
+            for action in ('limit-verify', 'limit-arm'):
+                result = self.helper('run-manifest', action, expected=1)
+                self.assertIn(reason, result.stderr)
+            self.assertEqual(manifest_path.read_bytes(), before)
+            self.assertNotIn('limit_resume', self.manifest())
+
+        schedule()
+        manifest = self.manifest()
+        self.assertEqual((manifest['limit_head'], manifest['limit_tree']), (self.git_head(), self.worktree_digest()))
+        before = manifest_path.read_bytes()
+        self.helper('run-manifest', 'limit-verify')
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-arm')
+        self.helper('run-manifest', 'limit-armed')
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('x')
+        result = self.helper('run-manifest', 'limit-verify', expected=1)
+        self.assertIn('the checkout changed', result.stderr)
+        self.helper('run-manifest', 'limit-armed', expected=1)
+        self.run_cmd(['git', 'checkout', '--', 'notes.txt'])
+        schedule()
+        (self.project / 'human.txt').write_text('new\n')
+        refused('the checkout changed')
+        (self.project / 'human.txt').unlink()
+        schedule()
+        (self.project / 'notes.txt').write_text('committed by a human\n')
+        self.commit('human commit')
+        refused('moved to another commit')
+        schedule()
+        (self.project / 'sub/file.txt').write_text('inside the submodule\n')
+        refused('the checkout changed')
+        sub_git(self.project / 'sub', 'checkout', '--', 'file.txt')
+        self.helper('run-manifest', 'limit-verify')
+        self.manifest(limit_resume='a' * 40)
+        invalid = self.helper('run-manifest', 'limit-count', expected=1)
+        self.assertIn('No valid run manifest', invalid.stderr)
+
+    def test_limit_relaunch_binding_recover_human_change_escalates_untouched(self):
+        self.limit_relaunch_scheduled()
+        scheduled = self.git_head()
+        self.assertEqual(self.manifest()['limit_tree'], self.worktree_digest())
+        edited, added = self.project / 'CLAUDE.md', self.project / 'human-note.txt'
+        self.assertEqual(self.run_cmd(['git', 'ls-files', '--', 'CLAUDE.md']).stdout, 'CLAUDE.md\n')
+        edited.write_bytes(edited.read_bytes() + b'a human edit during the wait\n')
+        added.write_text('a human file\n')
+        contents = (edited.read_bytes(), added.read_bytes())
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the checkout changed while the usage-limit relaunch waited', stop)
+        self.assertIn('nothing was committed', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertEqual((edited.read_bytes(), added.read_bytes()), contents)
+        self.assertEqual(self.git_head(), scheduled)
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_binding_tasks_newly_done(self):
+        queue = self.project / '.ai/tasks.md'
+        queue.parent.mkdir()
+        queue.write_text(task('T001', 'DONE') + task('T002') + task('T003'))
+        self.commit('queue')
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, '')
+        queue.write_text(task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, 'T002\n')
+        queue.write_text(task('T001', 'DONE') + task('T002', 'DONE') + task('T003', 'DONE') + task('T004', 'DONE'))
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, 'T002\nT003\nT004\n')
+        self.helper('tasks', 'newly-done', 'no-such-revision', expected=1)
+        queue.write_text(task('T001', 'DONE') + task('T001'))
+        self.helper('tasks', 'newly-done', 'HEAD', expected=1)
 
     def test_limit_relaunch_recover_cap_reached_escalates(self):
         self.limit_relaunch_scheduled(AI_LIMIT_RELAUNCH_MAX='1')

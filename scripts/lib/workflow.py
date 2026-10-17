@@ -639,6 +639,23 @@ def task_command(arguments):
         # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
         if not blocks or any(task['status'] == 'DONE' for task in blocks):
             fail('A task is already DONE (or there are no tasks).')
+    elif action == 'newly-done':
+        # Tasks DONE in the working queue but not (or absent) at REV, in file order.
+        rev = arguments[1] if len(arguments) == 2 else ''
+        if not rev or rev.startswith('-'):
+            fail('Usage: tasks newly-done REV')
+        try:
+            commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
+        except subprocess.CalledProcessError:
+            fail(f'Unknown revision: {rev}')
+        try:
+            before = git('show', f'{commit}:.ai/tasks.md').decode()
+        except subprocess.CalledProcessError:
+            before = ''  # no queue at REV: every DONE task is new
+        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+        for task in blocks:
+            if task['status'] == 'DONE' and task['id'] not in done:
+                print(task['id'])
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -1277,15 +1294,43 @@ def binding_dir():
 
 
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
-# used, the pending relaunch time, the HEAD it was scheduled at and the armed resume HEAD.
-LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume')
+# used, the pending relaunch time, the HEAD and tree digest it was scheduled at and the armed
+# resume binding ({"head", "tree"}).
+LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_resume')
 
 
 def limit_fields_valid(data):
+    def hexes(value, size):
+        return isinstance(value, str) and re.fullmatch(f'[0-9a-f]{{{size}}}', value) is not None
+
     count, at = data.get('limit_relaunches', 0), data.get('limit_relaunch_at', 0)
+    resume = data.get('limit_resume')
     return (type(count) is int and 0 <= count <= 100 and type(at) is int and at >= 0
-            and all(re.fullmatch(r'[0-9a-f]{40}', data[key]) if isinstance(data.get(key), str)
-                    else key not in data for key in ('limit_head', 'limit_resume')))
+            and ('limit_head' not in data or hexes(data['limit_head'], 40))
+            and ('limit_tree' not in data or hexes(data['limit_tree'], 64))
+            and ('limit_resume' not in data
+                 or (isinstance(resume, dict) and set(resume) == {'head', 'tree'}
+                     and hexes(resume['head'], 40) and hexes(resume['tree'], 64))))
+
+
+def limit_binding():
+    """(HEAD, worktree digest) of the checkout: what a usage-limit relaunch is bound to."""
+    root = checkout_root()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD^{commit}', cwd=root).decode().strip()
+    except subprocess.CalledProcessError:
+        fail('usage limit: the checkout has no commit to bind the relaunch to')
+    return head, worktree_digest(root)
+
+
+def limit_mismatch(head, tree):
+    """The reason the checkout differs from the recorded binding, or None when it is exact."""
+    now_head, now_tree = limit_binding()
+    if now_head != head:
+        return 'the branch moved to another commit'
+    if now_tree != tree:
+        return 'the checkout changed'
+    return None
 
 
 def limit_relaunch(path, data, action, arguments):
@@ -1298,11 +1343,6 @@ def limit_relaunch(path, data, action, arguments):
             fail(f'Usage: run-manifest {usage}')
         return int(value)
 
-    def head(value, usage):
-        if not re.fullmatch(r'[0-9a-f]{40}', value):
-            fail(f'Usage: run-manifest {usage}')
-        return value
-
     def clock(usage):
         if len(arguments) > 1:
             fail(f'Usage: run-manifest {usage}')
@@ -1314,15 +1354,19 @@ def limit_relaunch(path, data, action, arguments):
     at = data.get('limit_relaunch_at')
     count = data.get('limit_relaunches', 0)
     if action == 'limit-schedule':
-        usage = 'limit-schedule AT CAP HEAD'
-        if len(arguments) != 3:
+        usage = 'limit-schedule AT CAP'
+        if len(arguments) != 2:
             fail(f'Usage: run-manifest {usage}')
-        when, cap, start = number(arguments[0], usage), number(arguments[1], usage), head(arguments[2], usage)
+        when, cap = number(arguments[0], usage), number(arguments[1], usage)
         if at is not None:
             fail('usage limit: a relaunch is already scheduled')
         if count >= min(cap, 100):
             fail(f'usage limit: already relaunched {count} time(s) in this run')
-        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start)
+        # Verification point: ai-recover schedules after the stop's bookkeeping was written and
+        # before any commit, so this is exactly the checkout the relaunch must find; the
+        # relaunch verifies it before it touches the checkout (ai-recover relaunch_verify).
+        start, tree = limit_binding()
+        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree)
         give_back()
         atomic(path, json.dumps(data) + '\n')
         print(count + 1)
@@ -1351,24 +1395,23 @@ def limit_relaunch(path, data, action, arguments):
         give_back()
         atomic(path, json.dumps(data) + '\n')
         print(count)
-    elif action == 'limit-verify':
-        if len(arguments) != 1:
-            fail('Usage: run-manifest limit-verify HEAD')
-        if 'limit_head' not in data:
+    elif action in ('limit-verify', 'limit-arm'):
+        # Both recompute HEAD and the tree; verify is read only, arm records the exact match.
+        if arguments:
+            fail(f'Usage: run-manifest {action}')
+        if 'limit_head' not in data or 'limit_tree' not in data:
             fail('no scheduled relaunch')
-        if arguments[0] != data['limit_head']:
-            fail('the branch moved to another commit')
-    elif action == 'limit-arm':
-        if len(arguments) != 1:
-            fail('Usage: run-manifest limit-arm HEAD')
-        if arguments[0] != data.get('limit_head'):
-            sys.exit(1)
-        data['limit_resume'] = arguments[0]
-        atomic(path, json.dumps(data) + '\n')
+        why = limit_mismatch(data['limit_head'], data['limit_tree'])
+        if why:
+            fail(why)
+        if action == 'limit-arm':
+            data['limit_resume'] = {'head': data['limit_head'], 'tree': data['limit_tree']}
+            atomic(path, json.dumps(data) + '\n')
     elif action == 'limit-armed':
-        if len(arguments) != 1:
-            fail('Usage: run-manifest limit-armed HEAD')
-        if arguments[0] != data.get('limit_resume'):
+        if arguments:
+            fail('Usage: run-manifest limit-armed')
+        resume = data.get('limit_resume')
+        if resume is None or limit_mismatch(resume['head'], resume['tree']):
             sys.exit(1)
     elif action == 'limit-disarm':
         if 'limit_resume' in data:
@@ -2357,7 +2400,11 @@ def tree_snapshot(root):
     tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
     Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
     under an uninitialised submodule, so its directory is walked on the filesystem instead;
-    a symlink at a submodule path is recorded as a link, never followed."""
+    a symlink at a submodule path is recorded as a link, never followed.
+    The usage-limit relaunch binding (worktree_digest, run-manifest limit-*) relies on this
+    covering everything, tracked bookkeeping (.ai/state.md, run-log, handoff, reviews/)
+    included: a human edit there during the wait must count, so any new skip here needs that
+    binding rethought."""
     digest = hashlib.sha256()
     try:
         head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
@@ -2383,6 +2430,10 @@ def tree_snapshot(root):
         else:
             snapshot_path(digest, name, path)
     return digest.hexdigest()
+
+
+# The tree a usage-limit relaunch resumes: deliberately the same digest, never a second one.
+worktree_digest = tree_snapshot
 
 
 def finish_summary(arguments):
@@ -4612,6 +4663,8 @@ def main():
         clear_scratch()
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
+    elif command == 'worktree-digest':
+        print(worktree_digest(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':

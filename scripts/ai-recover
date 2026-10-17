@@ -147,8 +147,9 @@ ai_gate_check "$approved_gate" || \
   escalate 'gate files changed since you approved the run.' 'review the change and rerun ai-pipeline --approved yourself.'
 [[ "$branch" == "$(ai_helper run-manifest branch)" ]] || \
   escalate "the checkout is on $branch, not the approved run's branch." 'switch back or rerun ai-pipeline --approved yourself.'
-# A claimed relaunch accepts only the checkout its schedule recorded: escalate with the helper's
-# reason (nothing committed, nothing touched). Usage: relaunch_moved REASON.
+# A claimed relaunch accepts only the checkout its schedule recorded (HEAD and the whole tree,
+# submodules included): escalate with the helper's reason (nothing committed, nothing touched).
+# Usage: relaunch_moved REASON.
 relaunch_moved() {
   escalate "${1#Error: } while the usage-limit relaunch waited; nothing was committed." \
     'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
@@ -156,7 +157,7 @@ relaunch_moved() {
 relaunch_verify() {
   local why
   [[ "$relaunch" == yes ]] || return 0
-  why=$(ai_helper run-manifest limit-verify "$(git rev-parse HEAD)" 2>&1) || relaunch_moved "$why"
+  why=$(ai_helper run-manifest limit-verify 2>&1) || relaunch_moved "$why"
 }
 # The ONE verification site: nothing before it commits, stashes, checks out, writes a tracked
 # file or starts a session, and every later step transforms a VERIFIED tree.
@@ -222,8 +223,7 @@ if [[ "$relaunch" == yes ]]; then
     # Preserved task work: kept uncommitted; the resumed run accepts exactly this tree once.
     # Nothing touched the checkout since the verification (we hold the lock): a refusal is an
     # inconsistency, reported as the verification would.
-    ai_helper run-manifest limit-arm "$(git rev-parse HEAD)" 2>/dev/null || \
-      relaunch_moved 'the branch moved to another commit'
+    why=$(ai_helper run-manifest limit-arm 2>&1) || relaunch_moved "$why"
   fi
   resume '' ''
 fi
@@ -235,7 +235,9 @@ if (( cap > 0 )) && limit=$(ai_helper limit-stop 2>/dev/null); then
     escalate "the usage limit resets around $(date -d "@$at" '+%a %H:%M'), but no watchdog timer with --recover is installed to relaunch the run." \
       'install it (ai-watchdog --install-timer --recover) or rerun ai-pipeline after the reset.'
   fi
-  count=$(ai_helper run-manifest limit-schedule "$at" "$cap" "$(git rev-parse HEAD)" 2>/dev/null) || \
+  # Records HEAD and the tree digest now: the stop's bookkeeping is written and nothing is
+  # committed yet, and after this the host writes nothing tracked (only .ai/local/, host state).
+  count=$(ai_helper run-manifest limit-schedule "$at" "$cap" 2>/dev/null) || \
     escalate "usage limit again after $cap relaunch(es) in this run." 'rerun ai-pipeline after the reset.'
   relaunch_wait "$at" "$agent usage limit" "stopped at a $agent usage limit during $stage" "$count"
   AI_STOP_NOTIFIED=1

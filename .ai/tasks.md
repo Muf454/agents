@@ -481,7 +481,7 @@ ai-pipeline's clean-checkpoint stop.
 
 
 ## T012 — Preserved-work binding: the relaunch exception admits the exact preserved tree (MC-01 part 1, plan review round 2 P3/P9 design task)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: opus
 
@@ -578,6 +578,21 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17 Claude: done. `workflow.py`: `worktree_digest = tree_snapshot` (no second digest;
+the docstring states the relaunch binding relies on it covering bookkeeping) + command
+`worktree-digest`; `limit_binding()`/`limit_mismatch()`; manifest field `limit_tree` (64-hex),
+`limit_resume` = `{"head","tree"}` (exact keys, else invalid); `limit-schedule AT CAP` computes
+both itself (Verification point comment there); `limit-verify`/`limit-arm` take no argument,
+fail `no scheduled relaunch` / `the branch moved to another commit` / `the checkout changed`;
+`limit-armed` recomputes against `limit_resume`; `clear-attempts`/`start` drop `limit_tree`
+(LIMIT_FIELDS). `tasks newly-done REV` (unknown REV fails; no queue at REV = all DONE are new).
+`ai-recover`: no HEAD arguments; the dirty-branch `limit-arm` escalates with the helper's reason.
+docs/workflow.md updated. New tests: `test_limit_relaunch_binding_worktree_digest_covers_the_whole_tree`,
+`..._worktree_digest_covers_submodules`, `..._manifest_records_and_verifies_the_tree`,
+`..._recover_human_change_escalates_untouched`, `..._tasks_newly_done`. Updated for the new
+signatures: `limit_relaunch_fixture`, `test_limit_relaunch_watchdog_absent_schedule_changes_nothing`,
+`test_limit_relaunch_record_manifest_schedule_lifecycle`. Evidence: `-k limit_relaunch` Ran 27 OK,
+`-k recovery` Ran 65 OK, `-k usage_limit` Ran 6 OK, `.ai/bin/ai-check` Ran 844 OK.
 
 
 ## T014 — Relaunch binding verification contract: one verification site before any checkout mutation (MC-01 part 1, plan review round 3 P9/P10 design task)

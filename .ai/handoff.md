@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T012: `.ai/bin/ai-check` PASS (844 tests); `-k limit_relaunch` 27 OK, `-k recovery` 65 OK,
+`-k usage_limit` 6 OK.
 T003: `-k limit_relaunch` 22 OK, `-k recovery` 65 OK, `-k Docs` 3 OK; full gate see the task
 result. Mutation: skipping the `relaunch_verify` call fails the moved-HEAD test.
 T002: `.ai/bin/ai-check` PASS, 832 tests in 460.9 s; `-k limit_relaunch_watchdog` 8 OK;
@@ -120,8 +122,9 @@ the task named).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
 
 ## Next action
-T001–T003 done (limit-stop record and manifest schedule helpers; watchdog starts a due
+T001–T003 and T012 done (limit-stop record and manifest schedule helpers; watchdog starts a due
 relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`; ai-recover
 schedules a limit-only stop, restores a pending wait, and resumes a claimed relaunch after
-verifying HEAD). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
+verifying HEAD and the whole tree (`worktree-digest` = `tree_snapshot`, submodules included);
+`limit_resume` binds `{head, tree}`; `tasks newly-done REV` for T011). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
 into ai-pipeline's "Start from a clean checkpoint" stop. Next: the queue's next task.
