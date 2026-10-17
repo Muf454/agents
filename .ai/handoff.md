@@ -50,10 +50,9 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T001: `.ai/bin/ai-check` ran 824 tests in 628.5 s (over the 600 s tool limit, so it finished in
-the background); 823 passed, and the one failure, `test_pr_body_flow_this_repo_declares_the_flow_chart`,
-came from the planner's "## Flow chart" line in this handoff. That line is fixed and the test
-now passes on its own. The full gate rerun is left to the host's post-task `ai-check`.
+T002: `.ai/bin/ai-check` PASS, 832 tests in 460.9 s; `-k limit_relaunch_watchdog` 8 OK;
+`-k watchdog` 61 OK. Mutation: dropping the "due and `--recover`" clause of `relaunch_quiet`
+fails 4 of the 8 tests.
 
 ## Assumptions
 - MC-01: the relaunch also covers a Codex limit stop (same message and mechanism); default cap 2;
@@ -68,7 +67,9 @@ now passes on its own. The full gate rerun is left to the host's post-task `ai-c
   is not detected (documented limitation).
 
 ## Flow chart
-Flow unchanged so far (T001 adds helpers only). To be updated by T002/T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path,
+watchdog start after the reset, cap, ⛔ otherwise; the ai-recover side lands with T003). Still to
+be updated by T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -116,5 +117,6 @@ the task named).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
 
 ## Next action
-T001 done (limit-stop record, manifest relaunch schedule helpers, `observe relaunch`,
-`AI_LIMIT_RELAUNCH_MAX` in the settings lists); next is T002 (watchdog).
+T001–T002 done (limit-stop record and manifest schedule helpers; watchdog starts a due
+relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`); next is
+T003 (ai-recover schedules and resumes).

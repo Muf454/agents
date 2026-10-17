@@ -176,7 +176,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T002 — Watchdog starts a due limit relaunch; `--timer-recovers`; no stall alarm while it waits (MC-01 part 1, watchdog)
-Status: TODO
+Status: DONE
 Dependencies: T001
 Model: opus
 
@@ -289,6 +289,23 @@ Targeted: `python3 -m unittest discover -s tests -k watchdog` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-17. `scripts/lib/watchdog.py`: `relaunch_at(bin_dir)` runs THIS copy's
+`run-manifest limit-at` and returns epoch ns or None (non-zero exit or no integer = absent).
+`main()` computes `scheduled_ns` only with no runner and no marker; due + `--recover` →
+`start_recovery(…, stage='usage limit relaunch')` (the default crash last-error is now written
+only for a `crash…` stage; `--stage` passes the stage); refusal → incident `relaunch:<AT>`
+`⛔ STOPPED, needs you: the usage-limit relaunch could not start: <reason>.`, deduped by
+`active`. `relaunch_quiet` (pause running, pending schedule, or due with `--recover`) skips the
+stall rule. `--timer-recovers` reuses `timer_state` (split out of `timer_status`, output
+unchanged) and checks the service's `ExecStart=` for `"--recover"`.
+Tests: 8 `test_limit_relaunch_watchdog_*` (due launch; pending with pauses.log; P2 schedule
+alone with/without `--recover` then due launch then claimed → stalled; P19 refusal once over
+three probes, then human start → stalled; checkout copy refused, due without `--recover` →
+stalled; absent a/b/c with/without `--recover`; live marker / live pipeline; `--timer-recovers`).
+`-k limit_relaunch_watchdog` 8 OK, `-k watchdog` 61 OK, ai-check PASS (832 tests, 460.9 s).
+Mutation: removing the due-and-`--recover` clause fails 4 tests. docs/workflow.md "Checkout
+health monitoring" updated; vault flow chart "When something goes wrong" gained the relaunch path
+for both sides (ai-recover's scheduling/cap/resume is T003; written now on purpose).
 
 
 ## T003 — ai-recover schedules a relaunch for a limit-only stop and resumes it when due (MC-01 part 1, recovery)

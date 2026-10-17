@@ -1106,6 +1106,174 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
         self.assertIn('did not confirm it started', self.notifications())
 
+    def limit_relaunch_fixture(self, at):
+        # An approved run stopped at a usage limit: relaunch scheduled at AT, nothing running.
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('run-manifest', 'limit-schedule', str(at), '2', head)
+        self.watchdog_phase('implementing')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+
+    def launches(self):
+        log = self.base / 'systemd-run.log'
+        return log.read_text() if log.exists() else ''
+
+    def test_limit_relaunch_watchdog_due_schedule_starts_ai_recover(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        self.host_watchdog(AI_WATCHDOG_NOW=str(start))  # without --recover: nothing relaunches
+        self.assertEqual(self.launches(), '')
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage usage limit relaunch', self.launches())
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+        self.assertEqual(self.notifications(), '')
+        state = self.watchdog_state()
+        self.assertNotIn('stall_seen_ns', state)
+        self.assertNotIn('stalled', state['active'])
+
+    def test_limit_relaunch_watchdog_pending_schedule_is_not_stalled(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start + 3600)
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))
+        (self.project / '.ai/local/pauses.log').write_text(f'{stamp} paused 3660s: Claude usage limit\n')
+        for args in ((), ('--recover',)):
+            with self.subTest(args=args):
+                self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start + 360))
+                self.assertEqual(self.launches(), '')
+                self.assertEqual(self.notifications(), '')
+                self.assertEqual(self.watchdog_state()['active'], [])
+
+    def test_limit_relaunch_watchdog_schedule_alone_suppresses_the_stall(self):
+        # P2: a kill before the pauses.log append leaves only the host schedule.
+        start = int(time.time())
+        at = start + 3600
+        self.limit_relaunch_fixture(at)
+        local = self.project / '.ai/local'
+        for pauses in (None, f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start - 7200))} paused 60s: x\n'):
+            for args in (('--recover',), ()):
+                with self.subTest(pauses=pauses, args=args):
+                    if pauses:
+                        (local / 'pauses.log').write_text(pauses)
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start + 360))
+                    self.assertEqual(self.launches(), '')
+                    self.assertEqual(self.notifications(), '')
+                    self.assertEqual(self.watchdog_state()['active'], [])
+                    self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        (local / 'pauses.log').unlink()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(at + 1))
+        self.assertIn('ai-recover --stage usage limit relaunch', self.launches())
+        (local / 'pipeline.active').unlink()  # the mock's takeover; the relaunch claims:
+        self.helper('run-manifest', 'limit-claim', str(at))
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(at + 600))
+        self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(at + 960))
+        self.assertIn('killed runner?', self.notifications())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+
+    def test_limit_relaunch_watchdog_refusal_reported_once_without_a_stall(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')  # changed gate
+        for offset in (0, 360, 720):
+            self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + offset))
+            state = self.watchdog_state()
+            self.assertNotIn('stall_seen_ns', state)
+            self.assertNotIn('stalled', state['active'])
+            self.assertEqual(state['active'], [f'relaunch:{start - 10}'])
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('⛔ STOPPED, needs you: the usage-limit relaunch could not start: '
+                      'auto-recovery refused: gate files changed', self.notifications())
+        # A human start drops the schedule: the stall rule applies again.
+        self.approve_run()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start + 1080))
+        self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + 1440))
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 2)
+        self.assertIn('killed runner?', self.notifications().splitlines()[1])
+
+    def test_limit_relaunch_watchdog_checkout_copy_refused_and_due_without_recover_stalls(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        self.watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start))  # not the host copy
+        self.watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + 360))
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('the usage-limit relaunch could not start: auto-recovery only runs from the installed timer',
+                      self.notifications())
+        # Due, but this probe cannot relaunch: the killed-runner alarm is right.
+        (self.project / '.ai/local/watchdog.json').unlink()
+        self.notify_log.unlink()
+        self.host_watchdog(AI_WATCHDOG_NOW=str(start + 720))
+        self.host_watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1080))
+        self.assertEqual(self.launches(), '')
+        self.assertNotIn('usage-limit relaunch', self.notifications())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_limit_relaunch_watchdog_absent_schedule_changes_nothing(self):
+        # P11: no schedule is "absent", never "due at 0".
+        self.setup_project()
+        self.commit('bootstrap')
+        self.mock_systemd_run()
+        local = self.project / '.ai/local'
+        start = int(time.time())
+        cases = (('no manifest', None, 'planning'), ('approved, unscheduled', 'approve', 'implementing'),
+                 ('finished', 'finish', 'ready_for_review'))
+        for args in (('--recover',), ()):
+            for name, run, phase in cases:
+                with self.subTest(case=name, args=args):
+                    for path in (local / 'watchdog.json', self.notify_log):
+                        path.unlink(missing_ok=True)
+                    if run:
+                        self.approve_run()
+                    if run == 'finish':
+                        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2', head)
+                        self.helper('run-manifest', 'clear-attempts')
+                    self.watchdog_phase(phase)
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                    stalls = phase == 'implementing'
+                    self.host_watchdog(*args, expected=1 if stalls else 0, AI_WATCHDOG_NOW=str(start + 360))
+                    self.assertEqual(self.launches(), '')
+                    self.assertNotIn('usage-limit relaunch', self.notifications())
+                    self.assertFalse(any(key.startswith('relaunch:') for key in self.watchdog_state()['active']))
+                    if stalls:
+                        self.assertEqual(len(self.notifications().splitlines()), 1)
+                        self.assertIn('killed runner?', self.notifications())
+                    else:
+                        self.assertEqual(self.notifications(), '')
+            for path in self.base.joinpath('host-state').rglob('run.json'):
+                path.unlink()
+
+    def test_limit_relaunch_watchdog_live_marker_or_runner_blocks_the_launch(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        (self.project / '.ai/local/pipeline.active').write_text(f'{pipeline.pid}\n')
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.assertEqual(self.launches(), '')
+        (self.project / '.ai/local/pipeline.active').unlink()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))  # the ai-pipeline still runs
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(self.notifications(), '')
+
+    def test_limit_relaunch_watchdog_timer_recovers(self):
+        self.setup_project()
+        self.mock_systemctl()
+        result = self.watchdog('--timer-recovers', expected=1)
+        self.assertTrue(result.stdout.startswith('no-recover ai-watchdog-'), result.stdout)
+        self.assertIn('(timer missing: no unit files)', result.stdout)
+        self.watchdog('--install-timer', '--recover')
+        self.assertTrue(self.watchdog('--timer-recovers').stdout.startswith('recovers ai-watchdog-'))
+        self.watchdog('--install-timer', '--diagnose')
+        self.assertIn('installed without --recover', self.watchdog('--timer-recovers', expected=1).stdout)
+        self.watchdog('--timer-recovers', '--timer-status', expected=2)
+
     def test_watchdog_reports_unannounced_stops(self):
         self.setup_project()
         error = self.project / '.ai/local/last-error'

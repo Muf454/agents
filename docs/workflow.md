@@ -813,7 +813,19 @@ Incidents:
   reports it, and any probe that doesn't drops the record (a probe just before a pipeline
   starts stays silent). A checkout whose `.ai/local/observation.json` is at stage
   `planning` is never stalled (read without following symlinks; unreadable counts as
-  absent). A recorded stop is reported as **stop** instead.
+  absent). A recorded stop is reported as **stop** instead. Nor is a checkout waiting for
+  a usage-limit relaunch (below): the rule is skipped while the latest `pauses.log` pause
+  runs, while a relaunch is pending, and while a due one is this `--recover` probe's to
+  handle. With no schedule, or a due one probed without `--recover`, it applies as before.
+- **usage-limit relaunch**: when no runner and no marker exist, the probe asks its own
+  copy's `workflow.py run-manifest limit-at` for the approved run's scheduled relaunch
+  (exit 1 = none scheduled: no manifest, never scheduled, claimed or finished). Pending
+  (`AT > now`): nothing happens and the run counts as waiting, not killed, with or without
+  a `pauses.log` line (the host manifest is the authority). Due, with `--recover`: it
+  starts `ai-recover --stage 'usage limit relaunch'` through `start_recovery` (same host
+  copy, state root and gate checks as crash recovery; no default `last-error` is written).
+  If that is refused it sends one `⛔ STOPPED, needs you: the usage-limit relaunch could not
+  start: <reason>.` per AT (dedupe key `relaunch:<AT>`).
 - **hung**: a live runner whose newest activity is older than `--stale-minutes`
   (default 45). Activity is the newest mtime of `.ai/run-log.md`,
   `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in
@@ -854,6 +866,9 @@ after the timer starts (`OnActiveSec=2min`: after boot, and after `--install-tim
 never at once); timers installed before this change used `OnBootSec` and need
 `--install-timer` again (host copy and unit). `SuccessExitStatus=1` treats
 an incident as a successful probe. Nothing is installed by `setup-project`.
+`--timer-recovers` exits 0 (`recovers <timer>`) when `--timer-status` would say installed
+and the service's `ExecStart=` contains `"--recover"`, else 1 (`no-recover <timer> (<why>)`).
+`ai-recover` uses it to decide whether a usage-limit stop can wait for a relaunch.
 
 ## Reviewer selection and the Claude fallback
 
