@@ -18,9 +18,13 @@ PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session
 - T010 CU-5 (opus): the marker failure contract: a marker that cannot be read is kept (only
   invalid content is discarded), and `attempt-open` prints the id before it publishes the
   marker so the runner always holds the id of a marker that exists.
+- T011 CU-5 (opus): the attempt ordering: every new task record carries `started`, and
+  `ai-status --outcomes` orders a task's attempts by start time (old rows by `time` minus
+  `seconds`, file order when a row has neither), so a `crashed` record reconciled late never
+  changes a successfully retried task's result, attempt count or first-time pass.
 - T003 CU-5 (opus): `workflow.py outcome attempt-open / attempt-reconcile`, durable attempt
-  markers in host state, `attempt_id` on task outcomes; a marker whose outcome could not be
-  appended survives later attempts and is recorded once.
+  markers in host state, `attempt_id` and `started` on task outcomes; a marker whose outcome
+  could not be appended survives later attempts and is recorded once.
 - T004 CU-5 (opus): `ai-run` reconciles leftover markers at start (before the clean-checkpoint
   check), opens one per attempt (keeping a printed id even when the open fails) and removes
   it on a gate-broken stop; a SIGKILLed runner's attempt is logged as `crashed` once at the
@@ -79,12 +83,16 @@ tests (the groups are added by the tasks named).
 - `test_outcome_marker_contract_*` (T010: a marker read error is kept apart from invalid
   content, `open_attempt` prints the id before publishing, a failed publish after the link
   leaves the marker with the printed id).
+- `test_outcome_attempt_order_*` (T011: a crashed attempt appended after a later `done` of
+  the same task keeps its place by start time, so the task stays done with both attempts
+  counted; old rows and rows without a time keep today's order).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
   runner kept, garbage marker, an unreadable marker kept while the others are processed,
   torn last line, short write keeps the marker, a failed first outcome survives the second
   attempt and is recorded once, a failed sync is finished before the marker goes, an
   unreadable log keeps the marker and never duplicates, a failed open still removes its
-  marker on the normal outcome).
+  marker on the normal outcome, a marker reconciled only after a successful retry leaves the
+  task reported done).
 - `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, which
   then refuses the dirty checkout; a failed attempt open keeps the id and the task is never
   reported `crashed`; normal paths unchanged, gate-broken stop leaves no marker).

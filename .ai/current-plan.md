@@ -84,7 +84,8 @@ Invariant: a marker is removed only when the log durably holds a record with its
 operation overwrites a marker. Residual: an older installed copy without the lock in another
 checkout can interleave until upgraded; its buffered append only tears on a crash or full disk.
 - `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
-  branch/task/model from the marker, `attempt` numbered as today.
+  branch/task/model and `started` from the marker (the report orders by it, round 5 redesign),
+  `attempt` numbered as today (count at append time, informational).
 - Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker directory once
   at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
   that case.
@@ -160,6 +161,43 @@ exists is either held by a runner that knows its id or reconcilable as a dead ru
 Residual: a marker whose directory sync failed after the link may not survive a power loss;
 that loses at most a `crashed` record, never produces a false one.
 
+### CU-5 attempt ordering (round 5 redesign, T011)
+Round 5 (P15) found that the report's model of the log ("a task's last line is its result",
+`outcomes_report`, workflow.py:3093–3095; `first_row` = first line in file order, :3116) assumes
+append order = attempt order. Reconcile breaks that assumption by design: a marker kept through
+a read error (P12) or an unreadable log (P10) is recorded only at a LATER start or open, so a
+real `crashed` record of attempt A can be appended after a later attempt B's `done` of the same
+task, and the report then shows the task as not done; `outcome task`'s count-based `attempt`
+number also gives A the higher number. Fifth round in the CU-5 area, so the log's ordering
+model is redesigned once instead of patching the reconcile paths:
+1. **Every new task record carries `started`** (epoch seconds, int): `outcome task` writes
+   `int(time.time()) - seconds`; with `--attempt ID` naming a readable marker it uses the
+   marker's `started` instead (the attempt-open time, so the row and its marker agree; a
+   missing marker, P13, keeps the derived value); reconcile's `crashed` record carries the
+   marker's `started`. The marker's `started` stays `int(time.time())` at open (T003).
+2. **Logical order** (`attempt_start(record)`, `ordered_attempts(task_rows)`): a row's start
+   is its `started` when numeric, else `time` parsed as `%Y-%m-%dT%H:%M:%SZ` minus `seconds`
+   when both are present (every row the helper ever wrote has them), else unknown. Per task
+   key (project, branch, task): when every row has a start, the rows are sorted by
+   `(start, _at)`, `_at` = (file index, line index) being the tie-breaker; when any row's start
+   is unknown, that task keeps file order (compatibility: existing rows and hand-written test
+   logs without `time` behave exactly as today). Attempts of one checkout are sequential under
+   its lock, so start order is attempt order.
+3. **The report derives, never trusts**: per task, the final result is the LAST row in logical
+   order, the attempt count is the number of rows, attempt n is position n, and first-time
+   pass is "the FIRST row in logical order has `result == 'done'`". The stored `attempt` and
+   `first_pass` fields stay as written (count at append time; existing tests read them) and
+   are documented as such; the report no longer reads them. For a log with one writer and no
+   reconciled rows this gives today's numbers (file order = start order, stored fields agree).
+Invariant: a record appended late never changes which attempt counts as a task's result or
+its first attempt; reconcile stays best effort and never consults the task's later outcomes.
+Residual: two attempts of one task that start within the same second (impossible for a delayed
+reconcile, which needs a runner restart or a whole attempt between the two opens; possible for
+two normal attempts only in sub-second mock runs) fall back to append order, which is correct
+for normal attempts. Documented change: a log whose earlier attempts are missing counts its
+first visible attempt as attempt 1 (the report already did that for `attempt`; now also for
+first-time pass).
+
 ### R13 — boundary cut + full text (T005)
 - `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
   prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
@@ -182,10 +220,11 @@ that loses at most a `crashed` record, never produces a false one.
 | T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
 | T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
 | T010 | CU-5 marker failure contract: three-way marker read, id printed before publish (round 4 redesign) | opus | T009 |
-| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010) | opus | T010 |
+| T011 | CU-5 attempt ordering: `started` on task records, report derives result/attempts/first pass from start order (round 5 redesign) | opus | T007 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010/T011) | opus | T010, T011 |
 | T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check, id kept on a failed open), SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010, T011 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
@@ -197,19 +236,27 @@ that loses at most a `crashed` record, never produces a false one.
   only: unique random ids, one locked write per line with a newline guard, fsync of the new
   line, the marker and the directories they live in, one never-overwritten marker per attempt,
   reconcile idempotent by id, marker removal only after a strict read and a successful sync,
-  markers kept on read errors and ids kept by the runner on a failed open
+  markers kept on read errors and ids kept by the runner on a failed open, and a report that
+  orders attempts by start time instead of append position
   (designs: "CU-5 write protocol", "CU-5 marker-removal gate", "CU-5 marker failure
-  contract"). Durability of earlier rows is a non-goal
+  contract", "CU-5 attempt ordering"). Durability of earlier rows is a non-goal
   (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
   be deferred, not grown into a redesign tonight.
 - CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
   `confirm_recorded`'s retried sync cannot restore them; the gate only guarantees that no
   marker is removed without a successful sync attempt (T009 comment and docs).
-- CU-5 false crash: `outcomes_report` takes a task's LAST line as its result (workflow.py:3093),
-  so a `crashed` line appended for an attempt that actually finished would hide its `done`.
-  The marker failure contract (T010) rules that out for a failed `attempt-open` (the runner
-  keeps the printed id) and for a transient marker read error (the marker is kept, not
+- CU-5 false crash: a `crashed` line for an attempt that actually finished would hide its
+  `done`. The marker failure contract (T010) rules that out for a failed `attempt-open` (the
+  runner keeps the printed id) and for a transient marker read error (the marker is kept, not
   discarded); the only remaining source is the documented short-write case.
+- CU-5 late crash record: a REAL `crashed` line of an earlier attempt can be appended after a
+  later attempt's `done` of the same task (marker kept through a read error or an unreadable
+  log, recorded at a later start; plan review round 5, P15). Today's report reads a task's
+  last line (workflow.py:3093) and would show the task as not done. The attempt ordering
+  design (T011) makes the report derive result, attempt count and first-time pass from start
+  order (`started` on every new row, `time - seconds` for old rows, file order when a row has
+  neither), so the order of appends no longer matters; stored `attempt`/`first_pass` stay
+  informational.
 - CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
   reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
   there until the leftovers are committed; T004's test and the handoff state this order.

@@ -410,9 +410,88 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
+## T011 — CU-5 attempt ordering: `started` on task records, report derives result, attempts and first pass from start order (CU-5, part 0e, round 5 redesign)
+Status: TODO
+Dependencies: T007
+Model: opus
+
+### Goal
+`ai-status --outcomes` reports a task by the order its attempts STARTED, not by the order their
+lines reached the log, so a `crashed` record that reconcile appends late (after a later attempt
+of the same task already logged `done`) never turns the task into "not done", never makes the
+later attempt the first-time pass, and both attempts are counted. (Plan review round 5, P15;
+design note `.ai/current-plan.md` "CU-5 attempt ordering (round 5 redesign)".)
+
+### Implementation notes
+- `scripts/lib/workflow.py`, next to `outcome()` (~3029) and `outcomes_report` (~3085).
+- `outcome task` (~3042–3050): every task record gets `started: int(time.time()) - int(seconds)`
+  (epoch seconds; the attempt's start as the runner measured it). T003 refines this: with
+  `--attempt ID` naming a readable marker the record takes the marker's `started` instead, and
+  reconcile's `crashed` record carries the marker's `started`. Keep `attempt` and `first_pass`
+  exactly as today (count at append time) and comment that the report no longer reads them.
+- `attempt_start(record) -> int | float | None`: `record['started']` when it is an int or float
+  (not bool); else, when `time` parses with `%Y-%m-%dT%H:%M:%SZ` (`now()`'s format, ~25) and
+  `seconds` is a number, epoch of `time` minus `seconds`; else None. Comment why (old rows
+  have no `started`; every row the helper wrote has `time` and `seconds`).
+- `ordered_attempts(task_rows) -> dict[key, list[record]]` with `key = (project, branch,
+  task)` as in the report: per key, when every row has a start, sort by `(start, _at)` (`_at`
+  from `read_outcomes`, the append position, is the tie-breaker); when any row's start is
+  None, keep file order (`_at`) for that key. Comment the rule (P15: attempts of one checkout
+  are sequential under its lock, so start order is attempt order; a late reconciled record
+  must not become the result; file order is the compatibility mode for rows without `time`).
+- `outcomes_report`: build `final` from the LAST row of each ordered list; `spent` unchanged
+  (sum); the per-category table's `first-time pass` = the FIRST row of the ordered list has
+  `result == 'done'`, `avg attempts` = mean of the list lengths; `first_row` = the first row of
+  the ordered list (replaces "first line in file order"); `attempts_table`'s `first` = count of
+  starts whose `result == 'done'`. Drop every read of `first_pass` and `attempt` from the
+  report. Comment at `final` (replacing "a task's last line is its result"): "a task's last
+  attempt by start time is its result; a crashed attempt may be appended late".
+- Docs: README "Outcome log" (~495, ~499): the record's `started`, and that the report orders
+  attempts by start time; `docs/workflow.md` ~899–900 ("the attempt number counts earlier
+  lines…") gains "`started` is the attempt's start (epoch seconds)", and ~930–935 ("aggregates
+  the last line per task") becomes "the last attempt by start time (a crashed attempt
+  reconciled late keeps its place); first-time pass = the first attempt by start time ended
+  `done`; rows without `started` are ordered by `time` minus `seconds`, a task with a row that
+  has neither by file order". Flow unchanged.
+- No marker, no reconcile, no `ai-run` change here (T003/T004).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, README.md, docs/workflow.md
+
+### Acceptance criteria
+- Tests named `test_outcome_attempt_order_*` in tests/test_workflow.py (report rows written
+  by hand as `outcome_report_for` does, and unit cases on `attempt_start`/`ordered_attempts`):
+  - P15 reproduction: rows for T001 in file order `done` (model `m`, `attempt` 1, `first_pass`
+    true, `seconds` 5, `started` 1000) then `crashed` (`attempt` 2, `first_pass` false,
+    `seconds` null, `started` 900): the task summary shows done 1, not done 0, first-time pass
+    0/1, avg attempts 2.0; "Attempts by model" shows 2 attempts, 1 done, 1 not done, first-time
+    pass 0/1; the same two rows in the other file order give the same report;
+  - old rows (`time` and `seconds`, no `started`): a `done` at `2026-10-17T10:00:00Z` with
+    `seconds` 600 and an `error` at `2026-10-17T10:05:00Z` with `seconds` 60 appended first in
+    the file → the task is done (the `done` started at 09:50, the `error` at 10:04);
+  - mixed: one row with `started`, one with `time`/`seconds` → ordered by the derived starts;
+    one row with neither → the task keeps file order (last line wins as today);
+  - tie: equal starts → append order decides (the second line is the result);
+  - a real log: after `outcome task T001 done m 5` the line has an int `started` within a few
+    seconds of `time` minus 5.
+- `test_outcome_report_credits_each_attempt_to_its_model`, `test_outcome_report_old_lines_without_model_or_attempt`,
+  `test_outcome_report_old_line_followed_by_new_attempt` and `test_runner_logs_task_outcomes_and_report`
+  pass unchanged (their rows have no `started` or `time`, so file order applies and the
+  derived numbers equal the stored ones; name any test that had to change on purpose).
+- `DocsConsistencyTest` passes; all existing `outcome` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k outcome_attempt_order` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
 ## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
 Status: TODO
-Dependencies: T010
+Dependencies: T010, T011
 Model: opus
 
 ### Goal
@@ -422,8 +501,8 @@ without ever losing or duplicating a line.
 
 ### Implementation notes
 - Design: `.ai/current-plan.md` "CU-5 — attempt marker + reconcile", "CU-5 write protocol
-  (round 2 redesign)", "CU-5 marker-removal gate (round 3 redesign)" and "CU-5 marker failure
-  contract (round 4 redesign)". `scripts/lib/workflow.py`,
+  (round 2 redesign)", "CU-5 marker-removal gate (round 3 redesign)", "CU-5 marker failure
+  contract (round 4 redesign)" and "CU-5 attempt ordering (round 5 redesign)". `scripts/lib/workflow.py`,
   next to `outcome()` (~3029–3082). Markers: one file per attempt through T008's store
   (`attempts_dir()` = `binding_dir() / 'attempts'`, `write_marker`, `list_markers` (T010's
   three-way shape), `remove_marker`; `binding_dir` ~1247 runs `check_state_root`). Never a
@@ -437,7 +516,10 @@ without ever losing or duplicating a line.
   split after the last `)` (comm can hold spaces, parentheses, non-UTF-8: see
   `tests/run_parallel.py` `parse_stat`).
 - `outcome task TASK RESULT MODEL SECONDS [--attempt ID]`: the record gets `attempt_id` when
-  given; after a SUCCESSFUL append (`append_outcome` returned True, T007/T008), remove the
+  given, and `started` from the marker `<ID>.json` when it is readable and valid (T011's
+  ordering key; the marker's open time is the attempt's start; an absent or unreadable marker,
+  P13, keeps T011's derived `int(time.time()) - seconds`); after a SUCCESSFUL append
+  (`append_outcome` returned True, T007/T008), remove the
   marker file `<ID>.json` (`remove_marker`). Other markers are left alone; a failed or short
   append keeps the marker (the `outcome` call fails as T007 defines).
 - Append: every write goes through `append_outcome` (T007 + T008: readable `O_RDWR|O_APPEND`
@@ -461,7 +543,9 @@ without ever losing or duplicating a line.
   number the attempt from `read_outcomes([path], strict=True)` (P10: never the lenient reader
   here) and append a
   task record with `result: "crashed"`, task/model/project/branch from the marker (not the
-  current branch), `seconds: null`, `attempt` numbered as `outcome task` does, `first_pass:
+  current branch), `seconds: null`, `started` = the marker's `started` (T011: the report
+  orders attempts by it, so a record appended late keeps its place), `attempt` numbered as
+  `outcome task` does (count at append time; informational, P15), `first_pass:
   false`, `attempt_id`, and title/category as today; then remove ONLY if `append_outcome`
   returned True (a short write keeps the marker, stderr `Note: could not log the crashed
   attempt completely; will retry at the next start.`). stderr `Note: logged a crashed
@@ -473,8 +557,10 @@ without ever losing or duplicating a line.
   conservative record).
 - `outcome attempt-dir` (T008) gives T004 the marker directory; the current attempt's file is
   `<dir>/<id>.json`.
-- `outcomes_report` (~3085): check `crashed` rows with `seconds: null` are counted as not done
-  and add 0 minutes (it uses `r.get('seconds') or 0`); the per-model attempts table counts them.
+- `outcomes_report` (T011's ordered version): check `crashed` rows with `seconds: null` are
+  counted as not done and add 0 minutes (it uses `r.get('seconds') or 0`); the per-model
+  attempts table counts them; a `crashed` row ordered before a later `done` of the same task
+  leaves the task done.
 - Concurrency: called only by `ai-run` under the checkout lock; the log is shared by all
   checkouts and serialised by T008's `flock` inside `append_outcome`. No other lock.
 - No `scripts/ai-run` change here (T004). Docs are T004's.
@@ -503,6 +589,19 @@ scripts/lib/workflow.py, tests/test_workflow.py
     unpatched retry records A exactly once and removes it;
   - the attempts directory unlistable (`os.scandir` patched to raise `OSError`): the "could not
     list" note, exit 0, markers unchanged, nothing appended;
+  - delayed reconcile after a successful retry (P15): a dead runner's marker A for T001 with
+    `started` in the past (e.g. now − 100) is made unreadable (`chmod 0o000`, skipped as root;
+    in-process variant: the read patched to raise `OSError(EIO)` until released);
+    `attempt-open T001 m <own pid>` keeps A (note) and prints B; `outcome task T001 done m 5
+    --attempt B` appends one `done` line whose `started` equals marker B's and removes B;
+    `ai-status --outcomes` shows T001 done; A is made readable again; `attempt-reconcile`
+    appends exactly one `crashed` record for A (its `started` = marker A's, `attempt_id` A)
+    AFTER B's line and removes A; `ai-status --outcomes` still shows T001 done 1, not done 0,
+    2 attempts, first-time pass 0/1; a second and third `attempt-reconcile` append nothing and
+    the report is unchanged;
+  - `outcome task T001 done m 5 --attempt <id>` with a readable marker: the line's `started`
+    equals the marker's; with no marker for that id (P13 variant): `started` is within a few
+    seconds of `time` minus 5;
   - `attempt-open` with `write_marker` failing after the print (`os.fsync` patched to raise for
     the attempts-directory inode, P13): stdout is the id, exit 1, the "could not publish"
     note, the marker exists; `outcome task T001 done m 5 --attempt <that id>` then appends one
@@ -710,7 +809,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T006 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T007, T008, T009, T010, T003, T004, T005
+Dependencies: T001, T002, T007, T008, T009, T010, T011, T003, T004, T005
 Model: haiku
 
 ### Goal
@@ -719,8 +818,9 @@ does; the human knows which upgrade, vault and backlog steps remain.
 
 ### Implementation notes
 - Check each sentence the tasks added (README, `docs/workflow.md`) against the code once:
-  finding cells (T001/T002), attempt marker and `crashed` outcomes (T003/T004), boundary cut
-  and `recovery-decision.txt` (T005). Fix contradictions; no new behaviour.
+  finding cells (T001/T002), attempt marker and `crashed` outcomes (T003/T004), `started` and
+  the report's start-time ordering (T011), boundary cut and `recovery-decision.txt` (T005).
+  Fix contradictions; no new behaviour.
 - Vault: confirm `agents-flow.md` reflects T004 (and T005 if it changed the chart) with a
   current `updated:`; hub Log has one dated line per flow-changing task. Append one hub Log
   line: "flow batch 5 planner found FL-01, FL-07, FL-09, FL-11, FL-14, FL-15, FL-17, FL-18,
@@ -738,7 +838,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   `.ai/local/recovery-decision.txt`; `docs/workflow.md` states the finding-cell rule for both
   tables.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_removal_gate_*`, `test_outcome_marker_contract_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
+- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_removal_gate_*`, `test_outcome_marker_contract_*`, `test_outcome_attempt_order_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
   `test_recovery_reason_shorten_*` under "Covered by automated tests", and every group exists
   (`python3 -m unittest discover -s tests -k <group>` runs ≥ 1 test each).
 

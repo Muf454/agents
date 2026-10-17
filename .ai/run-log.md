@@ -356,3 +356,4 @@
 | 2026-10-17T02:08:12Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | f637081 | No merge or deployment performed |
 | 2026-10-17T02:08:18Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | f637081 | No merge or deployment performed |
 | 2026-10-17T02:08:56Z | runner | plan-revision | plan revised (round 4): accepted 3, rejected 0, needs-human 0 | n/a | f637081 | Plan review runs again |
+| 2026-10-17T02:17:01Z | runner | plan-revision | plan revised (round 5): accepted 1, rejected 0, needs-human 0 | n/a | 5eac98f | Plan review runs again |

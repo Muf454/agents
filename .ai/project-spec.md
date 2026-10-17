@@ -90,9 +90,16 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   before it publishes the marker, and the runner keeps a printed id even when the command
   fails afterwards, so a finished task is never logged `crashed` because its marker outlived
   a failed open (an id without a marker is harmless). A stop that deliberately logs nothing
-  (approved gate changed) removes the marker without running a helper. Advisory telemetry
-  only: never fatal, never a stop; a sync the kernel already failed cannot be redone (dirty
-  pages may be gone).
+  (approved gate changed) removes the marker without running a helper. Every new task record
+  carries `started` (the attempt's open time from its marker, else the append time minus the
+  duration), and `ai-status --outcomes` orders a task's attempts by start time (append
+  position only as the tie-breaker; old rows use `time` minus `seconds`; a task with a row
+  that has neither keeps file order), deriving the task's result (last attempt), its attempt
+  count and its first-time pass (first attempt done) from that order, so a `crashed` record
+  reconciled late, after a later attempt of the same task succeeded, never changes the task's
+  reported result; the stored `attempt` and `first_pass` fields remain the count at append
+  time. Advisory telemetry only: never fatal, never a stop; a sync the kernel already failed
+  cannot be redone (dirty pages may be gone).
 - **R13 recovery text.** Reasons, human actions and needs-human questions longer than their
   300-character cap are cut at a sentence end, else a word boundary, and end with `…`; the full
   recovery reason and human action are written to `.ai/local/recovery-decision.txt` when cut,
