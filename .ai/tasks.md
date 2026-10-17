@@ -674,7 +674,7 @@ order. Evidence: -k outcome_attempt_order 4 OK; -k outcome 52 OK; -k Docs 3 OK; 
 
 
 ## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
-Status: TODO
+Status: DONE
 Dependencies: T010, T011
 Model: opus
 
@@ -851,7 +851,25 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+2026-10-17 (claude opus): DONE. `scripts/lib/workflow.py`: `reconcile_attempts(own_pid)` /
+`reconcile_marker` / `runner_alive` (pid + `pid_start` via `process_start`; own pid reconciled,
+P6); read error kept with note, invalid content removed with note, listing failure (`OSError`,
+also a state-root `ValueError` or git error) noted and nothing touched; per marker
+`confirm_recorded` → remove only, else strict `read_outcomes` numbering and one `crashed` row
+(task/model/project/branch/`seq`/`started` from the marker, `seconds` null, `first_pass` false,
+`attempt_id`), removed only when `append_outcome` returned True; any `OSError`/`ValueError` keeps
+the marker with the "could not read or sync" note, exit 0. `outcome attempt-open TASK MODEL PID`
+(reconcile, then `open_attempt`; new `AttemptSeqError(OSError)` from `open_attempt` tells the
+pre-print allocation failure (note, nothing printed, exit 1) from a post-print publish failure
+(note, exit 1)); `outcome attempt-reconcile [OWN_PID]`; `outcome task … --attempt ID` (row gets
+`attempt_id`, `seq`/`started` from a readable marker, else fresh `seq`; marker removed only after
+a durable append; a failed directory sync of that removal is suppressed, since a resurrected
+marker is confirmed by `confirm_recorded`). Report needed no change (`seconds or 0`).
+Tests: 26 new `test_outcome_attempt_*` covering every acceptance bullet (delayed reconcile in
+three variants: same second, `started` −100, `chmod 0o000`; chmod/read-only variants skipped as
+root). Mutation: dropping the `confirm_recorded` check fails 4 tests, dropping the own-pid
+exception fails 2. Validation: `-k outcome_attempt` Ran 37 OK; `-k outcome` Ran 78 OK;
+`.ai/bin/ai-check` PASS (808 tests, 428.8 s). No `ai-run` or docs change (T004). Flow unchanged.
 
 ## T004 — `ai-run` opens, closes and reconciles task attempts; a SIGKILLed runner's attempt is logged at the next start (CU-5, part 2)
 Status: TODO

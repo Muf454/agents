@@ -3292,6 +3292,10 @@ def process_start(pid):
         return None
 
 
+class AttemptSeqError(OSError):
+    """next_attempt_seq failed inside open_attempt: nothing was printed or published."""
+
+
 def open_attempt(task, model, pid, out=None):
     """Print a new attempt id, then publish its marker; returns the id.
     Contract (P13): the id reaches the caller BEFORE the marker can exist, so a marker whose id
@@ -3316,7 +3320,10 @@ def open_attempt(task, model, pid, out=None):
     record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
               'branch': branch, 'started': int(time.time()), 'pid': int(pid),
               'pid_start': process_start(pid)}
-    record['seq'] = next_attempt_seq()
+    try:
+        record['seq'] = next_attempt_seq()
+    except OSError as error:
+        raise AttemptSeqError(*error.args) from error
     print(attempt_id, file=out or sys.stdout, flush=True)
     write_marker(record)
     return attempt_id
@@ -3328,6 +3335,76 @@ def remove_marker(path):
         path.unlink()
     with contextlib.suppress(FileNotFoundError):  # no directory: no entry to persist
         fsync_dir(path.parent)
+
+
+def note(message):
+    print(f'Note: {message}', file=sys.stderr)
+
+
+def runner_alive(record):
+    """The marker's runner still runs: its pid exists with the recorded start time (a reused
+    pid has another), or with any start time when none was recorded."""
+    try:
+        pid = int(record['pid'])
+    except (TypeError, ValueError):
+        return False
+    if record['pid_start'] is None:
+        return pid > 0 and Path(f'/proc/{pid}').exists()
+    start = process_start(pid)
+    return start is not None and start == record['pid_start']
+
+
+def reconcile_marker(log, marker, record, own_pid):
+    """Turn one valid marker of a runner that is gone (or of the caller itself) into exactly
+    one task record, then remove it. OSError propagates with the marker kept."""
+    if runner_alive(record) and record['pid'] != own_pid:
+        return  # another runner's attempt in progress
+    # A marker of own_pid with a matching start is an earlier, finished attempt of the calling
+    # runner whose outcome append failed: attempts are sequential under the checkout lock (P6).
+    if confirm_recorded(log, record['id']):
+        remove_marker(marker)  # recorded, and its interrupted sync is finished now (P9)
+        return
+    # Strict: a transient read failure must not number (or duplicate) anything (P10).
+    earlier = [r for r in read_outcomes([log], strict=True) if r.get('kind') == 'task'
+               and (r.get('project'), r.get('branch'), r.get('task'))
+               == (record['project'], record['branch'], record['task'])]
+    title = outcome_title(record['task'])
+    row = {'time': now(), 'kind': 'task', 'project': record['project'], 'branch': record['branch'],
+           'task': record['task'], 'title': title, 'category': task_category(title),
+           'model': record['model'] or 'default', 'result': 'crashed', 'attempt': len(earlier) + 1,
+           'first_pass': False, 'seconds': None, 'started': record['started'], 'seq': record['seq'],
+           'attempt_id': record['id']}
+    if not append_outcome(log, row):
+        note('could not log the crashed attempt completely; will retry at the next start.')
+        return
+    remove_marker(marker)
+    note(f"logged a crashed attempt of {record['task']} (the runner was killed without its exit handler).")
+
+
+def reconcile_attempts(own_pid=None):
+    """Log every attempt whose runner died without its exit handler as `crashed`, once. Each
+    marker is handled on its own and kept on any failure; never raises (best effort at start).
+    Removal rule (T009): a readable marker goes only after its record is durably in the log.
+    Known limit: a short write of a normal `outcome task --attempt` line keeps its marker, so
+    that attempt is logged as `crashed` here (storage was full; the conservative record)."""
+    try:
+        entries = list_markers()
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        note('could not list the attempt markers.')
+        return
+    log = outcomes_path()
+    for marker, record, error in entries:
+        if error is not None:
+            note('could not read an attempt marker; keeping it.')  # transient: retried next start
+            continue
+        try:
+            if record is None:
+                remove_marker(marker)  # complete content, but not ours (see read_marker)
+                note('discarded an invalid attempt marker.')
+                continue
+            reconcile_marker(log, marker, record, own_pid)
+        except (OSError, ValueError):
+            note('could not read or sync the outcome log; keeping the attempt marker.')
 
 
 def outcome_title(task_id):
@@ -3361,12 +3438,37 @@ def outcome(arguments):
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
-    | attempt-dir (prints the attempt marker directory)"""
+    | attempt-dir (prints the attempt marker directory)
+    | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
+    | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
+    `task … --attempt ID` takes seq and started from that attempt's marker and removes the
+    marker once the line is durably appended."""
     kind, *rest = arguments
     if kind == 'attempt-dir':
         if rest:
             fail('Usage: outcome attempt-dir')
         print(attempts_dir())
+        return
+    if kind == 'attempt-reconcile':
+        if len(rest) > 1 or (rest and not rest[0].isdigit()):
+            fail('Usage: outcome attempt-reconcile [OWN_PID]')
+        reconcile_attempts(int(rest[0]) if rest else None)
+        return
+    if kind == 'attempt-open':
+        if len(rest) != 3 or not rest[2].isdigit():
+            fail('Usage: outcome attempt-open TASK MODEL PID')
+        task_id, model, pid = rest[0], rest[1], int(rest[2])
+        reconcile_attempts(pid)
+        try:
+            open_attempt(task_id, model, pid)
+        except AttemptSeqError:
+            print('Note: could not allocate the attempt sequence.', file=sys.stderr)
+            sys.exit(1)
+        except OSError:
+            # The id is printed already: the runner keeps it, and its outcome line removes the
+            # marker if the link happened (open_attempt, P13).
+            print('Note: could not publish the attempt marker.', file=sys.stderr)
+            sys.exit(1)
         return
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
@@ -3375,8 +3477,12 @@ def outcome(arguments):
     path = outcomes_path()
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    marker = None
     if kind == 'task':
-        task_id, result, model, seconds = rest
+        if len(rest) not in (4, 6) or (len(rest) == 6 and rest[4] != '--attempt'):
+            fail('Usage: outcome task TASK RESULT MODEL SECONDS [--attempt ID]')
+        task_id, result, model, seconds = rest[:4]
+        attempt_id = rest[5] if len(rest) == 6 else None
         title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
@@ -3385,7 +3491,14 @@ def outcome(arguments):
         attempt = len(earlier) + 1
         # The attempt's start as the runner measured it (epoch seconds; informational, never an order key).
         started = int(time.time()) - int(seconds)
-        seq = None  # T003: the marker's seq for an --attempt row with a readable marker
+        seq = None
+        if attempt_id is not None:
+            marker = marker_path(attempt_id)
+            opened, _ = read_marker(marker)
+            if opened:
+                # The marker's order key and open time: this row, its marker and a `crashed` row
+                # reconciled from the same marker agree. Absent or unreadable (P13): fresh seq.
+                seq, started = opened['seq'], opened['started']
         if seq is None:
             # A row is never written without seq: one without would sort as a pre-upgrade row,
             # before every real attempt of the task.
@@ -3396,6 +3509,8 @@ def outcome(arguments):
         record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
                       result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
                       seconds=int(seconds), started=started, seq=seq)
+        if attempt_id is not None:
+            record['attempt_id'] = attempt_id
     elif kind == 'review':
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
@@ -3430,7 +3545,12 @@ def outcome(arguments):
     except OSError:
         complete = False
     if not complete:
-        fail(f'Could not append the outcome line completely: {path}.')
+        fail(f'Could not append the outcome line completely: {path}.')  # the marker stays
+    if marker is not None:
+        # Only this attempt's marker, only after a durable append. A failed directory sync of
+        # the removal is harmless: a resurrected marker's record is found by confirm_recorded.
+        with contextlib.suppress(OSError):
+            remove_marker(marker)
 
 
 def outcomes_report(arguments):

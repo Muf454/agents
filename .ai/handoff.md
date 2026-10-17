@@ -6,7 +6,9 @@ Done so far: T001, T002, T007 (`append_outcome` + per-line `decode_outcome_lines
 directory fsync, marker store), T009 (`read_outcomes(strict=True)`, `confirm_recorded`), T010
 (`list_markers` → `(path, record, error)`, `open_attempt` prints the id first), T012
 (`next_attempt_seq` counter `attempt-seq` beside the log, `seq` on task rows and markers,
-`ordered_attempts`). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
+`ordered_attempts`), T011 (report ordered by `seq`, `started` on rows), T003 (`outcome
+attempt-open` / `attempt-reconcile`, `outcome task … --attempt ID`; `reconcile_attempts` in
+`workflow.py`, no caller in `ai-run` until T004). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
 PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session):
 - T001 FL-16 (sonnet): both disposition tables read a first cell `ID`, `ID (SEVERITY)` or
   `ID (SEVERITY) title` (also `ID — title`, `ID: title`); decoration before the ID, unknown
@@ -47,8 +49,8 @@ FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage hal
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-2026-10-17 T012: `.ai/bin/ai-check` PASS (778 tests, 407.3 s on 8 workers); `-k outcome` 48 OK;
-`-k outcome_attempt_seq` 7 OK.
+2026-10-17 T003: `.ai/bin/ai-check` PASS (808 tests, 428.8 s on 8 workers); `-k outcome` 78 OK;
+`-k outcome_attempt` 37 OK.
 PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 
 ## Assumptions
@@ -107,7 +109,7 @@ tests (the groups are added by the tasks named).
   attempt and is recorded once, a failed sync is finished before the marker goes, an
   unreadable log keeps the marker and never duplicates, a failed open still removes its
   marker on the normal outcome, a marker reconciled only after a successful retry leaves the
-  task reported done).
+  task reported done; done).
 - `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, which
   then refuses the dirty checkout; a failed attempt open keeps the id and the task is never
   reported `crashed`; normal paths unchanged, gate-broken stop leaves no marker).
@@ -124,5 +126,5 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Continue the queue (T011 next: the report orders attempts by `ordered_attempts`; `started` on
-task records; docs).
+Continue the queue (T004 next: `ai-run` calls `outcome attempt-reconcile "$$"` at start,
+`attempt-open` per attempt, `--attempt` on `task_outcome`; README/docs and the vault flow chart).
