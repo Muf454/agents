@@ -5571,6 +5571,20 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             {'kind': 'review', 'reviewer': 'codex', 'mode': 'plan', 'time': '2026-01-01T00:00:02Z'}])
         self.assertNotIn('Codex catch-up pending', report)
 
+    def test_outcome_catchup_recheck_does_not_cover_code(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'recheck', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertIn('code HEAD', report.split('Codex catch-up pending')[1])
+        self.assertNotIn('covered by a later', report)
+
+    def test_outcome_catchup_code_covers_recheck(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'recheck'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+        self.assertIn('1 Claude review(s) covered', report)
+
     def test_outcome_catchup_done_command_records_and_covers(self):
         self.setup_project()
         state = self.base / 'host-state/outcomes.jsonl'

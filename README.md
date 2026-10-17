@@ -481,7 +481,8 @@ PR. When Codex has usage again, run one catch-up Codex review over the listed wo
 (e.g. `AI_REVIEWER=codex .ai/bin/ai-review --base <oldest listed base>` on the merged
 branch) and note the result in the log. `ai-status --outcomes` lists a Claude review under
 "Codex catch-up pending" only until a later Codex review of the same project, branch and
-family (plan or code) exists, or you record a catch-up done on another branch with
+family (plan or code; a full code review also covers a re-check, but a Codex re-check covers
+only a re-check, never a full review) exists, or you record a catch-up done on another branch with
 `ai-status --catch-up-done BRANCH...` (a human command; agents do not run it).
 
 ### Outcome log (tuning the model rules)

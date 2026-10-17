@@ -974,7 +974,7 @@ fails. Targeted `-k parallel_runner_tree`: Ran 11 OK; `-k parallel_runner`: Ran 
 `.ai/bin/ai-check`: PASS (739 tests, 394.3 s). README and docs/workflow.md updated; flow unchanged.
 
 ## T015 — A Codex re-check does not cover a full Claude code review (review M2, CU-2)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: sonnet
 
@@ -1008,6 +1008,7 @@ Targeted: `python3 -m unittest discover -s tests -k outcome_catchup` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `covered()` in `scripts/lib/workflow.py` uses an explicit `covers` map (Codex plan→plan; code→code, recheck; recheck→recheck). Added `test_outcome_catchup_recheck_does_not_cover_code` and `test_outcome_catchup_code_covers_recheck`; README and docs/workflow.md updated. Evidence: `-k outcome_catchup` Ran 7 OK; `.ai/bin/ai-check` Ran 741 tests OK. Flow unchanged.
 
 ## T016 — Disposition rows: one physical line per row and a lossless backslash/pipe encoding (review P7, N1; FL-25 b)
 Status: TODO

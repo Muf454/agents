@@ -904,7 +904,7 @@ verified `recheck.md`. If that cannot be verified the line is still written with
 fields. `ai-status --outcomes` sums them in "Re-checks by reviewer"; re-checks are not listed
 under "Reviews by reviewer", but a Claude re-check still appears under "Codex catch-up pending" until covered. A Claude
 review (any mode) is covered by a LATER record of the same project and branch that is a Codex
-review of the same family (plan covers plan; code covers code and re-check) or a `catchup`
+review of the same family (plan covers plan; code covers code and re-check; a Codex re-check covers only a re-check, not a full review) or a `catchup`
 record, which `ai-status --catch-up-done BRANCH...` appends. "Later" orders by `time`; equal
 times count only within one file, by line order. Covered reviews are summarised as a count.
 

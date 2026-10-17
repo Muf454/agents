@@ -3169,14 +3169,15 @@ def outcomes_report(arguments):
                          f'{total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
     fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-    family = lambda mode: 'plan' if mode == 'plan' else 'code'  # code covers code and recheck
+    # Codex mode -> Claude modes it covers; a targeted re-check never covers a full code review
+    covers = {'plan': ('plan',), 'code': ('code', 'recheck'), 'recheck': ('recheck',)}
 
     def covered(claude):
         for later in records:
             if (later.get('project'), later.get('branch')) != (claude.get('project'), claude.get('branch')):
                 continue
             is_codex = later.get('kind') == 'review' and later.get('reviewer') == 'codex' \
-                and family(later.get('mode')) == family(claude.get('mode'))
+                and claude.get('mode') in covers.get(later.get('mode'), ())
             if not (is_codex or later.get('kind') == 'catchup'):
                 continue
             if str(later.get('time')) > str(claude.get('time')) or (
