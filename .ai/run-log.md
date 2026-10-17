@@ -344,3 +344,4 @@
 | 2026-10-17T00:54:26Z | runner | T016 | completed | PASS | 85c4cb2 | Claude checkpointed; continuing queue |
 | 2026-10-17T01:00:52Z | runner | none | queue complete; ready for independent review | PASS | b92fd0b | Human acceptance remains |
 | 2026-10-17T01:04:41Z | runner | triage | review triaged into dispositions/tasks | n/a | e8553d4 | Fix tasks run next |
+| 2026-10-17 | claude (opus) | T017 | DONE: `process_table()` lets a `/proc` listing `OSError` propagate (`{}` only without `/proc`), so a stop reports `unknown (descendant scan failed: …)`; `reap_adopted()` skips that round; 2 `test_parallel_runner_tree_proc_listdir_*` tests; docs/workflow.md; handoff Next action current (N2) | PASS (ai-check, 746 tests; -k parallel_runner 34 OK) | parent aff6dae | Mutation: old `return {}` and unguarded reap each fail; flow unchanged |

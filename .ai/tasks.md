@@ -1055,7 +1055,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 DONE. Row regexes use `[ \t]*` (no newline crossing); writers escape `\` then `|`; `table_cell()` decodes `\\`/`\|` in one pass. Tests `test_disposition_pipes_missing_task_before_next_row`, `..._next_plan_row`, `..._literal_backslash_round_trip`. Targeted: disposition_pipes 9 OK, triage_severity_suffix 3 OK; ai-check PASS (744 tests). docs/workflow.md updated.
 
 ## T017 — A failed `/proc` enumeration is a scan failure, never "no descendants" (review M3)
-Status: TODO
+Status: DONE
 Dependencies: T014
 Model: opus
 
@@ -1094,4 +1094,15 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17 (claude opus): `process_table()` returns `{}` only when `/proc` is not a directory;
+an `os.listdir('/proc')` `OSError` now propagates, so `Dispatcher.scan()` returns None and the
+barrier reports `unknown (descendant scan failed: PermissionError(…))`. `reap_adopted()`
+catches it and skips that round. T014's order and the single-owner `stop_done` are unchanged.
+Tests: `test_parallel_runner_tree_proc_listdir_failure` (real `sleep 120` in its own session
+under a subreaping driver; `stop()` returns, `cleanup_failed` holds the unknown entry, stderr
+has `could not terminate descendants`, the driver kills and reaps the child) and
+`test_parallel_runner_tree_proc_listdir_failure_skips_reap_round` (zombie stays through a
+failing round, reaped on the next). Mutation: the old `except OSError: return {}` fails the
+first; removing the reap guard fails both. `-k parallel_runner` 34 OK; `.ai/bin/ai-check`
+PASS (746 tests). docs/workflow.md updated; flow unchanged.
 

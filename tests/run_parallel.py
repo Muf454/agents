@@ -214,11 +214,12 @@ def proc_stat(pid):
 
 
 def process_table():
-    """Return {pid: (state, ppid, starttime)} from one scan of /proc ({} where there is none)."""
-    try:
-        entries = os.listdir('/proc')
-    except OSError:
+    """Return {pid: (state, ppid, starttime)} from one scan of /proc ({} where there is none).
+    Raises OSError when /proc exists but cannot be listed: an empty table proves nothing then,
+    and a stop would take it as every descendant gone."""
+    if not os.path.isdir('/proc'):
         return {}
+    entries = os.listdir('/proc')
     found = {}
     for entry in entries:
         if entry.isdigit():
@@ -230,7 +231,7 @@ def process_table():
 
 def children_of(pid):
     """Return {child pid: (state, ppid, starttime)} for the children of `pid`, from one scan
-    of /proc ({} where there is no /proc)."""
+    of /proc ({} where there is no /proc; OSError when /proc cannot be listed)."""
     return {child: stat for child, stat in process_table().items() if stat[1] == pid}
 
 
@@ -459,7 +460,12 @@ class Dispatcher:
             if self.terminating and not self.stop_done.is_set() and not after_stop:
                 return
             batches = {process.pid for process in self.running}
-            for pid, (state, _, _) in children_of(os.getpid()).items():
+            try:
+                children = children_of(os.getpid())
+            except OSError:
+                # /proc could not be listed: skip this round, the next call reaps them.
+                return
+            for pid, (state, _, _) in children.items():
                 if state == 'Z' and pid not in batches:
                     try:
                         os.waitpid(pid, os.WNOHANG)

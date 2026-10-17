@@ -9768,6 +9768,69 @@ class ParallelRunnerTest(unittest.TestCase):
                       "RuntimeError('injected scan failure')", result.stderr)
         self.assert_gone(self.wait_pidfiles([batch, child]))
 
+    # Review M3: when /proc cannot be listed, an empty table proves nothing.
+    def proc_listdir_driver(self, body):
+        """Run a subreaping driver whose `os.listdir('/proc')` raises PermissionError while
+        `failing` is set, then `body`; return its result."""
+        script = self.base / 'listdir_driver.py'
+        script.write_text(
+            'import os, subprocess, sys, time\n'
+            f'sys.path.insert(0, {str(ROOT / "tests")!r})\n'
+            'import run_parallel\n'
+            'assert run_parallel.enable_subreaper(), "driver: no subreaper"\n'
+            'real_listdir = os.listdir\n'
+            'failing = False\n'
+            'def listdir(path="."):\n'
+            '    if failing and path == "/proc":\n'
+            '        raise PermissionError(13, "injected listdir failure", path)\n'
+            '    return real_listdir(path)\n'
+            'os.listdir = listdir\n'
+            f'dispatcher = run_parallel.Dispatcher([["unused"]], 1, {str(self.suite)!r}, reap=True)\n'
+            + body)
+        return subprocess.run([sys.executable, str(script)], cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True,
+                              timeout=(self.rp.FINAL_WAIT + 10) * TIMEOUT_SCALE + MEDIUM_TIMEOUT)
+
+    def test_parallel_runner_tree_proc_listdir_failure(self):
+        self.tree_guard()
+        result = self.proc_listdir_driver(
+            'child = subprocess.Popen(["sleep", "120"], start_new_session=True)\n'
+            'assert child.pid in dispatcher.live_descendants(), "driver: child not seen"\n'
+            'failing = True\n'
+            'dispatcher.stop()\n'
+            'failing = False\n'
+            'print("cleanup_failed", *dispatcher.cleanup_failed, sep="|", flush=True)\n'
+            'print("child alive", child.poll() is None, flush=True)\n'
+            'child.kill()\n'
+            'child.wait()\n')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("cleanup_failed|unknown (descendant scan failed: PermissionError(13, "
+                      "'injected listdir failure'))\n", result.stdout, output)
+        self.assertIn('run_parallel: could not terminate descendants: unknown (descendant scan failed: '
+                      'PermissionError(', result.stderr)
+        # No scan succeeded, so nothing signalled the child: the stop saw no tree at all.
+        self.assertIn('child alive True', result.stdout, output)
+
+    def test_parallel_runner_tree_proc_listdir_failure_skips_reap_round(self):
+        self.tree_guard()
+        result = self.proc_listdir_driver(
+            'child = subprocess.Popen(["true"])\n'
+            'deadline = time.monotonic() + 30\n'
+            'while run_parallel.proc_stat(child.pid)[0] != "Z":\n'
+            '    assert time.monotonic() < deadline, "driver: no zombie"\n'
+            '    time.sleep(0.05)\n'
+            'failing = True\n'
+            'dispatcher.reap_adopted()\n'
+            'print("after failing round", run_parallel.proc_stat(child.pid)[0], flush=True)\n'
+            'failing = False\n'
+            'dispatcher.reap_adopted()\n'
+            'print("after next round", run_parallel.proc_stat(child.pid), flush=True)\n')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn('after failing round Z', result.stdout, output)
+        self.assertIn('after next round None', result.stdout, output)
+
     # FL-27 part 3: an interrupt while run() is still starting workers (after the first one
     # launched its batch) goes through stop() like any later interrupt.
     def startup_interrupt(self, raised):

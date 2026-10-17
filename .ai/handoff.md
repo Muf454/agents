@@ -48,6 +48,10 @@
   `Dispatcher.stop()` raise; `terminate()` signals the batch groups before any scan, and a scan
   that raises (`Dispatcher.scan()` → None) never aborts the stop: the barrier keeps scanning to
   its deadline and then reports `unknown (descendant scan failed: …)` (run fails).
+- T017 (done, review M3): `process_table()` returns `{}` only when there is no `/proc`; when
+  `/proc` exists but cannot be listed the `OSError` propagates, so the stop counts it as a
+  failed scan (`unknown (descendant scan failed: …)`, run fails) instead of "no descendants";
+  `reap_adopted()` skips a round it cannot list and reaps on the next call.
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -90,6 +94,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-17 after T009: `.ai/bin/ai-check` PASS (736 tests; recorded in the run log, not re-run here).
 2026-10-17 after T010: targeted `-k Docs` (3 tests) and `-k flow_this_repo` (1 test) OK; full gate: see the run log entry for T010.
 2026-10-17 after T014: `.ai/bin/ai-check` PASS (739 tests, 394.3 s on 8 workers); `-k parallel_runner` 32 OK.
+2026-10-17 after T017: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers); `-k parallel_runner` 34 OK.
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -128,8 +133,9 @@ Each group below is a name prefix; `python3 -m unittest discover -s tests -k <gr
 tests (the groups are added by the tasks named).
 - `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002; T014 added
   `test_parallel_runner_tree_non_utf8_name`, `test_parallel_runner_tree_non_utf8_stat_parse`
-  and `test_parallel_runner_tree_scan_failure_still_signals_batch_groups`; T017 adds
-  `test_parallel_runner_tree_proc_listdir_failure`), `test_parallel_runner_startup_*` (T013).
+  and `test_parallel_runner_tree_scan_failure_still_signals_batch_groups`; T017 added
+  `test_parallel_runner_tree_proc_listdir_failure` and
+  `test_parallel_runner_tree_proc_listdir_failure_skips_reap_round`), `test_parallel_runner_startup_*` (T013).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005; T016 adds `test_disposition_pipes_missing_task_before_next_row`
@@ -154,6 +160,6 @@ tests (the groups are added by the tasks named).
 
 ## Next action
 Review round 1 (M1, M2, P7, N1) is fixed: T014, T015 and T016 are DONE. Review round 2
-triaged (`.ai/reviews/dispositions.md`): M3 and N2 accepted, none rejected or deferred. T017
-(a failed `/proc` listing must count as a scan failure) is TODO. Then re-review, the human's
-acceptance steps and the merge.
+triaged (`.ai/reviews/dispositions.md`): M3 and N2 accepted, none rejected or deferred; T017
+(M3: a failed `/proc` listing counts as a scan failure) is DONE and N2 is this section. All
+tasks T001–T017 are DONE. Next: re-review, the human's acceptance steps and the merge.
