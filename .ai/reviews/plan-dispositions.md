@@ -180,3 +180,10 @@ Plan review HEAD: 6aca5fe2706d6245e49955951a08754ca2837689
 | P16 | accepted | Verified: in T011's old-row case the `done` at `2026-10-17T10:00:00Z` with `seconds` 600 starts at 09:50 and the `error` at 10:05 with `seconds` 60 starts at 10:04, so T011's own `(start, _at)` rule makes `error` the final result while the bullet required "done": no implementation could satisfy both. The round 6 redesign (T012) removes the start-time derivation altogether, so rows without `seq` keep file order (today's behaviour, and exact for pre-upgrade rows). T011's bullet now states both file orders explicitly: `error` appended first, then `done` → done; `done` first, then `error` → NOT done with final result `error`, whatever the times say; a mixed case (two rows without `seq`, then two with `seq` in either file order) pins the "old rows first" rule. | T012, T011 |
 
 Convergence: the CU-5 area repeats for the sixth round (round 1 P1–P3 append, round 2 P6–P8 write protocol, round 3 P9–P10 removal decision, round 4 P12–P13 marker failure semantics, round 5 P15 report order, now P15/P16 on the order key itself), so no finer clock or extra tie-breaker: the design task T012 ("CU-5 attempt sequence", one persisted counter under the log lock, allocated at open or append, copied unchanged into markers, outcomes and reconciled rows, pre-upgrade rows first in file order) replaces the start-time key as a whole; T011 is reduced to deriving the report from T012's order, and T003 only copies the marker's `seq`.
+
+## Plan review round 1 (report 747419715d5ca63db8adf61b7e3ecd59896655abea76db835e7811595bea1e58)
+
+Plan review HEAD: 73d04f1ea56799ec8c52408641647b0a7e45d4da
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
