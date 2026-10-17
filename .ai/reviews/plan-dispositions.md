@@ -242,3 +242,10 @@ Plan review HEAD: 538d8a4fae0050919eb44fc4a7ebf3186ed0e0ee
 | P13 | accepted | Verified: the stall incident (scripts/lib/watchdog.py:449–451) notifies `⛔ STOPPED, needs you: nothing is running but the checkout is mid-implementing (killed runner?)`, and `test_watchdog_confirm_killed_runner_reported_once_after_five_minutes` (tests/test_workflow.py:821–832) asserts that `⛔` today; T002's absent-schedule bullet required both "no ⛔" and "(b) still raises `stalled`". Fix in T002's bullet as the reviewer proposed: no relaunch-related notification for all three cases (nothing containing `usage-limit relaunch`, no `relaunch:` key); (a) and (c) send nothing at all; (b) sends exactly one, the normal `stalled` ⛔ of the second probe. | T002 |
 
 Convergence: design task T016 added. The preserved-work exception has had BLOCKER/MAJOR findings five rounds running (round 1 P3 HEAD-only binding, T011; round 2 P3/P9 tree binding and DONE-before-limit, T012; round 3 P9/P10 verification before mutation, T014; round 4 P3 a fourth acceptance site, T015; round 5 P3 the plan review loop re-entered on an armed tree), and every redesign so far described the resumed run's path as checks to pass through, which is why a stage that must not be re-entered at all was missed, so no sixth check is patched: the plan note "Armed resume re-enters at implementation (plan review round 5 redesign, T016)" binds the arm to the `implementation` stop and states the resumed run's path as a fixed list of stages, owned by T016, which T011 feeds and T015 (now after it) audits as its fifth rule. P12 (detached planning's `.ai/local`) and P13 (T002's test wording) are first findings in their areas and are fixed inside T006 and T002.
+
+## Plan review round 6 (report 990a3d1a3d8ebed8051fd3014239bbbdbdadd46b981ac324ba87f7053e1f0b63)
+
+Plan review HEAD: 35df6b3684112433264eb9f41b00e48e48e9de8f
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
