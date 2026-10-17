@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 20f0c1e5d470a3ff12616e40e2cd19662cd512c3242920c959fbdde4c0dcde66; HEAD 87943881a1a6b0e8c71f8c46c7eb4abf692ef6e8; saved 2026-10-17T02:10:42Z. -->
+<!-- Plan review of plan digest 8118993f2167523afa944932b06f9916c3b22c36120f089b94285b18a81cb4e5; HEAD a557aff4702622ea8f1f437b7fc72c68bcecb718; saved 2026-10-17T02:19:48Z. -->
 
-# Plan review — round 5
+# Plan review — round 6
 
 Overall verdict: REVISE BEFORE IMPLEMENTATION
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=0
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
 
-Reviewed HEAD: `87943881a1a6b0e8c71f8c46c7eb4abf692ef6e8`
+Reviewed HEAD: `a557aff4702622ea8f1f437b7fc72c68bcecb718`
 
-The revised plan addresses P12–P14. One interaction between retained markers, successful retries and outcome reporting remains uncovered.
+The revision addresses P15 when attempt start timestamps differ. Equal timestamps still reproduce the defect, and one new acceptance criterion contradicts the proposed ordering rule.
 
 ## BLOCKER findings
 
@@ -15,17 +15,25 @@ None.
 
 ## MAJOR findings
 
-- P15: Delayed reconciliation of an older attempt can overwrite a successful retry’s reported result.
+- P15: Delayed reconciliation can still overwrite a successful retry when attempts start in the same second.
 
-  **Location:** `.ai/tasks.md:449`, `.ai/tasks.md:463`, `.ai/tasks.md:524`; `scripts/lib/workflow.py:3093`.
+  **Location:** `.ai/tasks.md:436`, `.ai/tasks.md:474`, `.ai/tasks.md:513`; `.ai/current-plan.md:194`.
 
-  Reconciliation keeps unreadable markers and allows implementation to continue. Consider attempt A of T001, whose runner dies. A’s marker remains unreadable during startup and attempt-open reconciliation. A later attempt B of T001 succeeds and logs `done`. When A becomes readable, reconciliation appends its `crashed` record after B’s outcome.
+  Markers store `started: int(time.time())`, and T011 breaks timestamp ties using append position. Suppose A opens and dies early, then B opens within the same second while A’s marker remains unreadable. B eventually succeeds; A becomes readable afterward and reconciliation appends its `crashed` row. Both starts are equal, so A sorts last: the task becomes not done and B incorrectly counts as a first-time pass.
 
-  The existing report chooses the last appended record per task, so it now reports T001 as not done. Distinct, correctly preserved attempt IDs do not prevent this. Numbering attempts from existing outcome rows also assigns the older A a higher number than B.
+  The claim that delayed reconciliation makes equal starts impossible does not hold. Neither the runner nor the helper imposes a minimum interval between opens; B’s duration and the later reconciliation delay do not change its start timestamp.
 
-  **Evidence:** An in-memory invocation of the actual `outcomes_report` function with B’s `done` followed by A’s delayed `crashed` produces `done=0, not done=1` in the task summary. T003’s planned two-attempt regression uses T001 followed by T002, so it misses this same-task interaction.
+  **Evidence:** An in-memory evaluation of T011’s specified sort with B’s `done` followed by A’s `crashed`, both with `started=1000`, selects `crashed` as the final result and reports first-time pass as true. The planned regression artificially separates starts by 100 seconds and misses this case.
 
-  **Concrete plan change:** Define logical attempt ordering independently of append order for normal and reconciled outcomes, including a tie-breaker and compatibility with existing rows. Use that ordering when selecting a task’s final result and calculating attempt statistics. Preserve best-effort reconciliation. Add a regression where A’s marker remains unreadable through B’s successful completion, then becomes readable: reconciliation records A exactly once, both attempts remain counted, and T001 remains reported as done after repeated reconciliation.
+  **Concrete plan change:** Assign new attempts an ordering key at open that distinguishes sequential attempts independently of append order, such as a persisted sequence, and carry it unchanged into normal and reconciled outcomes. Define legacy compatibility separately. Add a deterministic regression with equal wall-clock seconds and A unreadable through B’s successful completion; repeated reconciliation must leave B as the final attempt.
+
+- P16: T011’s legacy-row acceptance case requires the wrong final result.
+
+  **Location:** `.ai/tasks.md:469`.
+
+  The specified `done` row starts at 09:50, while the `error` row starts at 10:04. Ordering by start time therefore makes `error` the final result, yet the acceptance criterion requires the task to be done. Correct implementation cannot satisfy both this test and T011’s implementation instructions. The stated expectation instead preserves the existing last-appended-line behavior.
+
+  **Concrete plan change:** Keep these inputs and require not done, with `error` as the final result regardless of file order. If a successful final result is intended, change the timestamps so `done` starts later. Explicitly test both file orders.
 
 ## MINOR findings
 
@@ -33,17 +41,17 @@ None.
 
 ## Validation and scope
 
-Inspected repository instructions, spec, plan, all ten tasks, prior dispositions, state, handoff, relevant source, templates, tests, documentation and `.ai/validate`.
+Inspected repository instructions, spec, plan, all eleven tasks, prior dispositions, state, handoff, affected source, prompts, tests, documentation and `.ai/validate`.
 
 Observed passing checks:
 
-- `python3 -B scripts/lib/workflow.py tasks check`
-- Three `DocsConsistencyTest` tests
-- Python syntax parsing for four relevant files
-- Shell syntax checks for five relevant files
+- Task queue validation.
+- Three `DocsConsistencyTest` tests.
+- Python syntax parsing for four relevant files.
+- Shell syntax checks for five relevant files.
 
-The report-ordering reproduction ran entirely in memory. The full gate and integration tests were not run because they require writable fixtures and artifacts. These checks validate the current baseline; implementation is still absent.
+The ordering reproductions ran entirely in memory against the specified algorithm. The full gate and integration tests were not run because they require writable fixtures and artifacts. Implementation remains absent.
 
-The remaining finding concerns telemetry integrity and missing regression coverage. No additional authorization issue was identified in the inspected scope. After implementation, manually confirm that a recovered older attempt cannot change a successfully retried task’s reported status.
+No additional authorization or model-selection findings were identified in the inspected scope. After implementation, verify that delayed reconciliation preserves a successful retry’s reported result.
 
 No files were modified. No network or MCP integrations were invoked.
