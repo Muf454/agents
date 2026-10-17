@@ -135,3 +135,10 @@ Plan review HEAD: 10e6e3c5bc848a50a45aea6cec788b3beaa8334b
 | P8 | accepted | Verified: T007 only `fsync`s the log descriptor after `O_CREAT`, and T003 then removes and dir-syncs the marker in `binding_dir()`, a different directory. Fix in T008: `append_outcome` fsyncs the log's directory on every append and the parent of every directory it created, before returning True; sync failures are failures (marker kept). Tests: fsync order by inode with the state dir absent/present, and a directory-sync failure that keeps the marker. Marker store dir creation gets the same parent syncs. | T008 |
 
 Convergence: the CU-5 write/marker area got BLOCKER/MAJOR findings in round 1 (P1–P3) and again now (P6–P8), so instead of a third patch to T007/T003 the whole protocol (append, marker lifecycle, reconcile, with the invariant "a marker is removed only when the log durably holds its id; nothing overwrites a marker") is specified in the plan note "CU-5 write protocol (round 2 redesign)" and implemented by the design task T008; T003/T004 now consume it.
+
+## Plan review round 3 (report 25b32f9371d59ad6e6e74a57e4ffa453e57d9b751770952cab3037b153c8f6b9)
+
+Plan review HEAD: a5afce6e6804448ee32ec36f8d046f58a4f0bc13
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
