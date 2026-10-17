@@ -1,13 +1,13 @@
-<!-- Plan review of plan digest 0e6f1698d8f35c7994f2c3339324cdf0d3cb64bcfdb2c5856138ad675e0dd7b5; HEAD b62dd2920c9cda15b2adfc1b3cac3439c08d57ce; saved 2026-10-17T01:48:48Z. -->
+<!-- Plan review of plan digest 1a8f34e84c951787a7ecf3f91d1a7b21f16858796dbf5fbaafbd44f1f3a5a30c; HEAD ca16a66bc778a6e9b89983db067e947e30b88d4b; saved 2026-10-17T01:53:53Z. -->
 
 # Plan review
 
-Review scope: HEAD `b62dd2920c9cda15b2adfc1b3cac3439c08d57ce`, round 2.
+Review scope: HEAD `ca16a66bc778a6e9b89983db067e947e30b88d4b`, round 3.
 
 Overall verdict: Revise before unattended implementation.
 Finding counts: BLOCKER=0 MAJOR=3 MINOR=0
 
-The revised plan covers P1–P5, including the requested regression cases. The findings below concern remaining gaps in the proposed CU-5 implementation.
+The current plan addresses P1–P8. The remaining findings concern reconciliation failure paths and the proposed restart test.
 
 ## BLOCKER findings
 
@@ -15,33 +15,35 @@ None.
 
 ## MAJOR findings
 
-- P6: Opening another attempt can overwrite a marker retained after an append failure.
+- P9: Reconciliation can remove a marker after its outcome failed to sync.
 
-  **Location:** `.ai/tasks.md:212–228`, `.ai/tasks.md:301–304`; `scripts/ai-run:208–211,677–684`.
+  **Location:** `.ai/tasks.md:291–312`; `.ai/current-plan.md:74–82`.
 
-  T003 requires `attempt-open` to reconcile the singleton marker and then replace it. Reconciliation can legitimately leave that marker intact. For example, a normal task outcome receives a short write, retains its marker, and the runner continues to another task. Reconciliation sees the same runner PID still alive and leaves the old marker; `attempt-open` then overwrites it. The failed outcome is permanently lost. Repeated reconciliation failures at startup have the same overwrite risk.
+  A complete `os.write` followed by a failed file or directory sync leaves a readable outcome line and retains its marker. At the next reconciliation, T003 finds that `attempt_id` in the log and specifies “only remove,” without completing the failed sync. The marker can therefore be durably deleted while the outcome remains vulnerable to power loss.
 
-  **Concrete plan change:** Make unresolved markers survive subsequent attempt openings while preserving nonfatal telemetry behavior. For example, retain pending markers by attempt ID and reconcile them separately. Add a two-task regression where the first outcome append fails, the second task completes, and the first attempt remains recoverable and is eventually recorded exactly once.
+  This concerns the newly attempted append whose sync failed, within CU-5’s promised durability. It does not require repairing unrelated historical rows.
 
-- P7: The newline guard races with another checkout’s partial append.
+  **Concrete plan change:** Before removing a retained marker on the existing-record path, successfully sync the log and necessary directory entries. Preserve the marker on failure. Add fault-injection tests covering a complete write followed by file-sync and directory-sync failures, then reconciliation; assert that marker removal requires successful durability checks and introduces no duplicate record.
 
-  **Location:** `.ai/tasks.md:147–154,243–244`; `.ai/current-plan.md:51–57`.
+- P10: Reconciliation cannot distinguish an unreadable log from an empty one.
 
-  The tail check and append are separate operations without a shared lock. Writer A can observe a final newline, writer B can then append a partial record, and A can append its complete record without a leading newline. A’s record joins B’s fragment and becomes unreadable, although A reports success and removes its marker.
+  **Location:** `.ai/tasks.md:160–161,304–312`; `scripts/lib/workflow.py:2987–3000`.
 
-  An in-memory probe of the prescribed sequence reproduced this: A’s write returned its full byte count, but parsing retained only the earlier record. The claim that concurrent writers can produce only an empty line is therefore incorrect.
+  T007 explicitly preserves the reader’s behavior of silently skipping a file on `OSError`. T003 then uses that reader to decide whether an attempt already has a record. A transient read failure returns no records, so reconciliation can append a second `crashed` outcome and remove the marker, violating the exactly-once requirement.
 
-  **Concrete plan change:** Make framing safe across this interleaving. Either serialize the tail check and write across all checkouts, or always prefix each record with a newline and tolerate blank lines. Update the acceptance criteria and add a deterministic test that inserts B’s partial append between A’s tail check and write.
+  A read-only fault-injection probe confirmed that the existing reader returns `[]` on an injected read error. The proposed byte reader retains this behavior.
 
-- P8: Creating the outcome log lacks the directory sync needed for power-loss durability.
+  **Concrete plan change:** Give reconciliation a strict read mode that distinguishes a missing log from other read failures. On a read failure, retain the marker, emit a note, and continue without appending. Test an already-recorded attempt with a retained marker: inject one read failure, verify no append or removal, then verify a successful retry removes the marker without duplication.
 
-  **Location:** `.ai/tasks.md:147–154,219–221`; `.ai/project-spec.md:28–32,62–73`.
+- P11: The SIGKILL restart test assumes a clean checkout that the runner does not leave.
 
-  T007 creates `outcomes.jsonl` with `O_CREAT` and fsyncs its file descriptor, but never fsyncs its parent directory. File fsync alone does not guarantee persistence of a newly created directory entry. T003 can subsequently remove and durably sync the attempt marker in another directory. After power loss, the newly created log can be absent with no marker available to reconstruct the attempt.
+  **Location:** `.ai/tasks.md:383–386,395–417`; `scripts/ai-run:136–148,626`; `scripts/lib/workflow.py:760–785`.
 
-  This affects the new outcome’s durability, which CU-5 promises; it does not require repairing historical rows.
+  Before launching Claude, the runner writes tracked `.ai/state.md` with phase `implementing` and a new next action. The proposed `sigkill-runner` mock kills the runner without checkpointing that change. Consequently, the second ordinary `ai-run --approved` invocation specified by T004 fails the existing clean-checkpoint check before reaching the current gate-baseline location or running the task.
 
-  **Concrete plan change:** Persist the log’s directory entry before append success permits marker removal, including necessary newly created parent directories. Treat sync failures as telemetry failures that retain the marker. Add fault-injection tests for sync ordering and directory-sync failure.
+  The plan neither includes the necessary checkpoint reconciliation in this test nor explicitly resolves whether crash-outcome reconciliation must run before that startup refusal.
+
+  **Concrete plan change:** Define the ordering explicitly while preserving the clean-checkpoint requirement. If the first restart must record the crash even with dirty leftovers, perform trusted, best-effort outcome reconciliation before refusing implementation. Test that refusal and exactly-once crash logging, then explicitly checkpoint the fixture’s bookkeeping before the successful task restart. Otherwise, document the checkpoint prerequisite and include it in the test and restart instructions.
 
 ## MINOR findings
 
@@ -49,14 +51,14 @@ None.
 
 ## Validation and limitations
 
-Inspected repository guidance, all seven tasks, spec, plan, dispositions, state, handoff, relevant source, prompts, tests, documentation, validation scripts and revision history.
+Inspected guidance, all eight tasks, spec, plan, dispositions, state, handoff, relevant source, prompts, tests, documentation, validation entry points, and revision history. Model selections are appropriate.
 
 Observed:
 
 - Task queue validation passed.
 - Relevant shell syntax and Python AST checks passed.
 - Three documentation consistency tests passed.
-- Existing shared-prompt-contract and table-cell-pattern methods passed through direct invocation without fixture setup.
-- The in-memory concurrency probe reproduced P7.
+- The shared prompt-contract test passed by direct invocation.
+- Injected outcome-log read failure returned an empty record list.
 
-The full gate and fixture-based integration tests require filesystem writes and were not run in this read-only sandbox. Power-loss behavior was assessed from the prescribed sync ordering, not experimentally tested. Model selections are appropriate. No files were modified or network integrations invoked.
+The full gate and fixture-based integration tests require filesystem writes and were not run in this read-only sandbox. Durability findings follow the prescribed operation ordering; power-loss behavior was not experimentally tested. No files were modified or network integrations invoked.
