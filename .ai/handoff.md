@@ -128,7 +128,8 @@ Each group below is a name prefix; `python3 -m unittest discover -s tests -k <gr
 tests (the groups are added by the tasks named).
 - `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002; T014 added
   `test_parallel_runner_tree_non_utf8_name`, `test_parallel_runner_tree_non_utf8_stat_parse`
-  and `test_parallel_runner_tree_scan_failure_still_signals_batch_groups`), `test_parallel_runner_startup_*` (T013).
+  and `test_parallel_runner_tree_scan_failure_still_signals_batch_groups`; T017 adds
+  `test_parallel_runner_tree_proc_listdir_failure`), `test_parallel_runner_startup_*` (T013).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005; T016 adds `test_disposition_pipes_missing_task_before_next_row`
@@ -152,6 +153,7 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Review round 1 triaged (`.ai/reviews/dispositions.md`): M1, M2, P7, N1 accepted, none
-rejected or deferred. T014 (process scan) is DONE; T015 (catch-up coverage) and T016
-(disposition row parsing) are TODO. Then re-review, the human's acceptance steps and the merge.
+Review round 1 (M1, M2, P7, N1) is fixed: T014, T015 and T016 are DONE. Review round 2
+triaged (`.ai/reviews/dispositions.md`): M3 and N2 accepted, none rejected or deferred. T017
+(a failed `/proc` listing must count as a scan failure) is TODO. Then re-review, the human's
+acceptance steps and the merge.

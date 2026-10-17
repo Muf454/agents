@@ -1053,3 +1053,45 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ### Result / notes
 DONE. Row regexes use `[ \t]*` (no newline crossing); writers escape `\` then `|`; `table_cell()` decodes `\\`/`\|` in one pass. Tests `test_disposition_pipes_missing_task_before_next_row`, `..._next_plan_row`, `..._literal_backslash_round_trip`. Targeted: disposition_pipes 9 OK, triage_severity_suffix 3 OK; ai-check PASS (744 tests). docs/workflow.md updated.
+
+## T017 — A failed `/proc` enumeration is a scan failure, never "no descendants" (review M3)
+Status: TODO
+Dependencies: T014
+Model: opus
+
+### Goal
+When `os.listdir('/proc')` raises while the runner is subreaping, `Dispatcher.stop()` treats
+the round as an unconfirmed scan (like T014's raised scan), keeps signalling the batch groups,
+and after the completion barrier's deadline records `cleanup_failed` (`unknown (descendant
+scan failed: …)`), prints the diagnostic and the run fails, instead of accepting `{}` as a
+clean tree (FL-27).
+
+### Implementation notes
+- `tests/run_parallel.py` `process_table()` (~216): distinguish "no /proc" from "/proc could
+  not be enumerated". Simplest: let the `OSError` propagate (or return None and have callers
+  raise) so `Dispatcher.scan()` returns None and stores `scan_error`. Non-Linux keeps today's
+  behaviour: there `self.reap` is False and no stop scan runs; keep `children_of()`/`descendants()`
+  callers outside the stop safe.
+- `reap_adopted()` (~452) calls `children_of()` without a guard: an enumeration failure there
+  must skip that reap round (reap again later), never raise out of the run loop or the stop.
+- Keep T014's order (batch groups signalled before any scan) and the single-owner `stop_done`.
+- Comment why: an empty table proves nothing when the listing failed.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py (`test_parallel_runner_tree_*`)
+
+### Acceptance criteria
+- `test_parallel_runner_tree_proc_listdir_failure`: a real detached descendant (own session,
+  e.g. `sleep 120`) of a subreaping driver; `os.listdir('/proc')` patched to raise
+  `PermissionError`; `Dispatcher.stop()` returns without raising, `cleanup_failed` is set to the
+  `unknown (descendant scan failed: …)` entry and stderr carries `could not terminate
+  descendants`; the test then kills and reaps the child itself.
+- A case where `listdir('/proc')` raises during `reap_adopted()` returns without raising.
+- Existing `test_parallel_runner_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
