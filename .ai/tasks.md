@@ -477,7 +477,7 @@ PASS (771 tests). Flow unchanged (no caller until T003).
 
 
 ## T012 — CU-5 attempt sequence: one persisted `seq` allocated at open or append under the log lock; attempts ordered by it (CU-5, part 0e, round 6 redesign)
-Status: TODO
+Status: DONE
 Dependencies: T010
 Model: opus
 
@@ -568,6 +568,19 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17 (claude, opus): `attempt_seq_path`, `next_attempt_seq` (log `flock`, max(counter,
+highest task `seq` read strictly) + 1, tmp + fsync + `os.replace` + `fsync_dir`; the tmp is
+removed when the write or replace fails), `attempt_seq`, `ordered_attempts` in
+`scripts/lib/workflow.py`. `outcome task` writes `seq` (allocated; "given → use it" slot left
+for T003) and fails `Could not allocate the attempt sequence: <path>.` with nothing appended;
+`open_attempt` allocates before the print; `read_marker` requires an int `seq` (`MARKER_FIELDS`)
+and `marker_sort_key` sorts by (`seq`, name). Tests: 7 `test_outcome_attempt_seq_*` (fresh
+store + new process, self-heal, lock wait, allocation failure incl. read-only root and
+`open_attempt`, open then outcome, real log row, `ordered_attempts` units). Adjusted: the
+`marker_record` helper takes `seq` (T008 `test_outcome_write_protocol_marker_store` order now
+by `seq`), T010 `test_outcome_marker_contract_invalid_content` adds missing / `true` / `"3"`
+`seq` cases. Validation: `-k outcome_attempt_seq` Ran 7 OK; `-k outcome` Ran 48 OK;
+`.ai/bin/ai-check` PASS (778 tests, 407.3 s). No report, docs or runner change (T011/T003/T004).
 
 
 ## T011 — CU-5 report derives result, attempts and first pass from the attempt sequence; `started` on task records; docs (CU-5, part 0f, round 5 redesign as revised in round 6)

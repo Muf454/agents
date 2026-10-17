@@ -3101,6 +3101,75 @@ def append_outcome(path, record):
     return True
 
 
+def attempt_seq_path():
+    """The host-wide attempt counter, beside the log in the same state root."""
+    return state_root() / 'attempt-seq'
+
+
+def next_attempt_seq():
+    """Allocate the next attempt sequence number: max(counter, highest recorded seq) + 1,
+    persisted before it is returned. Every OSError propagates.
+    The lock is the log's (the one every writer takes, append_outcome), not the counter's: the
+    counter is replaced atomically, and a lock on a replaced inode no longer excludes later
+    lockers. Self-heal: a lost counter continues after the highest seq recorded in the log;
+    markers allocated but not yet recorded may then duplicate one, and `_at` breaks that tie.
+    Cost: one log read, what `outcome task` already pays for its `attempt` count."""
+    path = outcomes_path()
+    counter = attempt_seq_path()
+    created = make_dirs(path.parent)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = int(counter.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            current = 0
+        recorded = max((r['seq'] for r in read_outcomes([path], strict=True)
+                        if r.get('kind') == 'task' and attempt_seq(r) is not None), default=0)
+        n = max(current, recorded) + 1
+        temp = counter.with_name(counter.name + '.tmp')
+        try:
+            temp_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                data = str(n).encode()
+                if os.write(temp_fd, data) != len(data):
+                    raise OSError(f'Short write of attempt counter {temp}')
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+            os.replace(temp, counter)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                temp.unlink()
+            raise
+        fsync_dir(counter.parent)
+        sync_created(created)
+    finally:
+        os.close(fd)  # releases the lock
+    return n
+
+
+def attempt_seq(record):
+    """The record's attempt sequence number, or None (missing, a bool, or not an int)."""
+    seq = record.get('seq')
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
+def ordered_attempts(task_rows):
+    """{(project, branch, task): [record, ...]} in attempt order: rows without a seq first in
+    `_at` order, then the rest by (seq, `_at`). Round 6: every row the current helper writes has
+    a seq, so rows without one are pre-upgrade rows, all older than any new row and appended in
+    attempt order by one writer per checkout, so file order is exact for them; `_at` orders two
+    new rows only when the counter was lost. The sequence is host-wide (one counter per state
+    root), so a task's numbers have gaps: an order key, not a count."""
+    groups = {}
+    for r in task_rows:
+        groups.setdefault((r.get('project'), r.get('branch'), r.get('task')), []).append(r)
+    for rows in groups.values():
+        rows.sort(key=lambda r: (0, 0, r['_at']) if attempt_seq(r) is None else (1, r['seq'], r['_at']))
+    return groups
+
+
 def confirm_recorded(path, attempt_id):
     """True when the log holds a task record with `attempt_id` and the file and its directory
     were synced just now; False when it holds none (a missing log is not created). Other
@@ -3171,7 +3240,7 @@ def write_marker(record):
     return final
 
 
-MARKER_FIELDS = ('id', 'task', 'model', 'project', 'branch', 'started', 'pid', 'pid_start')
+MARKER_FIELDS = ('id', 'task', 'model', 'project', 'branch', 'started', 'seq', 'pid', 'pid_start')
 
 
 def read_marker(path):
@@ -3190,14 +3259,15 @@ def read_marker(path):
         return None, None
     if not isinstance(record, dict) or any(field not in record for field in MARKER_FIELDS) \
             or record['id'] != Path(path).stem or not MARKER_ID.match(str(record['id'])) \
-            or not isinstance(record['started'], (int, float)) or isinstance(record['started'], bool):
+            or not isinstance(record['started'], (int, float)) or isinstance(record['started'], bool) \
+            or attempt_seq(record) is None:
         return None, None
     return record, None
 
 
 def marker_sort_key(entry):
     path, record, _ = entry
-    return (1, record['started'], path.name) if record else (0, 0, path.name)
+    return (1, record['seq'], path.name) if record else (0, 0, path.name)
 
 
 def list_markers():
@@ -3235,7 +3305,9 @@ def open_attempt(task, model, pid, out=None):
       attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true
       [[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=
     Residual: a marker whose directory sync failed after the link may not survive a power
-    loss; that loses at most a `crashed` record, never produces a false one."""
+    loss; that loses at most a `crashed` record, never produces a false one.
+    The attempt's seq is allocated before the print: an OSError from next_attempt_seq
+    propagates with nothing printed and nothing published (the attempt runs untracked)."""
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
@@ -3244,6 +3316,7 @@ def open_attempt(task, model, pid, out=None):
     record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
               'branch': branch, 'started': int(time.time()), 'pid': int(pid),
               'pid_start': process_start(pid)}
+    record['seq'] = next_attempt_seq()
     print(attempt_id, file=out or sys.stdout, flush=True)
     write_marker(record)
     return attempt_id
@@ -3308,9 +3381,17 @@ def outcome(arguments):
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
         attempt = len(earlier) + 1
+        seq = None  # T003: the marker's seq for an --attempt row with a readable marker
+        if seq is None:
+            # A row is never written without seq: one without would sort as a pre-upgrade row,
+            # before every real attempt of the task.
+            try:
+                seq = next_attempt_seq()
+            except OSError:
+                fail(f'Could not allocate the attempt sequence: {attempt_seq_path()}.')
         record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
                       result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
-                      seconds=int(seconds))
+                      seconds=int(seconds), seq=seq)
     elif kind == 'review':
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,

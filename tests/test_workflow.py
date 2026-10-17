@@ -5793,9 +5793,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertEqual([p for p, _, _ in wf.list_markers()], [garbage, first])
 
     @staticmethod
-    def marker_record(attempt_id, started, **fields):
+    def marker_record(attempt_id, seq, **fields):
         return dict({'id': attempt_id, 'task': 'T001', 'model': 'm', 'project': 'p', 'branch': 'b',
-                     'started': started, 'pid': 1, 'pid_start': None}, **fields)
+                     'started': 1000, 'seq': seq, 'pid': 1, 'pid_start': None}, **fields)
 
     def test_outcome_marker_contract_three_way_read(self):
         wf = self.outcome_module()
@@ -5846,7 +5846,16 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             record = self.marker_record('f' * 16, 1)
             del record['pid_start']
             missing.write_text(json.dumps(record))
-            self.assertEqual(wf.list_markers(), [(mismatch, None, None), (missing, None, None)])
+            no_seq = directory / ('1' * 16 + '.json')
+            record = self.marker_record('1' * 16, 1)
+            del record['seq']
+            no_seq.write_text(json.dumps(record))
+            bool_seq = directory / ('2' * 16 + '.json')
+            bool_seq.write_text(json.dumps(self.marker_record('2' * 16, True)))
+            text_seq = directory / ('3' * 16 + '.json')
+            text_seq.write_text(json.dumps(self.marker_record('3' * 16, '3')))
+            self.assertEqual(wf.list_markers(), [(no_seq, None, None), (bool_seq, None, None), (text_seq, None, None),
+                                                 (mismatch, None, None), (missing, None, None)])
 
     def test_outcome_marker_contract_id_printed_before_publish(self):
         wf = self.outcome_module()
@@ -6008,6 +6017,154 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         log.write_bytes(log.read_bytes() + b'{"title": "caf\xc3')
         self.assertTrue(wf.confirm_recorded(log, 'a' * 16))
         self.assertEqual(len(wf.read_outcomes([log], strict=True)), 1)
+
+    def outcome_attempt_seq_env(self):
+        return mock.patch.dict(os.environ, {'AI_STATE_DIR': str(self.base / 'host-state')})
+
+    def outcome_attempt_seq_helper(self, *args):
+        """Run the helper in-process (so mock patches apply); (exit code, stderr)."""
+        import runpy
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', *args]), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr):
+            try:
+                runpy.run_path(str(HELPER), run_name='__main__')
+            except SystemExit as stop:
+                return stop.code, stderr.getvalue()
+        return 0, stderr.getvalue()
+
+    def test_outcome_attempt_seq_fresh_store_and_new_process(self):
+        self.outcome_log_project()
+        wf = self.outcome_module()
+        counter = self.base / 'host-state/attempt-seq'
+        with self.outcome_attempt_seq_env():
+            self.assertEqual([wf.next_attempt_seq() for _ in range(3)], [1, 2, 3])
+        self.assertEqual(counter.read_text(), '3')
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        self.assertEqual(self.outcome_rows()[-1]['seq'], 4)
+        self.assertEqual(counter.read_text(), '4')
+
+    def test_outcome_attempt_seq_self_heal(self):
+        wf = self.outcome_module()
+        state = self.base / 'host-state'
+        log, counter = state / 'outcomes.jsonl', state / 'attempt-seq'
+        with self.outcome_attempt_seq_env():
+            for seq in (7, 2):
+                self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'task': 'T001', 'seq': seq}))
+            self.assertTrue(wf.append_outcome(log, {'kind': 'review', 'seq': 50}))  # not a task row
+            self.assertEqual(wf.next_attempt_seq(), 8)
+            self.assertEqual(counter.read_text(), '8')
+            self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'task': 'T001', 'seq': 9}))
+            counter.write_text('5')
+            self.assertEqual(wf.next_attempt_seq(), 10)
+            counter.write_text('garbage')
+            self.assertEqual(wf.next_attempt_seq(), 10)  # garbage is 0: the log maximum (9) rules
+            self.assertEqual(counter.read_text(), '10')
+            self.assertEqual(wf.next_attempt_seq(), 11)  # a counter ahead of the log rules too
+
+    def test_outcome_attempt_seq_waits_for_the_log_lock(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'host-state/outcomes.jsonl'
+        counter = self.base / 'host-state/attempt-seq'
+        with self.outcome_attempt_seq_env():
+            self.assertEqual(wf.next_attempt_seq(), 1)
+            fd = os.open(log, os.O_RDWR)
+            self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            results = []
+            thread = threading.Thread(target=lambda: results.append(wf.next_attempt_seq()), daemon=True)
+            thread.start()
+            time.sleep(0.3 * TIMEOUT_SCALE)
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(counter.read_text(), '1')
+            os.close(fd)  # releases the lock
+            fd = None
+            thread.join(SHORT_TIMEOUT)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [2])
+        self.assertEqual(counter.read_text(), '2')
+
+    def test_outcome_attempt_seq_allocation_failure(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        state = self.base / 'host-state'
+        log = state / 'outcomes.jsonl'
+        before = log.read_bytes()
+        with mock.patch('os.replace', side_effect=OSError(errno.EIO, 'Input/output error')):
+            code, stderr = self.outcome_attempt_seq_helper('task', 'T001', 'done', 'm', '5')
+        self.assertEqual(code, 1)
+        self.assertIn('Could not allocate the attempt sequence', stderr)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertFalse((state / 'attempt-seq.tmp').exists())
+        wf = self.outcome_module()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            with mock.patch('os.replace', side_effect=OSError(errno.EIO, 'Input/output error')), \
+                    self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=out)
+            self.assertEqual(out.getvalue(), '')
+            self.assertEqual(list(directory.iterdir()) if directory.exists() else [], [])
+            self.assertFalse((state / 'attempt-seq.tmp').exists())
+        if os.geteuid() != 0:
+            state.chmod(0o500)
+            try:
+                code, stderr = self.outcome_attempt_seq_helper('task', 'T001', 'done', 'm', '5')
+            finally:
+                state.chmod(0o700)
+            self.assertEqual(code, 1)
+            self.assertIn('Could not allocate the attempt sequence', stderr)
+            self.assertEqual(log.read_bytes(), before)
+
+    def test_outcome_attempt_seq_open_attempt_then_outcome(self):
+        self.outcome_log_project()
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            wf.open_attempt('T001', 'm', os.getpid(), out=io.StringIO())
+            [(_, record, _)] = wf.list_markers()
+        counter = self.base / 'host-state/attempt-seq'
+        self.assertEqual(record['seq'], int(counter.read_text()))
+        self.helper('outcome', 'task', 'T002', 'done', 'm', '5')
+        self.assertGreater(self.outcome_rows()[-1]['seq'], record['seq'])
+
+    def test_outcome_attempt_seq_real_log_row(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        row = self.outcome_rows()[-1]
+        self.assertIs(type(row['seq']), int)
+        self.assertGreaterEqual(row['seq'], 1)
+        self.assertEqual((self.base / 'host-state/attempt-seq').read_text(), str(row['seq']))
+
+    def test_outcome_attempt_seq_ordered_attempts(self):
+        wf = self.outcome_module()
+
+        def rows(*specs):
+            return [dict({'kind': 'task', 'project': 'p', 'branch': 'b', 'task': 'T001', '_at': (0, at)}, **fields)
+                    for at, fields in specs]
+
+        def order(task_rows):
+            return {key: [r['name'] for r in value] for key, value in wf.ordered_attempts(task_rows).items()}
+
+        key = ('p', 'b', 'T001')
+        # Round 6 reproduction: B done (seq 2) logged before A crashed (seq 1), same start second.
+        for b_at, a_at in ((0, 1), (1, 0)):
+            self.assertEqual(order(rows((b_at, {'name': 'B', 'result': 'done', 'seq': 2, 'started': 1000}),
+                                        (a_at, {'name': 'A', 'result': 'crashed', 'seq': 1, 'started': 1000}))),
+                             {key: ['A', 'B']})
+        self.assertEqual(order(rows((2, {'name': 'y'}), (1, {'name': 'x'}))), {key: ['x', 'y']})
+        self.assertEqual(order(rows((0, {'name': 'new', 'seq': 3}), (1, {'name': 'old1'}), (2, {'name': 'old2'}))),
+                         {key: ['old1', 'old2', 'new']})
+        self.assertEqual(order(rows((5, {'name': 'late', 'seq': 4}), (3, {'name': 'early', 'seq': 4}))),
+                         {key: ['early', 'late']})
+        self.assertEqual(order(rows((0, {'name': 'int', 'seq': 1}), (1, {'name': 'bool', 'seq': True}),
+                                    (2, {'name': 'text', 'seq': '2'}))),
+                         {key: ['bool', 'text', 'int']})
+        self.assertEqual(order(rows((0, {'name': 'a', 'seq': 1}), (1, {'name': 'o', 'seq': 2, 'branch': 'o'}))),
+                         {key: ['a'], ('p', 'o', 'T001'): ['o']})
+        self.assertIsNone(wf.attempt_seq({'seq': False}))
+        self.assertEqual(wf.attempt_seq({'seq': 0}), 0)
 
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'

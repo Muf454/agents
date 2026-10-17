@@ -4,7 +4,9 @@
 Done so far: T001, T002, T007 (`append_outcome` + per-line `decode_outcome_lines` reader in
 `scripts/lib/workflow.py`; `outcome` fails with exit 1 on a short write), T008 (log lock,
 directory fsync, marker store), T009 (`read_outcomes(strict=True)`, `confirm_recorded`), T010
-(`list_markers` → `(path, record, error)`, `open_attempt` prints the id first). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
+(`list_markers` → `(path, record, error)`, `open_attempt` prints the id first), T012
+(`next_attempt_seq` counter `attempt-seq` beside the log, `seq` on task rows and markers,
+`ordered_attempts`). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
 PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session):
 - T001 FL-16 (sonnet): both disposition tables read a first cell `ID`, `ID (SEVERITY)` or
   `ID (SEVERITY) title` (also `ID — title`, `ID: title`); decoration before the ID, unknown
@@ -45,8 +47,8 @@ FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage hal
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-2026-10-17 T010: `.ai/bin/ai-check` PASS (771 tests, 414.6 s on 8 workers); `-k outcome` 41 OK;
-`-k outcome_marker_contract` 5 OK.
+2026-10-17 T012: `.ai/bin/ai-check` PASS (778 tests, 407.3 s on 8 workers); `-k outcome` 48 OK;
+`-k outcome_attempt_seq` 7 OK.
 PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 
 ## Assumptions
@@ -94,7 +96,7 @@ tests (the groups are added by the tasks named).
   leaves the marker with the printed id, a failed print publishes nothing; done).
 - `test_outcome_attempt_seq_*` (T012: the counter advances per attempt and persists, heals
   from the log when lost, waits for the log lock, an allocation failure appends nothing;
-  `ordered_attempts` puts rows without `seq` first in file order and the rest by `seq`).
+  `ordered_attempts` puts rows without `seq` first in file order and the rest by `seq`; done).
 - `test_outcome_attempt_order_*` (T011: a crashed attempt appended after a later `done` of
   the same task keeps its place by `seq`, also with equal wall-clock seconds, so the task
   stays done with both attempts counted; rows without `seq` keep today's file order).
@@ -121,4 +123,5 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Continue the queue (T012 next: persisted attempt `seq`, allocated before `open_attempt`'s print).
+Continue the queue (T011 next: the report orders attempts by `ordered_attempts`; `started` on
+task records; docs).
