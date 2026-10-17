@@ -266,3 +266,10 @@ Plan review HEAD: 47e2eabfa84b6ede2f68917fd534df366ff31fa3
 | P18 | accepted | Verified: T011 (tasks.md, consumer bullet) prints `Resuming preserved work of the usage-limit stop ($bound).`, while T016's reviewer's-case bullet and T015's common assertion required exactly one `Resuming preserved work of the usage-limit stop.`, a literal the new message never contains. Fixed in T016 (`(T001).`, the fixture's bound task) and T015 (`(<ID>).` with the fixture's bound task: `T001` unless stated, the fix task's ID in the re-check scenario). | T016, T015 |
 
 Convergence: design task T018 added. The preserved-work area has had BLOCKER/MAJOR findings seven rounds running (round 1 P3 HEAD-only binding, T011; round 2 P3/P9 tree binding, T012; round 3 P9/P10 verification before mutation, T014; round 4 P3 acceptance sites, T015; round 5 P3 the plan review loop, T016; round 6 P3 task binding, T017; round 7 P16/P17 the armed resume's stops and startup); every earlier redesign specified the resumed run's happy path (what it accepts, where it re-enters, which task it continues) and none specified what the armed resume's STOPS mean to recovery or which startup steps the armed checkpoint owes, so instead of adding `preserved task work` to the hard-rule patterns or a one-off `ai_deps` call, the plan note "Recovery never acts on an armed tree; the armed checkpoint comes after the complete startup (plan review round 7 redesign, T018)" states two whole-area rules (an armed manifest is terminal for recovery whatever the reason; the consumer runs after ai-run's complete startup), owned by T018, consumed by T011 and adopted by T015's contract as rules 6 and 7. P18 is wording in T016/T015.
+
+## Plan review round 8 (report 2268cc866d77b9a0b35231928506abe535e874021eb227a3441a0ecfc5108d5c)
+
+Plan review HEAD: 88b28e726bde5bef5e0eebe6f75e095ef0816dee
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
