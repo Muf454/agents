@@ -162,7 +162,9 @@ Before leaving an implementation session unattended:
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
    check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
    task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
-   prose in `Dependencies:`.
+   prose in `Dependencies:`. `python3 scripts/lib/workflow.py tasks fill-sections` (host-only)
+   adds a missing `### Likely affected modules` or `### Result / notes` heading to TODO tasks and
+   changes nothing else.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write
@@ -223,6 +225,8 @@ The runner selects one eligible task per fresh Claude invocation. Claude reads
 state, reconciles interrupted work, marks IN_PROGRESS, implements, validates, records
 results, marks DONE, and commits. The runner reruns the full gate, verifies a clean
 checkpoint, records its own small state/log checkpoint, then starts the next session.
+Sessions keep throwaway files under `.ai/local/scratch/`; the host empties `.ai/local/scratch`
+before and after every session and never follows a symlink there.
 Every accepted DONE checkpoint and the final handoff commit must contain exactly the bytes
 validation hashed (committed bytes equal to the validated files on disk), or the run stops with "differs
 from the validated content". Repositories using clean/smudge or eol filters (Git LFS,
@@ -281,7 +285,9 @@ tmux new -s my-app-ai
    new task appended after the tasks that depend on it still runs first; a cycle, unknown ID
    or prose in `Dependencies:` stops at once (`Plan revision stage: task queue is invalid`,
    no recovery attempt). A revision interrupted after its session wrote such a queue (crash,
-   restart) resumes the same way: the host repairs the uncommitted queue before any queue
+   restart) resumes the same way (after triage, planning and each revision the host also adds a
+   missing `### Likely affected modules` or `### Result / notes` to new tasks and prints
+   `Task queue: added missing sections: …`; any other missing section still stops): the host repairs the uncommitted queue before any queue
    check and records the revision without a second session. From review round `AI_SUPERVISE_ESCALATE_ROUND` the
    revision runs on `AI_SUPERVISE_ESCALATE_MODEL`. With `AI_SUPERVISE=0` the findings stop
    the run before any Claude usage: revise the plan and rerun, or pass
@@ -407,7 +413,10 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
    gate passes on the leftovers and none of them looks like a secret), or
-   `escalate`. Malformed answers escalate.
+   `escalate`. The answer is one JSON decision object; a diagnosis written before or after it
+   still counts when the object starts its own line and the prose around it contains no `{`,
+   `}`, `[` or `]`. Any other answer escalates, and the ⛔ reason quotes the start of what the
+   session wrote (`the recovery session gave no valid decision; it wrote: …`).
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
    pipeline was killed or the machine restarted.
 
@@ -470,7 +479,11 @@ Every Claude-written review starts with a `Reviewer: Claude fallback (…)` line
 listed in `.ai/reviews/fallback-log.md` (committed with the review) and is named in the
 PR. When Codex has usage again, run one catch-up Codex review over the listed work
 (e.g. `AI_REVIEWER=codex .ai/bin/ai-review --base <oldest listed base>` on the merged
-branch) and note the result in the log.
+branch) and note the result in the log. `ai-status --outcomes` lists a Claude review under
+"Codex catch-up pending" only until a later Codex review of the same project, branch and
+family (plan or code; a full code review also covers a re-check, but a Codex re-check covers
+only a re-check, never a full review) exists, or you record a catch-up done on another branch with
+`ai-status --catch-up-done BRANCH...` (a human command; agents do not run it).
 
 ### Outcome log (tuning the model rules)
 
@@ -840,7 +853,12 @@ python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the CPU count, at
 most 8; six batches per worker, so neighbouring and often similarly slow tests land in
 different batches and no worker idles while another works through a slow cluster). Each
-batch runs as `python3 -m unittest` in its own process. The runner fails when a batch fails
+batch runs as `python3 -m unittest` in its own process. On Linux the runner is a child
+subreaper: processes the batches orphan stay its descendants and it reaps them. A stop (a
+worker error, an interrupt or SIGTERM) then terminates every descendant, GNU `timeout` groups
+and detached sessions included, and waits until none is alive; if some survive it prints
+`run_parallel: could not terminate descendants: <pids>` (or `unknown (descendant scan failed: …)`
+when `/proc` could not be scanned) and exits non-zero. The runner fails when a batch fails
 or crashes (listing that batch's test IDs), when it collects no tests, or when the batches
 ran a different number of tests than it collected. Batches always run without colour (whatever `FORCE_COLOR`, `NO_COLOR` or
 `PYTHON_COLORS` the caller sets), and the summary parser ignores ANSI escapes. Switching

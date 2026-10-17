@@ -1,6 +1,6 @@
 # Review dispositions (Claude)
 
-Review HEAD: c9d092bf5eab8ad3c4398292651afc5fd784f77c
+Review HEAD: 31fb005a6b08a276d38f68b3a2b5d8235c25f123
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
@@ -9,5 +9,5 @@ with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. 
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
-| M3 | accepted | Confirmed in source: `tests/run_parallel.py:192` starts each batch with `subprocess.Popen(...)` without `start_new_session`/process group; `stop()` (:224–234) calls `terminate()`/`kill()` only on that direct child; `run_batch` blocks in `communicate()` (:197) until EOF, which a surviving grandchild holding the inherited stdout pipe never sends; `run()` then joins threads without a bound (:242–247). Many suite tests spawn fixture pipelines (`ai-run`, git, mock agents), so descendants are realistic. T004 required terminating running batches and joining every worker on interrupt/worker error. | T014 |
-| N6 | accepted | Confirmed: `queue_segments()` gates on the literal `line.startswith('## ')` (`scripts/lib/workflow.py:477`) while `task_blocks()` uses `^##\s+` (:409), so a `##<TAB>T001 — …` heading is a task to the validator but not a segment; `tasks_reorder()` then does `by_id[task_id]` (:539) → `KeyError` traceback. Cheap, in scope (T001 required the same heading/fence rules). | T015 |
+| M3 | accepted | Confirmed in source: `process_table()` (`tests/run_parallel.py:216-221`) catches the `OSError` of `os.listdir('/proc')` and returns `{}`; `Dispatcher.scan()` (390) only maps a raised exception to None, so the kill rounds (`live == {}` → break) and the completion barrier (`live == {}` → return) accept an empty tree without `cleanup_failed`. T014's test patches `descendants()`, above this handler. `reap_adopted()` also calls `children_of()` unguarded, so simply re-raising needs a guard there too. | T017 |
+| N2 | accepted | `.ai/handoff.md` "Next action" said T015/T016 TODO while both are DONE (`bd4a419`, `85c4cb2`). Workflow record only: corrected in this triage commit; T017 refreshes it again when done. | T017 |

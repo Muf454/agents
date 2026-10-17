@@ -9,6 +9,7 @@ Dependencies are `none` or comma-separated IDs. Put tasks in dependency order.
 Statuses are exactly TODO, IN_PROGRESS, BLOCKED, DONE. Keep at most one task
 IN_PROGRESS. DONE requires all dependencies DONE and verified acceptance criteria.
 Do not reuse IDs or remove old task results; append review-fix tasks with new IDs.
+Every section heading below is required; `### Result / notes` starts empty and is filled as work proceeds.
 
 The following is a FORMAT EXAMPLE ONLY inside a code fence, ignored by tooling:
 

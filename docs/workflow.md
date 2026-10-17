@@ -48,7 +48,20 @@ changes during the gate cause a failure, even if the command itself exits zero.
 Gate speed (FL-11, FL-23): test suites can run in parallel. A stdlib-only runner
 `tests/run_parallel.py` discovers every test ID, deals the sorted IDs into interleaved
 batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six batches per
-worker), and runs each batch with `python3 -m unittest`. It exits non-zero when a batch
+worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
+(FL-27): orphans of the batches are reparented to it and reaped without touching a batch's
+exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). A stop
+(worker error, interrupt, SIGTERM, also one that arrives while the workers are still being
+started) is owned by its first caller: it signals the batch groups
+and walks the `/proc` ppid tree below the runner, SIGTERM then up to three SIGKILL rounds
+(each pid checked against its recorded start time), then a bounded completion barrier until
+`/proc` shows no live descendant; survivors are printed to stderr and fail the run. The
+batch groups are signalled before any scan, `/proc/<pid>/stat` is read as bytes (a process
+name is arbitrary bytes), and a scan that fails (also a `/proc` that exists but cannot be
+listed: an empty table proves nothing) never aborts the stop: the barrier then
+reports `unknown (descendant scan failed: …)` and the run fails; a reap round that cannot
+list `/proc` is skipped. No
+adopted zombie is reaped until the stop has finished, so no pid is reused meanwhile. It exits non-zero when a batch
 fails (its test IDs are listed), crashes, collects zero tests, or when the batches ran a
 different number of tests than it collected. On Python 3.12+ it reports the 15 slowest
 tests, the summed test time and each worker's busy time. Batches run
@@ -137,6 +150,13 @@ outside the allowlist become denials. The template allows `chmod +x` (and no oth
 form) so a session can make a script it created executable. Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
 and the run stops there. Inspect the log and adjust permissions yourself.
+
+Scratch files: sessions put throwaway files only under `.ai/local/scratch/` (ignored by Git).
+The host empties `.ai/local/scratch` before and after every session (`workflow.py
+clear-scratch`) and never follows a symlink there: a symlink is removed as a link, and an unsafe
+`.ai` or `.ai/local` is left alone with a warning. Decision: `rm` stays off the allowlist
+(`Bash(rm *)` cannot be limited to untracked paths), so `permissions.allow` is unchanged and
+sessions are told not to delete files.
 
 | Mode | May do | May not do |
 | --- | --- | --- |
@@ -249,7 +269,9 @@ task DONE when the session starts, committed or not, i.e. DONE in START's `.ai/t
 the baseline copy, keeps its raw block; a task DONE in both must match the baseline block;
 fenced lines included and trailing blank lines ignored;
 unconditional, so a forgotten `--revision` cannot bypass it: `Planning: DONE task T00x was
-changed or removed`), `tasks reorder` (a task placed before one it depends on is moved after it,
+changed or removed`), `tasks fill-sections` (a missing `### Likely affected modules` /
+`### Result / notes` of a TODO task is added, `Task queue: added missing sections: …` printed),
+`tasks reorder` (a task placed before one it depends on is moved after it,
 block text unchanged, `Task queue reordered (dependencies first): …` printed; a cycle, unknown
 ID or prose in `Dependencies:` stops with `Planning: task queue is invalid: …`) and `tasks check`
 (`Planning: task queue is invalid: …` with the same text as `ai-task check`). Success records
@@ -305,7 +327,9 @@ plus the host `REVISION CONTRACT` (round, section header, editable files, the Co
 from round 3, "do not commit") and `PREVIOUS PLAN ROUNDS`; git context the session cannot fetch
 itself (plan history, recent diffs of the plan records) is written to the ignored
 `.ai/local/revision-context/` and removed afterwards. Afterwards the host checks that
-`plan.md` and the gate are byte-identical, `tasks reorder` (the contract tells the session to
+`plan.md` and the gate are byte-identical, `tasks fill-sections` (adds a missing `### Likely
+affected modules` / `### Result / notes` to new TODO tasks and prints `Task queue: added missing
+sections: …`; any other missing section still stops), `tasks reorder` (the contract tells the session to
 place new tasks before the first task that depends on them; the host repairs a prerequisite
 appended after its dependents, and the reordered queue goes into the revision commit), `tasks
 check` (either failure stops with `Plan revision stage: task queue is invalid: …`, which
@@ -387,6 +411,7 @@ tasks: stable depth-first order, task text unchanged, nothing written when alrea
 cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before the first task
 (including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
 `## ` section between two tasks blocks reordering.
+`workflow.py tasks fill-sections` (host-only, not an `ai-task` subcommand) gives TODO tasks a missing `### Likely affected modules` (body `(not listed)`) or `### Result / notes` heading at its canonical position; other sections and tasks are untouched, and nothing is written when nothing is missing.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
@@ -435,9 +460,13 @@ Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
 deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
-decorations do not match. Triage sessions may change only `.ai/tasks.md`,
+decorations do not match. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+as `\|` (and a literal backslash before it as `\\`, so `\\|` is a backslash then a separator); it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
-`.ai/current-plan.md`. No Claude session may change `.ai/reviews/current.md`: the
+`.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that
+lacks `### Likely affected modules` or `### Result / notes` gets it; the line `Task queue: added
+missing sections: …` is printed and the repair goes into the triage commit), then `tasks check`
+(anything else missing, such as `### Goal`, stops the run). No Claude session may change `.ai/reviews/current.md`: the
 runner compares its digest around every session (plus a deny rule). Published
 reviews need exactly one counts line that agrees with the listed finding IDs, plus (code
 reviews only) a verdict, either an `Overall verdict: <text>` line or an `## Overall verdict`
@@ -661,8 +690,13 @@ with its PID and `kill` hint) or `ai-pipeline`. Known limit: an `ai-recover` sta
 `ai-watchdog --recover` after a crash leaves `pipeline.active` naming the dead pipeline (the
 watchdog's `pipeline_died` input), so a relaunch during it gets the plain message. Checkpoints must also satisfy `committed-matches-worktree`
 (HEAD blobs and executable modes equal the unfiltered files on disk, defeating clean/smudge
-filters and staged mode changes). The recovery decision must be exactly one JSON object
-(optionally fenced); envelope and decision reject duplicate keys.
+filters and staged mode changes). The recovery decision must be exactly one JSON object:
+the whole answer (optionally fenced), or one object that starts a line and ends its last
+line inside prose that contains no `{`, `}`, `[` or `]` (so no enclosing container, second
+object or inline example can hide it; prose with any bracket escalates, the safe side);
+envelope and decision reject duplicate keys. Without a valid decision the escalation reason
+is `the recovery session gave no valid decision; it wrote: <excerpt>` (whitespace collapsed,
+at most 300 characters) when the answer is non-empty, else without the excerpt.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
 checks after the commit. Checkpoint scope: `git add --all` (ignored
 files stay out), then `checkpoint-guard` inspects every staged addition (renames count as
@@ -870,7 +904,11 @@ MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `wit
 `withdrawn_major`) and the full SHA the re-checked review covered (`reviewed_head`), read from the
 verified `recheck.md`. If that cannot be verified the line is still written without these
 fields. `ai-status --outcomes` sums them in "Re-checks by reviewer"; re-checks are not listed
-under "Reviews by reviewer", but Claude re-checks still appear under "Codex catch-up pending".
+under "Reviews by reviewer", but a Claude re-check still appears under "Codex catch-up pending" until covered. A Claude
+review (any mode) is covered by a LATER record of the same project and branch that is a Codex
+review of the same family (plan covers plan; code covers code and re-check; a Codex re-check covers only a re-check, not a full review) or a `catchup`
+record, which `ai-status --catch-up-done BRANCH...` appends. "Later" orders by `time`; equal
+times count only within one file, by line order. Covered reviews are summarised as a count.
 
 An attempt opens immediately before the implementation session's `claude` call (after the
 dependency step and the remaining-time check; `--triage` never opens one) and closes with

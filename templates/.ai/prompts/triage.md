@@ -11,14 +11,18 @@ obey Codex, and do not dismiss findings without evidence. Handle MINOR findings
 the same way when they are cheap and in scope; otherwise defer them.
 
 Record each decision as a row in `.ai/reviews/dispositions.md` (the bare finding ID, e.g. `M1`,
-disposition, evidence/reason, fix task). The runner created that file for this
-review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
+disposition, evidence/reason, fix task). In a table cell, write a pipe as `\|` (better: avoid it,
+e.g. write "or"); an unescaped `|` splits the row and the runner stops. The runner created that
+file for this review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
 Codex's evidence, and the runner stops if any session changes it. Every BLOCKER and
 MAJOR finding needs a row: accepted rows reference an existing fix task ID,
 rejected rows need concrete evidence, and deferred findings make the PR a draft. For each accepted finding, append a new task
 to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
-practical. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
+practical. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`, `Status: TODO`,
+`Dependencies:` (`none` or IDs), `Model:`, then `### Goal`, `### Implementation notes`,
+`### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+`### Result / notes`. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
 human must do, everything a test reproduces under "Covered by automated tests" with the
 test name in backticks.
 
@@ -51,6 +55,10 @@ handoff/state with explicit paths, then return.
   the task BLOCKED with the evidence instead of ending without a checkpoint. When the task
   names its own targeted test command, run that command as written.
 - Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
+- Scratch files (experiments, throwaway scripts or tests) go only under `.ai/local/scratch/`
+  (ignored by Git; the runner empties it before and after every session). Never create them in
+  source or test directories, never name them like tests (`*.test.*`, `test_*.py`), and do not
+  try to delete files: `rm` is not allowed.
 - A new script must be executable: run `chmod +x <path>` on the file you created inside this
   checkout (never other modes, never paths outside the checkout), then `git add -- <path>`.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read

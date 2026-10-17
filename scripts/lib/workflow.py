@@ -422,13 +422,18 @@ def task_blocks(text):
     return blocks
 
 
+REQUIRED_SECTIONS = ('Goal', 'Implementation notes', 'Likely affected modules',
+                     'Acceptance criteria', 'Validation', 'Result / notes')
+# The content-free sections `tasks fill-sections` may add, with the body inserted under the heading.
+FILLABLE_SECTIONS = {'Likely affected modules': ['(not listed)\n'], 'Result / notes': []}
+
+
 def tasks(text=None):
     blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
         fail('Duplicate task IDs.')
-    required = ('Goal', 'Implementation notes', 'Likely affected modules',
-                'Acceptance criteria', 'Validation', 'Result / notes')
+    required = REQUIRED_SECTIONS
     for task in blocks:
         for field in ('Status', 'Dependencies'):
             values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith(field + ':')]
@@ -551,9 +556,75 @@ def tasks_reorder():
     print('Task queue reordered (dependencies first): ' + ' '.join(order))
 
 
+def section_positions(lines):
+    """Line index of each exact `### <required section>` heading outside code fences."""
+    found, fence = {}, None
+    for index, line in enumerate(lines):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence and line.rstrip('\n') in {f'### {name}' for name in REQUIRED_SECTIONS}:
+            found.setdefault(line.rstrip('\n')[4:], index)
+    return found, fence
+
+
+def fill_task_sections(lines):
+    """Return (new lines, names added) for one TODO task block; other blocks are the caller's to skip."""
+    lines, added = list(lines), []
+    for name, body in FILLABLE_SECTIONS.items():
+        found, fence = section_positions(lines)
+        if name in found or fence:
+            continue
+        later = [found[n] for n in REQUIRED_SECTIONS[REQUIRED_SECTIONS.index(name) + 1:] if n in found]
+        if later:
+            at = min(later)
+            new = [f'### {name}\n', *body, '\n']
+            if lines[at - 1].strip():
+                new.insert(0, '\n')
+        else:
+            at = len(lines)
+            while at > 0 and not lines[at - 1].strip():
+                at -= 1
+            if lines[at - 1] and not lines[at - 1].endswith('\n'):
+                lines[at - 1] += '\n'
+            new = ['\n', f'### {name}\n', *body]
+        lines[at:at] = new
+        added.append(name)
+    return lines, added
+
+
+def tasks_fill_sections():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    out, report = [], []
+    for kind, key, lines in queue_segments(text):
+        if kind == 'task':
+            # Fenced Status: lines don't count; task_blocks ignores them too.
+            block = next((b for b in task_blocks(''.join(lines)) if b['id'] == key), None)
+            statuses = [line for line in block['lines'] if line.startswith('Status:')] if block else []
+            if len(statuses) == 1 and statuses[0].split(':', 1)[1].strip() == 'TODO':
+                lines, added = fill_task_sections(lines)
+                if added:
+                    report.append(f"{key} ({', '.join(added)})")
+        out.extend(lines)
+    if not report:
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue: added missing sections: ' + ', '.join(report))
+
+
 def task_command(arguments):
     if arguments[0] == 'reorder':
         tasks_reorder()
+        return
+    if arguments[0] == 'fill-sections':
+        tasks_fill_sections()
         return
     blocks = tasks()
     action = arguments[0]
@@ -908,8 +979,21 @@ def review_format_check(arguments):
         sys.exit(2)
 
 
-DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)(?:\s*\((?:BLOCKER|MAJOR|MINOR)\))?\s*\|\s*(accepted|rejected|deferred)\s*\|'
-                             r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+# A table cell: a backslash is only ever consumed together with the character after it, so `\|`
+# can never be split into a cell ending in `\` plus a separator (letting `[^|\n]` eat the
+# backslash on backtracking would do that). An unescaped `|` still ends the cell.
+TABLE_CELL = r'((?:\\.|[^\\|\n])*?)'
+
+
+def table_cell(text):
+    """A captured table cell as a value: `\\\\` is a backslash, `\\|` a pipe (one left-to-right
+    pass, other backslashes kept), surrounding space is dropped."""
+    return re.sub(r'\\([\\|])', r'\1', text).strip()
+
+
+# `[ \t]*`, not `\s*`: a row's match must never cross a newline into the next row.
+DISPOSITION_ROW = re.compile(r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
+                             r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -948,7 +1032,8 @@ def triage_check(arguments):
     bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
     if not bound or bound.group(1) != head.group(1):
         fail('Dispositions belong to a different review.')
-    rows = {m.group(1): (m.group(2).lower(), m.group(3), m.group(4)) for m in DISPOSITION_ROW.finditer(text)}
+    rows = {m.group(1): (m.group(2).lower(), table_cell(m.group(3)), table_cell(m.group(4)))
+            for m in DISPOSITION_ROW.finditer(text)}
     queue = {t['id']: t['status'] for t in tasks()}
     accepted = deferred = 0
     for level in ('BLOCKER', 'MAJOR'):
@@ -1023,7 +1108,7 @@ def review_rounds(base, head):
                            'rows': None})
         elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
             text = committed_file(sha, '.ai/reviews/dispositions.md')
-            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                   for m in DISPOSITION_ROW.finditer(text)}
     return rounds
 
@@ -1470,7 +1555,7 @@ def rejected_rows():
     for match in DISPOSITION_ROW.finditer(text):
         if match.group(1) in rows:
             fail(f'Finding {match.group(1)} has more than one disposition.')
-        rows[match.group(1)] = (match.group(2).lower(), match.group(3))
+        rows[match.group(1)] = (match.group(2).lower(), table_cell(match.group(3)))
     rejected = [(finding, level, rows[finding][1])
                 for level in ('BLOCKER', 'MAJOR') for finding in finding_ids(review, level)
                 if finding in rows and rows[finding][0] == 'rejected']
@@ -1560,7 +1645,7 @@ def publish_recheck(arguments):
     if tuple(current) != (head, digest, rows_hash):
         fail('Re-check: the review or the rejected rows changed during the re-check; run it again.')
     answers, notes = parse_recheck(Path(source).read_text(), [finding for finding, _, _ in rows])
-    cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
+    cell = lambda value: ' '.join(value.split()).replace('\\', '\\\\').replace('|', '\\|')
     lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
              f'reviewed HEAD {head}; saved {now()}. -->', '',
              f"# Re-check of rejected findings ({os.environ.get('AI_REVIEW_BY') or 'Codex'})", '',
@@ -1883,13 +1968,42 @@ def _no_duplicate_keys(pairs):
     return dict(pairs)
 
 
+# Recovery answer scanner. Prose around a decision may hide it inside an enclosing container
+# (`Diagnostic: [` ... `]`, or a bracket inside a JSON string fooling a count), and prose has
+# unbalanced quotes, so no string-aware count over it is well defined. A container needs an
+# opening bracket before the object and a closing one after it, so the prose around the one
+# candidate may contain no '{', '}', '[' or ']' at all; inside the object the JSON parser decides.
+# The object must start a line and end its last line (inline, quoted or backticked objects are
+# prose). No character counting and no string parsing happen outside the object.
+_PROSE_BRACKETS = re.compile(r'[{}\[\]]')
+
+
+def _scan_decision(text):
+    """The one line-start object inside bracket-free prose, or None."""
+    start = text.find('{')
+    if start < 0 or _PROSE_BRACKETS.search(text, 0, start) \
+            or text[text.rfind('\n', 0, start) + 1:start].strip():
+        return None
+    try:
+        decision, end = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys).raw_decode(text, start)
+    except ValueError:
+        return None
+    line_end = text.find('\n', end)
+    if not isinstance(decision, dict) or _PROSE_BRACKETS.search(text, end) \
+            or text[end:len(text) if line_end < 0 else line_end].strip():
+        return None
+    return decision
+
+
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
-    object (no duplicate keys; the span from the first '{' to the last '}') count.
-    Everything else escalates."""
+    object (no duplicate keys; the whole answer, or one line-start object inside prose
+    that has no '{', '}', '[' or ']') count. Everything else escalates; when the session
+    wrote something, the reason quotes the start of it."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
+    clean = lambda value: ' '.join(value.split())[:300]
     try:
         envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
@@ -1898,12 +2012,15 @@ def recover_decision(arguments):
             or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
-    # The answer must be exactly one JSON object (optionally in a ```json fence), nothing else.
+    if envelope['result'].strip():
+        escalate = ('escalate\t' + clean('the recovery session gave no valid decision; it wrote: '
+                                         + envelope['result']) + '\tinspect the stop yourself')
+    # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
         decision = json.loads(text, object_pairs_hook=_no_duplicate_keys)
     except ValueError:
-        decision = None
+        decision = _scan_decision(text)
     if not isinstance(decision, dict):
         print(escalate)
         return
@@ -1912,7 +2029,6 @@ def recover_decision(arguments):
             or not fields[1].strip():
         print(escalate)
         return
-    clean = lambda value: ' '.join(value.split())[:300]
     print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
 
 
@@ -2327,8 +2443,8 @@ def plan_rounds(arguments):
 PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
-    r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
-    r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+    r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
+    r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 
 
 def plan_history(arguments):
@@ -2363,7 +2479,7 @@ def plan_history(arguments):
                     seen.add(match.group(1))
                     findings.append((match.group(1), level, finding_title(body, match)))
         body = sections.get(record['report_digest'])
-        rows = None if body is None else {m.group(1): (m.group(2).lower(), m.group(4))
+        rows = None if body is None else {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                           for m in PLAN_DISPOSITION_ROW.finditer(body)}
         rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
     if rounds:
@@ -2511,7 +2627,7 @@ def plan_dispositions_check(arguments):
             fail(f'Row for {finding}, which is not a finding of plan review round {number}.')
         if finding in rows:
             fail(f'Finding {finding} has more than one row in the round {number} section.')
-        rows[finding] = (row.group(2).lower(), row.group(3), row.group(4))
+        rows[finding] = (row.group(2).lower(), table_cell(row.group(3)), table_cell(row.group(4)))
     for finding in required:
         if finding not in rows:
             fail(f'Finding {finding} has no row in the round {number} section.')
@@ -2828,7 +2944,7 @@ def fallback_record(arguments):
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
         branch = 'detached'
-    cell = lambda value: ' '.join(str(value).split()).replace('|', '\\|') or '-'
+    cell = lambda value: ' '.join(str(value).split()).replace('\\', '\\\\').replace('|', '\\|') or '-'
     text = FALLBACK_LOG.read_text() if FALLBACK_LOG.exists() else (
         '# Claude fallback reviews (Codex catch-up pending)\n\n'
         'Reviews written by the Claude fallback while Codex could not review. Codex reviews all of\n'
@@ -2866,18 +2982,20 @@ def task_category(title):
 
 
 def read_outcomes(paths):
+    """Records in file order; each carries `_at` = (file index, line index), its write position."""
     records = []
-    for path in paths:
+    for file_index, path in enumerate(paths):
         try:
             lines = Path(path).read_text().splitlines()
         except OSError:
             continue
-        for line in lines:
+        for line_index, line in enumerate(lines):
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
             if isinstance(record, dict):
+                record['_at'] = (file_index, line_index)
                 records.append(record)
     return records
 
@@ -2911,7 +3029,8 @@ def recheck_counts(answers, levels):
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
-    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)"""
+    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
+    | catchup BRANCH (the human recorded a Codex catch-up of that branch)"""
     kind, *rest = arguments
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
@@ -2952,6 +3071,10 @@ def outcome(arguments):
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
         record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
+    elif kind == 'catchup':
+        if len(rest) != 1 or not rest[0]:
+            fail('Usage: outcome catchup BRANCH')
+        record['branch'] = rest[0]
     else:
         fail(f'Unknown outcome kind: {kind}')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3048,11 +3171,32 @@ def outcomes_report(arguments):
                          f'{total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
     fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-    if fallback:
+    # Codex mode -> Claude modes it covers; a targeted re-check never covers a full code review
+    covers = {'plan': ('plan',), 'code': ('code', 'recheck'), 'recheck': ('recheck',)}
+
+    def covered(claude):
+        for later in records:
+            if (later.get('project'), later.get('branch')) != (claude.get('project'), claude.get('branch')):
+                continue
+            is_codex = later.get('kind') == 'review' and later.get('reviewer') == 'codex' \
+                and claude.get('mode') in covers.get(later.get('mode'), ())
+            if not (is_codex or later.get('kind') == 'catchup'):
+                continue
+            if str(later.get('time')) > str(claude.get('time')) or (
+                    later.get('time') == claude.get('time') and later['_at'][0] == claude['_at'][0]
+                    and later['_at'][1] > claude['_at'][1]):
+                return True
+        return False
+
+    pending = [r for r in fallback if not covered(r)]
+    if pending:
         lines += ['## Claude-only reviews (Codex catch-up pending)', '']
         lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
-                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in pending]
         lines.append('')
+    if len(fallback) > len(pending):
+        lines += [f'{len(fallback) - len(pending)} Claude review(s) covered by a later Codex review or '
+                  'catch-up record.', '']
     print('\n'.join(lines).rstrip('\n'))
 
 
@@ -3356,6 +3500,48 @@ def local_dir_fd(root):
         return None
     close_fds(fds[0], fds[1])
     return fds[2]
+
+
+def remove_tree(parent_fd, name):
+    """Delete the directory NAME of PARENT_FD and everything below it, walking descriptors
+    opened without following symlinks: an inner symlink is unlinked, never entered."""
+    fd = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as entries:
+            children = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        for child, is_dir in children:
+            if is_dir:
+                remove_tree(fd, child)
+            else:
+                os.unlink(child, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def clear_scratch():
+    """clear-scratch: empty .ai/local/scratch of AI_ROOT (else the current directory) between
+    agent sessions. Never a path-based delete: a session may have replaced `.ai`, `.ai/local`
+    or `scratch` by a symlink, so everything goes through the pinned `.ai/local` descriptor.
+    Warns and never fails the caller."""
+    root = os.environ.get('AI_ROOT') or os.getcwd()
+    local_fd = local_dir_fd(root)
+    if local_fd is None:
+        return warn('could not clear .ai/local/scratch: unsafe or missing .ai/local')
+    try:
+        try:
+            info = os.stat('scratch', dir_fd=local_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(info.st_mode):
+            remove_tree(local_fd, 'scratch')
+        else:
+            # A symlink is removed itself, never followed.
+            os.unlink('scratch', dir_fd=local_fd)
+    except (OSError, RecursionError) as error:
+        warn(f'could not clear .ai/local/scratch: {error}')
+    finally:
+        os.close(local_fd)
 
 
 def read_record(dir_fd, name, limit, tail=False):
@@ -3748,6 +3934,8 @@ def main():
         deps_status(arguments)
     elif command == 'deps-record':
         deps_record(arguments)
+    elif command == 'clear-scratch':
+        clear_scratch()
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
     elif command == 'finish-summary':

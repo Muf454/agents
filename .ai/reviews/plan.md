@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 05325f13c3f01979619cc830282272c6a83602e0c903e5dfb3c2a145f92d1e3e; HEAD e5e68b0b75e0ed3812d63ba0fec5049b9a121652; saved 2026-10-14T21:18:05Z. -->
+<!-- Plan review of plan digest fdd051dc935110c2232840ebab09c0aa1481afb9b654a78c1b2c5de5ad324e01; HEAD 3c8a687f261a4fd6e78842e758456405038ada9f; saved 2026-10-16T20:19:52Z. -->
 
 # Plan review
 
-Scope: HEAD `e5e68b0b75e0ed3812d63ba0fec5049b9a121652`, round 2.
+Overall verdict: Ready for implementation with one MINOR formatting gap.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
 
-Overall verdict: Suitable for implementation with the minor plan improvements below.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Reviewed HEAD: `3c8a687f261a4fd6e78842e758456405038ada9f`.
 
 ## BLOCKER findings
 
@@ -17,48 +17,38 @@ None.
 
 ## MINOR findings
 
-- P8: Correct the notification-log assumption and test retention rollover.
+- P7: Complete the table escape contract for literal backslashes before pipes.
 
-  **Location:** `.ai/tasks.md:641`; `scripts/lib/workflow.py:3496`.
+  **Location:** `.ai/tasks.md:363–372` (T005); `scripts/lib/workflow.py:1563,2831`.
 
-  T009 describes the log as append-only and says every notification changes its size. The actual writer atomically replaces the log and retains only 200 lines. Once retention fills, repeated identical notifications can leave its size and content unchanged.
+  The proposed parser consumes backslashes in pairs, while the retained writers escape only pipes. For example, encoding the literal evidence `literal regex \| is required` produces:
 
-  The proposed inode/mtime fingerprint already accommodates replacement, so this does not reopen P3.
+  ```text
+  | P11 | accepted | literal regex \\| is required | T030 |
+  ```
 
-  **Concrete plan change:** Describe the existing replacement and retention behavior accurately. Add a regression using `notify-log` on a full 200-line log with repeated identical messages and unchanged timestamps, asserting that the fingerprint changes despite unchanged displayed events and file size.
+  An in-memory reproduction using the planned regex reads `is required` as the Task cell. The planned decoder also lacks a rule for representing and recovering a literal backslash immediately before a pipe. The specified round-trip test covers only a bare pipe.
 
-- P9: Add coverage for the concurrent runner’s cleanup requirement.
+  **Concrete plan change:** Define consistent encoding and decoding for literal backslashes and pipes. Add round-trip cases containing a literal backslash followed by a pipe and multiple consecutive backslashes, while retaining the missing-Task-cell rejection tests.
 
-  **Location:** `.ai/tasks.md:354`; `.ai/tasks.md:363`.
+## Previous-round assessment
 
-  T004 explicitly requires terminating running batch processes and joining threads on interruption or worker exceptions. Its acceptance tests cover ordinary failures, discovery errors and count mismatches, but none exercises these new cleanup paths. Those tests could pass while interruption leaves workers or subprocesses running.
+P3 is addressed by T012’s bracket-free surrounding-prose rule and negative cases. P6 is addressed by T013’s cleanup-protected startup loop and interruption tests. The current plan also retains coverage for P1, P2, P4 and P5.
 
-  **Concrete plan change:** Add deterministic tests with blocked batches: interrupt the runner and separately inject a worker launch exception. Require bounded termination, a failing exit status and cleanup of the running batch processes.
+All 13 tasks specify models; no model-risk mismatch was found.
 
-## Previous findings re-evaluated
+## Validation observed
 
-P1–P7 are addressed by the current plan:
+- Task queue validation passed.
+- Python AST parsing passed for 8 files; shell syntax checks passed for 13 files.
+- `DocsConsistencyTest`: 3 tests passed.
+- An in-memory model of T012 passed 9 representative acceptance and rejection cases.
+- An in-memory reproduction demonstrated P7.
 
-- T011 repairs interrupted revision queues before the queue-dependent checks.
-- T005 adds execution probing, fallback and cleanup for tmpfs selection.
-- T009 fingerprints notification identity independently of displayed text.
-- T004 specifies `opus`.
-- The handoff now declares `Flow unchanged`; T002 updates it when the flow changes.
-- T004 explicitly updates the documentation consistency contract.
-- T006 preserves existing test IDs while permitting additional tests.
+## Scope and limitations
 
-## Validation observed and limitations
+Inspected repository instructions, spec, plan, tasks, state, handoff, prior dispositions, relevant source, prompts, tests, documentation and `.ai/validate`. No other findings were identified in those inspected areas.
 
-Inspected the instructions, spec, plan, queue, dispositions, state, handoff, relevant source, tests, documentation and `.ai/validate`.
+The full gate and integration tests were not run because they write fixtures and validation artifacts in this read-only environment. Planned behavior remains unimplemented. Retain the real-process signal tests and manual self-check interruption check after implementation.
 
-Observed:
-
-- HEAD matches the requested scope; working tree is clean.
-- Task queue validation passes.
-- Shell syntax checks pass for 13 files.
-- All three documentation consistency tests pass.
-- Test discovery collects 619 tests.
-
-The full `./scripts/ai-check`, fixture integration tests and CI timing measurements were not run because this sandbox permits only filesystem reads. Implementation must still satisfy the planned regression tests and full gate; the performance target requires the documented human CI check.
-
-No additional security, authorization or data-integrity findings were identified in the inspected plan. This review is not human acceptance.
+No files were modified or network integrations invoked.

@@ -1,4 +1,5 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
+import ast
 import contextlib
 import importlib.util
 import io
@@ -6,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -101,6 +103,11 @@ args = sys.argv[1:]
 assert '--permission-mode' in args and args[args.index('--permission-mode')+1] == 'dontAsk'
 assert '--' in args
 prompt = args[args.index('--')+1]
+def drop_sections(block, names=('Likely affected modules', 'Result / notes')):
+    # A task block as a forgetful session would write it: the named ### sections left out.
+    for name in names:
+        block = re.sub(r'^### ' + re.escape(name) + r'\n.*?(?=^### |\Z)', '', block, flags=re.S | re.M)
+    return block
 if 'RECOVERY CONTRACT' in prompt:
     assert args[args.index('--tools')+1] == 'Read,Glob,Grep'
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
@@ -110,10 +117,15 @@ if 'RECOVERY CONTRACT' in prompt:
     if os.environ.get('MOCK_RECOVER_KILL'):
         # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
         os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
-    decision = {'action': os.environ.get('MOCK_RECOVER', 'rerun'), 'reason': 'the session crashed once.',
+    mode = os.environ.get('MOCK_RECOVER', 'rerun')
+    decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
-    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
-                      'result': json.dumps(decision)}))
+    answer = json.dumps(decision)
+    if mode == 'prose-only':
+        answer = 'The session\tcrashed once;\n\nI could not decide what to do.'
+    elif mode.startswith('prose-'):
+        answer = 'The session crashed once and left nothing behind.\n' + answer + '\nThat is my verdict.'
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': answer}))
     sys.exit(0)
 if 'CLAUDE REVIEWER' in prompt:
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
@@ -187,6 +199,8 @@ if 'REVISION CONTRACT' in prompt:
             text = tasks_file.read_text()
             new_id = 'T%03d' % (max(int(x) for x in re.findall(r'^## T(\d+)', text, re.M)) + 1)
             new_task = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+            if mode == 'revise-accept-missing-sections':
+                new_task = drop_sections(new_task)
             if mode in ('revise-accept-prereq', 'revise-accept-cycle'):
                 # The new task is a prerequisite of the first task, appended after it (the cycle
                 # variant also makes the new task depend on that first task).
@@ -246,6 +260,8 @@ if 'PLANNING CONTRACT' in prompt:
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
+    if mode == 'plan-missing-sections':
+        second = drop_sections(second)
     if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
     if mode == 'plan-bad-queue':
@@ -263,6 +279,7 @@ if 'PLANNING CONTRACT' in prompt:
     sys.exit(0)
 assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
 assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
+assert '.ai/local/scratch/' in prompt, 'the prompt does not name the scratch directory'
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
 knowledge = os.environ.get('MOCK_KNOWLEDGE_DIR')
@@ -276,6 +293,9 @@ mode = os.environ.get('MOCK_CLAUDE', 'success')
 if os.environ.get('MOCK_REQUIRE'):  # e.g. dependencies the host installs before a session
     assert pathlib.Path(os.environ['MOCK_REQUIRE']).exists(), 'missing ' + os.environ['MOCK_REQUIRE']
 with open('.ai/local/mock-invocations', 'a') as f: f.write('call\n')
+if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before every session
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'scratch-seen', 'a') as f:
+        f.write(' '.join(sorted(os.listdir('.ai/local/scratch'))) + '\n')
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
@@ -317,6 +337,10 @@ if 'TRIAGE CONTRACT' in prompt:
         ids = [int(x) for x in re.findall(r'^## T(\d+)', text, re.M)]
         new_id = 'T%03d' % (max(ids) + 1)
         block = open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', new_id)
+        if mode == 'triage-missing-sections':
+            block = drop_sections(block)
+        if mode == 'triage-missing-goal':
+            block = drop_sections(block, ('Goal', 'Likely affected modules', 'Result / notes'))
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
         review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
@@ -416,6 +440,17 @@ if mode not in ('no-progress', 'bad-format'):
             pathlib.Path(task_id + '.txt').chmod(0o755)
             subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
+if mode == 'scratch-leftover':
+    # Throwaway files a session leaves behind; the host must remove them after the session.
+    scratch = pathlib.Path('.ai/local/scratch')
+    (scratch / 'nested/deeper').mkdir(parents=True, exist_ok=True)
+    (scratch / 'tmp.test.sh').write_text('echo scratch\n')
+    (scratch / 'nested/deeper/notes.txt').write_text('scratch\n')
+if mode == 'scratch-parent-symlink':
+    pathlib.Path('.ai/local').rename('.ai/local-aside')
+    pathlib.Path('.ai/local').symlink_to(os.environ['MOCK_VICTIM'])
+if mode == 'scratch-symlink':
+    pathlib.Path('.ai/local/scratch').symlink_to(os.environ['MOCK_VICTIM'])
 if mode == 'bad-format':
     pathlib.Path('.ai/tasks.md').write_text('## T001 — broken\nStatus: MAGIC\n')
 if denied_but_done:
@@ -1529,6 +1564,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('never prefix commands with `cd`', self.prompt_section('recover'))
         self.assertNotIn('never prefix commands with cd (', (ROOT / 'scripts/ai-run').read_text())
 
+    def test_task_sections_prompts_show_the_format(self):
+        for name in ('triage', 'plan-revision', 'plan'):
+            text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()
+            for phrase in ('### Likely affected modules', '### Result / notes', 'write a pipe as'):
+                self.assertIn(phrase, text, f'{name}.md lacks {phrase!r}')
+        tasks = (ROOT / 'templates/.ai/tasks.md').read_text()
+        self.assertIn('`### Result / notes` starts empty', tasks)
+
     def test_tool_contract_setup_installs_ai_task(self):
         self.setup_project()
         self.assertTrue((self.project / '.ai/bin/ai-task').is_file())
@@ -1957,6 +2000,137 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('T001.txt', tracked)
         self.assertEqual(self.run_cmd(['git', 'diff', '--cached', '--name-only']).stdout.strip(), '')
 
+    def scratch_victim(self):
+        """An external directory a session might point the host's delete at."""
+        victim = self.base / 'victim'
+        (victim / 'scratch').mkdir(parents=True)
+        (victim / 'scratch/keep').write_text('keep\n')
+        (victim / 'keep').write_text('keep\n')
+        return victim
+
+    def clear_scratch(self):
+        return self.helper('clear-scratch')
+
+    def test_scratch_clear_refuses_a_symlinked_local_or_ai(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        local.rename(self.base / 'local-aside')
+        local.symlink_to(victim)
+        result = self.clear_scratch()
+        self.assertIn('Warning: could not clear .ai/local/scratch', result.stderr)
+        self.assertTrue((victim / 'scratch/keep').exists())
+        local.unlink()
+        ai = self.project / '.ai'
+        other = self.base / 'other-ai'
+        (other / 'local/scratch').mkdir(parents=True)
+        (other / 'local/scratch/keep').write_text('keep\n')
+        ai.rename(self.base / 'ai-aside')
+        ai.symlink_to(other)
+        result = self.clear_scratch()
+        self.assertIn('Warning: could not clear .ai/local/scratch', result.stderr)
+        self.assertTrue((other / 'local/scratch/keep').exists())
+
+    def test_scratch_clear_removes_a_symlink_without_following_it(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        scratch.symlink_to(victim)
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.is_symlink() or scratch.exists())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_clear_removes_a_tree_but_never_enters_inner_symlinks(self):
+        self.setup_project()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        (scratch / 'nested/deeper').mkdir(parents=True)
+        (scratch / 'tmp.test.sh').write_text('echo\n')
+        (scratch / 'nested/deeper/file').write_text('x\n')
+        (scratch / 'link').symlink_to(victim)
+        (scratch / 'nested/link').symlink_to(victim / 'keep')
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.exists())
+        self.assertTrue((self.project / '.ai/local').is_dir())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_clear_handles_missing_scratch_and_a_regular_file(self):
+        self.setup_project()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        scratch.write_text('a file, not a directory\n')
+        result = self.clear_scratch()
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertFalse(scratch.exists())
+
+    def test_scratch_clear_runs_before_and_after_each_session(self):
+        self.ready()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.mkdir(parents=True)
+        (scratch / 'old').write_text('left by an earlier session\n')
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='scratch-leftover')
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+        # The mock records any scratch it finds at session start: there must be none.
+        seen = self.base / 'scratch-seen'
+        self.assertFalse(seen.exists(), seen.read_text() if seen.exists() else '')
+        self.assertFalse(scratch.exists())
+        self.assertNotIn('scratch', self.run_cmd(['git', 'ls-files']).stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_scratch_clear_never_follows_a_symlink_a_session_planted(self):
+        self.ready()
+        victim = self.scratch_victim()
+        self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='scratch-parent-symlink',
+                  MOCK_VICTIM=str(victim))
+        self.assertTrue((victim / 'scratch/keep').exists())
+        self.assertTrue((victim / 'keep').exists())
+
+    def test_scratch_clear_removes_a_scratch_symlink_after_the_session(self):
+        self.ready()
+        victim = self.scratch_victim()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='scratch-symlink', MOCK_VICTIM=str(victim))
+        scratch = self.project / '.ai/local/scratch'
+        self.assertFalse(scratch.is_symlink() or scratch.exists())
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+
+    def test_scratch_dir_prompts_name_it_and_share_one_block(self):
+        self.ready()
+        # The mock asserts the runner prompt names .ai/local/scratch/ on every session.
+        self.tool('ai-run', '--approved')
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+        for name in ('runner', 'triage'):
+            self.assertIn('`.ai/local/scratch/`', self.prompt_section(name))
+            self.assertIn('`rm` is not allowed', self.prompt_section(name))
+        self.assertEqual(self.prompt_section('runner'), self.prompt_section('triage'))
+        self.assertIn('.ai/local/scratch/', (ROOT / 'templates/CLAUDE.md').read_text())
+
+    def test_scratch_dir_docs_describe_the_host_clear(self):
+        for path in ('README.md', 'docs/workflow.md'):
+            text = ' '.join((ROOT / path).read_text().split())
+            self.assertIn('empties `.ai/local/scratch`', text, path)
+            self.assertIn('never follows a symlink', text, path)
+
+    def test_scratch_clear_startup_refuses_a_preexisting_scratch_symlink(self):
+        self.ready()
+        victim = self.scratch_victim()
+        scratch = self.project / '.ai/local/scratch'
+        scratch.parent.mkdir(exist_ok=True)
+        scratch.symlink_to(victim)
+        result = self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Unsafe symlink in workflow path', result.stderr)
+        self.assertTrue((victim / 'keep').exists())
+        self.assertTrue((victim / 'scratch/keep').exists())
+        self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+
     def test_recovery_never_commits_secret_looking_files(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
@@ -2291,6 +2465,66 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-task', 'reorder')
         self.assertIn('Task queue reordered (dependencies first): T011 T001', result.stdout)
         self.tool('ai-task', 'check')
+
+    def test_task_sections_fill_raid_case(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        no_result = '### Result / notes\nPending.\n'
+
+        def without_likely(text, task_id):
+            return text.replace(f'### Likely affected modules\n{task_id}.txt\n', '')
+        t19 = without_likely(task('T019'), 'T019').replace(no_result, '')
+        t20 = task('T020').replace(no_result, '')
+        t01 = without_likely(task('T001', status='DONE'), 'T001')
+        original = '# Queue\n\nPreamble.\n\n' + t01 + t19 + t20 + '## Notes\nTrailer.\n'
+        queue.write_text(original)
+        self.commit()
+        result = self.helper('tasks', 'fill-sections')
+        self.assertEqual(result.stdout.strip(), 'Task queue: added missing sections: '
+                         'T019 (Likely affected modules, Result / notes), T020 (Result / notes)')
+        text = queue.read_text()
+        self.assertTrue(text.startswith('# Queue\n\nPreamble.\n\n' + t01 + '## T019'))
+        self.assertTrue(text.endswith('## Notes\nTrailer.\n'))
+        parts = self.queue_blocks(text)
+        self.assertEqual(parts['T001'], t01.rstrip('\n'))
+        self.assertEqual(parts['T019'].count('### Likely affected modules\n(not listed)\n\n### Acceptance'), 1)
+        self.assertTrue(parts['T019'].endswith('### Validation\nbash .ai/validate\n\n### Result / notes'))
+        self.assertTrue(parts['T020'].endswith('### Validation\nbash .ai/validate\n\n### Result / notes'))
+        self.assertEqual(parts['T020'].count('### Likely affected modules'), 1)
+        self.helper('plan-keeps-done', 'HEAD')
+        result = self.helper('tasks', 'check', expected=1)
+        self.assertIn('T001: missing ### Likely affected modules', result.stderr)
+        queue.write_text(text.replace(t01, task('T001', status='DONE'), 1))
+        self.helper('tasks', 'check')
+
+    def test_task_sections_fill_complete_queue_is_untouched(self):
+        self.ready(task('T001') + task('T002', dependencies='T001'))
+        queue = self.project / '.ai/tasks.md'
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        result = self.helper('tasks', 'fill-sections')
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_task_sections_fill_ignores_fences_and_adds_only_two(self):
+        self.ready()
+        queue = self.project / '.ai/tasks.md'
+        fenced = task('T001').replace('### Result / notes\nPending.\n',
+                                      '```\n### Result / notes\n```\n')
+        queue.write_text(fenced)
+        self.helper('tasks', 'check', expected=1)
+        self.helper('tasks', 'fill-sections')
+        text = queue.read_text()
+        self.assertTrue(text.rstrip('\n').endswith('```\n\n### Result / notes'))
+        self.helper('tasks', 'check')
+        no_goal = task('T001').replace('### Goal\nWrite a local test artifact.\n', '') \
+            .replace('### Result / notes\nPending.\n', '')
+        queue.write_text(no_goal)
+        self.helper('tasks', 'fill-sections')
+        self.assertNotIn('### Goal', queue.read_text())
+        self.assertIn('### Result / notes', queue.read_text())
+        result = self.helper('tasks', 'check', expected=1)
+        self.assertIn('T001: missing ### Goal', result.stderr)
 
     def test_queue_check_empty_template_queue_fails(self):
         self.setup_project()
@@ -4181,6 +4415,109 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         log.write_text('not json')
         self.assertTrue(self.helper('recover-decision', str(log), '0').stdout.startswith('escalate'))
 
+    def scan_decision(self, result):
+        log = self.base / 'decision.json'
+        log.write_text(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result}))
+        return self.helper('recover-decision', str(log), '0').stdout.rstrip('\n')
+
+    def assert_scan_escalates(self, cases):
+        for result in cases:
+            with self.subTest(result=result):
+                reason = ' '.join(f'the recovery session gave no valid decision; it wrote: {result}'.split())[:300]
+                self.assertEqual(self.scan_decision(result), f'escalate\t{reason}\tinspect the stop yourself')
+
+    def assert_prose_excerpt(self, result):
+        action, reason, human = self.scan_decision(result).split('\t')
+        self.assertEqual((action, human), ('escalate', 'inspect the stop yourself'))
+        self.assertTrue(reason.startswith('the recovery session gave no valid decision; it wrote: '), reason)
+        self.assertLessEqual(len(reason), 300)
+        return reason
+
+    def test_recovery_decision_prose_only_escalates_with_an_excerpt(self):
+        reason = self.assert_prose_excerpt('The gate\ttimed out   twice.\n\nI cannot tell why. ' + 'x' * 400)
+        self.assertIn('it wrote: The gate timed out twice. I cannot tell why. xxx', reason)
+        self.assertEqual(len(reason), 300)
+        # Nothing written: the reason stays as before.
+        self.assertEqual(self.scan_decision('  \n '),
+                         'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+
+    def test_recovery_decision_prose_with_brackets_escalates_with_an_excerpt(self):
+        candidate = '{"action":"commit_and_rerun","reason":"example"}'
+        reason = self.assert_prose_excerpt(f'Diagnostic: ["]",\n{candidate}\n]')
+        self.assertIn('it wrote: Diagnostic: ["]", {"action":"commit_and_rerun"', reason)
+        reason = self.assert_prose_excerpt('Diagnosis.\n{"action": "delete_branch", "reason": "a"}')
+        self.assertIn('it wrote: Diagnosis. {"action": "delete_branch"', reason)
+
+    def test_recovery_decision_prose_rerun_resumes_the_pipeline(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
+                  MOCK_CLAUDE='error-once', MOCK_RECOVER='prose-rerun')
+        notes = self.notifications()
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('🔧 Recovered (1/2)', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+
+    def test_recovery_decision_prose_only_notification_quotes_the_session(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='prose-only')
+        notes = self.notifications()
+        self.assertIn('the recovery session gave no valid decision; it wrote: The session crashed once; '
+                      'I could not decide what to do.', notes)
+        self.assertEqual(notes.count('⛔'), 1)
+
+    def test_recovery_decision_scan_accepts_one_line_start_object_in_bracket_free_prose(self):
+        decision = '{"action": "escalate", "reason": "x", "human_action": "y"}'
+        self.assertEqual(self.scan_decision(f'The run stopped because the gate timed out.\nIt looks real.\n{decision}'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n{decision}\nThat is my verdict.\nThanks.'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n```json\n{decision}\n```'), 'escalate\tx\ty')
+        self.assertEqual(self.scan_decision(f'Diagnosis first.\n```json\n{decision}\n```\nMore prose.'),
+                         'escalate\tx\ty')
+        self.assertEqual(self.scan_decision('Diagnosis.\n  {\n    "action": "rerun",\n    "reason": "crash"\n}\n'),
+                         'rerun\tcrash\t')
+        self.assertEqual(self.scan_decision('Diagnosis.\n{"action": "rerun", "reason": "saw [1] and {x} ]["}'),
+                         'rerun\tsaw [1] and {x} ][\t')
+
+    def test_recovery_decision_scan_nested_action_only_outer_counts(self):
+        self.assertEqual(self.scan_decision('Diagnosis.\n{"action": "rerun", "reason": "x", '
+                                            '"n": {"action": "commit_and_rerun", "reason": "y"}}'),
+                         'rerun\tx\t')
+
+    def test_recovery_decision_scan_escalates_enclosing_containers(self):
+        candidate = '{"action":"commit_and_rerun","reason":"example"}'
+        self.assert_scan_escalates([
+            # plan review round 2 (P3): a bracket inside a JSON string in the prose
+            f'Diagnostic: ["]",\n{candidate}\n]',
+            f'Diagnostic: ["{{",\n{candidate}\n]',
+            f'Diagnostic: ["}}",\n{candidate}\n]',
+            f'Diagnosis.\n{candidate}\n]',
+            f'Diagnosis.\n{candidate}\n}}',
+            f'See [the log].\n{candidate}',
+            # round 1
+            'Broken diagnostic: {"details":{"action":"commit_and_rerun", "reason":"example"}, BROKEN}',
+            'Broken diagnostic:\n{"details":{"action":"commit_and_rerun", "reason":"example"}, BROKEN}',
+            'Diagnostic: [{"action":"rerun","reason":"example"}]',
+            f'Diagnostic: [\n{candidate}\n]',
+            'An example: "{\\"action\\": \\"rerun\\", \\"reason\\": \\"x\\"}"',
+            'I would answer `{"action": "rerun", "reason": "x"}` here.',
+            f'The template is {{"action": "...", "reason": "..."}}.\n{candidate}',
+        ])
+
+    def test_recovery_decision_scan_escalates_invalid_or_ambiguous_candidates(self):
+        self.assert_scan_escalates([
+            'Diagnosis.\n{"action": "rerun", "reason": "a"}\n{"action": "rerun", "reason": "b"}',
+            'Diagnosis.\n{"action": "rerun", "reason": "a"}\n{"action": "escalate", "reason": "b"}',
+            'Diagnosis.\n{"action": "rerun", "action": "escalate", "reason": "a"}',
+            'Diagnosis.\n{"action": "rerun"}',
+            'Diagnosis.\n{"action": "rerun", "reason": "a"} that is it',
+            'Diagnosis.\n{"verdict": "rerun", "reason": "a"}',
+            'Diagnosis.\n{"action": "delete_branch", "reason": "a"}',
+            'Prose only, no decision at all.',
+        ])
+
     def test_recovery_refuses_other_branch_and_tampered_manifest(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
@@ -5195,6 +5532,82 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             {'task': 'T010', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 120}])
         self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
         self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
+
+    def catchup_report(self, rows, extra_files=()):
+        self.setup_project()
+        paths = []
+        for index, group in enumerate([rows, *extra_files]):
+            path = self.base / f'catchup{index}.jsonl'
+            path.write_text(''.join(json.dumps({'project': 'p', 'branch': 'b', **row}) + '\n' for row in group))
+            paths.append(str(path))
+        return self.tool('ai-status', '--outcomes', *paths).stdout
+
+    def claude_review(self, time, mode='code', **extra):
+        return {'kind': 'review', 'reviewer': 'claude-fallback', 'mode': mode, 'model': 'm', 'time': time,
+                'head': 'a' * 40, **extra}
+
+    def test_outcome_catchup_later_codex_review_covers(self):
+        report = self.catchup_report([self.claude_review('2026-01-01T00:00:01Z'),
+                                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+        self.assertIn('1 Claude review(s) covered', report)
+
+    def test_outcome_catchup_earlier_other_branch_or_family_does_not_cover(self):
+        claude = self.claude_review('2026-01-01T00:00:05Z')
+        for later in ({'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:01Z'},
+                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:09Z', 'branch': 'o'},
+                      {'kind': 'review', 'reviewer': 'codex', 'mode': 'plan', 'time': '2026-01-01T00:00:09Z'}):
+            self.assertIn('Codex catch-up pending', self.catchup_report([claude, later]))
+
+    def test_outcome_catchup_recheck_and_plan_families(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'recheck'), self.claude_review('2026-01-01T00:00:01Z', 'plan'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertIn('plan HEAD', report.split('Codex catch-up pending')[1])
+        self.assertNotIn('recheck HEAD', report)
+        self.assertIn('1 Claude review(s) covered', report)
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'plan'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'plan', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+
+    def test_outcome_catchup_recheck_does_not_cover_code(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'recheck', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertIn('code HEAD', report.split('Codex catch-up pending')[1])
+        self.assertNotIn('covered by a later', report)
+
+    def test_outcome_catchup_code_covers_recheck(self):
+        report = self.catchup_report([
+            self.claude_review('2026-01-01T00:00:01Z', 'recheck'),
+            {'kind': 'review', 'reviewer': 'codex', 'mode': 'code', 'time': '2026-01-01T00:00:02Z'}])
+        self.assertNotIn('Codex catch-up pending', report)
+        self.assertIn('1 Claude review(s) covered', report)
+
+    def test_outcome_catchup_done_command_records_and_covers(self):
+        self.setup_project()
+        state = self.base / 'host-state/outcomes.jsonl'
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({**self.claude_review('2026-01-01T00:00:01Z'), 'project': 'project with spaces',
+                                     'branch': 'feature/x'}) + '\n')
+        out = self.tool('ai-status', '--catch-up-done', 'feature/x').stdout
+        self.assertIn('Recorded Codex catch-up for feature/x', out)
+        record = self.outcome_rows()[-1]
+        self.assertEqual((record['kind'], record['branch'], record['project']),
+                         ('catchup', 'feature/x', 'project with spaces'))
+        self.assertTrue(record['time'])
+        self.assertNotIn('Codex catch-up pending', self.tool('ai-status', '--outcomes').stdout)
+        with state.open('a') as log:
+            log.write(json.dumps({**self.claude_review('2999-01-01T00:00:00Z'), 'project': 'project with spaces',
+                                  'branch': 'feature/x'}) + '\n')
+        self.assertIn('Codex catch-up pending', self.tool('ai-status', '--outcomes').stdout)
+
+    def test_outcome_catchup_equal_times(self):
+        t = '2026-01-01T00:00:01Z'
+        self.assertNotIn('Codex catch-up pending', self.catchup_report([self.claude_review(t), {'kind': 'catchup', 'time': t}]))
+        self.assertIn('Codex catch-up pending', self.catchup_report([{'kind': 'catchup', 'time': t}, self.claude_review(t)]))
+        self.assertIn('Codex catch-up pending', self.catchup_report([self.claude_review(t)], [[{'kind': 'catchup', 'time': t}]]))
 
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
@@ -6337,6 +6750,55 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
         self.assertEqual(self.open_stage(), '')
 
+    def test_task_sections_host_triage_adds_the_missing_sections(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002 (Likely affected modules, Result / notes)',
+                      result.stdout)
+        self.assertEqual(self.triage_rounds(), 1)
+        counted = self.run_cmd(['git', 'log', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.split()
+        tasks_text = self.run_cmd(['git', 'show', f'{counted[0]}:.ai/tasks.md']).stdout
+        new_task = tasks_text.split('## T002')[1]
+        self.assertIn('### Likely affected modules', new_task)
+        self.assertIn('### Result / notes', new_task)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.open_stage(), '')
+        prompt = (self.base / 'triage-prompts.log').read_text()
+        self.assertIn('Copy the task format of .ai/tasks.md exactly', prompt)
+
+    def test_task_sections_host_triage_missing_goal_still_stops(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-missing-goal')
+        self.assertIn('missing ### Goal', result.stderr)
+        self.assertNotIn('(Goal', result.stdout)
+
+    def test_task_sections_host_planning_adds_the_missing_sections(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002 (Likely affected modules, Result / notes)',
+                      result.stdout)
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        queue = (self.project / '.ai/tasks.md').read_text()
+        second = queue.split('## T002')[1]
+        self.assertIn('### Likely affected modules', second)
+        self.assertIn('### Result / notes', second)
+        self.assertEqual(self.observation()['note'], '2 tasks')
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_task_sections_host_revision_adds_the_missing_sections(self):
+        self.revise_ready()
+        result = self.revise(MOCK_CLAUDE='revise-accept-missing-sections')
+        self.assertIn('Task queue: added missing sections: T002', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)
+        self.assertEqual(self.revision_commits(), 1)
+        committed = self.run_cmd(['git', 'show', 'HEAD:.ai/tasks.md']).stdout.split('## T002')[1]
+        self.assertIn('### Likely affected modules', committed)
+        self.assertIn('### Result / notes', committed)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+
     def test_triage_completion_uncommitted_records_recover_into_one_round(self):
         # 2026-10-05: the triage session's commit was denied, the run stopped, recovery resumed.
         self.ready()
@@ -6914,6 +7376,96 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         rows = [m.group(2).lower() for m in wf.DISPOSITION_ROW.finditer(
             (self.project / '.ai/reviews/dispositions.md').read_text())]
         self.assertEqual(rows, ['rejected', 'accepted'])
+
+    def test_disposition_pipes_escaped_pipe_in_evidence_keeps_the_task_cell(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        piped = rows.replace('defect confirmed in the fixture', 'use `--yes \\| --no`')
+        dispositions.write_text(piped)
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+        wf = self.recheck_module()
+        row = wf.DISPOSITION_ROW.search(piped)
+        self.assertEqual((wf.table_cell(row.group(3)), wf.table_cell(row.group(4))), ('use `--yes | --no`', 'T001'))
+        # An unescaped pipe still splits the row: the Task cell is then misread.
+        dispositions.write_text(rows.replace('defect confirmed in the fixture', 'use --yes | --no'))
+        self.helper('triage-check', '--fresh', expected=1)
+
+    def test_disposition_pipes_rejected_row_with_escaped_pipe_passes(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace(
+            '| accepted | defect confirmed in the fixture | T001 |',
+            '| rejected | the flag reads `--yes \\| --no` in the fixture | none |'))
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=0 deferred=0')
+
+    def test_disposition_pipes_missing_task_cell_is_malformed(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace('| accepted | defect confirmed in the fixture | T001 |',
+                                             '| accepted | discussion of fix \\| T001 |'))
+        result = self.helper('triage-check', '--fresh', expected=1)
+        self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_disposition_pipes_table_cell_pattern(self):
+        wf = self.recheck_module()
+        cell = re.compile('^' + wf.TABLE_CELL + r'\|')
+        self.assertEqual(cell.match('a \\| b|').group(1), 'a \\| b')
+        self.assertEqual(cell.match('C:\\path|').group(1), 'C:\\path')
+        self.assertEqual(wf.table_cell(' a \\| b '), 'a | b')
+        self.assertEqual(wf.table_cell('C:\\path'), 'C:\\path')
+
+    def test_disposition_pipes_missing_task_before_next_row(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace(
+            '| accepted | defect confirmed in the fixture | T001 |',
+            '| accepted | defect confirmed in the fixture |\n| M9 | rejected | other | none |'))
+        self.helper('triage-check', '--fresh', expected=1)
+        wf = self.recheck_module()
+        found = [m.group(1) for m in wf.DISPOSITION_ROW.finditer(dispositions.read_text())]
+        self.assertNotIn('M1', found)
+        self.assertIn('M9', found)
+
+    def test_disposition_pipes_missing_task_before_next_plan_row(self):
+        wf = self.recheck_module()
+        plan = '| P1 | accepted | note |\n| P2 | rejected | covered in docs/x.md:1 | |\n'
+        self.assertEqual([m.group(1) for m in wf.PLAN_DISPOSITION_ROW.finditer(plan)], ['P2'])
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + plan)
+        self.plan_check(start, expected=1)
+
+    def test_disposition_pipes_literal_backslash_round_trip(self):
+        wf = self.recheck_module()
+        for decoded in ('literal regex | is required', 'a \\\\ b', 'ends with \\', 'C:\\path | x', 'a \\| b'):
+            with self.subTest(decoded):
+                encoded = ' '.join(decoded.split()).replace('\\', '\\\\').replace('|', '\\|')
+                row = f'| M1 | accepted | {encoded} | T001 |\n'
+                match = wf.DISPOSITION_ROW.search(row)
+                self.assertEqual((wf.table_cell(match.group(3)), wf.table_cell(match.group(4))), (decoded, 'T001'))
+        self.assertEqual(wf.table_cell('literal regex \\| is required'), 'literal regex | is required')
+        self.assertEqual(wf.table_cell('a \\\\\\\\ b'), 'a \\\\ b')
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        dispositions.write_text(rows.replace('defect confirmed in the fixture', 'literal regex \\| is required'))
+        self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_disposition_pipes_plan_dispositions_read_the_task_cell(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        rows = ('| P1 | accepted | flag `--no\\|--yes` needs a test | T002 |\n'
+                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+        path.write_text(path.read_text() + rows)
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        malformed = '| P1 | accepted | discussion of fix \\| T002 |\n'
+        path.write_text(path.read_text().replace(rows.splitlines(True)[0], malformed))
+        self.plan_check(start, expected=1)
+
+    def test_disposition_pipes_round_trip_through_the_recheck_record(self):
+        self.rejected_review(['| M1 | rejected | the flag reads `--yes \\| --no` in the fixture | none |\n',
+                              '| M2 | accepted | real defect | T002 |\n'], fix_task=True)
+        self.helper('triage-check', '--fresh')
+        self.tool('ai-review', '--recheck')
+        self.assertIn('the flag reads `--yes | --no` in the fixture',
+                      (self.base / 'codex-recheck-calls').read_text())
+        recheck = (self.project / '.ai/reviews/recheck.md').read_text()
+        self.assertIn('the flag reads `--yes \\| --no` in the fixture', recheck)
+        self.assertNotIn('\\\\|', recheck)
 
     def test_recheck_command_missing_duplicate_extra_malformed_count_as_upheld(self):
         wf = self.recheck_module()
@@ -8813,6 +9365,518 @@ class ParallelRunnerTest(unittest.TestCase):
         output, _ = process.communicate(timeout=self.STOP_BOUND)
         self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
         self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the SIGTERM')
+
+    # FL-27: as a child subreaper the runner adopts what the batches orphan and reaps it.
+    def write_orphan(self):
+        """A test whose `sh` backgrounds a 1 s sleep and exits at once, orphaning it; it records
+        the sleeper's ppid as /proc shows it and the runner's pid (the batch's parent)."""
+        self.pidfile = self.base / 'sleeper.pid'
+        # No kill on cleanup: the sleep ends by itself, and once reaped its pid may be reused.
+        self.seen = self.base / 'seen'
+        self.write('test_orphan.py',
+                   '    def test_spawn(self):\n'
+                   '        import subprocess\n'
+                   f'        path = {str(self.pidfile)!r}\n'
+                   '        subprocess.run(["sh", "-c", "sleep 1 & echo $! > " + path + ".tmp"], check=True)\n'
+                   '        os.replace(path + ".tmp", path)\n'
+                   '        pid = int(open(path).read())\n'
+                   '        stat = open(f"/proc/{pid}/stat").read()\n'
+                   f'        open({str(self.seen)!r}, "w").write(stat.rsplit(")", 1)[1].split()[1]'
+                   ' + " " + str(os.getppid()))\n')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'child subreapers are Linux-only')
+    def test_parallel_runner_subreaper_adopts_and_reaps_orphans(self):
+        self.write_orphan()
+        # Keeps the run going until the sleeper has exited, then wants it reaped (gone from
+        # /proc, not a zombie) and no zombie child of the runner left.
+        self.write('test_wait.py',
+                   '    def test_wait(self):\n'
+                   '        import time\n'
+                   f'        path, deadline = {str(self.pidfile)!r}, time.monotonic() + {MEDIUM_TIMEOUT}\n'
+                   '        while not os.path.exists(path):\n'
+                   '            self.assertLess(time.monotonic(), deadline, "the orphan never started")\n'
+                   '            time.sleep(0.05)\n'
+                   '        pid = int(open(path).read())\n'
+                   '        while os.path.exists(f"/proc/{pid}"):\n'
+                   '            self.assertLess(time.monotonic(), deadline, f"orphan {pid} was not reaped")\n'
+                   '            time.sleep(0.05)\n'
+                   '        runner = os.getppid()\n'
+                   '        while True:\n'
+                   '            zombies = []\n'
+                   '            for entry in filter(str.isdigit, os.listdir("/proc")):\n'
+                   '                try:\n'
+                   '                    fields = open(f"/proc/{entry}/stat").read().rsplit(")", 1)[1].split()\n'
+                   '                except OSError:\n'
+                   '                    continue\n'
+                   '                if fields[0] == "Z" and int(fields[1]) == runner:\n'
+                   '                    zombies.append(entry)\n'
+                   '            if not zombies:\n'
+                   '                break\n'
+                   '            self.assertLess(time.monotonic(), deadline, f"zombie children of the runner: {zombies}")\n'
+                   '            time.sleep(0.05)\n')
+        result = self.runner('--start-dir', str(self.suite))
+        self.assertTrue(result.stdout.rstrip().endswith('OK'), result.stdout)
+        self.assertIn('Ran 2 tests', result.stdout)
+        ppid, runner = self.seen.read_text().split()
+        self.assertEqual(ppid, runner, 'the orphan was not reparented to the runner')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'child subreapers are Linux-only')
+    def test_parallel_runner_subreaper_keeps_failure_and_crash_reports(self):
+        self.write_orphan()
+        self.write('test_fail.py', '    def test_fail(self): self.assertEqual(1, 2, "distinctive failure")\n')
+        self.write('test_crash.py', '    def test_crash(self): os._exit(3)\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertIn('distinctive failure', result.stdout)
+        self.assertIn('FAILED (exit code 1)', result.stdout)
+        self.assertIn('crashed (exit code 3) without a unittest summary', result.stdout)
+        self.assertIn('FAILED (failing batches:', result.stdout)
+        ppid, runner = self.seen.read_text().split()
+        self.assertEqual(ppid, runner)
+
+    def test_parallel_runner_subreaper_stat_parse_and_main_only(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        # Fields 5..52 hold their own numbers, so starttime (field 22) reads 22.
+        text = '4321 (we) (ird name) R 99 ' + ' '.join(str(field) for field in range(5, 53)) + '\n'
+        self.assertEqual(run_parallel.parse_stat(text), ('R', 99, 22))
+        self.assertIsNone(run_parallel.parse_stat('4321 (truncated'))
+        self.assertIsNone(run_parallel.parse_stat('4321 (x) S notanumber'))
+        if sys.platform.startswith('linux'):
+            self.assertEqual(run_parallel.proc_stat(os.getpid())[1], os.getppid())
+            self.assertIn(os.getpid(), run_parallel.children_of(os.getppid()))
+        tree = ast.parse(self.RUNNER.read_text())
+        callers = []
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.ClassDef)):
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'enable_subreaper':
+                        callers.append(function.name)
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'enable_subreaper']
+        # One call, inside main() only (not at module level, not in Dispatcher).
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(callers, ['main'])
+
+    # FL-27 part 2: a stop terminates the runner's whole descendant tree, including GNU
+    # `timeout` (its own process group) and detached sessions. The Dispatcher runs in a child
+    # driver: the test process itself must never become a subreaper.
+    def tree_guard(self):
+        if not sys.platform.startswith('linux'):
+            self.skipTest('the descendant walk needs Linux /proc and a child subreaper')
+        if not shutil.which('timeout') or not shutil.which('setsid'):
+            self.skipTest('GNU timeout and setsid are needed')
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        self.rp = run_parallel
+        self.pidfiles = []
+        self.addCleanup(self.kill_recorded)
+
+    def kill_recorded(self):
+        for path in self.pidfiles:
+            try:
+                os.kill(int(path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    def pidfile(self, name):
+        path = self.base / name
+        self.pidfiles.append(path)
+        return path
+
+    def write_tree_test(self, name, shell, popen_pidfile=None):
+        """A test whose `sh -c <shell>` (or `timeout 120 sh -c`) runs in the batch and is
+        waited for; with `popen_pidfile` the command is `timeout 120 sh -c <shell>` and the
+        `timeout` pid is written there."""
+        command = (['timeout', '120', 'sh', '-c', shell] if popen_pidfile else ['sh', '-c', shell])
+        body = ('    def test_tree(self):\n'
+                '        import subprocess\n'
+                f'        child = subprocess.Popen({command!r})\n')
+        if popen_pidfile:
+            body += (f'        path = {str(popen_pidfile)!r}\n'
+                     '        open(path + ".tmp", "w").write(str(child.pid))\n'
+                     '        os.replace(path + ".tmp", path)\n')
+        body += '        child.wait()\n'
+        self.write(name, body)
+
+    def write_timeout_tree(self):
+        self.timeout_pid, self.child_pid = self.pidfile('timeout.pid'), self.pidfile('child.pid')
+        self.write_tree_test('test_tree.py', f'echo $$ > {self.child_pid}.tmp; mv {self.child_pid}.tmp '
+                             f'{self.child_pid}; exec sleep 120', popen_pidfile=self.timeout_pid)
+        return [self.timeout_pid, self.child_pid]
+
+    def write_stub_tree(self):
+        self.stub_pid = self.pidfile('stub.pid')
+        inner = f'trap "" TERM; echo $$ > {self.stub_pid}.tmp; mv {self.stub_pid}.tmp {self.stub_pid}; exec sleep 120'
+        self.write_tree_test('test_stub.py', f"setsid sh -c '{inner}' </dev/null >/dev/null 2>&1 & "
+                             'while :; do sleep 1; done')
+        return [self.stub_pid]
+
+    def wait_pidfiles(self, paths):
+        deadline = time.monotonic() + MEDIUM_TIMEOUT
+        while not all(path.exists() for path in paths):
+            self.assertLess(time.monotonic(), deadline, f'pid files never appeared: {paths}')
+            time.sleep(0.05)
+        return [int(path.read_text()) for path in paths]
+
+    def driver(self, scenario, batches, workers=2):
+        """Write a driver that runs a subreaper Dispatcher on `batches` after `scenario`
+        (patches) and prints the exception run() raised; returns its path."""
+        script = self.base / 'driver.py'
+        script.write_text(
+            'import os, subprocess, sys, threading, time\n'
+            f'sys.path.insert(0, {str(ROOT / "tests")!r})\n'
+            'import run_parallel\n'
+            f'PIDFILES = {[str(path) for path in self.pidfiles]!r}\n'
+            f'BOUND = {MEDIUM_TIMEOUT!r}\n'
+            'def wait_pidfiles():\n'
+            '    deadline = time.monotonic() + BOUND\n'
+            '    while not all(os.path.exists(path) for path in PIDFILES):\n'
+            '        if time.monotonic() > deadline:\n'
+            '            raise SystemExit("driver: pid files never appeared")\n'
+            '        time.sleep(0.05)\n'
+            'reap = run_parallel.enable_subreaper()\n'
+            'assert reap, "driver: no subreaper"\n'
+            f'dispatcher = run_parallel.Dispatcher({batches!r}, {workers}, {str(self.suite)!r}, reap=reap)\n'
+            + scenario +
+            'try:\n'
+            '    dispatcher.run()\n'
+            'except BaseException as error:\n'
+            '    print("raised", type(error).__name__, error, flush=True)\n'
+            '    sys.exit(3)\n'
+            'print("no error", flush=True)\n')
+        return script
+
+    def run_driver(self, script, paths, bound):
+        """Run the driver; return its result and how long it took after `paths` existed (the
+        stop starts then), failing when that exceeds `bound`."""
+        process = subprocess.Popen([sys.executable, str(script)], cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        self.wait_pidfiles(paths)
+        started = time.monotonic()
+        stdout, stderr = process.communicate(timeout=bound + MEDIUM_TIMEOUT)
+        elapsed = time.monotonic() - started
+        result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        self.assertLess(elapsed, bound, stdout + stderr)
+        return result
+
+    FAIL_SECOND_LAUNCH = (
+        'real_popen = subprocess.Popen\n'
+        'def popen(command, *args, **kwargs):\n'
+        '    if "test_other.Sample.test_a" in command:\n'
+        '        wait_pidfiles()\n'
+        '        raise OSError("injected launch failure")\n'
+        '    return real_popen(command, *args, **kwargs)\n'
+        'run_parallel.subprocess.Popen = popen\n')
+
+    def state_of(self, pid):
+        """The /proc state letter of `pid`, or None when it is gone."""
+        stat = self.rp.proc_stat(pid)
+        return stat and stat[0]
+
+    def assert_gone(self, pids):
+        for pid in pids:
+            self.assertTrue(self.sleeper_gone(pid), f'{pid} survived the stop ({self.state_of(pid)})')
+
+    def test_parallel_runner_tree_worker_failure_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths, (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertIn('raised OSError injected launch failure', result.stdout, result.stdout + result.stderr)
+        self.assert_gone(self.wait_pidfiles(paths))
+
+    def start_runner(self, wrapper=None):
+        command = [sys.executable, str(self.RUNNER), '--start-dir', str(self.suite)]
+        if wrapper:
+            command = [sys.executable, '-c', wrapper, *command[1:]]
+        process = subprocess.Popen(command, cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(process.kill)
+        return process
+
+    def stop_runner(self, process, paths, signum, bound):
+        pids = self.wait_pidfiles(paths)
+        process.send_signal(signum)
+        started = time.monotonic()
+        output, _ = process.communicate(timeout=bound + MEDIUM_TIMEOUT)
+        self.assertLess(time.monotonic() - started, bound, output)
+        return pids, output
+
+    def test_parallel_runner_tree_sigterm_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        process = self.start_runner()
+        pids, output = self.stop_runner(process, paths, signal.SIGTERM,
+                                        (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_sigint_to_runner_alone_kills_timeout_group(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        # The runner gets Python's SIGINT handler even when this test inherited SIGINT ignored.
+        wrapper = ('import runpy, signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler); '
+                   'sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+        process = self.start_runner(wrapper)
+        pids, output = self.stop_runner(process, paths, signal.SIGINT,
+                                        (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertNotEqual(process.returncode, 0, output)
+        self.assertIn('KeyboardInterrupt', output)
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_sigterm_kills_stubborn_detached_descendant(self):
+        self.tree_guard()
+        paths = self.write_stub_tree()
+        process = self.start_runner()
+        pids, output = self.stop_runner(process, paths, signal.SIGTERM,
+                                        (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        # Right after the runner returned, no extra polling: the completion barrier saw to it.
+        for pid in pids:
+            self.assertIn(self.state_of(pid), (None, 'Z'), f'stub {pid} survived the stop')
+
+    def test_parallel_runner_tree_kills_process_forked_during_stop(self):
+        self.tree_guard()
+        parent, forked = self.pidfile('parent.pid'), self.pidfile('forked.pid')
+        self.write_tree_test('test_tree.py', f'trap "sleep 120 & echo \\$! > {forked}; wait" TERM; '
+                             f'echo $$ > {parent}.tmp; mv {parent}.tmp {parent}; while :; do sleep 1; done')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        self.pidfiles.remove(forked)  # written only during the stop
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        self.pidfiles.append(forked)
+        result = self.run_driver(script, [parent], (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        self.assertIn('raised OSError', result.stdout, result.stdout + result.stderr)
+        pids = [int(parent.read_text())]
+        if forked.exists() and forked.read_text().strip():
+            pids.append(int(forked.read_text()))
+        self.assert_gone(pids)
+
+    def test_parallel_runner_tree_completion_barrier_failure_exits_non_zero(self):
+        self.tree_guard()
+        paths = self.write_timeout_tree()
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        # Above the kernel's largest pid_max (2**22): never a real process.
+        phantom = 2 ** 22 + 1
+        scenario = self.FAIL_SECOND_LAUNCH + (
+            'real_live = run_parallel.Dispatcher.live_descendants\n'
+            f'run_parallel.Dispatcher.live_descendants = lambda self: {{**real_live(self), {phantom}: 0}}\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths, (self.rp.FINAL_WAIT + self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        self.assertIn(f'run_parallel: could not terminate descendants: {phantom}', result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_gone(self.wait_pidfiles(paths))
+
+    def test_parallel_runner_tree_main_exits_non_zero_when_cleanup_failed(self):
+        self.tree_guard()
+        self.write('test_one.py', '    def test_a(self): pass\n')
+        wrapper = ('import runpy, sys; sys.argv = sys.argv[1:]; sys.path.insert(0, sys.argv[0].rsplit("/", 1)[0]); '
+                   'import run_parallel; real = run_parallel.Dispatcher.run\n'
+                   'def run(self):\n'
+                   '    results = real(self); self.cleanup_failed = [4242]; return results\n'
+                   'run_parallel.Dispatcher.run = run; sys.exit(run_parallel.main())')
+        process = self.start_runner(wrapper)
+        output, _ = process.communicate(timeout=PIPELINE_TIMEOUT)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertIn('descendants survived the stop: 4242', output)
+
+    def test_parallel_runner_tree_concurrent_stops_never_reap_during_shutdown(self):
+        self.tree_guard()
+        stubs = []
+        for number in (1, 2):
+            stub = self.pidfile(f'stub{number}.pid')
+            stubs.append(stub)
+            inner = f'trap "" TERM; echo $$ > {stub}.tmp; mv {stub}.tmp {stub}; exec sleep 120'
+            self.write_tree_test(f'test_stub{number}.py', f"setsid sh -c '{inner}' </dev/null >/dev/null 2>&1 & "
+                                 'while :; do sleep 1; done')
+        # Both workers fail at once (after both stubs exist) and both call stop(), while run()'s
+        # reap loop keeps polling (the stubs ignore SIGTERM, so the stop lasts TERMINATE_GRACE);
+        # a reap during the kill rounds would free a pid for reuse.
+        scenario = (
+            'barrier = threading.Barrier(2, timeout=BOUND)\n'
+            'def drain(self, process):\n'
+            '    wait_pidfiles()\n'
+            '    barrier.wait()\n'
+            '    raise RuntimeError(f"injected failure {process.pid}")\n'
+            'run_parallel.Dispatcher.drain = drain\n'
+            'real_waitpid = os.waitpid\n'
+            'during_stop = []\n'
+            'def waitpid(pid, options):\n'
+            '    if sys._getframe(1).f_code.co_name == "reap_adopted" and dispatcher.terminating \\\n'
+            '            and not dispatcher.stop_done.is_set():\n'
+            '        during_stop.append(pid)\n'
+            '    return real_waitpid(pid, options)\n'
+            'os.waitpid = waitpid\n'
+            'import atexit\n'
+            'atexit.register(lambda: print("during_stop", during_stop, "rounds", dispatcher.kill_rounds,\n'
+            '                              "errors", len(dispatcher.errors), "alive",\n'
+            '                              [t.name for t in threading.enumerate() if t.daemon], flush=True))\n')
+        script = self.driver(scenario, [['test_stub1.Sample.test_tree'], ['test_stub2.Sample.test_tree']])
+        result = self.run_driver(script, stubs, (self.rp.TERMINATE_GRACE * 2 + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised RuntimeError injected failure', result.stdout, output)
+        self.assertIn('during_stop [] rounds 1 errors 2 alive []', result.stdout, output)
+        self.assert_gone(self.wait_pidfiles(stubs))
+
+    # Review M1: a process name is arbitrary bytes, and the scan reads every process on the host.
+    def test_parallel_runner_tree_non_utf8_stat_parse(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        # Fields 5..52 hold their own numbers, so starttime (field 22) reads 22.
+        text = b'4321 (\xff) \xfe) Z 99 ' + ' '.join(str(field) for field in range(5, 53)).encode() + b'\n'
+        self.assertEqual(run_parallel.parse_stat(text), ('Z', 99, 22))
+        self.assertIsNone(run_parallel.parse_stat(b'4321 (\xff'))
+
+    def test_parallel_runner_tree_non_utf8_name(self):
+        self.tree_guard()
+        named = self.pidfile('named.pid')
+        # PR_SET_NAME is 15; the pid file only appears once /proc shows the non-UTF-8 name.
+        code = ('import ctypes, os, time; ctypes.CDLL(None).prctl(15, b"\\xff", 0, 0, 0); '
+                'assert open("/proc/self/comm", "rb").read() == b"\\xff\\n"; '
+                f'path = {str(named)!r}; open(path + ".tmp", "w").write(str(os.getpid())); '
+                'os.replace(path + ".tmp", path); time.sleep(120)')
+        self.write_tree_test('test_tree.py', f'exec {shlex.quote(sys.executable)} -c {shlex.quote(code)}')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, [named], (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised OSError injected launch failure', result.stdout, output)
+        self.assertNotIn('UnicodeDecodeError', output)
+        self.assert_gone(self.wait_pidfiles([named]))
+
+    def test_parallel_runner_tree_scan_failure_still_signals_batch_groups(self):
+        self.tree_guard()
+        batch, child = self.pidfile('batch.pid'), self.pidfile('child.pid')
+        self.write_tree_test('test_tree.py', f'echo $PPID > {batch}.tmp; mv {batch}.tmp {batch}; '
+                             f'echo $$ > {child}.tmp; mv {child}.tmp {child}; exec sleep 120')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        scenario = self.FAIL_SECOND_LAUNCH + (
+            'def descendants(root, table=None):\n'
+            '    raise RuntimeError("injected scan failure")\n'
+            'run_parallel.descendants = descendants\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, [batch, child],
+                                 (self.rp.FINAL_WAIT + self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised OSError injected launch failure', result.stdout, output)
+        # The failed scans never confirmed the tree gone, so the stop reports it.
+        self.assertIn('could not terminate descendants: unknown (descendant scan failed: '
+                      "RuntimeError('injected scan failure')", result.stderr)
+        self.assert_gone(self.wait_pidfiles([batch, child]))
+
+    # Review M3: when /proc cannot be listed, an empty table proves nothing.
+    def proc_listdir_driver(self, body):
+        """Run a subreaping driver whose `os.listdir('/proc')` raises PermissionError while
+        `failing` is set, then `body`; return its result."""
+        script = self.base / 'listdir_driver.py'
+        script.write_text(
+            'import os, subprocess, sys, time\n'
+            f'sys.path.insert(0, {str(ROOT / "tests")!r})\n'
+            'import run_parallel\n'
+            'assert run_parallel.enable_subreaper(), "driver: no subreaper"\n'
+            'real_listdir = os.listdir\n'
+            'failing = False\n'
+            'def listdir(path="."):\n'
+            '    if failing and path == "/proc":\n'
+            '        raise PermissionError(13, "injected listdir failure", path)\n'
+            '    return real_listdir(path)\n'
+            'os.listdir = listdir\n'
+            f'dispatcher = run_parallel.Dispatcher([["unused"]], 1, {str(self.suite)!r}, reap=True)\n'
+            + body)
+        return subprocess.run([sys.executable, str(script)], cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True,
+                              timeout=(self.rp.FINAL_WAIT + 10) * TIMEOUT_SCALE + MEDIUM_TIMEOUT)
+
+    def test_parallel_runner_tree_proc_listdir_failure(self):
+        self.tree_guard()
+        result = self.proc_listdir_driver(
+            'child = subprocess.Popen(["sleep", "120"], start_new_session=True)\n'
+            'assert child.pid in dispatcher.live_descendants(), "driver: child not seen"\n'
+            'failing = True\n'
+            'dispatcher.stop()\n'
+            'failing = False\n'
+            'print("cleanup_failed", *dispatcher.cleanup_failed, sep="|", flush=True)\n'
+            'print("child alive", child.poll() is None, flush=True)\n'
+            'child.kill()\n'
+            'child.wait()\n')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("cleanup_failed|unknown (descendant scan failed: PermissionError(13, "
+                      "'injected listdir failure'))\n", result.stdout, output)
+        self.assertIn('run_parallel: could not terminate descendants: unknown (descendant scan failed: '
+                      'PermissionError(', result.stderr)
+        # No scan succeeded, so nothing signalled the child: the stop saw no tree at all.
+        self.assertIn('child alive True', result.stdout, output)
+
+    def test_parallel_runner_tree_proc_listdir_failure_skips_reap_round(self):
+        self.tree_guard()
+        result = self.proc_listdir_driver(
+            'child = subprocess.Popen(["true"])\n'
+            'deadline = time.monotonic() + 30\n'
+            'while run_parallel.proc_stat(child.pid)[0] != "Z":\n'
+            '    assert time.monotonic() < deadline, "driver: no zombie"\n'
+            '    time.sleep(0.05)\n'
+            'failing = True\n'
+            'dispatcher.reap_adopted()\n'
+            'print("after failing round", run_parallel.proc_stat(child.pid)[0], flush=True)\n'
+            'failing = False\n'
+            'dispatcher.reap_adopted()\n'
+            'print("after next round", run_parallel.proc_stat(child.pid), flush=True)\n')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn('after failing round Z', result.stdout, output)
+        self.assertIn('after next round None', result.stdout, output)
+
+    # FL-27 part 3: an interrupt while run() is still starting workers (after the first one
+    # launched its batch) goes through stop() like any later interrupt.
+    def startup_interrupt(self, raised):
+        self.tree_guard()
+        self.timeout_pid, self.child_pid = self.pidfile('timeout.pid'), self.pidfile('child.pid')
+        self.stub_pid = self.pidfile('stub.pid')
+        stub = (f'trap "" TERM; echo $$ > {self.stub_pid}.tmp; mv {self.stub_pid}.tmp {self.stub_pid}; '
+                'exec sleep 120')
+        self.write_tree_test('test_tree.py', f"setsid sh -c '{stub}' </dev/null >/dev/null 2>&1 & "
+                             f'echo $$ > {self.child_pid}.tmp; mv {self.child_pid}.tmp {self.child_pid}; '
+                             'exec sleep 120', popen_pidfile=self.timeout_pid)
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        paths = [self.timeout_pid, self.child_pid, self.stub_pid]
+        # The main thread's second Thread.start() raises once the first batch's tree exists.
+        scenario = (
+            'real_start = threading.Thread.start\n'
+            'starts = []\n'
+            'def start(self):\n'
+            '    if threading.current_thread() is threading.main_thread():\n'
+            '        starts.append(self)\n'
+            '        if len(starts) == 2:\n'
+            '            wait_pidfiles()\n'
+            f'            raise {raised}\n'
+            '    return real_start(self)\n'
+            'threading.Thread.start = start\n'
+            'import atexit\n'
+            'atexit.register(lambda: print("rounds", dispatcher.kill_rounds, flush=True))\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, paths,
+                                 (self.rp.TERMINATE_GRACE * 2 + self.rp.FINAL_WAIT + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn('rounds 1\n', result.stdout, output)
+        self.assertNotIn('RuntimeError', output)
+        # Right after the driver exited, no extra polling: the completion barrier saw to it.
+        for pid in self.wait_pidfiles(paths):
+            self.assertIn(self.state_of(pid), (None, 'Z'), f'{pid} survived the stop')
+        return result
+
+    def test_parallel_runner_startup_sigint_during_worker_start_stops_batch(self):
+        result = self.startup_interrupt('KeyboardInterrupt')
+        self.assertIn('raised KeyboardInterrupt', result.stdout, result.stdout + result.stderr)
+
+    def test_parallel_runner_startup_sigterm_during_worker_start_stops_batch(self):
+        result = self.startup_interrupt('SystemExit(143)')
+        self.assertIn('raised SystemExit 143', result.stdout, result.stdout + result.stderr)
 
 
 class TestHarnessTimeoutsTest(unittest.TestCase):

@@ -1,121 +1,123 @@
-# Spec: Flow batch 3: queue repair (FL-24), fast CI self-check (FL-23), dashboard follow-ups (DB-05, DB-02, DB-03)
+# Spec: Flow batch 4: self-check process ownership (FL-27), record-format tolerance (FL-25), scratch files (FL-26), recovery answer with prose (FL-12), catch-up coverage (CU-2)
 
 ## Objective
-Stop losing nights to queues that a plan revision left out of order, make the toolkit's own CI
-self-check fast and deterministic, and give mission control what it still greps logs for:
-fixture-free discovery, PR and review counts, and a blocking wait for changes. Source: vault
-`agents-backlog.md`, section "Dashboard follow-ups for mission control" (FL-24, FL-23, DB-05,
-DB-02, DB-03). Branch `fix/flow-batch-3`, created from `origin/fix/night-stops` (open PR #27,
-not merged). Planned by Claude on 2026-10-14 against 5894c2b. Unattended planning: the
-assumptions are recorded below and in `.ai/current-plan.md`, not asked.
-Hub decisions respected: AD-4 (small atomic files in `.ai/local/`, no daemon), AD-5 (status
-never authorizes), gate files are never edited by a pipeline session.
+Stop the overnight stops that come from record formatting and session hygiene rather than from
+real problems, and make the toolkit's own self-check clean up every process it starts. Source:
+vault `agents-backlog.md` (FL-27, FL-25, FL-26, FL-12, FL-21, CU-1..CU-4). Branch
+`fix/flow-batch-4`, created from `origin/master` at 7d22939 (after PRs #27 and #28 merged).
+Planned by Claude on 2026-10-16. Unattended planning: assumptions are recorded below and in
+`.ai/current-plan.md` instead of being asked. Out of scope by instruction: MC-01, DB-04 (need
+Zack's design decisions) and the FL-23/T006 profiling follow-up.
+Hub decisions respected: AD-4 (small files in `.ai/local/`, no daemon), AD-5 (status never
+authorizes), gate files are never edited by a pipeline session.
 
-## Verified against the code (2026-10-14, 5894c2b)
-- **FL-24 open.** No reorder exists in `scripts/`. `ai-run --revise-plan` tells the session to
-  "append new TODO tasks with new IDs to .ai/tasks.md" (`scripts/ai-run` ~394–395), then runs a
-  bare `ai_helper tasks check` (~418). On failure that writes no `last-error` (not `ai_die`), so
-  `ai-pipeline` `stop 'plan revision'` (~307) records `stopped during plan revision (see
-  terminal)`, which matches none of ai-recover's hard rules (`scripts/ai-recover` ~135–141):
-  recovery reruns (the resume finds the dispositions complete and re-runs the same check) and
-  escalates after `AI_RECOVER_MAX` (2) attempts. `ai-run --plan` validates the queue after the
-  session (~322) and stops on an out-of-order queue. Mission control's workaround
-  `~/Projects/wt/plans/sessions/reorder-queue.py` does a DFS order (dependencies pulled up
-  before their first dependent) and rewrites prose `Dependencies:` lines to ids; this spec
-  rejects prose instead (Zack's brief, 2026-10-14).
-- **FL-23 open.** CI (`.github/workflows/self-check.yml`, `timeout-minutes: 40` already applied
-  by Zack) runs `./scripts/ai-check` → `.ai/validate` → `tests/run_parallel.py` with
-  `min(8, CPUs)` static round-robin shards. In PR #27 run 38356827946 the
-  `test_supervised_plan_resume_*_watchdog` tests failed: `tool('ai-recover', …)`
-  (tests/test_workflow.py ~3480) runs under `COMMAND_TIMEOUT` (25 s) because `tool()`
-  (~1290–1294) gives `PIPELINE_TIMEOUT` only to `ai-pipeline`, although ai-recover execs a
-  whole resumed pipeline (plan review → revision → re-review → implementation). Sleeps are
-  mocked (`AI_SLEEP`, `AI_NOTIFY_CMD` writes a local file, `gh`/`codex`/`claude` are local
-  mocks), so the cost is CPU and I/O: thousands of short processes (bash, python3 helpers,
-  git) per pipeline test. Locally `/tmp` is tmpfs; the GitHub runner's is disk. Several tests
-  still pass bare literal timeouts (`timeout=10/15/20/25/60/120`, e.g. ~747, ~1272, ~3437,
-  ~3940, ~4865, ~5417, ~5504, ~8173) that `AI_TEST_TIMEOUT_SCALE` does not stretch. No
-  per-test timing is reported, so nobody knows which tests dominate.
-- **DB-05 open.** `dashboard.discover` (`scripts/lib/dashboard.py` ~122–150) lists every
-  checkout a live runner process (`/proc/<pid>/cwd`) works in; fixture pipelines of the test
-  suite (`/tmp/ai-toolkit-test-*/project with spaces`) qualify. Fixtures use a temp
-  `AI_STATE_DIR`, so they are never in the real host registry.
-- **DB-02 open.** A run dict (`inspect` ~267–308) has no PR or review fields. The PR URL is in
-  `.ai/state.md` (`Next action: Human: test and merge the pull request <url>`, written by
-  ai-pipeline ~611) and in the run log (`pull request ready: <url>`, ~612). Review counts are
-  the `Finding counts: BLOCKER=n MAJOR=n MINOR=n` line of `.ai/reviews/current.md` and
-  `.ai/reviews/plan.md` (`workflow.py` `COUNTS` ~729).
-- **DB-03 open.** `ai-dashboard` has `--once`, `--json`, `--all` only (~680–699).
-- Nothing in this section is already done; the 40-minute CI job timeout mentioned in FL-23 is
-  already in the workflow file.
+## Verified against the code (2026-10-16, 7d22939)
+- **FL-27 open.** `tests/run_parallel.py` starts each batch with `start_new_session=True` and
+  `stop()` (~256–272) signals only each batch's process group (`signal_group`, ~160). GNU
+  `timeout`, used by every fixture pipeline (`scripts/ai-run` ~265, `scripts/ai-review`,
+  `scripts/ai-recover` ~186), calls `setpgid` and so runs itself and its child in a new group:
+  both survive a worker failure, an interrupt or SIGTERM. PR #28's final review M3
+  (`.ai/reviews/current.md`) reproduced it with `timeout 120 sleep 120`; `drain()` (~221) only
+  bounds the wait (`DRAIN_GRACE`), it kills nothing outside the group.
+- **FL-25 (a) open.** `tasks()` (`scripts/lib/workflow.py` ~425–462) requires `### Likely
+  affected modules` and `### Result / notes` in every task. After a triage session `ai-run`
+  runs a bare `ai_helper tasks check` (~519) and stops; after planning (~331) and plan revision
+  (~434) the host reorders, then `tasks check` stops. Nothing adds the two content-free
+  sections. The TRIAGE CONTRACT (~507) and `templates/.ai/prompts/triage.md` never show the
+  task format.
+- **FL-25 (b) open.** `DISPOSITION_ROW` (~911) and `PLAN_DISPOSITION_ROW` (~2329) read cells
+  with `(.*?)\s*\|`, so an escaped `\|` ends a cell (raid polish P11: the Task column read
+  `--no\`). Every reader of either table uses these two regexes (triage-check ~951,
+  review_rounds ~1027, rejected rows ~1470, disputes ~1625, plan history ~2367,
+  plan-dispositions-check ~2508, PR body ~3242). The host's own writers already escape `|`
+  as `\|` (~1563, ~2831).
+- **FL-26 open.** No template prompt says where scratch files go; `rm` is not on the
+  allowlist (`templates/.ai/permissions.allow`, deliberately: Bash rules are prefix matches and
+  cannot restrict a path). A throwaway test file in `src/` then fails the gate and the session
+  ends without a checkpoint. `.ai/local/` is git-ignored by `setup-project` (workflow.py ~319).
+- **FL-12 open.** `recover_decision` (workflow.py ~1886–1916) accepts only a text that is
+  exactly one JSON object (optionally fenced); prose before it escalates with "gave no valid
+  decision" and the session's diagnosis is lost. `test_recovery_decision_parsing_is_strict`
+  (tests/test_workflow.py ~4156) pins `Decision: {…}` → escalate.
+- **FL-21 already done.** `scripts/lib/watchdog.py` `STALL_CONFIRM_NS` (~24–26, ~443–451): a
+  stall must hold 5 minutes after its first sighting, with the install-time probe named in the
+  comment; tests `test_watchdog_confirm_*` (~744–836). Dropped.
+- **CU-4 already done.** `Dispatcher.env()` (~189–200) drops `FORCE_COLOR` and sets
+  `NO_COLOR=1`, `PYTHON_COLORS=0`; `summary()` strips ANSI codes; tests
+  `test_parallel_runner_passes_with_caller_colour_settings` and siblings (~8637–8668). Dropped.
+- **CU-1 already done.** `outcomes_report` "Attempts by model" (~2997–3013) credits each attempt
+  to its own model; `test_outcome_report_credits_each_attempt_to_its_model` (~5175). Dropped.
+- **CU-3 already done.** A re-check outcome carries `upheld_blocker`, `upheld_major`,
+  `withdrawn_blocker`, `withdrawn_major` (~2942–2951) and the report sums them ("Re-checks by
+  reviewer", ~3036–3049). Dropped.
+- **CU-2 open.** "Claude-only reviews (Codex catch-up pending)" (~3050–3055) lists every Claude
+  review forever; there is no record that a Codex review covered it.
 
 ## Requirements
-- **FL-24 queue repair.**
-  - `workflow.py tasks reorder` (also `ai-task reorder`) rewrites `.ai/tasks.md` into a stable
-    dependency order: tasks keep their file order except that a task's missing dependencies are
-    pulled up right before it (depth first, in file order); a valid queue is left byte-identical
-    and unwritten. Block text is never changed (headings, `Dependencies:` lines and every other
-    line, DONE tasks included); only whole blocks move. Rejected with a clear `Error:` and the
-    file untouched: duplicate IDs, a task without exactly one `Dependencies:` line, a
-    `Dependencies:` value that is not `none` or task IDs separated by commas (prose), an unknown
-    ID, a self-dependency or cycle (`dependency cycle: T003 -> T005 -> T003`), a non-task `## `
-    section between two tasks when a move is needed. Atomic replace.
-  - Called by the host only on the planning paths: `ai-run --plan` (after `plan-keeps-done`,
-    before `tasks check`) and `ai-run --revise-plan` (after the session, before its `tasks
-    check`). Revision recovery: an interrupted revision's uncommitted queue is rejected by
-    earlier checks (ai-pipeline ~416, ai-run ~138 and ~338, `plan-dispositions-check`), so a
-    guarded helper `revision-queue-repair` runs before them in ai-pipeline (plan review on) and
-    `ai-run --revise-plan`; it repairs only an uncommitted queue whose dirty files are plan
-    revision records, whose HEAD queue is valid without DONE tasks, for a verified plan review
-    not yet revised (T011). A committed out-of-order queue is still rejected by
-    `ai-pipeline`'s queue check; no reorder in `ai-run` implementation or `ai-review`.
-  - A queue the host cannot repair, or that is still invalid after the reorder, stops
-    `--revise-plan` through `ai_die "Plan revision stage: task queue is invalid: <error>"` and
-    `--plan` through `ai_die "Planning: task queue is invalid: <error>"`. `Plan revision stage`
-    is an always-escalate pattern in ai-recover, so recovery escalates at once (no rerun).
-  - The revision contract asks for new tasks before their first dependent; the host repairs
-    the order anyway.
-- **FL-23 CI self-check.**
-  - The test harness gives every command that runs a pipeline (ai-pipeline, ai-recover) the
-    pipeline timeout; every subprocess timeout and time bound in the tests is a named constant
-    scaled by `AI_TEST_TIMEOUT_SCALE`; under `CI=true` without an explicit value the scale
-    defaults to 2. A timed-out command fails with its captured partial output.
-  - `tests/run_parallel.py` reports the slowest tests and per-worker time, and balances work
-    dynamically (many small interleaved batches pulled by `AI_TEST_WORKERS` workers) instead of
-    fixed shards; it still fails on a count mismatch. The docs and `DocsConsistencyTest`
-    describe the batches, not shards.
-  - Fixture repositories and test temp files avoid needless disk syncs (git `core.fsync`
-    off in fixtures; test temp dirs on tmpfs when available AND a probe script executes there,
-    else the default temp dir), and the slowest tests are made cheaper without weakening any
-    assertion (every existing test ID kept; new tests may raise the count). Target: the whole suite well under 10 minutes on a
-    4-CPU GitHub runner; verified by the human on the PR's CI run.
-- **DB-05.** Runner processes whose environment contains `AI_DASHBOARD_IGNORE=1` are not used
-  for discovery (read from `/proc/<pid>/environ`, bounded; unreadable → not ignored). The
-  test harness sets it for every fixture it starts. Registered checkouts are unaffected.
-- **DB-02.** Each run in `--json` gains `pr` (URL or `''`) and `reviews` (`{'plan': …, 'code':
-  …}`, each `{'blocker', 'major', 'minor', 'head'}` or `null`); the details (expanded) view
-  shows `pr:` and `reviews:` lines. Read through the existing pinned, bounded readers; the
-  counts are informational (not verified against the host binding; the pipeline stays
-  authoritative). CI state is not fetched (no network).
-- **DB-03.** `ai-dashboard --wait [--since CURSOR] [--timeout S] [--interval S]` blocks until
-  a run appears or changes status, stage or observation state, or gets a new notification
-  line (detected from the log's file version and raw last line, not the sanitised, truncated
-  display text, so identical or same-prefix lines are still seen), then prints `{state_root, cursor, timed_out: false, runs: [changed runs]}` and exits
-  0; on timeout prints the same with `timed_out: true`, `runs: []` and exits 1; an invalid
-  cursor is a usage error (exit 2). `--since` compares against the previous call's cursor at
-  once, so nothing is lost between calls. Read-only like the rest of the dashboard.
-- **Docs.** README and `docs/workflow.md` describe each change; the vault flow chart
-  (`agents-flow.md`) is updated in the same task for every flow change (FL-24); tasks append a
-  dated line to the hub's Log, never tick vault checkboxes.
+- **FL-27 the self-check owns its process tree.**
+  - On Linux, `run_parallel.py` makes itself a child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`
+    via `ctypes`), so every descendant of every batch stays its descendant even after its
+    parent exits or it changes process group or session. Adopted orphans that exit are reaped
+    during the run (no zombie build-up), without ever reaping a batch process (exit codes and
+    summaries stay exactly as today).
+  - On a worker failure, an interrupt (SIGINT) or SIGTERM, every descendant process is
+    terminated (SIGTERM, grace, SIGKILL; identity checked by `/proc` start time before SIGKILL)
+    before `run()` returns or re-raises, including GNU `timeout` and its child; a bounded
+    final wait confirms each is gone or a zombie, and survivors after it are named on stderr
+    with a non-zero exit. One `stop()` caller owns termination, and no adopted zombie is
+    reaped while it runs. This holds from the first worker start on, so an interrupt while
+    later workers are still being started is covered too. Elsewhere
+    (no `prctl`, not Linux) the behaviour stays as today.
+  - The flag is set only by the runner's `main()`, never in a process that imports the module.
+- **FL-25 record formats.**
+  - (a) After a triage, planning or plan-revision session, the host adds a missing
+    `### Likely affected modules` (body `(not listed)`) and a missing empty `### Result / notes`
+    to TODO tasks only, at their canonical position; any other missing section still stops
+    the run as today. Nothing is written when nothing is missing. DONE, IN_PROGRESS and
+    BLOCKED blocks are never touched.
+  - (b) Disposition and plan-disposition rows accept `\|` inside a cell (it is part of the
+    cell, read back as `|`, and never split into a cell ending in `\`); an unescaped `|`
+    still splits a row, and a row whose Task cell is missing stays malformed.
+  - The template prompts (triage, plan, plan revision) and the host contracts show the exact
+    task format and say how to write a pipe in a table cell.
+- **FL-26 scratch files.** Template prompts tell sessions to put throwaway files only under
+  `.ai/local/scratch/` (ignored by Git, never named like a test file) and never in source or
+  test directories. `ai-run` empties `.ai/local/scratch` before and after every Claude
+  session through directory descriptors pinned without following symlinks (a symlink at
+  `scratch` is removed, not followed; a symlinked `.ai/local` or `.ai` means a warning and no
+  delete; the clear after a session runs only once the gate digest is verified; a failure is
+  reported and never stops the run). The permission template is unchanged (no `rm`).
+- **FL-12 recovery answer with prose.** `recover-decision` accepts a result whose text holds
+  prose around exactly one decision object: the first `{` of the text starts its line, the
+  JSON object decoded from it ends its line, its `action` is one of the three actions and its
+  fields are valid, and the prose before and after it contains no `{`, `}`, `[` or `]` (so no
+  container can enclose it, without parsing prose; plan review round 2 P3). Anything else (a
+  bracket in the prose, a second object, a duplicate key, a malformed object, a whole-text JSON
+  value that is not an object, or a failed envelope) escalates; objects inline in prose or
+  nested in another value are never decisions. When it escalates for want of a decision, the reason carries a
+  short, cleaned excerpt of what the session wrote. The recover prompt template asks for the
+  JSON object alone, with the diagnosis inside `reason`.
+- **CU-2 catch-up coverage.** `ai-status --outcomes` lists under "Codex catch-up pending" only
+  Claude reviews that no later Codex review of the same project and branch (same family:
+  plan covers plan; code covers code and re-check) and no explicit catch-up record covers. A
+  human command `ai-status --catch-up-done BRANCH...` appends a `catchup` outcome per branch
+  (covers that project+branch's Claude reviews up to that time; with equal timestamps only
+  records earlier in the same log file). The report says how many
+  Claude reviews are covered.
+- **Docs.** README and `docs/workflow.md` describe each change; every flow change updates the
+  vault flow chart (`agents-flow.md`, `updated:`) and appends a dated hub Log line in the same
+  task; sessions never tick vault checkboxes.
 
 ## Non-goals
-No change to `.ai/bin`, `.ai/prompts`, `.ai/validate`, `.ai/permissions.allow`,
-`.claude/settings.json` or `.github/workflows/*` (human steps in the handoff). No reorder in
-ai-pipeline's own queue check of a committed queue or in implementation sessions. No rewriting of prose
-dependencies. No CI status in the dashboard. No dashboard actions or daemon.
+No change to `.ai/bin`, `.ai/prompts`, `.ai/validate`, `.ai/ci-setup`, `.ai/permissions.allow`,
+`.claude/settings.json` or `.github/workflows/*` (human steps in the handoff). No `rm` or
+`git clean` on the allowlist. No cgroups. No structured-output (`--json-schema`) flag for the
+recovery session. No repair of content sections (Goal, Implementation notes, Acceptance
+criteria, Validation). FL-16 (severity suffix in plan-disposition IDs), MC-01, DB-04 and the
+FL-23 profiling follow-up stay in the backlog.
 
 ## Acceptance
-- Offline regression tests per task (names in `.ai/tasks.md`), in the existing styles; existing
-  tests pass (the ones changed on purpose are named in the task results).
-- `.ai/validate` passes; T004–T006 record measured before/after suite timings.
+- Offline regression tests per task (names in `.ai/tasks.md`), in the existing styles;
+  existing tests pass (tests changed on purpose are named in the task results).
+- `.ai/validate` passes (it runs the changed `tests/run_parallel.py` itself).
 - README, `docs/workflow.md` and the vault flow chart match the code.

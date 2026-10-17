@@ -211,6 +211,10 @@ task_outcome() {
     printf '%s\n' 'Note: could not append to the outcome log.' >&2
 }
 
+# Sessions keep throwaway files in .ai/local/scratch; emptied before and after each session
+# through pinned descriptors (never follows a symlink there). A failure only warns.
+clear_scratch() { ai_helper clear-scratch || true; }
+
 review_digest() { sha256sum .ai/reviews/current.md 2>/dev/null | cut -d' ' -f1 || true; }
 
 # An accepted checkpoint must hold exactly the bytes validation hashed (filters, hooks).
@@ -261,6 +265,7 @@ claude_session() {
       session_code=
       attempt_open=yes
     fi
+    clear_scratch
     set +e
     timeout --signal=TERM --kill-after=10s "$limit" claude -p \
       --permission-mode dontAsk --output-format json \
@@ -272,6 +277,8 @@ claude_session() {
     set -e
     session_code=$code
     ai_guard_verify
+    # Only now: the helper is the checkout's copy, trusted once the gate digest is verified.
+    clear_scratch
     # The independent review is Codex's evidence; no Claude session may alter it.
     [[ "$(review_digest)" == "$review_before" ]] || \
       ai_die 'A Claude session modified .ai/reviews/current.md; inspect and restore the Codex report.'
@@ -308,7 +315,8 @@ if [[ -n "$plan_file" ]]; then
   prompt+='After you finish, the host reorders .ai/tasks.md into dependency order (each task placed after '
   prompt+='the tasks it depends on; it rejects cycles, unknown IDs and prose in Dependencies:) and validates '
   prompt+='it with the same rules as .ai/bin/ai-task check: exactly one Status: and one Dependencies: line '
-  prompt+='per task, and the required sections.'
+  prompt+='per task, and the required sections (the host adds a missing Likely affected modules or '
+  prompt+='Result / notes to TODO tasks; anything else missing stops the run).'
   prompt+=' Keep every DONE task block exactly as it is (status, text and results); the host stops '
   prompt+='the run when a DONE task was changed or removed.'
   if [[ "$plan_revision" == yes ]]; then
@@ -328,6 +336,9 @@ if [[ -n "$plan_file" ]]; then
   keep_error=$(ai_helper plan-keeps-done "$since" --baseline "$plan_baseline" 2>&1 >/dev/null) || \
     ai_die "Planning: ${keep_error#Error: }"
   # Dependencies first; the reorder keeps every block's text, so DONE tasks stay as checked.
+  fill_out=$(ai_helper tasks fill-sections 2>&1) || \
+    ai_die "Planning: task queue is invalid: ${fill_out#Error: }"
+  [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
   reorder_out=$(ai_helper tasks reorder 2>&1) || \
     ai_die "Planning: task queue is invalid: ${reorder_out#Error: }"
   [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
@@ -406,7 +417,9 @@ if [[ "$revise_plan" == yes ]]; then
     prompt+="$heading"'": one row per BLOCKER/MAJOR finding (MINOR optional), disposition accepted (add new '
     prompt+='TODO tasks with new IDs to .ai/tasks.md, placed before the first task that depends on them (the '
     prompt+='host reorders the queue into dependency order and rejects cycles, unknown IDs and prose in '
-    prompt+='Dependencies:), and reference them), rejected (concrete evidence) or '
+    prompt+='Dependencies:), and reference them; copy the task format of .ai/tasks.md exactly, with every ### '
+    prompt+='section: the host adds a missing Likely affected modules or Result / notes, anything else '
+    prompt+='missing stops the run), rejected (concrete evidence) or '
     prompt+='needs-human (only for a decision only the human can make; the question in the Evidence column). '
     prompt+='Keep the header, the "Plan review HEAD:" line and everything above the section unchanged. You may '
     prompt+='edit only .ai/project-spec.md, .ai/current-plan.md, .ai/tasks.md, .ai/reviews/plan-dispositions.md '
@@ -431,6 +444,9 @@ if [[ "$revise_plan" == yes ]]; then
     ai_die 'A Claude session modified .ai/reviews/plan.md; inspect and restore the plan review.'
   # A prerequisite added after its dependents is repaired here (committed with the revision);
   # a cycle, unknown ID or prose stops: ai-recover always escalates "Plan revision stage".
+  fill_out=$(ai_helper tasks fill-sections 2>&1) || \
+    ai_die "Plan revision stage: task queue is invalid: ${fill_out#Error: }"
+  [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
   reorder_out=$(ai_helper tasks reorder 2>&1) || \
     ai_die "Plan revision stage: task queue is invalid: ${reorder_out#Error: }"
   [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
@@ -504,7 +520,7 @@ if [[ "$triage" == yes ]]; then
     git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
     ai_guard_verify
     prompt=$(cat .ai/prompts/triage.md)
-    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md. Append new TODO tasks with new IDs for accepted findings and reference them. Copy the task format of .ai/tasks.md exactly: the heading, Status:, Dependencies:, Model: and every ### section (Goal, Implementation notes, Likely affected modules, Acceptance criteria, Validation, an empty Result / notes); the host adds a missing Likely affected modules or Result / notes, anything else missing stops the run. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
     # Same routine as triage-check --fresh, so the prompt and the check agree on the round.
     rounds=$(ai_helper review-history --current --count) || ai_die 'Triage stage: cannot count the earlier review rounds.'
     history=$(ai_helper review-history --current) || ai_die 'Triage stage: cannot summarise the earlier review rounds.'
@@ -516,6 +532,10 @@ if [[ "$triage" == yes ]]; then
     [[ -z "$(dirty_beyond_records)" ]] || \
       ai_die 'Triage left uncommitted changes; inspect and checkpoint before continuing.'
   fi
+  # A new task that lacks Likely affected modules or Result / notes is repaired, not fatal.
+  fill_out=$(ai_helper tasks fill-sections 2>&1) || \
+    ai_die "Triage stage: task queue is invalid: ${fill_out#Error: }"
+  [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
   ai_helper tasks check
   triage_scope ''
   error=$(ai_helper triage-check --fresh 2>&1 >/dev/null) || ai_die "Triage incomplete: ${error#Error: }"
