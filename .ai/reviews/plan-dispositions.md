@@ -207,3 +207,10 @@ Plan review HEAD: 1dafbd71d386317f691261ec5f8961d82ca6624b
 | P9 | accepted | Verified: T001's `limit-arm HEAD`/`limit-armed HEAD` compare only HEAD, the lock is released during the wait, and ai-run's tier-1 path stages everything (`git add --all -- .`, `scripts/ai-run:689`), so a human edit during the wait would be absorbed. Same area as P3 (design task T012): `worktree-digest` hashes HEAD, the index and every non-ignored path (bookkeeping `.ai/state.md`/`run-log.md`/`handoff.md` included, only `.ai/local/` excluded; the plan note explains why the host writes nothing else in between); `limit-schedule` records it, `limit-arm` recomputes under ai-recover's lock and arms only on an exact match, `limit-armed` recomputes at every acceptance site; a mismatch escalates `the checkout changed while the usage-limit relaunch waited; nothing was committed.`. Regression: edit an unrelated tracked file and add an untracked one without changing HEAD → one ⛔, both changes byte-identical, no commit, no session. | T012, T011 |
 
 Convergence: design task T012 added. The preserved-work exception got MAJOR findings in round 1 (P3) and again now (P3, P9), so it is redesigned as a whole (plan note "Preserved-work resume (plan review round 2 redesign)": tree binding plus one rule for what ai-run does with the armed tree) instead of patched; P4 is the second finding on R15 revocation, closed by making revocation durable-or-stop and consuming ownership before acting (T008/T009); P8 is a first finding in its area.
+
+## Plan review round 3 (report 067f07ad0ce236b693f182b689eeab876208592d721bb8c07be9c1b8f5ad0d96)
+
+Plan review HEAD: 6039118e4ccd2d717e0154982c776ccba67bde5a
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
