@@ -4,13 +4,13 @@ Project: agents
 Branch: feature/limits-plan-stage
 Phase: implementing
 Current task: none
-Last completed task: T003
-Tasks complete: 3
-Tasks remaining: 16
-Last validation: PASS at 2026-10-17T20:25:04Z
+Last completed task: T012
+Tasks complete: 4
+Tasks remaining: 15
+Last validation: PASS at 2026-10-17T20:52:06Z
 Blocked: no
-Next action: Resume/implement T012
-Last updated: 2026-10-17T20:25:05Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-17T20:52:06Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
