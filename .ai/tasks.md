@@ -71,15 +71,25 @@ relaunches per human-started run, giving back the recovery attempt `ai-recover` 
     at = AT, `limit_head` = HEAD, `attempts = max(0, attempts - 1)`, print the count);
   - `limit-due [NOW]` (read only, for the watchdog: print AT, exit 0 when set and `AT <= NOW`;
     else exit 1 silently);
+  - `limit-at` (read only: print AT and exit 0 whenever a schedule is set, due or not; exit 1
+    silently when none): the watchdog's single question "is a relaunch scheduled, and when?",
+    so a pending schedule suppresses its stall alarm from host state alone (plan review round
+    3, P2; T002);
   - `limit-hold [NOW]` (schedule set and `AT > NOW` → `attempts = max(0, attempts - 1)`, print
     AT, exit 0; else exit 1, nothing written): an `ai-recover` that finds the run still
     waiting gives its reservation back and restores the wait (P2);
   - `limit-claim [NOW]` (schedule set and `AT <= NOW` → drop `limit_relaunch_at`,
     `attempts = max(0, attempts - 1)`, print the count; else exit 1): consumes the schedule, so
     any later stop of that recovery is terminal and no probe launches it again (P1);
-  - `limit-arm HEAD` (exit 0 and set `limit_resume = HEAD` only when HEAD equals `limit_head`;
+  - `limit-verify HEAD` (read only: exit 0 silently when HEAD equals `limit_head`; else exit 1
+    with `the branch moved to another commit` on stderr; no schedule or no `limit_head` → exit
+    1 `no scheduled relaunch`): the relaunch's first check of the checkout (T003, plan
+    "Verification point"; ai-recover appends ` while the usage-limit relaunch waited; nothing
+    was committed.` to the reason);
+    `limit-arm HEAD` (exit 0 and set `limit_resume = HEAD` only when HEAD equals `limit_head`;
     else exit 1, nothing written); `limit-armed HEAD` (read only: exit 0 when `limit_resume ==
-    HEAD`); `limit-disarm` (drop `limit_resume`; missing is fine). P3, used by T003/T011;
+    HEAD`); `limit-disarm` (drop `limit_resume`; missing is fine). P3, used by T003/T011. T012
+    extends `limit-verify`/`limit-arm`/`limit-armed` to the tree digest and drops the argument;
   - `limit-count` (print the count, 0 when absent).
   `clear-attempts` also drops all four fields; `start` already writes a fresh dict (check).
   Comment why the attempt is given back (a limit wait is not a failed recovery; `ai-recover`
@@ -106,10 +116,13 @@ tests/test_dashboard.py (only if an observation schema test lists the fields)
     then `limit-schedule 100 2 H` → count 1, `attempts` 0, `limit-due 99` exit 1, `limit-due 100`
     prints 100; a second `limit-schedule` while one is set fails `already scheduled` and leaves
     the count 1; `reserve-attempt`, `limit-hold 99` → prints 100, `attempts` 0, schedule kept;
-    `limit-claim 99` exit 1; `limit-hold 100` exit 1; `reserve-attempt`, `limit-claim 100` →
+    `limit-claim 99` exit 1; `limit-hold 100` exit 1; `limit-at` prints 100 before and after
+    the hold and exits 1 once the schedule is claimed; `reserve-attempt`, `limit-claim 100` →
     count 1, schedule gone, `attempts` 0 (never below 0); a second `limit-claim` exits 1;
-    `limit-arm <other>` exit 1, `limit-arm H` exit 0, `limit-armed H` 0, `limit-disarm`, then
-    `limit-armed H` 1; second schedule → 2; third with cap 2 fails with `already relaunched 2
+    `limit-verify <other>` exit 1 with `moved to another commit`, `limit-verify H` exit 0 and
+    the manifest unchanged (same bytes), `limit-arm <other>` exit 1, `limit-arm H` exit 0, `limit-armed H` 0,
+    `limit-disarm`, then `limit-armed H` 1; `limit-verify H` after `clear-attempts` → exit 1 `no
+    scheduled relaunch`; second schedule → 2; third with cap 2 fails with `already relaunched 2
     time(s)`; `clear-attempts` and a new `start` drop all four fields; a manifest with
     `limit_relaunches: "1"` is invalid;
   - `limit-stop-write` safety (CLI, plus one in-process case that plants the first temp name
@@ -152,16 +165,20 @@ scheduled limit relaunch is due, reports once when it cannot, never calls the wa
   existing check (host copy, state root, gate digest against `run-manifest gate`). The unit name
   may stay `ai-recover-<slug>-<time>`.
 - `main()` (~408–515), inside the lock, after `alive`/`marker` are known and before the incident
-  logic: when `args.recover` and not `alive` and `marker_snapshot(marker)` is None, run THIS
-  copy's `python3 <bin_dir>/lib/workflow.py run-manifest limit-due` in `root` (as
-  `start_recovery` runs `run-manifest gate`; `AI_WATCHDOG_NOW` passed as its NOW argument when
-  set, so tests control time). Exit 0 with AT → `start_recovery(…, stage='usage limit
-  relaunch')`; None → nothing more (ai-recover announces itself) and continue with the normal
-  probe; a refusal → notify `⛔ STOPPED, needs you: the usage-limit relaunch could not start:
-  <reason>.` once per AT (key `relaunch:<AT>` kept in the dedupe record's `active` list while the
-  schedule is unchanged).
-- Stall incident (~443–451): add `now >= paused_until(local)` (ai-recover's pauses.log line,
-  T003, ends at AT).
+  logic: when not `alive` and `marker_snapshot(marker)` is None, run THIS copy's `python3
+  <bin_dir>/lib/workflow.py run-manifest limit-at` in `root` (as `start_recovery` runs
+  `run-manifest gate`; the only question is "is a relaunch scheduled, and when?"). Exit 0 →
+  `scheduled_ns = AT * 1e9`, else 0. With `args.recover` and `scheduled_ns <= now` →
+  `start_recovery(…, stage='usage limit relaunch')`; None → nothing more (ai-recover announces
+  itself) and continue with the normal probe; a refusal → notify `⛔ STOPPED, needs you: the
+  usage-limit relaunch could not start: <reason>.` once per AT (key `relaunch:<AT>` kept in the
+  dedupe record's `active` list while the schedule is unchanged). `scheduled_ns > now` → nothing
+  launched; the value only feeds the stall rule below (a pending schedule without `--recover`
+  still suppresses the stall alarm: the run is waiting, not killed).
+- Stall incident (~443–451): add `now >= max(paused_until(local), scheduled_ns)`. The host
+  schedule is the authority (plan review round 3, P2: `limit-hold` restores a schedule whose
+  pauses.log line was never written, and `.ai/local` is agent-writable anyway); ai-recover's
+  pauses.log line (T003) stays as the quiet-time input of the hung rule and as history.
 - New flag `--timer-recovers` (in the mutually exclusive timer group): exit 0 printing
   `recovers <timer>` when `timer_status` would report installed (reuse its logic without
   printing twice) and the service file's `ExecStart=` line contains `"--recover"`; else exit 1
@@ -186,6 +203,14 @@ scripts/lib/watchdog.py, tests/test_workflow.py, docs/workflow.md, vault agents-
   - schedule in the future (`AI_WATCHDOG_NOW` before AT): nothing launched, no notification;
     with phase `implementing`, no last-error and a pauses.log line ending after now, two probes
     `STALL_CONFIRM_NS` apart raise no `stalled` incident;
+  - P2 regression: schedule in the future persisted by the helper, phase `implementing`, no
+    last-error, no marker, and NO `pauses.log` (or one whose last line ended in the past): two
+    `--recover` probes `STALL_CONFIRM_NS` apart with `AI_WATCHDOG_NOW` before AT → no `stalled`
+    incident, no ⛔, nothing launched (`systemd-run` never recorded), `watchdog.json` `active`
+    empty; the same two probes without `--recover` → the same; then a probe with
+    `AI_WATCHDOG_NOW` after AT and `--recover` launches `--stage usage limit relaunch`; with the
+    schedule claimed (`limit-claim` via the helper) and still no pauses.log, the two probes
+    DO raise `stalled` as today (the suppression is tied to the schedule, not to the phase);
   - due but refused (checkout copy, or changed gate): one ⛔ naming `usage-limit relaunch could
     not start`; a second probe sends nothing more;
   - a live `pipeline.active` marker (or runner) with a due schedule: no launch;
@@ -225,23 +250,45 @@ with the feature off, it escalates as today.
      started recovery early): restore the waiting state without Claude, a new reservation
      (`limit-hold` gave it back) or a count change: remove `.ai/local/last-error` (the limit
      message or the watchdog's crash default), `.ai/local/limit-stop` and the stale
-     `.ai/local/pipeline.active`, `ai_observe relaunch "$at" …`, notify the same ⏸ PAUSED line
-     as the scheduling path (a repeat is harmless; none at all is not), print `Still waiting for
-     the usage-limit relaunch after <time>.` and `exit 75` (no trap is set yet, so nothing else
-     reports it).
+     `.ai/local/pipeline.active`, append the pauses.log line exactly as the scheduling path
+     does (one function `pause_line AT` used by both: a kill between `limit-schedule` and the
+     append left none, plan review round 3 P2; the watchdog no longer needs it for the stall
+     rule, T002, but the hung rule's quiet time and the history do), `ai_observe relaunch
+     "$at" …`, notify the same ⏸ PAUSED line as the scheduling path (a repeat is harmless; none
+     at all is not), print `Still waiting for the usage-limit relaunch after <time>.` and
+     `exit 75` (no trap is set yet, so nothing else reports it).
   b. `count=$(ai_helper run-manifest limit-claim)` exit 0 → `relaunch=yes`. The schedule is
      consumed now, so a later escalation (`AI_AUTO_RECOVER=0`, gate, branch, plan decision,
      leftovers) is that relaunch's one terminal ⛔ and no probe starts it again.
+- Verification first (plan "Verification point", round 3 P9; T014 owns the contract and its
+  regressions, this task puts the site in place): one function `relaunch_verify` called at
+  exactly ONE site, right after the branch check (~109–110) and BEFORE `args` are read, the
+  plan-revision decision block (~114–129), the hard rules, the open-stage branch (~149–163)
+  and the leftovers commit (~165–171). Body: `[[ $relaunch == yes ]] || return 0`;
+  `why=$(ai_helper run-manifest limit-verify "$(git rev-parse HEAD)" 2>&1) || escalate "${why#Error: }
+  while the usage-limit relaunch waited; nothing was committed." 'inspect the checkout, commit
+  or discard what changed, then rerun ai-pipeline.'` (the helper's reason is `the branch moved
+  to another commit` here; T012 adds `the checkout changed` and drops the argument; the full
+  texts in the plan note are `the branch moved to another commit while the usage-limit relaunch
+  waited; nothing was committed.` / `the checkout changed while the usage-limit relaunch
+  waited; nothing was committed.`, so build the message from the helper's reason and never
+  hard-code it twice). Nothing before this site may commit, stash, check out,
+  write a tracked file or start a session; `escalate` writes only `.ai/local` and host state.
+  Comment the rule at the site: every later step transforms a VERIFIED tree.
 - After the plan-revision decision block (~129) and BEFORE the hard rules (~131):
   1. `relaunch == yes`: `ai_notify "▶ RESUMED after the usage limit (relaunch $count/$cap):
-     $branch."`; then the existing open-stage branch (~149–163) if a stage is open, else the
-     record-stop-leftovers block (~165–171, factor it into a function used by both paths); then,
-     when the checkout is still dirty: `ai_helper run-manifest limit-arm "$(git rev-parse HEAD)"`
-     exit 0 → keep the preserved task work uncommitted and `resume` (the resumed pipeline and
-     ai-run accept exactly this tree once, T011); exit 1 (HEAD moved since the stop) → escalate
-     `the usage-limit relaunch found uncommitted changes on a different commit.` / `inspect and
-     commit or discard them, then rerun ai-pipeline.`. Clean → `resume`. `resume` takes an
-     optional notification so the relaunch does not also say `🔧 Recovered (n/max)`.
+     $branch."`; then the transitions of the verified tree, in this order: the existing
+     open-stage branch (~149–163) if a stage is open (its scope check stays; a human in-scope
+     edit was already caught by `relaunch_verify`); else the record-stop-leftovers block
+     (~165–171, factor it into a function used by both paths: a dirty tree confined to
+     `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md` is the stopped run's own bookkeeping,
+     committed as today); then, when the checkout is still dirty: `ai_helper run-manifest
+     limit-arm "$(git rev-parse HEAD)"` exit 0 → keep the preserved task work uncommitted and
+     `resume` (the resumed pipeline and ai-run accept exactly this tree once, T011); exit 1 is
+     an internal inconsistency (nothing may have touched the checkout since the verification,
+     under the lock) → escalate with the same wording as `relaunch_verify`. Clean → `resume`.
+     `resume` takes an optional notification so the relaunch does not also say `🔧 Recovered
+     (n/max)`.
   2. Limit-only stop: `read -r agent at < <(ai_helper limit-stop)` succeeds →
      cap 0 → fall through (hard rule, today's ⛔);
      `"$AI_BIN/ai-watchdog" "$AI_ROOT" --timer-recovers` fails → escalate with the reset time
@@ -249,8 +296,8 @@ with the feature off, it escalates as today.
      `ai_helper run-manifest limit-schedule "$at" "$cap" "$(git rev-parse HEAD)"` fails →
      escalate `usage limit again after $cap relaunch(es) in this run.` / `rerun ai-pipeline after
      the reset.`;
-     else append the pauses.log line, `ai_observe relaunch "$at" …` (not `pause`: the
-     dashboard's evidence of a scheduled relaunch, T004), the ⏸ notification, remove
+     else `pause_line "$at"` (the pauses.log line), `ai_observe relaunch "$at" …` (not `pause`:
+     the dashboard's evidence of a scheduled relaunch, T004), the ⏸ notification, remove
      `.ai/local/last-error`, `.ai/local/limit-stop` and `.ai/local/pipeline.active`, set
      `AI_STOP_NOTIFIED=1`, `trap - EXIT`, print `Paused at a <agent> usage limit; the watchdog
      relaunches the run after <time>.` and `exit 75`.
@@ -278,7 +325,14 @@ scripts/ai-recover, tests/test_workflow.py, README.md, docs/workflow.md, vault a
   - then the manifest's AT is set into the past (rewrite run.json in `AI_STATE_DIR`) and
     `ai-recover --stage 'usage limit relaunch'` runs with a normal `MOCK_CLAUDE` → the pipeline
     resumes and completes; notifications contain `▶ RESUMED after the usage limit (relaunch 1/2)`
-    and no `🔧 Recovered`; `attempts` 0 at finish;
+    and no `🔧 Recovered`; `attempts` 0 at finish; the stop's bookkeeping leftovers are in a
+    `record stop during` commit made AFTER the verification (the run log of ai-recover's
+    stderr, or the commit's parent being the scheduled HEAD);
+  - HEAD moved during the wait, clean tree (round 3 P9): schedule as above, the test makes one
+    commit (any tracked file), AT into the past, relaunch → exactly one ⛔ containing `moved to
+    another commit while the usage-limit relaunch waited` and `nothing was committed`,
+    `recovery_calls()` empty, no session, HEAD still the test's commit, no new commit, no
+    `limit_resume`, the manifest has no `limit_relaunch_at` (claimed: terminal);
   - cap: `AI_LIMIT_RELAUNCH_MAX=1` and a second limit stop after one relaunch → ⛔ with
     `usage limit again after 1 relaunch(es)`;
   - `AI_LIMIT_RELAUNCH_MAX=0` → ⛔ `this kind of stop always needs a human` (today);
@@ -297,9 +351,13 @@ scripts/ai-recover, tests/test_workflow.py, README.md, docs/workflow.md, vault a
     (a kill right after `limit-schedule`); (ii) last-error removed, `pipeline.active` with a dead
     PID (a kill during cleanup; the watchdog's crash last-error written as `start_recovery`
     does); (iii) a watchdog probe on (ii) with `--recover`, which launches crash recovery for the
-    dead marker → every variant exits 75 with `Still waiting`, `limit_relaunches` still 1,
-    `attempts` 0, no `recovery_calls()`, no `🔧`/`⛔`, last-error, limit-stop and
-    pipeline.active gone, observation `relaunch_at` = AT; then with AT in the past one relaunch
+    dead marker; (iv) as (i) but with `pauses.log` removed (a kill right after
+    `limit-schedule`, before the append) → every variant exits 75 with `Still waiting`,
+    `limit_relaunches` still 1, `attempts` 0, no `recovery_calls()`, no `🔧`/`⛔`, last-error,
+    limit-stop and pipeline.active gone, observation `relaunch_at` = AT, and pauses.log's last
+    line parses with `watchdog.paused_until` to AT (also in (iv)); then two
+    `host_watchdog('--recover')` probes `STALL_CONFIRM_NS` apart with `AI_WATCHDOG_NOW` before
+    AT send nothing and launch nothing (round 3 P2); then with AT in the past one relaunch
     resumes as above (`relaunch 1/2`).
 - `test_recovery_*`, `test_usage_limit_*`, `test_watchdog_*` pass unchanged.
 
@@ -326,60 +384,76 @@ T011 needs to tell "task marked DONE before the limit" from "task still in progr
 ### Implementation notes
 - Design: `.ai/current-plan.md` "Preserved-work resume (plan review round 2 redesign)". This
   replaces the HEAD-only binding of T001/T003 (round 1 P3); T011 consumes it.
-- `scripts/lib/workflow.py` `worktree_digest()` + command `worktree-digest` (prints the hex):
-  sha256 over `HEAD` (`git rev-parse HEAD`), the raw `git ls-files --stage -z` output (index:
-  mode, blob, stage, path; binds staged changes) and, for every path of `git ls-files --cached
-  --others --exclude-standard -z` sorted by raw bytes and not under `.ai/local/`: the path, then
-  `link` + target (lstat symlink), `file` + `st_mode & 0o777` + content (streamed as in
-  `fingerprint()` ~702), `dir` for a gitlink/submodule directory, or `missing`. Unlike
-  `fingerprint()` it does NOT skip `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md` or
-  `.ai/reviews/` (a human edit there during the wait must count). Comment the host-bookkeeping
-  argument (plan note): between scheduling and the arm the host writes only `.ai/local/` and host
-  state; ai-recover's leftovers commit (ai-recover ~165–171) only runs on a bookkeeping-only
-  tree, which is clean afterwards and never armed.
+- `scripts/lib/workflow.py` `worktree_digest(root)` + command `worktree-digest` (prints the
+  hex): it IS the existing `tree_snapshot(root)` (~2245–2276), called with the checkout root;
+  write no second digest (plan review round 3, P10). `tree_snapshot` already covers HEAD, the
+  staged diff (`git diff --cached --binary`: binds staged-only changes), every path of
+  `git ls-files --cached --others --exclude-standard -z` outside `.ai/local/` with kind, mode
+  and bytes or link target, submodules recursively (`repo` + the nested snapshot of their HEAD,
+  index and working contents) and uninitialised submodules walked on the filesystem; it does
+  NOT skip `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md` or `.ai/reviews/` (a human edit
+  there during the wait must count). Document in the docstring that the relaunch binding
+  relies on it, so a future "skip" there needs this comment changed. Comment the plan's
+  "Verification point" rule where the digest is recorded: the digest is taken by
+  `limit-schedule` after the stop's bookkeeping was written and before any commit, and the
+  relaunch verifies it before it touches the checkout (T003 `relaunch_verify`, T014).
 - `run_manifest`: new optional field `limit_tree` (64-hex); `limit_resume` becomes an object
   `{"head": 40-hex, "tree": 64-hex}` (wrong type → invalid manifest, as T001's fields).
   Signatures change (T001's HEAD argument removed; the helper computes from the checkout, the
   shell passes no binding value): `limit-schedule AT CAP` records `limit_head` and `limit_tree`;
-  `limit-arm` recomputes both and sets `limit_resume` only on an exact match of both, else exit 1
-  with `the checkout changed while the usage-limit relaunch waited` (tree) or `HEAD moved`
-  (head) on stderr, nothing written; `limit-armed` recomputes and exits 0 only when both equal
-  `limit_resume`; `limit-disarm` unchanged; `clear-attempts`/`start` drop `limit_tree` too.
-- `scripts/ai-recover` (T003's claimed-relaunch path): `limit-schedule "$at" "$cap"`; the dirty
-  branch calls `limit-arm` and on failure escalates with the helper's reason: `the checkout
-  changed while the usage-limit relaunch waited; nothing was committed.` / `inspect the
-  uncommitted changes, commit or discard them, then rerun ai-pipeline.` (HEAD moved keeps T003's
-  wording). No commit, no stash, no checkout on that path.
+  `limit-verify` (read only) recomputes both and exits 0 silently only when both equal the
+  recorded ones, else exit 1 with `the branch moved to another commit` (head) or `the checkout
+  changed` (tree) on stderr (ai-recover appends ` while the usage-limit relaunch waited;
+  nothing was committed.`), `no scheduled relaunch` when `limit_head`/`limit_tree` are absent;
+  `limit-arm` recomputes both and sets `limit_resume` only on an exact match of both, else
+  exit 1 with the same reasons, nothing written; `limit-armed` recomputes and exits 0 only when
+  both equal `limit_resume`; `limit-disarm` unchanged; `clear-attempts`/`start` drop
+  `limit_tree` too.
+- `scripts/ai-recover` (T003's claimed-relaunch path): `limit-schedule "$at" "$cap"`;
+  `relaunch_verify` calls `limit-verify` without an argument and the dirty branch calls
+  `limit-arm` without an argument; both escalate with the helper's reason followed by ` while
+  the usage-limit relaunch waited; nothing was committed.` / `inspect the checkout, commit or
+  discard what changed, then rerun ai-pipeline.`. The order (verify before anything else) is
+  T003's; do not move the site. No commit, no stash, no checkout before or on a failing path.
 - `tasks newly-done REV` (in `task_command`): parse `git show REV:.ai/tasks.md` with
   `tasks(text)` and the working queue with `tasks()`; print the IDs DONE in the working queue
   and not DONE (or absent) at REV, one per line, file order; an unparsable queue fails as
   `tasks check` does. Used by T011.
 - No pipeline/ai-run acceptance change here (T011). Docs: docs/workflow.md "Interruption,
-  limits, and recovery" says the relaunch continues exactly the tree it stopped with and that
-  any change during the wait escalates. Flow unchanged in this task (T011 updates the chart).
+  limits, and recovery" says the relaunch continues exactly the tree it stopped with
+  (submodules included) and that any change during the wait escalates. Flow unchanged in this
+  task (T011 updates the chart).
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/ai-recover, tests/test_workflow.py, docs/workflow.md
 
 ### Acceptance criteria
 - Tests named `test_limit_relaunch_binding_*` in tests/test_workflow.py:
-  - `worktree-digest` unit cases on a fixture checkout: unchanged when only `.ai/local/` files
-    change; changes for each of: an edited tracked file, an edited `.ai/state.md`, a new
-    untracked file, a deleted tracked file, a staged-only change (an edit staged with `git add`,
-    then the worktree file restored to HEAD's bytes: only the index differs), a mode change, a symlink target
-    change, a new commit;
+  - `worktree-digest` unit cases on a fixture checkout: equals `tree_snapshot` of the same
+    checkout (the test's existing `tree_snapshot()` helper, ~9634); unchanged when only
+    `.ai/local/` files change; changes for each of: an edited tracked file, an edited
+    `.ai/state.md`, an edited `.ai/reviews/dispositions.md`, a new untracked file, a deleted
+    tracked file, a staged-only change (an edit staged with `git add`, then the worktree file
+    restored to HEAD's bytes: only the index differs), a mode change, a symlink target change,
+    a new commit; with a submodule (fixture as `test_deps_status_tree_snapshot_covers_submodules`,
+    ~9663): an edited submodule file and a new commit inside the submodule each change the
+    digest while the parent's HEAD and `git diff --cached` are unchanged (round 3 P10);
   - manifest: `limit-schedule 100 2` records `limit_head` = HEAD and `limit_tree` = the digest;
-    `limit-arm` arms on the same tree and `limit-armed` exits 0; after writing one byte to an
-    unrelated tracked file `limit-armed` exits 1; a fresh schedule, then a new untracked file →
-    `limit-arm` exits 1 naming `changed while the usage-limit relaunch waited`, no
-    `limit_resume`; a manifest with `limit_resume` as a string is invalid;
+    `limit-verify` exits 0 and leaves the manifest byte-identical; `limit-arm` arms on the same
+    tree and `limit-armed` exits 0; after writing one byte to an unrelated tracked file
+    `limit-verify` exits 1 with `the checkout changed` and `limit-armed` exits 1; a fresh
+    schedule, then a new untracked file → `limit-verify` and `limit-arm` exit 1 naming `the
+    checkout changed`, no `limit_resume`; a fresh schedule, then a commit → both name `moved
+    to another commit`; a fresh schedule, then an edit inside the submodule only → both exit 1
+    `the checkout changed`; a manifest with `limit_resume` as a string is invalid;
   - end-to-end (fixtures as T003's `test_limit_relaunch_recover_*` with `limit-far`; T011's
     dirty mock does not exist yet, and the dirty-at-scheduling case is covered by the manifest
     units above and by T011): schedule, then the test edits an unrelated tracked file AND adds an untracked file without
     changing HEAD, sets AT into the past and runs `ai-recover --stage 'usage limit relaunch'` →
     exactly one ⛔ naming `changed while the usage-limit relaunch waited`, both human changes
     byte-identical on disk, no commit made (HEAD unchanged), no `limit_resume`,
-    `recovery_calls()` empty, no implementation session ran;
+    `recovery_calls()` empty, no implementation session ran (the bookkeeping-only, open-stage
+    and submodule end-to-end cases are T014's);
   - `tasks newly-done HEAD`: none on a clean queue; `T002` after the test sets T002 DONE in the
     working file; a task DONE at HEAD and in the file is not printed; a malformed working queue
     fails.
@@ -394,9 +468,97 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
+## T014 — Relaunch binding verification contract: one verification site before any checkout mutation (MC-01 part 1, plan review round 3 P9/P10 design task)
+Status: TODO
+Dependencies: T003, T012
+Model: opus
+
+### Goal
+A claimed usage-limit relaunch accepts the checkout only after one verification of HEAD and the
+whole tree (submodules included) against what was recorded at scheduling, performed before any
+commit, resume, arm or session; every change made during the wait, wherever it lives, stops the
+relaunch with the checkout exactly as found, and the transitions the relaunch may then apply to
+the verified tree are stated and tested as one contract.
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "Preserved-work resume", part "Verification point (plan review
+  round 3 redesign, T014)". T003 placed `relaunch_verify` and T012 made `limit-verify` compare
+  HEAD and the `tree_snapshot` digest; this task owns the contract as a whole: audit the site,
+  pin the transitions, cover the cases the earlier design missed, and document it.
+- Audit `scripts/ai-recover` from the claim to `resume`: list in the result every statement that
+  writes to the checkout (git commit/add/stash/checkout, any write outside `.ai/local`), reads
+  the checkout to decide (open-stage scope check, leftovers test, dirty test) or starts a
+  session, and show each is after the single `relaunch_verify` call. Any that is not → move it
+  below the site. `relaunch_verify` has exactly one call site (a `grep -c` in a test of the
+  installed script is fine: `tests/test_workflow.py` already reads scripts for such checks).
+- Transition table as a comment block right after the `▶ RESUMED` notification, matching the
+  plan: (a) open stage → `resume` (scope check kept); (b) dirty confined to `.ai/state.md`,
+  `.ai/run-log.md`, `.ai/handoff.md` → leftovers commit → `ai_gate_check` → `resume`; (c) dirty
+  otherwise → `limit-arm` → `resume`; (d) clean → `resume`. Nothing else is permitted; a new
+  branch there needs the table changed. `limit-arm` failing in (c) escalates with the verify
+  wording (an internal inconsistency; the result records that it cannot be reached by a human
+  change, since the lock is held from the verification on).
+- Reasons: the ⛔ texts are built from the helper's reason (`the branch moved to another
+  commit` / `the checkout changed`) + ` while the usage-limit relaunch waited; nothing was
+  committed.`; `Next:` is `inspect the checkout, commit or discard what changed, then rerun
+  ai-pipeline.` for both. Check T003's and T012's tests assert these exact texts; adjust them
+  here if they drifted (named in the result).
+- docs/workflow.md "Interruption, limits, and recovery" and "Recovery contract": one paragraph
+  "What a relaunch accepts": the verification, the four transitions, and that a change anywhere
+  in the checkout during the wait (tracked, untracked, staged, bookkeeping, a commit, a
+  submodule) escalates with nothing committed. README "Recovery": one sentence.
+- Flow chart (vault): the relaunch branch reads "verify HEAD and tree first, else ⛔ (nothing
+  committed)"; T011 adds the preserved-work wording after it.
+
+### Likely affected modules
+scripts/ai-recover, tests/test_workflow.py, docs/workflow.md, README.md, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `test_limit_relaunch_verify_*` in tests/test_workflow.py (fixtures as T003's
+  `test_limit_relaunch_recover_*` with `limit-far`, timer installed with `--recover`; each case
+  schedules a relaunch, changes the checkout as stated, sets AT into the past and runs
+  `ai-recover --stage 'usage limit relaunch'`; unless stated, every case asserts: exactly one
+  ⛔ containing `while the usage-limit relaunch waited` and `nothing was committed`, HEAD
+  unchanged, `git status --porcelain` identical before and after (same bytes), every changed
+  file byte-identical, no `limit_resume`, no `limit_relaunch_at`, `recovery_calls()` empty, the
+  mock recorded no session, no `▶ RESUMED` notification):
+  - bookkeeping-only human edit (round 3 P9): the test appends one line to `.ai/state.md` (the
+    tree stays confined to the three bookkeeping files) → ⛔ `the checkout changed`; no
+    `record stop during` commit exists for the relaunch;
+  - clean checkout whose HEAD moved (P9): the test commits the stop's leftovers itself, then
+    one more commit → ⛔ `moved to another commit`; no further commit;
+  - in-scope edit during an open stage (P9): after scheduling the test opens a triage stage in
+    host state (`run-manifest stage-set triage <HEAD>` through the helper, as ai-pipeline does
+    at ~561) and edits `.ai/reviews/dispositions.md` (inside `triage-scope`) → ⛔ `the checkout
+    changed`; the stage record is still open and unchanged; no `🔧 Recovering` notification; the
+    same with a `plan-revision` stage and an edit to `.ai/reviews/plan-dispositions.md`;
+  - submodule file (P10): fixture with a submodule as `test_deps_status_tree_snapshot_covers_submodules`;
+    after scheduling the test edits a file inside the submodule (parent HEAD and `git diff
+    --cached` unchanged) → ⛔ `the checkout changed`, the submodule edit preserved;
+  - submodule HEAD (P10): after scheduling the test commits inside the submodule (parent HEAD
+    and index unchanged) → ⛔ `the checkout changed`, the submodule's HEAD and the parent's
+    gitlink unchanged by recovery (no `git add` of the submodule path);
+  - positive control: no change during the wait → the relaunch resumes (`▶ RESUMED`), the
+    leftovers commit `record stop during` exists and its parent is the scheduled HEAD, the
+    pipeline completes; the same with a submodule present and untouched;
+  - `relaunch_verify` is called from exactly one site in `scripts/ai-recover` (and the installed
+    `.ai/bin/ai-recover` of the fixture), and the escalation texts of T003/T012 match the exact
+    wording above.
+- `test_limit_relaunch_*`, `test_recovery_*`, `test_usage_limit_*` and `test_watchdog_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_verify` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
 ## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
 Status: TODO
-Dependencies: T012
+Dependencies: T014
 Model: opus
 
 ### Goal
@@ -407,9 +569,10 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
 
 ### Implementation notes
 - Design: `.ai/current-plan.md` "Relaunch schedule lifecycle", part "Preserved task work", and
-  "Preserved-work resume (plan review round 2 redesign)". T001/T012 provide `run-manifest
-  limit-arm` / `limit-armed` (no arguments: they recompute HEAD and the tree digest, T012) /
-  `limit-disarm`; T003/T012 arm it in ai-recover's claimed-relaunch path only for the exact tree
+  "Preserved-work resume (plan review round 2 redesign)" including "Verification point (round
+  3 redesign, T014)". T001/T012 provide `run-manifest limit-arm` / `limit-armed` (no arguments:
+  they recompute HEAD and the tree digest, T012) / `limit-disarm`; T003/T012/T014 verify the
+  checkout first and arm it in ai-recover's claimed-relaunch path only for the exact tree
   recorded at scheduling.
 - An armed tree is accepted only where today's clean-checkout checks stand between the resumed
   pipeline and ai-run's first implementation session, and only when ALL hold: the process is a
@@ -453,8 +616,8 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
 - ai-recover's later stops after an armed resume follow the normal recovery rules (the arm is
   gone, so a second crash does not get the exception).
 - docs/workflow.md "Interruption, limits, and recovery" and README "Recovery": a limit stop
-  keeps the session's uncommitted work and the relaunch continues it once; a moved HEAD
-  escalates.
+  keeps the session's uncommitted work and the relaunch continues it once; any change during
+  the wait escalates (T014's paragraph; add the preserved-work sentence to it).
 - Flow chart (vault): the relaunch branch notes "uncommitted task work is continued, not
   committed by recovery".
 
@@ -471,8 +634,9 @@ scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/wor
     mock that completes the task → the pipeline completes; the source file is in a validated
     checkpoint commit; `recovery_calls()` empty (no recovery decision session); notifications
     contain `▶ RESUMED after the usage limit` and no `⛔`; the manifest has no `limit_resume`;
-  - HEAD moved after scheduling (a commit made by the test, tree still dirty) → ⛔ `on a
-    different commit`, nothing committed by recovery, no session ran;
+  - HEAD moved after scheduling (a commit made by the test, tree still dirty) → ⛔ `moved to
+    another commit while the usage-limit relaunch waited`, nothing committed by recovery, no
+    session ran, the session's edits byte-identical;
   - DONE before the limit (round 2 P3): new mock mode `MOCK_CLAUDE=limit-far-done`: the session
     sets the active task DONE in `.ai/tasks.md`, writes a source file, then reports the far
     limit. With a one-task queue: scheduled (exit 75); AT into the past; `ai-recover --stage
@@ -944,7 +1108,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, flow chart and handoff audit (all items)
 Status: TODO
-Dependencies: T011, T004, T007, T009
+Dependencies: T011, T014, T004, T007, T009
 Model: haiku
 
 ### Goal

@@ -88,11 +88,16 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   future restores the wait without counting a relaunch or retrying early; uncommitted work of
   the limited implementation session is continued once by the normal implementation session
   (validated before any commit), not escalated (plan review round 1, P1–P3). The exception is
-  bound to the preserved tree (HEAD, index and worktree contents) recorded when the relaunch is
-  scheduled and re-verified under the lock; any change during the wait escalates with nothing
-  committed. A session that marked its task DONE before the limit gets that work validated and
-  checkpointed by ai-run before any session, also when no runnable task remains (plan review
-  round 2, P3/P9).
+  bound to the preserved tree (HEAD, index, worktree contents and submodules, the existing
+  `tree_snapshot` digest) recorded when the relaunch is scheduled; the claimed relaunch
+  verifies it under the lock exactly once, before any commit, resume, arm or session, and any
+  change during the wait (a tracked, untracked, staged or bookkeeping change, a commit, a
+  submodule change, also while a triage or plan-revision stage is open) escalates with the
+  checkout exactly as found and nothing committed. A session that marked its task DONE before
+  the limit gets that work validated and checkpointed by ai-run before any session, also when
+  no runnable task remains (plan review round 2, P3/P9; round 3, P9/P10). The watchdog's stall
+  alarm stays silent while a relaunch is pending in the manifest, whether or not the local
+  pause log still carries the wait (round 3, P2).
 - The dashboard shows a gone run as paused only with evidence of a currently scheduled
   relaunch (`relaunch_at` in the observation); a newer last-error still wins.
 - `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same
