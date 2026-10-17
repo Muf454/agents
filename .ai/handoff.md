@@ -15,12 +15,16 @@ PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session
 - T009 CU-5 (opus): the marker-removal gate: a strict log reader (missing log = empty, any
   other read failure keeps the marker) and `confirm_recorded` (locked read, then file and
   directory sync before a marker whose record exists may go).
+- T010 CU-5 (opus): the marker failure contract: a marker that cannot be read is kept (only
+  invalid content is discarded), and `attempt-open` prints the id before it publishes the
+  marker so the runner always holds the id of a marker that exists.
 - T003 CU-5 (opus): `workflow.py outcome attempt-open / attempt-reconcile`, durable attempt
   markers in host state, `attempt_id` on task outcomes; a marker whose outcome could not be
   appended survives later attempts and is recorded once.
 - T004 CU-5 (opus): `ai-run` reconciles leftover markers at start (before the clean-checkpoint
-  check), opens one per attempt and removes it on a gate-broken stop; a SIGKILLed runner's
-  attempt is logged as `crashed` once at the next start.
+  check), opens one per attempt (keeping a printed id even when the open fails) and removes
+  it on a gate-broken stop; a SIGKILLed runner's attempt is logged as `crashed` once at the
+  next start.
 - T005 R13 (sonnet): recovery reasons, human actions and needs-human questions are cut at a
   sentence or word boundary with `…`; a cut recovery decision is kept in full in
   `.ai/local/recovery-decision.txt`, named in the ⛔ notification.
@@ -72,12 +76,18 @@ tests (the groups are added by the tasks named).
 - `test_outcome_removal_gate_*` (T009: strict reader tells a missing log from an unreadable
   one, `confirm_recorded` syncs file then directory before confirming and waits for the log
   lock).
+- `test_outcome_marker_contract_*` (T010: a marker read error is kept apart from invalid
+  content, `open_attempt` prints the id before publishing, a failed publish after the link
+  leaves the marker with the printed id).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
-  runner kept, garbage marker, torn last line, short write keeps the marker, a failed first
-  outcome survives the second attempt and is recorded once, a failed sync is finished before
-  the marker goes, an unreadable log keeps the marker and never duplicates).
+  runner kept, garbage marker, an unreadable marker kept while the others are processed,
+  torn last line, short write keeps the marker, a failed first outcome survives the second
+  attempt and is recorded once, a failed sync is finished before the marker goes, an
+  unreadable log keeps the marker and never duplicates, a failed open still removes its
+  marker on the normal outcome).
 - `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, which
-  then refuses the dirty checkout; normal paths unchanged, gate-broken stop leaves no marker).
+  then refuses the dirty checkout; a failed attempt open keeps the id and the task is never
+  reported `crashed`; normal paths unchanged, gate-broken stop leaves no marker).
 - `test_recovery_reason_shorten_*` (T005: boundary cuts, full-text file, ⛔ notification names it).
 
 ## Human todos

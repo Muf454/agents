@@ -231,7 +231,9 @@ round 2, P6–P8; design note `.ai/current-plan.md` "CU-5 write protocol (round 
   write `<id>.json.tmp` (`O_WRONLY|O_CREAT|O_EXCL`, 0o600), fsync, `os.link` to `<id>.json`
   (fails if it exists: never overwrites; on `FileExistsError` raise), unlink the tmp, fsync the
   dir; `list_markers()`: `*.json` files sorted by (`started`, name), each `(path, record or None)`
-  (unreadable/invalid → None); `remove_marker(path)`: unlink (missing is fine), fsync the dir.
+  (invalid content → None; T010 refines this into a three-way classification that keeps a
+  read error apart from invalid content, so write the reader so that T010 only adds the third
+  case); `remove_marker(path)`: unlink (missing is fine), fsync the dir.
   Ids are `secrets.token_hex(8)` and validated `^[0-9a-f]{16}$` before use in a file name.
 - `outcome attempt-dir` prints `attempts_dir()` (for T004's `on_exit`); there is no singleton
   `attempt.json` and no `attempt-path` (T003/T004 updated accordingly).
@@ -251,7 +253,9 @@ scripts/lib/workflow.py, tests/test_workflow.py
     one append syncs the log file, then its directory, then each newly created ancestor's
     parent, all before True is returned; with the dir present, file then directory;
   - directory-sync failure (the wrapper raises `OSError` for the directory inode): the
-    `outcome` command exits non-zero; T003's `outcome task … --attempt` keeps the marker;
+    `outcome` command exits non-zero and `append_outcome` has not returned True (the
+    marker-retention half of this case is T003's P9 acceptance bullet, since `--attempt` is
+    T003's interface; plan review round 4, P14);
   - marker store: two `write_marker` calls give two files; writing an existing id raises and
     leaves the first file byte-identical; `list_markers` returns both in `started` order and a
     garbage file as `(path, None)`; `remove_marker` of a missing file is fine; an invalid id is
@@ -330,9 +334,85 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
-## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+## T010 — CU-5 marker failure contract: three-way marker read, id printed before publish (CU-5, part 0d, round 4 redesign)
 Status: TODO
 Dependencies: T009
+Model: opus
+
+### Goal
+A transient error while reading one attempt marker never discards it (the other markers are
+still processed), and a failure of `attempt-open` after the marker is linked never leaves the
+runner without the id, so a task that finished normally is never reported `crashed` later.
+(Plan review round 4, P12 and P13; design note `.ai/current-plan.md` "CU-5 marker failure
+contract (round 4 redesign)".)
+
+### Implementation notes
+- `scripts/lib/workflow.py`, in T008's marker store.
+- Read: `list_markers()` returns `[(path, record, error)]` sorted by (`started` when known,
+  name); exactly one of `record`/`error` is set, or both are `None` for invalid content:
+  `record` is a dict when the file was read completely and holds the required fields
+  (`id` matching the file name and `^[0-9a-f]{16}$`, `task`, `model`, `project`, `branch`,
+  `started`, `pid`, `pid_start`); `error` is the `OSError` instance when opening or reading the
+  file failed (P12: the marker is the only durable evidence of an unrecorded attempt; a
+  transient `EIO`/`EACCES` must not look like garbage); both `None` when the content was read
+  completely but is not a valid marker (JSON error, missing field, id mismatch). Comment why
+  invalid content may be discarded (our writer links only complete, fsynced files, so invalid
+  content under the final name is foreign or corrupt, never a torn marker of ours).
+  `os.scandir` failing raises; the caller (T003's reconcile) notes it and touches nothing.
+  Adjust T008's `list_markers` test to the new shape.
+- Publish: `open_attempt(task, model, pid, out=sys.stdout) -> str`: build the record (fields as
+  T003 lists, `pid_start` from `/proc/PID/stat`), `print(id, file=out, flush=True)` FIRST, then
+  `write_marker(record)`. Comment the contract (P13): the id reaches the caller before the
+  marker can exist, so a marker without an id in the runner is impossible (a failed write to
+  the pipe raises before the link); an id without a marker is harmless (the outcome carries
+  it, `remove_marker` of a missing file is a no-op, nothing reconciles it). An `OSError` from
+  `write_marker` propagates after the print; the `attempt-open` command (T003) turns it into
+  a stderr note and exit 1. `open_attempt` does not reconcile (T003's `attempt-open` does,
+  before calling it).
+- Runner contract for T004 (write it as a comment on `open_attempt`):
+  `attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true` then
+  `[[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=`; the exit status is ignored after
+  the id is validated.
+- Residual (comment + plan Risks): a marker whose directory sync failed after the link may not
+  survive a power loss; that loses at most a `crashed` record, never produces a false one.
+- No reconcile, no `attempt-open` command, no `ai-run` change here (T003/T004).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_outcome_marker_contract_*` in tests/test_workflow.py (unit, `AI_STATE_DIR`
+  in the test's temp dir):
+  - `list_markers` with three files, a valid marker, a garbage file and a valid marker whose
+    read fails (`os.open`/`Path.read_bytes`, whichever the implementation uses, patched to raise
+    `OSError(EIO)` for that path only; variant: `chmod 0o000`, skipped when running as root):
+    returns three entries, the valid one with its record, the garbage one as `(path, None,
+    None)`, the failing one as `(path, None, <OSError>)`, the files unchanged;
+  - a marker whose `id` field differs from its file name, and one with a missing field, are
+    invalid content, not errors;
+  - `open_attempt` on a healthy store: the id is written to `out` before `write_marker` runs
+    (wrap `write_marker` to assert `out` already holds the id), the marker exists, the return
+    value equals the printed id;
+  - `open_attempt` with `os.fsync` patched to raise for the attempts-directory inode only (P13:
+    the failure after the link): the id was printed, `OSError` propagates, `<id>.json` exists
+    and holds that id; with the attempts directory read-only (`chmod 0o500`, skipped as root):
+    the id was printed, `OSError` propagates, no marker exists;
+  - `write_marker` is not called when the print fails (`out` whose `write` raises `OSError`):
+    no marker, no tmp file.
+- All existing `outcome` tests pass unchanged (`-k outcome`), T008's `list_markers` case
+  updated to the new shape and named in the result.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k outcome_marker_contract` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+Status: TODO
+Dependencies: T010
 Model: opus
 
 ### Goal
@@ -342,17 +422,20 @@ without ever losing or duplicating a line.
 
 ### Implementation notes
 - Design: `.ai/current-plan.md` "CU-5 — attempt marker + reconcile", "CU-5 write protocol
-  (round 2 redesign)" and "CU-5 marker-removal gate (round 3 redesign)". `scripts/lib/workflow.py`,
+  (round 2 redesign)", "CU-5 marker-removal gate (round 3 redesign)" and "CU-5 marker failure
+  contract (round 4 redesign)". `scripts/lib/workflow.py`,
   next to `outcome()` (~3029–3082). Markers: one file per attempt through T008's store
-  (`attempts_dir()` = `binding_dir() / 'attempts'`, `write_marker`, `list_markers`,
-  `remove_marker`; `binding_dir` ~1247 runs `check_state_root`). Never a singleton file, never
-  an overwrite (plan review round 2, P6).
+  (`attempts_dir()` = `binding_dir() / 'attempts'`, `write_marker`, `list_markers` (T010's
+  three-way shape), `remove_marker`; `binding_dir` ~1247 runs `check_state_root`). Never a
+  singleton file, never an overwrite (plan review round 2, P6).
 - `outcome attempt-open TASK MODEL PID`: first reconcile leftover markers with own PID = PID
-  (same function as below), then `write_marker({"id": secrets.token_hex(8), "task", "model",
-  "project", "branch", "started": int(time.time()), "pid": PID, "pid_start": <field 22 of
-  /proc/PID/stat or null>})`. Print the id. Read `/proc/PID/stat` as bytes and split after the
-  last `)` (comm can hold spaces, parentheses, non-UTF-8: see `tests/run_parallel.py`
-  `parse_stat`).
+  (same function as below), then T010's `open_attempt(TASK, MODEL, PID)`, which prints the id
+  BEFORE publishing `{"id": secrets.token_hex(8), "task", "model", "project", "branch",
+  "started": int(time.time()), "pid": PID, "pid_start": <field 22 of /proc/PID/stat or
+  null>}` (P13). An `OSError` after the print → stderr `Note: could not publish the attempt
+  marker.`, exit 1 (the runner keeps the printed id, T004). Read `/proc/PID/stat` as bytes and
+  split after the last `)` (comm can hold spaces, parentheses, non-UTF-8: see
+  `tests/run_parallel.py` `parse_stat`).
 - `outcome task TASK RESULT MODEL SECONDS [--attempt ID]`: the record gets `attempt_id` when
   given; after a SUCCESSFUL append (`append_outcome` returned True, T007/T008), remove the
   marker file `<ID>.json` (`remove_marker`). Other markers are left alone; a failed or short
@@ -362,8 +445,12 @@ without ever losing or duplicating a line.
   `read_outcomes` is T007's per-line reader. Do not add a second append path.
 - `outcome attempt-reconcile [OWN_PID]`: handles EVERY marker of `list_markers()` in order,
   each on its own (a failure on one keeps it and goes on to the next). No marker → silent exit
-  0. Unreadable or invalid marker → `remove_marker`, stderr `Note: discarded an unreadable
-  attempt marker.`. Runner alive (pid exists and its current start time equals `pid_start`;
+  0. The listing itself failing (`OSError` from `list_markers`) → stderr `Note: could not list
+  the attempt markers.`, exit 0, nothing touched. Per entry (T010's three-way shape, P12): a
+  read error → keep the marker, stderr `Note: could not read an attempt marker; keeping it.`,
+  continue with the next marker; invalid content (`record` and `error` both `None`) →
+  `remove_marker`, stderr `Note: discarded an invalid attempt marker.`; a valid record →
+  below. Runner alive (pid exists and its current start time equals `pid_start`;
   `pid_start` null → pid exists) AND pid ≠ OWN_PID → leave it, silent. A marker of OWN_PID
   (with a matching start time) is an earlier, finished attempt of the calling runner whose
   outcome append failed (attempts are sequential under the lock), so it is reconciled like a
@@ -409,6 +496,20 @@ scripts/lib/workflow.py, tests/test_workflow.py
   - live runner (marker with the test process's own pid and start time): left in place, nothing
     appended; same pid with a different `pid_start` → reconciled as dead;
   - a garbage marker → unlinked with the note, exit 0, nothing appended;
+  - transient marker read failure (P12): two dead runners' markers A and B; the read of A
+    patched to raise `OSError(EIO)` once (in-process; variant at command level with A
+    `chmod 0o000`, skipped as root): reconcile keeps A byte-identical, appends nothing for A,
+    prints the "could not read" note, still records B once and removes B, exit 0; the
+    unpatched retry records A exactly once and removes it;
+  - the attempts directory unlistable (`os.scandir` patched to raise `OSError`): the "could not
+    list" note, exit 0, markers unchanged, nothing appended;
+  - `attempt-open` with `write_marker` failing after the print (`os.fsync` patched to raise for
+    the attempts-directory inode, P13): stdout is the id, exit 1, the "could not publish"
+    note, the marker exists; `outcome task T001 done m 5 --attempt <that id>` then appends one
+    line with that `attempt_id` and removes the marker; a following reconcile appends nothing.
+    Variant with the attempts directory read-only (skipped as root): stdout is the id, exit 1,
+    no marker; `outcome task … --attempt <id>` appends one line carrying it; reconcile appends
+    nothing;
   - torn tail: the log ends with `{"time": "x", "kin` (no newline); the next `outcome` append
     starts on a new line and `read_outcomes` returns the new record (and not the fragment);
   - torn multibyte tail (P2): a valid record, then `{"title": "caf\xc3` (no newline), and a dead
@@ -475,9 +576,15 @@ A runner killed by SIGKILL during a task session leaves an attempt that the next
   restart refuses at ~136 before anything later could run; the reconcile is best effort, writes
   host state only and runs the same checkout helper that `state-root-check` (~109) already runs
   before the baseline, so it adds no new trust class. Do not move the gate baseline.
-- Attempt open (~262–267, inside `claude_session` where `attempt_open=yes` is set):
-  `attempt_id=$(ai_helper outcome attempt-open "$active_task" "${task_model:-$model}" "$$" 2>/dev/null) || attempt_id=`
-  before `attempt_open=yes` (a limit retry stays in the same attempt, as today).
+- Attempt open (~262–267, inside `claude_session` where `attempt_open=yes` is set), T010's
+  runner contract (plan review round 4, P13):
+  `attempt_id=$(ai_helper outcome attempt-open "$active_task" "${task_model:-$model}" "$$" 2>/dev/null) || true`
+  then `[[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=`, before `attempt_open=yes` (a
+  limit retry stays in the same attempt, as today). Comment: the helper prints the id before
+  it publishes the marker, so a marker can only exist once this shell holds its id; clearing
+  the id on a non-zero exit would leave a published marker behind and the next start would
+  log a finished task as `crashed` (the report takes a task's last line). Never clear a valid
+  printed id because of the exit status.
 - `task_outcome` (~208–212): pass `--attempt "$attempt_id"` when set, then clear `attempt_id`.
 - `on_exit` (~169–196): when `attempt_open == yes` and `gate_ok == no` (no helper may run),
   `[[ -z "$attempt_dir" || -z "$attempt_id" ]] || rm -f -- "$attempt_dir/$attempt_id.json"`
@@ -516,6 +623,15 @@ agents.md (Log)
   - the existing interrupted/timeout/error outcome paths (e.g. `test_runner_logs_task_outcomes_and_report`
     and the session-timeout outcome tests) log exactly what they did before, now with
     `attempt_id`, and leave no marker;
+  - failed attempt open, id kept (P13, end to end): before an `ai-run --approved` whose mock
+    implements and checkpoints the task, the test creates the fixture's attempts directory
+    (`outcome attempt-dir` under the fixture's `AI_STATE_DIR`) and makes it read-only
+    (`chmod 0o500`, restored in `addCleanup`, skipped as root), so `attempt-open` prints an id
+    and exits 1 after it: the run completes, the task's `done` line carries a 16-hex
+    `attempt_id`, stderr/log has no `crashed`, and the next `ai-run --approved` start appends
+    nothing; the post-link variant (marker exists, exit 1) is covered at helper level by
+    T003's `attempt-open` cases, since a directory-sync failure cannot be injected into the
+    runner's helper from outside;
   - a gate-changing session (existing gate-change mock mode): no outcome line (as today) and no
     marker afterwards, and the next start logs nothing for it.
 - All existing tests pass unchanged; the vault flow chart and hub Log are updated (or the
@@ -594,7 +710,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T006 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T007, T008, T009, T003, T004, T005
+Dependencies: T001, T002, T007, T008, T009, T010, T003, T004, T005
 Model: haiku
 
 ### Goal
@@ -622,7 +738,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   `.ai/local/recovery-decision.txt`; `docs/workflow.md` states the finding-cell rule for both
   tables.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_removal_gate_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
+- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_removal_gate_*`, `test_outcome_marker_contract_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
   `test_recovery_reason_shorten_*` under "Covered by automated tests", and every group exists
   (`python3 -m unittest discover -s tests -k <group>` runs ≥ 1 test each).
 

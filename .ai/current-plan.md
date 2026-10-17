@@ -129,6 +129,37 @@ non-`--plan` mode: best effort, host state only, through the same checkout helpe
 `Start from a clean checkpoint`; the human (or the recovery session) commits the leftovers,
 and the next start runs the task. T004's end-to-end test follows exactly this order.
 
+### CU-5 marker failure contract (round 4 redesign, T010)
+Round 4 (P12, P13) found two more marker paths whose failure outcome was unspecified: a
+transient error while READING a marker was treated like invalid content and discarded, and a
+failure of `attempt-open` AFTER the marker was linked left a marker whose id the runner had
+cleared (`|| attempt_id=`), so a finished task was later logged `crashed` and the report
+(`outcomes_report`, workflow.py:3093, last line per task wins) showed it as not done. Fourth
+round in the CU-5 marker area, so the failure semantics of every marker operation are stated
+once, as a contract, instead of per path:
+1. **Publish** (`open_attempt`, used by `outcome attempt-open` after its reconcile): choose the
+   id, PRINT it to stdout and flush, THEN publish the marker (dir, tmp, fsync, link, unlink
+   tmp, dir fsync). Any failure after the print: stderr note, exit 1, marker possibly present.
+   The runner keeps every valid id the command printed, whatever its exit status:
+   `attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true`, then
+   `[[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=`. Asymmetry that makes this safe: an
+   id WITHOUT a marker is harmless (the outcome line carries it, `remove_marker` of a missing
+   file is a no-op, nothing reconciles it), while a marker without an id in the runner
+   produces a false `crashed` line; printing first means a marker can only exist once the
+   runner has its id (a write to the closed pipe fails before the link).
+2. **Read** (`list_markers`): every `*.json` entry is classified three ways, never raising
+   for one file: a valid record; invalid content (`None`: read completely, but not JSON, missing
+   fields, or `id` different from the file name), which reconcile discards with its note (our
+   writer links only complete, fsynced files, so invalid content under the final name is
+   foreign or corrupt, never a torn marker of ours); a read error (the `OSError` instance:
+   open/read failed), which reconcile keeps, notes and skips, going on with the next marker.
+   A listing failure (`scandir` raising) is a note, exit 0, nothing touched.
+3. **Remove**: unchanged, T009's one removal rule.
+Invariant: no marker is discarded because of a transient failure, and every marker that
+exists is either held by a runner that knows its id or reconcilable as a dead runner's.
+Residual: a marker whose directory sync failed after the link may not survive a power loss;
+that loses at most a `crashed` record, never produces a false one.
+
 ### R13 — boundary cut + full text (T005)
 - `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
   prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
@@ -150,10 +181,11 @@ and the next start runs the task. T004's end-to-end test follows exactly this or
 | T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
 | T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
 | T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
-| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009) | opus | T009 |
-| T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check), SIGKILL end-to-end, docs, flow chart | opus | T003 |
+| T010 | CU-5 marker failure contract: three-way marker read, id printed before publish (round 4 redesign) | opus | T009 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010) | opus | T010 |
+| T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check, id kept on a failed open), SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
@@ -164,13 +196,20 @@ and the next start runs the task. T004's end-to-end test follows exactly this or
   larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
   only: unique random ids, one locked write per line with a newline guard, fsync of the new
   line, the marker and the directories they live in, one never-overwritten marker per attempt,
-  reconcile idempotent by id, marker removal only after a strict read and a successful sync
-  (designs: "CU-5 write protocol", "CU-5 marker-removal gate"). Durability of earlier rows is a non-goal
+  reconcile idempotent by id, marker removal only after a strict read and a successful sync,
+  markers kept on read errors and ids kept by the runner on a failed open
+  (designs: "CU-5 write protocol", "CU-5 marker-removal gate", "CU-5 marker failure
+  contract"). Durability of earlier rows is a non-goal
   (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
   be deferred, not grown into a redesign tonight.
 - CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
   `confirm_recorded`'s retried sync cannot restore them; the gate only guarantees that no
   marker is removed without a successful sync attempt (T009 comment and docs).
+- CU-5 false crash: `outcomes_report` takes a task's LAST line as its result (workflow.py:3093),
+  so a `crashed` line appended for an attempt that actually finished would hide its `done`.
+  The marker failure contract (T010) rules that out for a failed `attempt-open` (the runner
+  keeps the printed id) and for a transient marker read error (the marker is kept, not
+  discarded); the only remaining source is the documented short-write case.
 - CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
   reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
   there until the leftovers are committed; T004's test and the handoff state this order.

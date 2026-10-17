@@ -353,3 +353,6 @@
 | 2026-10-17T01:46:34Z | runner | plan-revision | plan revised (round 1): accepted 5, rejected 0, needs-human 0 | n/a | 7bec6f1 | Plan review runs again |
 | 2026-10-17T01:52:03Z | runner | plan-revision | plan revised (round 2): accepted 3, rejected 0, needs-human 0 | n/a | 9bf0b77 | Plan review runs again |
 | 2026-10-17T01:59:24Z | runner | plan-revision | plan revised (round 3): accepted 3, rejected 0, needs-human 0 | n/a | 2010bbe | Plan review runs again |
+| 2026-10-17T02:08:12Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | f637081 | No merge or deployment performed |
+| 2026-10-17T02:08:18Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | f637081 | No merge or deployment performed |
+| 2026-10-17T02:08:56Z | runner | plan-revision | plan revised (round 4): accepted 3, rejected 0, needs-human 0 | n/a | f637081 | Plan review runs again |

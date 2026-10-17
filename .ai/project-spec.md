@@ -84,9 +84,15 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   log (a missing log is empty; any other read failure keeps the marker, appends nothing and
   prints a note) and removes a marker whose record already exists only after it has
   successfully synced the log file and its directory under the log lock (a complete write whose
-  sync failed is finished here). A stop that deliberately logs nothing (approved gate changed)
-  removes the marker without running a helper. Advisory telemetry only: never fatal, never a
-  stop; a sync the kernel already failed cannot be redone (dirty pages may be gone).
+  sync failed is finished here). A marker that cannot be read (open or read error) is kept and
+  skipped with a note, and the other markers are still processed; only content that was read
+  completely and is not a valid marker is discarded. `attempt-open` prints the attempt id
+  before it publishes the marker, and the runner keeps a printed id even when the command
+  fails afterwards, so a finished task is never logged `crashed` because its marker outlived
+  a failed open (an id without a marker is harmless). A stop that deliberately logs nothing
+  (approved gate changed) removes the marker without running a helper. Advisory telemetry
+  only: never fatal, never a stop; a sync the kernel already failed cannot be redone (dirty
+  pages may be gone).
 - **R13 recovery text.** Reasons, human actions and needs-human questions longer than their
   300-character cap are cut at a sentence end, else a word boundary, and end with `…`; the full
   recovery reason and human action are written to `.ai/local/recovery-decision.txt` when cut,
