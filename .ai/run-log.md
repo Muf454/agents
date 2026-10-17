@@ -388,3 +388,6 @@
 | 2026-10-17T07:23:11Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 4d5681f | No merge or deployment performed |
 | 2026-10-17T07:23:14Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 4d5681f | No merge or deployment performed |
 | 2026-10-17T07:24:28Z | runner | plan-revision | plan revised (round 1): accepted 7, rejected 0, needs-human 0 | n/a | 4d5681f | Plan review runs again |
+| 2026-10-17T07:34:42Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 901845e | No merge or deployment performed |
+| 2026-10-17T07:34:45Z | runner | plan-revision | stopped (exit 1); inspect state/diff before resuming | see local logs | 901845e | No merge or deployment performed |
+| 2026-10-17T07:35:58Z | runner | plan-revision | plan revised (round 2): accepted 4, rejected 0, needs-human 0 | n/a | 901845e | Plan review runs again |

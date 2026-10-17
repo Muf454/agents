@@ -87,17 +87,27 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   terminal ⛔, never a launch loop); a recovery started while the schedule is still in the
   future restores the wait without counting a relaunch or retrying early; uncommitted work of
   the limited implementation session is continued once by the normal implementation session
-  (validated before any commit), not escalated (plan review round 1, P1–P3).
+  (validated before any commit), not escalated (plan review round 1, P1–P3). The exception is
+  bound to the preserved tree (HEAD, index and worktree contents) recorded when the relaunch is
+  scheduled and re-verified under the lock; any change during the wait escalates with nothing
+  committed. A session that marked its task DONE before the limit gets that work validated and
+  checkpointed by ai-run before any session, also when no runnable task remains (plan review
+  round 2, P3/P9).
 - The dashboard shows a gone run as paused only with evidence of a currently scheduled
   relaunch (`relaunch_at` in the observation); a newer last-error still wins.
 - `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same
   edit allowlist as `ai-run --plan`, Read access to each `--read-dir`, a `planning` dashboard
   stage while it runs, an outcome record `kind: plan` and a run-log line; `--detach` returns
   after the session has confirmably started and prints its PID and log path. The session never
-  commits. A planning session killed without a plan shows as a stop on the Plan box.
+  commits. A planning session killed without a plan shows as a stop on the Plan box. The
+  detached log is created exclusively (unique name, no symlink or FIFO followed) inside the
+  pinned `.ai/local` and becomes the runner's stdout/stderr through that descriptor (P8).
 - `ai-pipeline` un-drafts an existing draft PR only when host state records that the pipeline
   drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft,
-  and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it.
+  and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it. A
+  `--draft` run whose clear cannot be confirmed stops (⛔, names the record to delete) before it
+  changes the PR, and an un-draft first consumes the record, so a record that cannot be removed
+  never un-drafts (P4).
 - Every behaviour change has an offline regression test in the existing style; `.ai/bin/ai-check`
   passes; README.md and `docs/workflow.md` describe the new behaviour; the vault flow chart is
   updated in the tasks that change the flow.

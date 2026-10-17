@@ -11,7 +11,10 @@ on 2026-10-17 (Claude planning session, unattended):
   run; past it, without a recovering timer, or with the cap at 0, ⛔ as today. No mission tick.
   Plan review round 1: the schedule is held/claimed right after the attempt reservation (no
   launch loop, no double schedule), and T011 lets the relaunch continue the limited session's
-  uncommitted task work once, validated as usual.
+  uncommitted task work once, validated as usual. Plan review round 2: T012 binds that exception
+  to the exact preserved tree (a change during the wait escalates, nothing absorbed) and T011
+  also checkpoints a task marked DONE just before the limit; T013 creates the `--detach` log
+  safely; T008/T009 make `--draft` revocation durable or stop.
 - **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
   `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
   confirmed detached start printing PID and log), planning sessions in the outcome log and run
@@ -32,7 +35,8 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
 - DB-04: `ai-plan` keeps `plan-allowlist` unchanged (it also allows
   `.ai/reviews/dispositions.md`, which `launch-plan.sh` did not); a finished plan keeps today's
   dashboard view (Plan ✓, 📝 under Plan check) until the pipeline starts.
-- R15: a PR drafted because of `--draft` is the human's choice and never recorded; an un-draft
+- R15: a PR drafted because of `--draft` is the human's choice and never recorded; a `--draft`
+  run that cannot remove the pipeline's record stops (⛔ names the file); an un-draft
   failure warns and does not stop the run; a human who un-drafts and re-drafts between two runs
   is not detected (documented limitation).
 
@@ -66,7 +70,9 @@ the task named).
 - `test_limit_relaunch_record_*` (T001: limit-stop record, relaunch time, manifest schedule/cap/attempt give-back).
 - `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once, no stall alarm while waiting, `--timer-recovers`).
 - `test_limit_relaunch_recover_*` (T003: pause instead of ⛔, resume without Claude, cap, off switch, no timer, mixed reason, terminal escalation after a claim, interrupted scheduling restores the wait).
-- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; moved HEAD escalates; a human start refuses a dirty tree).
+- `test_limit_relaunch_binding_*` (T012: tree digest, arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
+- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; a task DONE before the limit is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree).
+- `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
 - `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).

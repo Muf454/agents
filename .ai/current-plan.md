@@ -22,7 +22,7 @@ flowchart TD
   sched --> probe["watchdog probe (every 10 min, --recover):<br/>no runner, no marker, run-manifest limit-due"]
   probe --> launch["start_recovery(stage 'usage limit relaunch')"]
   launch --> claim["ai-recover, right after reserve-attempt:<br/>limit-hold (still waiting → restore wait, exit 75)<br/>or limit-claim (schedule consumed: later stops are terminal)"]
-  claim --> due["gate/branch checks, record stop leftovers;<br/>dirty at the scheduled HEAD → limit-arm (T011);<br/>▶ RESUMED, exec ai-pipeline"]
+  claim --> due["gate/branch checks, record stop leftovers;<br/>dirty with exactly the scheduled tree → limit-arm (T012), else ⛔;<br/>▶ RESUMED, exec ai-pipeline"]
   due -. "limit again" .-> only
 ```
 - **Record (T001).** `ai_limit_pause` writes `.ai/local/limit-stop` (`<Agent> <reset epoch or 0>`,
@@ -68,6 +68,47 @@ flowchart TD
   committed-matches-worktree, as for any task. Chosen over a recovery WIP commit (would commit
   unvalidated content) and over the Claude decision session (the reviewer's and the decision's
   point: a limit is not a human problem). HEAD moved since the stop → ⛔.
+- **Preserved-work resume (plan review round 2 redesign, T012 + T011).** Round 1 (P3) and
+  round 2 (P3, P9) both found gaps in the preserved-work exception, so the area is specified
+  as a whole instead of patched per symptom:
+  - *Binding.* The exception admits a TREE, not a commit. `workflow.py worktree-digest`
+    (T012) hashes HEAD, the index (`git ls-files --stage -z`) and every path of
+    `git ls-files --cached --others --exclude-standard -z` (type, mode, content or link
+    target, or "missing"), excluding only `.ai/local/`. Tracked bookkeeping
+    (`.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md`) is INCLUDED: between scheduling and
+    the arm the host writes only `.ai/local/` and host state outside the checkout (ai-recover's
+    leftovers commit runs only on a bookkeeping-only tree, which is clean afterwards and never
+    armed). `limit-schedule AT CAP` records `limit_head` and `limit_tree` computed by the
+    helper itself; `limit-arm` (no argument) recomputes both under ai-recover's lock and arms
+    (`limit_resume = {head, tree}`) only on an exact match; `limit-armed` (no argument)
+    recomputes and compares at every acceptance site. Any difference (a human edit, an added
+    file, a staged change, a commit) → ⛔ `the checkout changed while the usage-limit relaunch
+    waited; nothing was committed.`, the arm is not set and the tree is left as it is.
+  - *What the resumed run does with the tree.* ai-pipeline does not skip ai-run while the tree
+    is armed (`tasks complete` at ai-pipeline ~499 is not consulted then). ai-run consumes the
+    arm before any session and asks `tasks newly-done HEAD` (T012: IDs DONE in the working
+    queue but not DONE in HEAD's queue): exactly one → *armed checkpoint*: the existing
+    post-task DONE path (full `ai-check`, failure returns the task to IN_PROGRESS and stops;
+    tier-1 commit with `checkpoint-guard`, stamp verify, `committed-matches-worktree`; runner
+    bookkeeping commit), refactored into one function used by both, then the loop continues
+    (final validation and handoff when nothing is left); none → the normal session on
+    `tasks next` (IN_PROGRESS first); more than one → `ai_die` (the arm is already gone, so
+    the next recovery takes the normal rules).
+- **R15 revocation (plan review round 2, P4).** Pipeline ownership is revoked durably or the run
+  stops: records live in their own host directory `binding_dir()/pr-draft/`; `pr-draft clear`
+  unlinks, fsyncs the directory and confirms the file is gone (any other `OSError` → exit 1
+  naming the path); `pr-draft take URL` consumes a matching record the same way and prints its
+  HOW. A `--draft` run clears at the start of the PR step, before any `gh` change, and a failed
+  clear stops `pull request` with a reason ai-recover treats as a hard rule (⛔, names the file
+  to delete). The un-draft path takes the record BEFORE `gh pr ready`; a failed take leaves the
+  PR draft (warning); a failed ready re-records it (best effort; a lost record fails closed).
+- **Detached log (plan review round 2, P8).** `ai-plan --detach` never redirects to a path:
+  it launches `setsid python3 -I "$AI_BIN/lib/workflow.py" exec-logged NAME -- "$AI_BIN/ai-run"
+  --plan …` (T013), which pins `.ai/local` with `local_dir_fd`, creates NAME
+  (`plan-<UTC stamp>-<8 random hex>.log`, validated) with `O_CREAT|O_EXCL|O_NOFOLLOW|
+  O_NONBLOCK`, checks it is a regular file, `dup2`s it to stdout/stderr and `execv`s the runner
+  (same PID). An existing name (symlink, FIFO, file) fails without touching it, and two launches
+  never share a log.
 - **Watchdog (T002).** Under its lock, before the incident logic: with `--recover`, no runner
   alive and no `pipeline.active` marker, it asks THIS host copy's `workflow.py run-manifest
   limit-due` (same trust path as the gate check in `start_recovery`); when due it calls
@@ -110,9 +151,11 @@ flowchart TD
   [--session-timeout S] [--knowledge-dir DIR] [--read-dir DIR]... [--detach]`: without
   `--detach` it execs `ai-run --plan …` (same process, so the dashboard and watchdog see an
   `ai-run` runner and nothing else changes). With `--detach`: prompt path made absolute, log
-  `.ai/local/plan-<UTC stamp>.log`, `setsid "$AI_BIN/ai-run" --plan … </dev/null >log 2>&1 &`
-  (a non-interactive shell's background job is not a group leader, so `setsid` execs without
-  forking and `$!` is the runner's PID), then wait up to `AI_PLAN_ACK_SECONDS` (default 20) for
+  `.ai/local/plan-<UTC stamp>-<8 random hex>.log` created by T013's `exec-logged` (see
+  "Detached log" above; never a shell redirection to the log path), `setsid python3 -I …
+  exec-logged NAME -- "$AI_BIN/ai-run" --plan … </dev/null &` (a non-interactive shell's
+  background job is not a group leader, so `setsid` execs without forking, and `exec-logged`
+  execs the runner, so `$!` is the runner's PID), then wait up to `AI_PLAN_ACK_SECONDS` (default 20) for
   `.ai/local/observation.json` to show `stage: planning` with `pid` equal to that PID (success:
   `Planning session started: pid N, log PATH`, exit 0), or for the child to exit (print the log's
   last lines, exit with its status), else `could not confirm …` exit 1 (the child keeps running).
@@ -135,8 +178,8 @@ flowchart TD
   the pipeline's policy (`unresolved` or disputes). Recorded when the pipeline creates the PR
   with `--draft` for policy, or converts an existing ready PR with `gh pr ready --undo` for policy
   (after the isDraft check confirms). When `make_draft=no` and the existing PR is a draft: if
-  `pr-draft get` equals this PR's URL → `gh pr ready "$branch"`, confirm `isDraft == false`, clear
-  the record, log it; a failure warns and keeps the record (the run still finishes; the summary
+  `pr-draft take` of this PR's URL succeeds (record consumed first, round 2 P4) → `gh pr ready
+  "$branch"`, confirm `isDraft == false`, log it; a failure warns and keeps the record (the run still finishes; the summary
   says the PR is still a draft). No record or another URL → leave it draft and print
   `PR is a draft set outside the pipeline; left as draft.` An existing ready PR clears a stale
   record (a human un-drafted it). A run with `--draft` clears the record whatever the PR's state:
@@ -148,13 +191,15 @@ flowchart TD
 | T001 | MC-01 | limit-stop record, run-manifest relaunch schedule, setting | opus |
 | T002 | MC-01 | watchdog starts the due relaunch, `--timer-recovers`, stall skip | opus |
 | T003 | MC-01 | ai-recover schedules instead of escalating; hold/claim lifecycle; due path resumes | opus |
-| T011 | MC-01 | relaunch continues preserved task work once (armed resume) | opus |
+| T012 | MC-01 | preserved-work binding: tree digest, arm on exact tree, `tasks newly-done` | opus |
+| T011 | MC-01 | relaunch continues preserved task work once (armed resume; DONE → armed checkpoint) | opus |
 | T004 | MC-01, DB-04 | dashboard: waiting relaunch is paused, killed planning is a stop | sonnet |
 | T005 | DB-04 | `ai-run --plan --read-dir` (permission boundary) | opus |
+| T013 | DB-04 | `workflow.py exec-logged`: exclusive log in pinned `.ai/local`, exec on its fd | opus |
 | T006 | DB-04 | `scripts/ai-plan` with `--detach` | opus |
 | T007 | DB-04 | planning sessions in the outcome log and run log | sonnet |
 | T008 | R15 | host record of a pipeline-drafted PR | sonnet |
-| T009 | R15 | PR step un-drafts only a recorded pipeline draft | sonnet |
+| T009 | R15 | PR step un-drafts only a recorded pipeline draft (durable revocation) | opus |
 | T010 | all | docs, flow chart and handoff audit | haiku |
 
 ## Risks
@@ -165,9 +210,12 @@ flowchart TD
   ai-recover leaves the schedule due with no marker, so the next probe (10 min later) relaunches
   once more; that is a retry of the same relaunch, not a new one (the relaunch count does not
   change) and needs an external kill in a window of two helper calls each time. Accepted.
-- Preserved task work (T011) is admitted only on a resume, at the HEAD recorded when the stop
-  was scheduled, once; it is the session's own uncommitted output, exactly what the in-process
-  `ai_limit_pause` wait would have continued with, and it is validated before any commit.
+- Preserved task work (T011/T012) is admitted only on a resume, for the exact tree (HEAD, index,
+  worktree) recorded when the stop was scheduled, once; it is the session's own uncommitted
+  output, exactly what the in-process `ai_limit_pause` wait would have continued with, and it
+  is validated before any commit. A human edit during the wait (days for a weekly limit)
+  changes the digest and escalates; nothing is absorbed. Residual: an edit that restores
+  byte-identical content is indistinguishable, and harmless.
 - Watchdog not installed or installed without `--recover`: detected by `--timer-recovers`; the
   stop escalates as today. A timer removed after scheduling: nobody relaunches; the ⏸
   notification states the time, so the human can rerun. Accepted (no daemon, AD-4).
@@ -184,7 +232,8 @@ flowchart TD
 
 ## Validation strategy
 Targeted `python3 -m unittest discover -s tests -k <prefix>` per task, then `.ai/bin/ai-check`
-(about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*` (incl. `test_limit_relaunch_preserved_*`),
+(about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*` (incl. `test_limit_relaunch_preserved_*`,
+`test_limit_relaunch_binding_*`), `test_exec_logged_*`,
 `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*`, `test_plan_read_dir_*`,
 `test_ai_plan_*`, `test_plan_outcome_*`, `test_pr_undraft_*`.
 
