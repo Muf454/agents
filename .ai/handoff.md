@@ -114,24 +114,26 @@ catch-up rule is a reviewer-log rule, not a chart box). Nothing pending.
 2. Interrupt a real self-check (`bash .ai/validate`, Ctrl-C after a minute) and confirm with
    `pgrep -af 'ai-toolkit-test|ai-tests-'` that no fixture process is left.
 3. Run `.ai/bin/ai-status --outcomes` on your real outcome log: Claude reviews of branches that
-   later got a Codex review are no longer listed as pending; record any other branch's catch-up
-   with `--catch-up-done`.
+   later got a full Codex review are no longer listed as pending (a Codex re-check alone does
+   not cover them, review M2); record any other branch's catch-up with `--catch-up-done`.
 
 ### Covered by automated tests
 Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its
 tests (the groups are added by the tasks named).
-- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002),
-  `test_parallel_runner_startup_*` (T013).
+- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002; T014 adds
+  `test_parallel_runner_tree_non_utf8_name`), `test_parallel_runner_startup_*` (T013).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
-- `test_disposition_pipes_*` (T005).
+- `test_disposition_pipes_*` (T005; T016 adds `test_disposition_pipes_missing_task_before_next_row`
+  and `test_disposition_pipes_literal_backslash_round_trip`).
 - `test_scratch_clear_*` (T011: symlinked `.ai`/`.ai/local` refused, `scratch` symlink unlinked,
   tree removed without entering inner symlinks, cleared before and after a real `ai-run` session,
   a pre-existing `scratch` symlink stops the run at startup), `test_scratch_dir_*` (T007).
 - `test_recovery_decision_scan_*` (T012), `test_recovery_decision_prose_*` (T008: prose-only and
   bracketed answers escalate with the excerpt; a mock prose + `rerun` answer resumes the
   pipeline end to end; a prose-only answer's ⛔ notification quotes the session).
-- `test_outcome_catchup_*` (T009).
+- `test_outcome_catchup_*` (T009; T015 adds `test_outcome_catchup_recheck_does_not_cover_code`
+  and `test_outcome_catchup_code_covers_recheck`).
 
 ## Human todos
 - Installed copies: `.ai/bin` and `.ai/prompts` of this repo and other projects keep the old
@@ -143,5 +145,6 @@ tests (the groups are added by the tasks named).
   ID cells with a severity suffix, same regex area as T005).
 
 ## Next action
-Queue complete: T001–T013 (all 13 batch tasks) are DONE. Next: independent review
-(`.ai/reviews/current.md`), then the human's acceptance steps above and the merge.
+Review round 1 triaged (`.ai/reviews/dispositions.md`): M1, M2, P7, N1 accepted, none
+rejected or deferred. Fix tasks T014 (opus, process scan), T015 (catch-up coverage) and T016
+(disposition row parsing) are TODO. Then re-review, the human's acceptance steps and the merge.

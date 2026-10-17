@@ -916,3 +916,123 @@ hub Log has the FL-21/CU-1/CU-3/CU-4 "already done" line (2026-10-16) plus new T
 Handoff: "Manual testing" (Needs you, every test group named under Covered), Human todos, the
 flow chart and next action updated. Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
 Gate: `.ai/bin/ai-check` PASS (736 tests, 397.4 s on 8 workers). No human acceptance is implied.
+
+## T014 — Process scan survives non-UTF-8 process names; a scan failure never skips batch termination (review M1)
+Status: TODO
+Dependencies: T013
+Model: opus
+
+### Goal
+A process anywhere on the host whose name is not valid UTF-8 can no longer make
+`Dispatcher.stop()` raise before the batch groups are signalled and leave fixture processes
+alive while `stop_done` is set (FL-27).
+
+### Implementation notes
+- `tests/run_parallel.py` `proc_stat()` (~203): read `/proc/<pid>/stat` as bytes
+  (`read_bytes()`) and let `parse_stat` split after the last `b')'`, or decode with
+  `errors='surrogateescape'`/`'replace'`; only the numeric fields after the last `)` are used.
+  Catch `ValueError` (UnicodeDecodeError is one) as well as `OSError` per entry so one odd
+  entry is skipped, not fatal.
+- `Dispatcher.terminate()` (~384): signal the batch process groups before (or independently
+  of) the first `live_descendants()` scan, so a scan failure cannot skip the group SIGTERM /
+  SIGKILL; a scan that raises falls back to `{}` for that round rather than aborting `stop()`.
+  Keep the single-owner / `stop_done` barrier from T013.
+- Comment why (arbitrary bytes in comm).
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_run_parallel.py (or wherever `test_parallel_runner_tree_*` live)
+
+### Acceptance criteria
+- `test_parallel_runner_tree_non_utf8_name`: a real child sets its name with
+  `prctl(PR_SET_NAME, b"\xff")` (via ctypes, skip if not Linux); `Dispatcher.stop()` with
+  subreaping returns without raising and the child is gone or a zombie afterwards.
+- A unit case: `parse_stat`/`proc_stat` on stat content with a non-UTF-8 name returns the
+  right state, ppid and starttime.
+- A case where the descendant scan raises (patched) still signals the batch groups and the
+  batch process is gone after `stop()`.
+- All existing `test_parallel_runner_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner_tree` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T015 — A Codex re-check does not cover a full Claude code review (review M2, CU-2)
+Status: TODO
+Dependencies: T009
+Model: sonnet
+
+### Goal
+"Codex catch-up pending" keeps a Claude `code` review until a full Codex `code` review (or a
+catch-up record) follows it; a targeted Codex `recheck` only re-examines rejected findings
+(`templates/.ai/prompts/recheck.md`) and covers only a Claude `recheck`.
+
+### Implementation notes
+- `scripts/lib/workflow.py` outcome report `covered()` (~3172–3186): replace the symmetric
+  `family` mapping with an explicit "covers" relation: Codex `plan` covers Claude `plan`;
+  Codex `code` covers Claude `code` and `recheck`; Codex `recheck` covers Claude `recheck`
+  only. Catch-up records unchanged.
+- This matches spec CU-2 ("code covers code and re-check"); the symmetric reading was the bug.
+  Update README / `docs/workflow.md` where catch-up coverage is described to say a re-check
+  does not cover a full review.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md, README.md
+
+### Acceptance criteria
+- `test_outcome_catchup_recheck_does_not_cover_code`: Claude `code` at t1, Codex `recheck`
+  at t2 (same project/branch) → the Claude review stays under "Codex catch-up pending" and
+  no "covered" line counts it.
+- `test_outcome_catchup_code_covers_recheck`: Claude `recheck` at t1, Codex `code` at t2 →
+  covered.
+- Existing `test_outcome_catchup_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k outcome_catchup` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T016 — Disposition rows: one physical line per row and a lossless backslash/pipe encoding (review P7, N1; FL-25 b)
+Status: TODO
+Dependencies: T005
+Model: sonnet
+
+### Goal
+A row missing its Task cell stays malformed even when another row follows it, and evidence
+containing a literal `\|` or runs of backslashes round-trips through the host's writers and
+readers without shifting columns.
+
+### Implementation notes
+- `scripts/lib/workflow.py` `DISPOSITION_ROW` (~994) and `PLAN_DISPOSITION_ROW` (~2445): use
+  `[ \t]*` instead of `\s*` around cells (as `CONVERGENCE_LINE` already does), so a match never
+  crosses a newline into the next row.
+- Encoding contract: writers (`cell` lambdas ~1646, ~2945) escape `\` as `\\` first, then `|`
+  as `\|`; `table_cell()` decodes exactly `\\` → `\` and `\|` → `|` in one left-to-right pass
+  (e.g. `re.sub(r'\\([\\|])', r'\1', text)`); any other backslash (`C:\path`) is kept.
+  `TABLE_CELL` already pairs a backslash with the next character, so `\\|` reads as `\` plus a
+  separator, which is now consistent with the writer.
+- `docs/workflow.md` dispositions-format sentence: mention `\\` for a literal backslash
+  before a pipe.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_disposition_pipes_missing_task_before_next_row`: for both `triage-check --fresh` and
+  `plan-dispositions-check`, a required row lacking its Task cell followed by another row
+  fails as malformed/missing (never `accepted=0 deferred=0` pass), and the following row is
+  still read as its own row.
+- `test_disposition_pipes_literal_backslash_round_trip`: evidence `literal regex \| is required`
+  and `a \\\\ b` (multiple consecutive backslashes) rendered by the existing writers and read
+  back give the original text, and the Task cell reads the task ID.
+- Existing `test_disposition_pipes_*` and `test_triage_severity_suffix_*` tests pass
+  unchanged (`C:\path` kept).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k disposition_pipes` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k triage_severity_suffix` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
