@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T011
 Tasks complete: 7
 Tasks remaining: 12
-Last validation: PASS at 2026-10-18 (ai-check, 879 tests)
+Last validation: PASS at 2026-10-17T23:02:12Z
 Blocked: no
-Next action: Next unblocked task in .ai/tasks.md
-Last updated: 2026-10-18
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-17T23:02:12Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
