@@ -66,9 +66,10 @@ flowchart TD
   (task IN_PROGRESS, source). The claimed relaunch does not commit them and does not escalate:
   when the tree is dirty after recording the bookkeeping leftovers and HEAD still equals
   `limit_head`, it arms the manifest (`limit_resume = HEAD`). The resumed `ai-pipeline` and
-  `ai-run` accept exactly that tree at their start-from-clean checks (ai-pipeline ~123,
-  `reconcile_disputes` ~326 with no re-check, ai-run ~148), only on a resume, and ai-run
-  consumes the arm before its first session. The normal session reconciles the work ("Reconcile
+  `ai-run` accept exactly that tree through one predicate, `clean_or_armed`, at every
+  cleanliness check between the resume and ai-run's first session ("Armed-tree acceptance"
+  below, T015: ai-pipeline ~123, both tests of `reconcile_disputes` ~326/~349, ai-run ~148),
+  only on a resume, and ai-run consumes the arm before its first session. The normal session reconciles the work ("Reconcile
   interrupted work first"); DONE still needs `ai-check`, the checkpoint guard and
   committed-matches-worktree, as for any task. Chosen over a recovery WIP commit (would commit
   unvalidated content) and over the Claude decision session (the reviewer's and the decision's
@@ -122,6 +123,47 @@ flowchart TD
        inconsistency and escalates with the same wording; it is no longer the first check.
     4. `limit-armed` at ai-pipeline's and ai-run's acceptance sites (T011) recomputes against
        `limit_resume` in the same exec chain under the same lock, so a passing arm passes there.
+  - *Armed-tree acceptance (plan review round 4 redesign, T015).* Round 4 (P3) found a fourth
+    site on the resume path that refuses the armed tree (the final cleanliness check of
+    `reconcile_disputes`, ai-pipeline ~349, reached with a settled `verified` re-check); the
+    earlier design enumerated sites one by one (ai-pipeline ~123–125, `reconcile_disputes`
+    ~326, ai-run ~148–149), which is how each round found one more. The acceptance of the armed
+    tree by the resumed run is now ONE contract for the whole path from the resume's
+    `exec ai-pipeline` to ai-run's `limit-disarm`:
+    1. *One predicate.* `clean_or_armed`: true when `git status --porcelain
+       --untracked-files=all` is empty, or when `armed_resume` holds (the process is a resume,
+       `run-manifest limit-armed` recomputes HEAD and the tree digest and finds them equal to
+       `limit_resume`, and no stage is open). Every check on that path that today requires a
+       clean checkout goes through it: ai-pipeline start-from-clean (~123–125), both
+       cleanliness tests of `reconcile_disputes` (~326 with status `none`, and the final one at
+       ~349 whatever the status), ai-run start-from-clean (~148–149). No other `git status`
+       test exists on that path; the ones after ai-run's first session (~507, `publish_ready`,
+       `ensure_validated`) are unchanged and never see an armed tree, because ai-run consumed
+       the arm and checkpointed or validated before they run.
+    2. *No host write while armed.* Between the resume and `limit-disarm` the host makes no
+       commit and writes no tracked file while the tree is armed. Where the path could commit
+       (`reconcile_disputes` commits re-check or dispute records) the armed tree is admitted only
+       when nothing is there to commit; otherwise the run stops BEFORE the commit, fail closed,
+       with the arm untouched and nothing committed (`recheck_fail 'preserved task work carries
+       uncommitted review records; inspect them.'`, also for a `pending` status, whose re-check
+       would commit). The plan review loop cannot commit on an armed tree: the plan review was
+       current at the first start, and an implementation session changes the plan digest's
+       inputs only through `.ai/tasks.md` statuses, which make `tasks untouched` fail and skip
+       the loop; an open stage is excluded by `armed_resume`. Such a stop is an inconsistency
+       that a limit stop in an implementation session cannot produce (review records are
+       committed before any task runs, by `reconcile_disputes` on every start, resume and
+       triage); it is reported as today's re-check stop, never absorbed.
+    3. *One consumer.* `limit-disarm` has exactly one call site (ai-run, before any session);
+       after it the normal rules apply unchanged (`ai-check`, `checkpoint-guard`,
+       `committed-matches-worktree`, the `no_checkpoint` stop).
+    4. *Matrix, not sites.* The contract is tested as a matrix of resume-path states on an armed
+       tree (T015): re-check status `none` / settled `verified` (with and without recorded
+       disputes) / inconsistent `pending` and inconsistent dirty records (fail closed, nothing
+       committed), plan review on and off, `tasks complete` true and false, an untouched queue
+       with a current plan review; each admitted state reaches ai-run with the arm consumed
+       exactly once and no commit before it; the reviewer's scenario (one accepted and one
+       rejected finding, a verified re-check, a limit during the fix task) completes with no
+       recovery decision session.
   - *What the resumed run does with the tree.* ai-pipeline does not skip ai-run while the tree
     is armed (`tasks complete` at ai-pipeline ~499 is not consulted then). ai-run consumes the
     arm before any session and asks `tasks newly-done HEAD` (T012: IDs DONE in the working
@@ -149,16 +191,19 @@ flowchart TD
   never share a log.
 - **Watchdog (T002).** Under its lock, before the incident logic: with `--recover`, no runner
   alive and no `pipeline.active` marker, it asks THIS host copy's `workflow.py run-manifest
-  limit-at` (same trust path as the gate check in `start_recovery`) for the scheduled AT; when
-  `AT <= now` it calls `start_recovery(root, local, marker, stage='usage limit relaunch')`
-  (generalised: the default crash last-error is written only for the crash stage). Refused →
-  one `⛔ STOPPED, needs you: the usage-limit relaunch could not start: <reason>.` per AT
-  (dedupe key `relaunch:<AT>` in `watchdog.json` `active`). `AT > now` → nothing launched and
-  the stall incident is skipped: the stall rule holds only while
-  `now >= max(paused_until(local), pending AT)`, so a pending host schedule suppresses the
-  stall alarm by itself, whether or not `.ai/local/pauses.log` still carries the wait (plan
-  review round 3, P2: a kill between `limit-schedule` and the pauses.log append, restored by
-  `limit-hold`, left no pause entry). The `pauses.log` line stays for the hung rule's quiet
+  limit-at` (same trust path as the gate check in `start_recovery`) for the scheduled AT. The
+  probe's decision is a three-way state, never a number compared with zero (plan review round
+  4, P11: "absent = 0" made every unscheduled checkout due): *absent* (`limit-at` exits 1: no
+  manifest, an approved run without a schedule, a finished run) → nothing launched, no
+  notification, stall rule as today; *pending* (`AT > now`) → nothing launched, the stall
+  incident skipped; *due* (`AT <= now`, with `--recover`) → `start_recovery(root, local,
+  marker, stage='usage limit relaunch')` (generalised: the default crash last-error is written
+  only for the crash stage). Refused → one `⛔ STOPPED, needs you: the usage-limit relaunch
+  could not start: <reason>.` per AT (dedupe key `relaunch:<AT>` in `watchdog.json` `active`).
+  The stall rule holds only while `now >= max(paused_until(local), AT or 0)`, so a pending host
+  schedule suppresses the stall alarm by itself, whether or not `.ai/local/pauses.log` still
+  carries the wait (plan review round 3, P2: a kill between `limit-schedule` and the
+  pauses.log append, restored by `limit-hold`, left no pause entry). The `pauses.log` line stays for the hung rule's quiet
   time and as the dashboard's history. New flag
   `--timer-recovers`: exit 0 when `timer_status(root)` is installed and the service's ExecStart
   contains `"--recover"`, else 1 (one line on stdout).
@@ -239,6 +284,7 @@ flowchart TD
 | T012 | MC-01 | preserved-work binding: tree digest (= `tree_snapshot`), verify/arm on the exact tree, `tasks newly-done` | opus |
 | T014 | MC-01 | relaunch binding verification contract: one verification site before any mutation, host transitions, submodule and bookkeeping regressions | opus |
 | T011 | MC-01 | relaunch continues preserved task work once (armed resume; DONE → armed checkpoint) | opus |
+| T015 | MC-01 | armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed, state matrix incl. a settled re-check | opus |
 | T004 | MC-01, DB-04 | dashboard: waiting relaunch is paused, killed planning is a stop | sonnet |
 | T005 | DB-04 | `ai-run --plan --read-dir` (permission boundary) | opus |
 | T013 | DB-04 | `workflow.py exec-logged`: exclusive log in pinned `.ai/local`, exec on its fd | opus |
@@ -256,7 +302,7 @@ flowchart TD
   ai-recover leaves the schedule due with no marker, so the next probe (10 min later) relaunches
   once more; that is a retry of the same relaunch, not a new one (the relaunch count does not
   change) and needs an external kill in a window of two helper calls each time. Accepted.
-- Preserved task work (T011/T012/T014) is admitted only on a resume, for the exact tree (HEAD,
+- Preserved task work (T011/T012/T014/T015) is admitted only on a resume, for the exact tree (HEAD,
   index, worktree, submodules) recorded when the stop was scheduled, once; it is the session's
   own uncommitted output, exactly what the in-process `ai_limit_pause` wait would have
   continued with, and it is validated before any commit. The relaunch verifies the whole
@@ -265,7 +311,14 @@ flowchart TD
   index, HEAD or a submodule, escalates with the checkout exactly as found; nothing is
   absorbed. Residual: an edit that restores byte-identical content is indistinguishable, and
   harmless; ignored paths (installed dependencies) are outside the digest, as for
-  `tree_snapshot` today.
+  `tree_snapshot` today. The resumed run admits that tree through one predicate on the whole
+  path to ai-run's first session and makes no commit while it is armed (T015); a state in
+  which the path would have to commit first (uncommitted review records, a pending re-check)
+  cannot follow a limit stop in an implementation session and stops fail closed with nothing
+  committed.
+- Watchdog probe on an unscheduled checkout: `limit-at` exit 1 is "absent", not "due at 0"
+  (round 4, P11); T002 tests the no-manifest, approved-unscheduled and finished-run probes for
+  "no launch, no notification".
 - Watchdog not installed or installed without `--recover`: detected by `--timer-recovers`; the
   stop escalates as today. A timer removed after scheduling: nobody relaunches; the ⏸
   notification states the time, so the human can rerun. Accepted (no daemon, AD-4).
@@ -283,7 +336,7 @@ flowchart TD
 ## Validation strategy
 Targeted `python3 -m unittest discover -s tests -k <prefix>` per task, then `.ai/bin/ai-check`
 (about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*` (incl. `test_limit_relaunch_preserved_*`,
-`test_limit_relaunch_binding_*`, `test_limit_relaunch_verify_*`), `test_exec_logged_*`,
+`test_limit_relaunch_binding_*`, `test_limit_relaunch_verify_*`, `test_limit_relaunch_accept_*`), `test_exec_logged_*`,
 `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*`, `test_plan_read_dir_*`,
 `test_ai_plan_*`, `test_plan_outcome_*`, `test_pr_undraft_*`.
 

@@ -95,9 +95,15 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   submodule change, also while a triage or plan-revision stage is open) escalates with the
   checkout exactly as found and nothing committed. A session that marked its task DONE before
   the limit gets that work validated and checkpointed by ai-run before any session, also when
-  no runnable task remains (plan review round 2, P3/P9; round 3, P9/P10). The watchdog's stall
-  alarm stays silent while a relaunch is pending in the manifest, whether or not the local
-  pause log still carries the wait (round 3, P2).
+  no runnable task remains (plan review round 2, P3/P9; round 3, P9/P10). The resumed run
+  admits the armed tree through one predicate at every cleanliness check between the resume
+  and ai-run's first session, a settled re-check or recorded disputes included, commits
+  nothing while the tree is armed, and stops fail closed (nothing committed, arm kept) in the
+  only states where it would have to commit first (uncommitted review records, a pending
+  re-check), which a limit stop in an implementation session cannot produce (round 4, P3). The
+  watchdog's stall alarm stays silent while a relaunch is pending in the manifest, whether or
+  not the local pause log still carries the wait (round 3, P2); a checkout without a schedule
+  (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11).
 - The dashboard shows a gone run as paused only with evidence of a currently scheduled
   relaunch (`relaunch_at` in the observation); a newer last-error still wins.
 - `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same

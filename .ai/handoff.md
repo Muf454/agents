@@ -17,7 +17,10 @@ on 2026-10-17 (Claude planning session, unattended):
   safely; T008/T009 make `--draft` revocation durable or stop. Plan review round 3: T014 makes
   the relaunch verify HEAD and the whole tree (the existing `tree_snapshot`, submodules
   included) once, before it commits, resumes or arms anything; the watchdog's stall alarm reads
-  the pending schedule from the manifest, not from the local pause log.
+  the pending schedule from the manifest, not from the local pause log. Plan review round 4:
+  T015 makes the resumed run accept the armed tree through one predicate on the whole path to
+  ai-run (a settled re-check no longer refuses it) with no commit while armed; T002's probe
+  treats a missing schedule as absent, never as due.
 - **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
   `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
   confirmed detached start printing PID and log), planning sessions in the outcome log and run
@@ -44,7 +47,7 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
   is not detected (documented limitation).
 
 ## Flow chart
-To be updated by T002/T003/T014/T011 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+To be updated by T002/T003/T014/T011/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -71,11 +74,12 @@ and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T
 Each group is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs it (added by
 the task named).
 - `test_limit_relaunch_record_*` (T001: limit-stop record, relaunch time, manifest schedule/cap/attempt give-back).
-- `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once, no stall alarm while waiting, `--timer-recovers`).
+- `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once, no stall alarm while waiting, nothing launched or reported for a checkout without a schedule, `--timer-recovers`).
 - `test_limit_relaunch_recover_*` (T003: pause instead of ⛔, resume without Claude, cap, off switch, no timer, mixed reason, terminal escalation after a claim, interrupted scheduling restores the wait).
 - `test_limit_relaunch_binding_*` (T012: tree digest = `tree_snapshot` incl. submodules, verify/arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
 - `test_limit_relaunch_verify_*` (T014: the relaunch verifies before any commit or resume; bookkeeping-only edits, a moved HEAD on a clean tree, in-scope edits during an open stage and submodule changes all stop with the checkout untouched).
-- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; a task DONE before the limit is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree).
+- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; a task DONE before the limit is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
+- `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state, accepted-plus-rejected findings with a verified re-check included, commits nothing before ai-run consumes the arm, and fails closed on inconsistent review records).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
 - `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006), `test_plan_outcome_*` (T007).

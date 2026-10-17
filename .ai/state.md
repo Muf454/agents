@@ -6,11 +6,11 @@ Phase: planning
 Current task: none
 Last completed task: none
 Tasks complete: 0
-Tasks remaining: 14
+Tasks remaining: 15
 Last validation: not run
 Blocked: no
 Next action: Review the revised plan (ai-review --plan)
-Last updated: 2026-10-17T07:48:39Z
+Last updated: 2026-10-17T07:58:54Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
