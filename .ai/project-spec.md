@@ -93,9 +93,13 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   verifies it under the lock exactly once, before any commit, resume, arm or session, and any
   change during the wait (a tracked, untracked, staged or bookkeeping change, a commit, a
   submodule change, also while a triage or plan-revision stage is open) escalates with the
-  checkout exactly as found and nothing committed. A session that marked its task DONE before
-  the limit gets that work validated and checkpointed by ai-run before any session, also when
-  no runnable task remains (plan review round 2, P3/P9; round 3, P9/P10). The resumed run
+  checkout exactly as found and nothing committed. The preserved work is bound to the task the
+  limited session was working on (ai-run records it in the host manifest before every
+  implementation session; an implementation stop with no recorded task gets no arm): when that
+  task is DONE, in HEAD already or only in the preserved queue, ai-run validates and
+  checkpoints the preserved edits before any session and before the final handoff, also when
+  no runnable task remains; otherwise that task's own session continues them (plan review
+  round 2, P3/P9; round 3, P9/P10; round 6, P3). The resumed run
   admits the armed tree through one predicate at every cleanliness check between the resume
   and ai-run's first session, a settled re-check or recorded disputes included, commits
   nothing while the tree is armed, and stops fail closed (nothing committed, arm kept) in the
@@ -122,7 +126,10 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   pinned `.ai/local` and becomes the runner's stdout/stderr through that descriptor (P8).
   `ai-plan` works as the first toolkit command in a freshly installed checkout: like every
   other command it runs `ai_root` first, which refuses a symlinked `.ai`/`.ai/local` and then
-  creates a missing `.ai/local` before the detached launch (round 5, P12).
+  creates a missing `.ai/local` before the detached launch (round 5, P12). The prompt file,
+  `--knowledge-dir` and every `--read-dir` are resolved against the caller's working directory
+  before `ai_root` changes to the checkout root, so a relative path names the same directory
+  it would for `ai-run --plan` run from the same place (round 6, P14).
 - `ai-pipeline` un-drafts an existing draft PR only when host state records that the pipeline
   drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft,
   and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it. A

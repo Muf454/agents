@@ -423,7 +423,8 @@ T011 needs to tell "task marked DONE before the limit" from "task still in progr
   `{"head": 40-hex, "tree": 64-hex}` (wrong type → invalid manifest, as T001's fields).
   Signatures change (T001's HEAD argument removed; the helper computes from the checkout, the
   shell passes no binding value): `limit-schedule AT CAP` records `limit_head` and `limit_tree`
-  (T016 appends a STAGE argument and `limit_stage`; write the parser so one more positional is
+  (T016 appends a STAGE argument and `limit_stage`; T017 copies the manifest's `task` into
+  `limit_task` and adds `task` to `limit_resume`; write the parser so one more positional is
   a one-line change); `limit-verify` (read only) recomputes both and exits 0 silently only when both equal the
   recorded ones, else exit 1 with `the branch moved to another commit` (head) or `the checkout
   changed` (tree) on stderr (ai-recover appends ` while the usage-limit relaunch waited;
@@ -579,9 +580,110 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
+## T017 — Preserved work is bound to the interrupted task: manifest task record, task-bound arm (MC-01 part 1, plan review round 6 P3 design task)
+Status: TODO
+Dependencies: T003, T012
+Model: opus
+
+### Goal
+The usage-limit arm names the task whose output the preserved tree is, recorded in host state by
+ai-run before every implementation session, so the resumed ai-run decides what to do with the
+preserved work from that task's status instead of inferring the task from the queue's diff; a
+task committed DONE before the limit, with further edits preserved, is then checkpointed under
+full validation before any session or the final handoff (T011 places the consumer rule on this
+binding).
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "Preserved-work resume", part "Preserved work is bound to the
+  interrupted task (plan review round 6 redesign, T017)". Verified at the revision: T011's
+  consumer chose by counting `tasks newly-done HEAD`; a session that committed its task DONE
+  (queue and source in HEAD), edited more and hit the limit leaves `newly-done` empty, `tasks
+  next` prints `none` for a one-task queue (scripts/lib/workflow.py ~642–647), and ai-run's
+  final-handoff path (scripts/ai-run ~623–648) validates the dirty tree but commits only
+  `.ai/state.md`/`.ai/run-log.md`, so `verify_checkpoint 'final handoff'` (~242–254) dies on
+  `uncommitted changes after the checkpoint`; with more tasks the next session would start on
+  the finished task's leftovers.
+- `scripts/lib/workflow.py` `run_manifest` (~1279): optional field `task` (string matching
+  `^T\d{3,}$`, the queue's ID pattern; wrong type → invalid manifest, as T001's fields). New
+  actions `task-set ID` (validate, write) and `task-clear` (drop; missing is fine), each one
+  atomic write; `start` writes a fresh dict (drops it), `clear-attempts` drops it. Comment: the
+  field is read only by `limit-schedule`; it is host state written by ai-run (host code, like
+  `outcome attempt-open`), never read from the checkout.
+- `limit-schedule AT CAP [STAGE]` (T012's signature; T016 adds STAGE) copies `task` into
+  `limit_task` (absent when `task` is absent). `limit-arm` (after T016's stage check, before
+  T012's HEAD/tree comparison): `limit_task` absent → exit 1 with `the usage-limit stop left
+  uncommitted changes with no task recorded` on stderr, nothing written; on success
+  `limit_resume = {"head", "tree", "task"}` (T012's object plus `task`; a `limit_resume`
+  without a string `task` is invalid). `limit-armed` compares head and tree as T012 (the task is
+  not recomputed); `limit-disarm` unchanged. New read-only action `limit-task`: print
+  `limit_resume.task`, exit 0; not armed → exit 1 silently. `clear-attempts`/`start` drop
+  `limit_task`.
+- `scripts/ai-recover` (T003's transition (c)): a failing `limit-arm` already escalates with
+  the helper's reason; for the task reason the ⛔ reads `the usage-limit stop left uncommitted
+  changes with no task recorded; nothing was committed.` / `inspect the checkout, commit or
+  discard what changed, then rerun ai-pipeline.` (built from the helper's reason as T014
+  prescribes; add the row to T014's transition table comment).
+- `scripts/ai-run` (implementation mode only: `-z "$plan_file"` and not triage): right before
+  `claude_session` of the task loop (~663, beside `ai_helper state implementing`),
+  `ai_helper run-manifest task-set "$active_task" 2>/dev/null || printf '%s\n' 'Note: could
+  not record the task in the run manifest.' >&2` (best effort: a standalone `ai-run --approved`
+  has no manifest and no relaunch; inside a pipeline a lost record makes a later `limit-arm`
+  fail closed); after the iteration's bookkeeping commit (~716) `ai_helper run-manifest
+  task-clear 2>/dev/null || true`; the same `task-clear` once before the loop (after T011's arm
+  consumption, which reads `limit_resume.task`, never `task`), so a stale value from an
+  interrupted run never binds a later stop. `on_exit` does not touch it: the limit stop is an
+  `ai_die` inside the session and the record must survive it.
+- The consumer rule is T011's (plan note, rule 3): `bound=$(ai_helper run-manifest limit-task)`
+  read BEFORE `limit-disarm`, then by `tasks status "$bound"`. This task only provides the
+  binding and the recording; before T011 the resumed pipeline still refuses the armed tree with
+  `Start from a clean checkpoint` (say so in the result).
+- docs/workflow.md "Interruption, limits, and recovery" (the paragraph T011/T014/T016 write):
+  the relaunch continues the task the limited session was working on, named in the host
+  manifest. Flow unchanged in this task (T011 updates the chart).
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-recover, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Tests named `test_limit_relaunch_bound_*` in tests/test_workflow.py:
+  - manifest units (after `run-manifest start`): `task-set T001` → `task` recorded; `task-set
+    x1` → exit 1, nothing written; `task-clear` drops it, twice (idempotent); `limit-schedule
+    100 2 [STAGE]` after `task-set T001` → `limit_task` `T001`; without a task → no
+    `limit_task`; `limit-arm` on the dirty scheduled tree with `limit_task` → `limit_resume.task`
+    is `T001` and `limit-task` prints `T001`; without `limit_task` → exit 1 `no task recorded`,
+    no `limit_resume`, the manifest otherwise byte-identical; `limit-task` exits 1 when not
+    armed; a manifest with `task: 7` or a `limit_resume` lacking `task` is invalid;
+    `clear-attempts` and a new `start` drop `task` and `limit_task`;
+  - ai-run records: a two-task run with a mock that copies `run.json` (via `AI_STATE_DIR`) into
+    `.ai/local/` during its session → the copy taken during T001's session holds `task: T001`,
+    the one during T002's session `task: T002`, and the manifest holds no `task` after the run
+    completes; a `limit-far` stop in the first session (`AI_LIMIT_MAX_WAIT=60`) leaves `task:
+    T001` in the manifest; a standalone `ai-run --approved` without a manifest prints the note
+    once and completes;
+  - end-to-end (fixtures as T016's stage-bound case: last-error the limit message, a valid
+    `limit-stop`, an uncommitted source edit, `ai-recover --stage implementation` with the
+    timer installed): with no `task` in the manifest → scheduled with no `limit_task`; AT into
+    the past; relaunch → exactly one ⛔ containing `no task recorded` and `nothing was
+    committed`, the edit byte-identical, HEAD unchanged, no `limit_resume`, no
+    `limit_relaunch_at` (claimed: terminal), `recovery_calls()` empty, no session; the positive
+    control with `task-set T001` before the stop → `limit_task` `T001` at scheduling and, after
+    the relaunch's `limit-arm`, `limit_resume.task` `T001` (the resumed run's handling of the
+    armed tree is T011's; assert only the manifest here).
+- T001's, T003's and T012's tests updated for the new fields (named in the result); all
+  `test_limit_relaunch_*`, `test_recovery_*` and `test_usage_limit_*` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_bound` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
 ## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
 Status: TODO
-Dependencies: T014
+Dependencies: T014, T017
 Model: opus
 
 ### Goal
@@ -593,8 +695,10 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
 ### Implementation notes
 - Design: `.ai/current-plan.md` "Relaunch schedule lifecycle", part "Preserved task work", and
   "Preserved-work resume (plan review round 2 redesign)" including "Verification point (round
-  3 redesign, T014)". T001/T012 provide `run-manifest limit-arm` / `limit-armed` (no arguments:
-  they recompute HEAD and the tree digest, T012) / `limit-disarm`; T003/T012/T014 verify the
+  3 redesign, T014)" and "Preserved work is bound to the interrupted task (round 6 redesign,
+  T017)". T001/T012 provide `run-manifest limit-arm` / `limit-armed` (no arguments: they
+  recompute HEAD and the tree digest, T012) / `limit-disarm`; T017 provides the manifest `task`
+  record, `limit_task`, `limit_resume.task` and `limit-task`; T003/T012/T014 verify the
   checkout first and arm it in ai-recover's claimed-relaunch path only for the exact tree
   recorded at scheduling.
 - An armed tree is accepted only where today's clean-checkout checks stand between the resumed
@@ -628,24 +732,39 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
   ~499 (`if ! ai_helper tasks complete; then … ai-run`) runs ai-run also when `armed_resume`
   holds, whatever `tasks complete` says, so the arm is always consumed by ai-run and the
   review/publish path never meets the dirty tree.
-- ai-run consumes the arm exactly once: when the armed exception admits the dirty tree it runs
-  `ai_helper run-manifest limit-disarm` (failure → `ai_die`, nothing started) before the
-  session loop and prints `Resuming preserved work of the usage-limit stop.`. Then
-  `newly=$(ai_helper tasks newly-done HEAD)` (T012):
-  - exactly one ID → *armed checkpoint* of that task, before any session: refactor the loop's
-    `DONE)` branch (ai-run ~669–703 plus the runner-bookkeeping commit and the post-commit
-    `verify_checkpoint` ~713–720) into one function `checkpoint_done TASK` used by the loop and
-    here, unchanged in substance: full `ai-check` (failure → task back to IN_PROGRESS, state
-    blocked, `ai_die`), tier-1 commit `chore(ai): checkpoint <id> (validated; the session did
-    not commit)` with `checkpoint-guard`, stamp verify and `committed-matches-worktree`, the 🔧
-    notification, `ai_log`, bookkeeping commit. `task_outcome done` only if it works without an
-    attempt opened in this process (say which in the result). Then the loop starts as today
-    (final validation and handoff when nothing is left, else the next task);
-  - none → the first iteration works on `tasks next` as today (the IN_PROGRESS task first,
-    workflow.py ~642–647); its prompt already says `Reconcile interrupted work first`;
-  - more than one → `ai_die 'Preserved work marks several tasks DONE; inspect it before
-    continuing.'` (the arm is gone, so the next recovery takes the normal rules).
-  A clean tree never consumes the arm (`clear-attempts` at finish drops it).
+- ai-run consumes the arm exactly once, before any session and before `tasks next`, by the
+  task the arm names (T017; plan note "Preserved work is bound to the interrupted task (plan
+  review round 6 redesign, T017)", rule 3): when the armed exception admits the dirty tree,
+  `bound=$(ai_helper run-manifest limit-task)` (failure → `ai_die`), then `ai_helper
+  run-manifest limit-disarm` (failure → `ai_die`, nothing started), print `Resuming preserved
+  work of the usage-limit stop ($bound).`, `ai_helper run-manifest task-clear` (T017), then
+  the consistency check: `tasks newly-done HEAD` (T012) must print nothing or exactly `$bound`,
+  else `ai_die 'Preserved work marks another task DONE; inspect it before continuing.'`. Then by
+  `status=$(ai_helper tasks status "$bound")`:
+  - DONE, whether HEAD already has it DONE or only the working queue does (a session that
+    committed its task DONE and edited further before the limit, plan review round 6 P3, takes
+    this path too) → *armed checkpoint* `checkpoint_done "$bound"` before any session: refactor
+    the loop's `DONE)` branch (ai-run ~669–703 plus the runner-bookkeeping commit and the
+    post-commit `verify_checkpoint` ~713–720) into one function `checkpoint_done TASK` used by
+    the loop and here, unchanged in substance: full `ai-check` (failure → task back to
+    IN_PROGRESS, state blocked, `ai_die`), tier-1 commit `chore(ai): checkpoint <id> (validated;
+    the session did not commit)` with `checkpoint-guard`, stamp verify and
+    `committed-matches-worktree`, the 🔧 notification, `ai_log`, bookkeeping commit,
+    `verify_checkpoint`, ✅. For a task already DONE in HEAD this is a second, validated commit
+    of that task's own after-commit edits (the implementation review covers the range like any
+    task commit). `task_outcome done` only if it works without an attempt opened in this
+    process (say which in the result). Then the loop starts as today (final validation and
+    handoff when nothing is left, else the next task);
+  - IN_PROGRESS or TODO → the first iteration as today, which must work on `$bound`: `tasks
+    next` prints it (IN_PROGRESS first, workflow.py ~642–647; a TODO bound task is the first
+    eligible unless the session changed the queue); another ID → `ai_die "Preserved work
+    belongs to $bound, but the next task is <id>; inspect the queue."`. Its prompt already says
+    `Reconcile interrupted work first`;
+  - BLOCKED → `ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'`
+    (today's rule, ~705–706); an ID not in the queue → `ai_die`.
+  `newly-done` is no longer the decision, only the consistency check. In every `ai_die` above
+  the arm is already gone, so the next recovery takes the normal rules. A clean tree never
+  consumes the arm (`clear-attempts` at finish drops it).
 - After the session nothing is relaxed: DONE → `ai-check`, tier-1 commit with
   `checkpoint-guard`, `committed-matches-worktree` (~669–701; update the comment "The session
   started from a clean tree" to say an armed resume started from its own preserved task work);
@@ -684,7 +803,23 @@ scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/wor
     limited after DONE) → T001 checkpointed before T002's session, T002 then runs normally;
     a failing `.ai/validate` on that tree → `Validation failed; T001 returned to IN_PROGRESS.`,
     nothing committed by the runner;
-  - a tree with two tasks newly DONE → `Preserved work marks several tasks DONE`, no session;
+  - DONE committed before the limit (round 6 P3, the reviewer's case): new mock mode
+    `MOCK_CLAUDE=limit-far-done-committed`: the session sets its task DONE in `.ai/tasks.md`,
+    writes a source file, COMMITS both, writes a second source change without committing, then
+    reports the far limit. One-task queue → scheduled (exit 75), `tasks newly-done HEAD` prints
+    nothing, the manifest holds `limit_task` `T001`; AT into the past; relaunch → the pipeline
+    completes with no recovery decision session: the second change is in a `checkpoint T001
+    (validated; the session did not commit)` commit whose parent is the relaunch's `record stop
+    during` commit or the session's own commit, the mock records NO implementation session
+    after the relaunch, exactly one `Resuming preserved work of the usage-limit stop (T001).`,
+    `recovery_calls()` empty, no `⛔`, no `limit_resume`, no `task` left in the manifest; the
+    same with a two-task queue → T001's checkpoint precedes T002's session, which starts on a
+    clean tree; a failing `.ai/validate` on that tree → `Validation failed; T001 returned to
+    IN_PROGRESS.`, nothing committed by the runner (HEAD is the session's commit);
+  - a tree whose bound task is DONE while a second task is also newly DONE → `Preserved work
+    marks another task DONE`, no session, nothing committed; a bound task left TODO while the
+    session marked another task IN_PROGRESS (mock variant) → `Preserved work belongs to T001,
+    but the next task is T002`, no session;
   - round 2 P9 end-to-end with preserved work: `limit-far-dirty` scheduled, then the test edits
     an unrelated tracked file and adds an untracked file (HEAD unchanged), AT into the past,
     relaunch → one ⛔ `changed while the usage-limit relaunch waited`, the session's edits and
@@ -747,9 +882,10 @@ was, before the run's first implementation session.
   `^[ -~]{1,40}$`; wrong type → invalid manifest, as T001's fields). `limit-schedule AT CAP
   STAGE` (T012's signature plus STAGE, validated the same way) records it beside `limit_head`
   and `limit_tree`; `clear-attempts` and `start` drop it. `limit-arm` (no argument) arms only
-  when `limit_stage == 'implementation'` AND HEAD and the tree digest match (T012); the stage
-  is checked first: a mismatch exits 1 with `the usage-limit stop left uncommitted changes
-  outside an implementation session` on stderr, nothing written; then T012's reasons.
+  when `limit_stage == 'implementation'` AND `limit_task` is set (T017) AND HEAD and the tree
+  digest match (T012); the stage is checked first: a mismatch exits 1 with `the usage-limit
+  stop left uncommitted changes outside an implementation session` on stderr, nothing written;
+  then T017's task check, then T012's reasons.
   `limit-verify`, `limit-armed` and `limit-disarm` are unchanged (the stage is judged once, at
   the arm; `limit_resume` can only exist for an implementation stop).
 - `scripts/ai-recover`: `limit-schedule "$at" "$cap" "$stage"` (`$stage` is this ai-recover's
@@ -807,10 +943,19 @@ scripts/lib/workflow.py, scripts/ai-recover, scripts/ai-pipeline, tests/test_wor
     (transition (d)), and the plan review loop runs as today: the plan reviewer mock is
     invoked once after `▶ RESUMED` (the stale review is re-reviewed on the clean checkout), the
     run then completes; this pins that only the armed resume skips the loop;
-  - a recorded needs-human plan decision still stops an armed resume: plant the needs-human
-    revision record in host state (as the existing `plan_decision_check` tests do) after
-    scheduling → the relaunch stops with `plan review needs your decision`, HEAD unchanged, the
-    manifest still armed, nothing committed, no session;
+  - a recorded needs-human plan decision on the relaunch itself: plant the needs-human revision
+    record in host state (as the existing `plan_decision_check` tests do) after scheduling →
+    ai-recover's plan-revision decision block (~114–129) runs BEFORE the transitions that call
+    `limit-arm`, so the relaunch escalates there: exactly one ⛔ containing `plan review needs
+    your decision`, the schedule consumed (no `limit_relaunch_at`: terminal), NO arm
+    (`limit_resume` absent), HEAD unchanged, the checkout byte-identical, nothing committed, no
+    session (plan review round 6, P15: recovery never arms in this case);
+  - a recorded needs-human plan decision still stops an ARMED resume: arm at helper level
+    (`limit-schedule 100 2 implementation` on the dirty tree after `task-set T001`, then
+    `limit-arm`), plant the needs-human record, then start `ai-pipeline` exactly as ai-recover's
+    `resume` does (the same environment variables, `AI_RECOVERY_ATTEMPT` set) → stops at the
+    first `plan_decision_check` (~410) with `plan review needs your decision`, HEAD unchanged,
+    the manifest still armed, nothing committed, no session, no `limit-disarm` call;
   - stage-bound arm, helper level (after `run-manifest start`): `limit-schedule 100 2
     implementation` on a dirty tree → `limit-arm` arms, `limit_stage` recorded; a fresh
     `limit-schedule 100 2 review` on the same dirty tree → `limit-arm` exits 1 with `outside an
@@ -922,7 +1067,10 @@ scripts/ai-pipeline, scripts/ai-run, scripts/lib/common.sh, tests/test_workflow.
     `--skip-plan-review` → admitted; the stale-review variant (a committed partial checkpoint)
     is T016's `test_limit_relaunch_reenter_*` and is listed in the matrix by name;
   - `tasks complete` true (`limit-far-done` with a one-task queue, T011) and false → both
-    reach ai-run (the arm is consumed either way);
+    reach ai-run (the arm is consumed either way); the bound task already DONE in HEAD with
+    trailing edits (`limit-far-done-committed`, T011/T017) → reaches ai-run and is checkpointed
+    before the final handoff (listed in the matrix by T011's test name; the armed checkpoint
+    is a commit AFTER `limit-disarm`, so rule 2 holds);
   - inconsistent states fail closed with the arm kept and HEAD unchanged, no session, no
     `limit-disarm`: (i) `recheck-status` `pending` (the test removes the host binding of the
     re-check report, or rewrites dispositions to reject a finding without a re-check, after
@@ -1121,8 +1269,16 @@ the hand-run `launch-plan.sh` is no longer needed.
   `source …/lib/common.sh` like the other scripts; executable, git mode 100755).
 - Options: `PROMPT_FILE` (first positional), `--revision`, `--model NAME`, `--session-timeout S`,
   `--knowledge-dir DIR`, `--read-dir DIR` (repeatable), `--detach`, `-h|--help`. Validation of
-  the shared options is ai-run's; ai-plan checks only its own (`--detach`, the prompt file exists,
-  is regular and readable; resolve it to an absolute path before any `cd`).
+  the shared options is ai-run's; ai-plan checks only its own (`--detach`; the prompt file
+  exists, is regular and readable) and resolves every PATH argument against the caller's
+  working directory BEFORE `ai_root` (which `cd`s to the checkout root, common.sh ~115): the
+  prompt file, `--knowledge-dir DIR` and each `--read-dir DIR` (`[[ -d "$2" ]]` with ai-run's
+  wording for a missing directory, then `cd -- "$2" && pwd -P`), rebuilding `rest` with the
+  absolute values in the original order and multiplicity; every other option is passed through
+  unchanged (plan review round 6, P14: `ai-run` resolves its directories at parse time from the
+  caller's cwd, scripts/ai-run ~71–75 and T005, so a relative `--read-dir ./reference` from
+  `/repo/subdir` would otherwise reach ai-run as `/repo/reference`, or be refused although the
+  caller's directory exists).
 - Foreground: `exec "$AI_BIN/ai-run" --plan "$prompt" "${rest[@]}"` (same PID: the dashboard,
   watchdog and lock see an `ai-run` runner, nothing else changes).
 - Both modes start with `ai_root` (scripts/lib/common.sh ~113–119), as every toolkit command
@@ -1195,6 +1351,14 @@ scripts/ai-plan, scripts/lib/workflow.py, tests/test_workflow.py, README.md, doc
     `.ai/local` is a real directory and holds exactly one `plan-*.log`; the foreground
     `ai-plan prompt.md` on another fresh install likewise creates `.ai/local` and succeeds;
   - a missing prompt file → exit 1 before anything starts; `--help` exits 0;
+  - relative directories from a subdirectory (round 6 P14): with `sub/reference`, `reference`,
+    `sub/kb` and `kb` all present in the checkout, each holding a differently named marker
+    file, run from cwd `sub/` `ai-plan ../prompt.md --read-dir ./reference --read-dir
+    ../reference --knowledge-dir ./kb` in the foreground and with `--detach` → the mock's
+    recorded args contain `--add-dir <abs>/sub/reference`, `--add-dir <abs>/reference` and the
+    knowledge dir `<abs>/sub/kb`, in that order, and the `Read(//<abs>/sub/reference/**)`
+    entry; a relative `--read-dir` that exists only at the checkout root (`--read-dir ./only-at-root`
+    from `sub/`) → exit 1 with ai-run's missing-directory wording, nothing started;
   - `setup-project` installs `.ai/bin/ai-plan` as executable.
 - `test_dashboard_plan_live_ai_run_plan_is_running_on_plan` and all plan-stage tests pass.
 
@@ -1399,7 +1563,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, flow chart and handoff audit (all items)
 Status: TODO
-Dependencies: T011, T014, T016, T015, T004, T007, T009
+Dependencies: T011, T014, T017, T016, T015, T004, T007, T009
 Model: haiku
 
 ### Goal

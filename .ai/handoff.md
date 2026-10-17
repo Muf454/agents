@@ -24,6 +24,13 @@ on 2026-10-17 (Claude planning session, unattended):
   to an `implementation` stop and makes the armed resume re-enter at implementation (no plan
   review loop on the preserved tree, so a partial checkpoint that made the plan review stale
   no longer ends in a recovery decision); T006's `ai-plan` creates `.ai/local` on first use.
+  Plan review round 6: T017 binds the preserved work to the task the limited session was
+  working on (ai-run records it in the host manifest before every session; the arm requires
+  it), so T011's resumed ai-run decides by that task's status and a task committed DONE before
+  the limit with trailing edits is checkpointed, validated, before any session or the final
+  handoff; T006 resolves relative directory arguments against the caller's directory before
+  `ai_root`; T016's needs-human test now expects the schedule consumed and no arm on the
+  relaunch, plus a separate armed-resume stop.
 - **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
   `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
   confirmed detached start printing PID and log), planning sessions in the outcome log and run
@@ -50,7 +57,7 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
   is not detected (documented limitation).
 
 ## Flow chart
-To be updated by T002/T003/T014/T011/T016/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+To be updated by T002/T003/T014/T017/T011/T016/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -81,12 +88,13 @@ the task named).
 - `test_limit_relaunch_recover_*` (T003: pause instead of ⛔, resume without Claude, cap, off switch, no timer, mixed reason, terminal escalation after a claim, interrupted scheduling restores the wait).
 - `test_limit_relaunch_binding_*` (T012: tree digest = `tree_snapshot` incl. submodules, verify/arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
 - `test_limit_relaunch_verify_*` (T014: the relaunch verifies before any commit or resume; bookkeeping-only edits, a moved HEAD on a clean tree, in-scope edits during an open stage and submodule changes all stop with the checkout untouched).
-- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; a task DONE before the limit is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
+- `test_limit_relaunch_bound_*` (T017: the manifest records the running task, the arm names it and is refused without it, `limit-task`).
+- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once, decided by the bound task's status; a task DONE before the limit, committed or not, is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
 - `test_limit_relaunch_reenter_*` (T016: the arm is granted only for an implementation stop; an armed resume skips the plan review loop, so a committed partial checkpoint with a stale plan review completes without a plan review or recovery decision; a clean resume still re-reviews; a needs-human plan decision still stops).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state, accepted-plus-rejected findings with a verified re-check included, commits nothing before ai-run consumes the arm, and fails closed on inconsistent review records).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet), `test_plan_outcome_*` (T007).
+- `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos
