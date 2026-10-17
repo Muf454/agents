@@ -91,13 +91,18 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   fails afterwards, so a finished task is never logged `crashed` because its marker outlived
   a failed open (an id without a marker is harmless). A stop that deliberately logs nothing
   (approved gate changed) removes the marker without running a helper. Every new task record
-  carries `started` (the attempt's open time from its marker, else the append time minus the
-  duration), and `ai-status --outcomes` orders a task's attempts by start time (append
-  position only as the tie-breaker; old rows use `time` minus `seconds`; a task with a row
-  that has neither keeps file order), deriving the task's result (last attempt), its attempt
-  count and its first-time pass (first attempt done) from that order, so a `crashed` record
-  reconciled late, after a later attempt of the same task succeeded, never changes the task's
-  reported result; the stored `attempt` and `first_pass` fields remain the count at append
+  carries `seq`, a number from one persisted host-wide counter (`attempt-seq` beside the log,
+  advanced under the log lock, self-healing from the highest recorded `seq`) allocated when
+  the attempt opens (stored in its marker and copied to its outcome and to a reconciled
+  `crashed` record) or, for an attempt without an open, when its row is appended; a row is
+  never written without one (an allocation failure fails that append). It also carries
+  `started` (the attempt's open time from its marker, else the append time minus the
+  duration; informational). `ai-status --outcomes` orders a task's attempts by `seq`, rows
+  without one (written before this version) first in file order, deriving the task's result
+  (last attempt), its attempt count and its first-time pass (first attempt done) from that
+  order, so a `crashed` record reconciled late, after a later attempt of the same task
+  succeeded, never changes the task's reported result, even when both attempts opened within
+  the same second; the stored `attempt` and `first_pass` fields remain the count at append
   time. Advisory telemetry only: never fatal, never a stop; a sync the kernel already failed
   cannot be redone (dirty pages may be gone).
 - **R13 recovery text.** Reasons, human actions and needs-human questions longer than their

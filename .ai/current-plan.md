@@ -84,8 +84,8 @@ Invariant: a marker is removed only when the log durably holds a record with its
 operation overwrites a marker. Residual: an older installed copy without the lock in another
 checkout can interleave until upgraded; its buffered append only tears on a crash or full disk.
 - `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
-  branch/task/model and `started` from the marker (the report orders by it, round 5 redesign),
-  `attempt` numbered as today (count at append time, informational).
+  branch/task/model, `started` and `seq` from the marker (the report orders by `seq`, round 6
+  redesign), `attempt` numbered as today (count at append time, informational).
 - Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker directory once
   at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
   that case.
@@ -191,12 +191,69 @@ model is redesigned once instead of patching the reconcile paths:
    reconciled rows this gives today's numbers (file order = start order, stored fields agree).
 Invariant: a record appended late never changes which attempt counts as a task's result or
 its first attempt; reconcile stays best effort and never consults the task's later outcomes.
-Residual: two attempts of one task that start within the same second (impossible for a delayed
-reconcile, which needs a runner restart or a whole attempt between the two opens; possible for
-two normal attempts only in sub-second mock runs) fall back to append order, which is correct
-for normal attempts. Documented change: a log whose earlier attempts are missing counts its
-first visible attempt as attempt 1 (the report already did that for `attempt`; now also for
-first-time pass).
+Documented change: a log whose earlier attempts are missing counts its first visible attempt
+as attempt 1 (the report already did that for `attempt`; now also for first-time pass).
+Superseded in part by round 6 (below): the ORDER KEY is no longer the start time. Round 5's
+residual ("equal starts within one second are impossible for a delayed reconcile") was wrong:
+nothing enforces an interval between two opens, and B's duration does not move B's start
+(plan review round 6, P15). `started` stays on every new row and marker as information; the
+order comes from a persisted sequence. The start-time derivation (`attempt_start`, `time`
+minus `seconds`) is dropped.
+
+### CU-5 attempt sequence (round 6 redesign, T012)
+Round 6 (P15 again, P16) showed that a wall-clock key cannot order attempts: markers hold
+whole seconds, a restart or `attempt-open` can follow a crashed open within the same second,
+and the planned tie-breaker was the append position, i.e. exactly the order the design set out
+not to trust; the legacy acceptance case (P16) also contradicted the start-time rule. Sixth
+round in the CU-5 area, so the order key is redesigned once, as a whole:
+1. **One persisted sequence beside the log**: `state_root() / 'attempt-seq'` (the log is
+   `state_root() / 'outcomes.jsonl'`, workflow.py:2958–2959; both live and die together).
+   `next_attempt_seq() -> int`: open the log `O_RDWR|O_APPEND|O_CREAT` (directories created
+   as `append_outcome` does) and take its `flock LOCK_EX`, the lock every writer on the host
+   already uses, so allocators and appenders of every checkout are serialised and the lock
+   lives on a file that is never replaced (locking the counter file itself would break as soon
+   as it is replaced atomically); `n = max(counter value, highest seq of any task record in the
+   log read strictly) + 1` (counter missing or not an int → 0); persist `n` atomically (tmp in
+   the same directory, fsync, `os.replace`, `fsync_dir`); release; return `n`. Any `OSError`
+   propagates. The log scan is the self-heal for a lost or deleted counter and costs what
+   `outcome task` already pays for its `attempt` count (workflow.py:3045).
+2. **Allocation = the moment the host first records the attempt**, under the checkout lock
+   that makes a checkout's attempts sequential:
+   - `open_attempt` (T010) allocates BEFORE it prints the id; the marker carries `seq`.
+     A failed allocation prints nothing and publishes nothing (exit 1, note): the attempt runs
+     untracked, as it does today when the helper fails.
+   - `outcome task … --attempt ID` with a readable, valid marker takes the marker's `seq`
+     (and `started`); every other `outcome task` (no `--attempt`, or no readable marker)
+     allocates a fresh `seq` at append time. The attempt's open (or, without an open, its
+     append) comes after every earlier attempt's open, so the allocation order is the attempt
+     order. A failed allocation fails the command (exit 1, nothing appended): with a marker the
+     attempt is later reconciled as `crashed` with the marker's `seq` (the conservative record,
+     like the short-write limit); without one the untracked row is lost, as any `OSError` loses
+     it today. A row is never written without `seq`.
+   - reconcile's `crashed` record carries the marker's `seq` (and `started`), however late it
+     is appended.
+3. **Logical order** (`attempt_seq(record)`, `ordered_attempts(task_rows)`): `seq` when it is
+   an int (not bool), else none. Per task key (project, branch, task): rows WITHOUT `seq`
+   first, in file order (`_at`), then rows WITH `seq` by `(seq, _at)`. Why this is total and
+   right: every task row the new helper writes has a `seq` (rule 2), so rows without one are
+   pre-upgrade rows; all of them were appended before any new row, by one writer per checkout
+   in attempt order (no reconcile existed), so file order is their attempt order and "old
+   before new" is exact. Hand-written test logs have no `seq` and keep today's order.
+4. **The report derives, never trusts** (unchanged from round 5): final result = last row in
+   logical order, attempt count = rows, first-time pass = first row is `done`; the stored
+   `attempt` and `first_pass` fields stay as written and are documented as informational.
+Invariant: two attempts of one task never share an order key (one host-wide counter under one
+lock), and a record appended late never changes which attempt is a task's result or its
+first; `_at` only ever orders pre-upgrade rows. The sequence is host-wide, so one task's
+numbers have gaps: it is an order key, not a count (`attempt` is the count).
+Residuals (comment + Risks): a counter lost after a power loss continues after the highest
+RECORDED seq, so markers allocated but not yet recorded may duplicate a seq; `_at` breaks that
+tie. A `done` whose append failed only because the counter could not be written is recorded
+`crashed` by the next reconcile (documented limit, same class as the short write).
+Regression that pins P15: B `done` (`seq` 2) appended before A `crashed` (`seq` 1), both
+`started` 1000 → done 1, not done 0, 2 attempts, first-time pass 0/1, identical in both file
+orders (T012 in memory, T003 end to end with A unreadable through B's completion and A's
+`started` set to the current second right before B's open).
 
 ### R13 — boundary cut + full text (T005)
 - `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
@@ -220,11 +277,12 @@ first-time pass).
 | T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
 | T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
 | T010 | CU-5 marker failure contract: three-way marker read, id printed before publish (round 4 redesign) | opus | T009 |
-| T011 | CU-5 attempt ordering: `started` on task records, report derives result/attempts/first pass from start order (round 5 redesign) | opus | T007 |
-| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010/T011) | opus | T010, T011 |
+| T012 | CU-5 attempt sequence: persisted `seq` allocated at open or append under the log lock, `ordered_attempts` by seq (round 6 redesign) | opus | T010 |
+| T011 | CU-5 report derives result/attempts/first pass from T012's order; `started` on task records; docs | opus | T012 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010/T012/T011) | opus | T010, T011 |
 | T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check, id kept on a failed open), SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010, T011 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010, T011, T012 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
@@ -237,9 +295,9 @@ first-time pass).
   line, the marker and the directories they live in, one never-overwritten marker per attempt,
   reconcile idempotent by id, marker removal only after a strict read and a successful sync,
   markers kept on read errors and ids kept by the runner on a failed open, and a report that
-  orders attempts by start time instead of append position
+  orders attempts by a persisted sequence instead of append position
   (designs: "CU-5 write protocol", "CU-5 marker-removal gate", "CU-5 marker failure
-  contract", "CU-5 attempt ordering"). Durability of earlier rows is a non-goal
+  contract", "CU-5 attempt ordering", "CU-5 attempt sequence"). Durability of earlier rows is a non-goal
   (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
   be deferred, not grown into a redesign tonight.
 - CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
@@ -252,11 +310,18 @@ first-time pass).
 - CU-5 late crash record: a REAL `crashed` line of an earlier attempt can be appended after a
   later attempt's `done` of the same task (marker kept through a read error or an unreadable
   log, recorded at a later start; plan review round 5, P15). Today's report reads a task's
-  last line (workflow.py:3093) and would show the task as not done. The attempt ordering
-  design (T011) makes the report derive result, attempt count and first-time pass from start
-  order (`started` on every new row, `time - seconds` for old rows, file order when a row has
-  neither), so the order of appends no longer matters; stored `attempt`/`first_pass` stay
-  informational.
+  last line (workflow.py:3093) and would show the task as not done. The attempt sequence
+  design (T012, consumed by T011) makes the report derive result, attempt count and first-time
+  pass from a persisted per-host sequence allocated when the attempt opens (or, without an
+  open, when its row is appended), old rows without `seq` first in file order, so the order of
+  appends no longer matters; stored `attempt`/`first_pass` stay informational. Round 5's
+  start-time key was dropped (round 6, P15): whole-second starts collide and nothing enforces
+  an interval between opens.
+- CU-5 sequence counter: `attempt-seq` lives beside the log and is updated under the log's
+  `flock`; a lost counter continues after the highest recorded `seq` (unrecorded markers may
+  then duplicate one, `_at` decides); an allocation failure fails the `outcome task` call, so
+  a finished attempt with a marker is recorded `crashed` at the next reconcile (same class as
+  the short-write limit; T012 comment and docs).
 - CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
   reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
   there until the leftovers are committed; T004's test and the handoff state this order.
