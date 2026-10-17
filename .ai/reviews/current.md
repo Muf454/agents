@@ -1,33 +1,33 @@
-<!-- Host evidence: HEAD dfdcf0e34cb51689197b17e4a4d4836c5344f466; merge-base 7d22939e12957f9ba744f563498161f970fe31ab; saved 2026-10-17T01:33:05Z. -->
+<!-- Host evidence: HEAD 617be4b80b1f8161d56c0238ee0d1721331900e6; merge-base df0d3c2e187c9308ebd893e9151cef98a43a4d9e; saved 2026-10-17T06:59:21Z. -->
 
 # Independent review
 
-Overall verdict: PASS — no findings in the inspected scope.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Overall verdict: PASS WITH MINOR FINDINGS — no demonstrated BLOCKER or MAJOR defect in the inspected changes.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `dfdcf0e34cb51689197b17e4a4d4836c5344f466`
+Reviewed HEAD: `617be4b80b1f8161d56c0238ee0d1721331900e6`
 
-Supplied base and verified merge-base: `7d22939e12957f9ba744f563498161f970fe31ab`
+Supplied base and verified merge-base: `df0d3c2e187c9308ebd893e9151cef98a43a4d9e`
 
 ## Scope and validation
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, previous reviews/dispositions, relevant documentation, scoped Git history, the full supplied diff, and affected source/tests. Also examined changes since `31fb005a6b08a276d38f68b3a2b5d8235c25f123`. The checkout was clean.
+Inspected repository instructions, specification, plan, tasks, state, handoff, review dispositions, relevant documentation, scoped Git history/diff, and affected source/tests. The checkout was clean.
 
 Validation evidence observed:
 
-- `.ai/local/validation.json`: PASS at `2026-10-17T01:30:16Z`, recorded at `fda736b78e5c03c109cfef392a53feba4861ac23`.
-- Referenced log: **746 tests passed in 394.5 seconds**, across 48 batches on eight workers.
-- Independent `stamp verify` confirmed that the validation fingerprint matches the reviewed checkout.
+- `.ai/local/validation.json`: PASS at `2026-10-17T06:55:24Z`, recorded at `52ef5dd468784cd5b9d9a221f65551e7892166dc`.
+- Referenced log: **817 tests passed in 434.6 seconds**.
+- Independent `stamp verify` confirmed that the fingerprint matches the reviewed content.
 
-Checks independently run and passed:
+Checks independently run:
 
-- Task queue validation, discovery of 746 tests, three documentation consistency tests, and `git diff --check`.
-- Python AST parsing for three changed files and shell syntax checks for 13 scripts/templates.
-- Comparison confirming no baseline test methods were removed.
-- In-memory checks covering 1,365 table-cell round trips through both disposition grammars, malformed row boundaries, task-section insertion/order/idempotence, 15 recovery parsing cases, and 11 catch-up scope/ordering cases.
-- Real-process checks for non-UTF-8 process names, GNU `timeout` descendants, `/proc` enumeration failure, and recovery of adopted-child reaping after a failed scan.
+- Task queue validation, three documentation tests, Python AST parsing, shell syntax checks, and `git diff --check`.
+- Discovery of 817 tests; no baseline test methods removed.
+- Four existing pure test methods without their writing fixture setup.
+- Independent checks covering 480 accepted finding-cell forms, 12 rejected forms, torn UTF-8 lines, U+2028, equal-second attempt ordering, and recovery-text shortening.
+- Reproduction of N2 using the actual parser with mocked filesystem endpoints.
 
-The full `./scripts/ai-check` and writing fixture tests were not rerun because this review is read-only. Reproduction processes were terminated and reaped. No files were written or network/MCP integrations invoked.
+The full `./scripts/ai-check` and writing integration fixtures were not rerun because this review is read-only. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -39,46 +39,73 @@ None found in the inspected scope.
 
 ## MINOR findings
 
-None found in the inspected scope.
+### N1 — Marker documentation describes the superseded schema and ordering
+
+**Location:** `docs/workflow.md:935`, `docs/workflow.md:938`
+
+The documented required marker fields omit `seq`, and the listing order is described as oldest `started` first. Actual validation requires an integer `seq`, and valid markers sort by `(seq, filename)`.
+
+**Impact:** The maintenance documentation gives an incorrect marker contract. A marker constructed from its documented field list is rejected as invalid and can be discarded during reconciliation.
+
+**Evidence:** `MARKER_FIELDS` and `read_marker` at `scripts/lib/workflow.py:3274` require `seq`; `marker_sort_key` at `scripts/lib/workflow.py:3299` sorts by it. T012 explicitly changed both rules.
+
+**Recommended direction:** Add `seq` to the documented fields and describe the actual ordering. This also completes T006’s documentation-consistency requirement.
+
+### N2 — The advertised full recovery text is silently truncated
+
+**Location:** `scripts/lib/workflow.py:2084`; related promise at `README.md:421`
+
+R13 requires the full recovery reason and human action in `recovery-decision.txt` when the notification is shortened. The implementation instead slices each normalized value to 4,000 characters without marking that second truncation.
+
+**Impact:** Someone following the notification’s “Full text” pointer can miss diagnostic details or instructions at the end. The original recovery log remains available, limiting the impact.
+
+**Evidence:** A 5,143-character reason ending in `FINAL_DIAGNOSTIC_DETAIL` produced a sidecar payload containing exactly 4,000 reason characters, without the final detail or a truncation indicator.
+
+T005 explicitly specifies the 4,000-character bound, so the implementation follows that task detail; it conflicts with the specification and user-facing promise.
+
+**Recommended direction:** Preserve the complete normalized values as specified, or explicitly identify truncation and point to the complete recovery log. Reconcile the specification and documentation with the chosen behavior.
 
 ## Previous findings re-evaluated
 
-- **M1 / T014:** Fixed. Byte-based process-stat parsing handles non-UTF-8 names; independent real-process cleanup passed.
-- **M2 / T015:** Fixed. A targeted Codex re-check leaves a full Claude code review pending. Full code reviews retain the intended coverage.
-- **M3 / T017:** Fixed. An actual `os.listdir('/proc')` failure reaches `scan()` as unavailable and produces an unconfirmed-cleanup diagnostic. Reaping skips the failed round and succeeds on the next available scan.
-- **P7 and N1 / T016:** Fixed. Backslash/pipe values round-trip correctly, and a missing Task cell cannot consume the following row.
-- **N2:** Fixed. The handoff now identifies T014–T016 as completed and requests re-review followed by human testing.
+The accepted batch-5 plan findings are addressed in the inspected implementation:
 
-No rejected findings were re-raised. No separate pre-existing defect is reported.
+- Readable append descriptors, per-line UTF-8 decoding, complete-write checks, locking, and directory synchronization.
+- Separate attempt markers, strict log reads, confirmation before removal, and retention after marker-read failures.
+- Reconciliation before the dirty-checkout refusal and retention of printed attempt IDs after publication failures.
+- Persisted sequence ordering, including late reconciliation, equal-second starts, and legacy rows.
+- Stale recovery-sidecar removal and malformed finding-cell diagnostics.
+
+No rejected finding was re-raised. No separate pre-existing defect is reported.
 
 ## Missing coverage
 
-No additional required regression test gap was identified in the inspected changes. Existing tests address the accepted findings at the relevant boundaries, including the lower-level `/proc` enumeration failure.
+Add recovery-sidecar cases exceeding 4,000 characters for both reason and human action, asserting complete retention or explicit truncation with a pointer to the original log.
 
-Scratch deletion, host-stage integration, startup interruption, and concurrent shutdown tests were inspected and included in the recorded passing suite; they were not independently rerun here.
+The documentation tests pass but do not detect N1. Recorded integration coverage was inspected; it was not independently rerun.
 
 ## Security concerns
 
-No additional demonstrated security or authorization defect was found. Scratch deletion uses pinned directory descriptors and no-follow opens, and post-session cleanup follows gate verification. Permission templates remain unchanged.
+No additional demonstrated security or authorization defect was found in the inspected changes. Gate-change stops avoid helper execution and remove the current attempt marker through the shell path.
 
 ## Architecture concerns
 
-The implementation uses standard-library dependencies and preserves protected installed files and target-project configuration. Catch-up reporting remains advisory.
+The changes use standard-library dependencies and retain advisory telemetry semantics. Protected installed copies remain unchanged, with upgrades documented as human work.
 
-The vault flow chart includes task-section repair and scratch cleanup, has `updated: 2026-10-17`, and has corresponding dated hub log entries. **Flow chart updated.**
+The vault flow chart has `updated: 2026-10-17`, includes crash reconciliation in its outcome-log description, and has a corresponding hub log entry. **Flow chart updated.**
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- After acceptance, refresh installed tooling/prompts through the documented upgrade process.
-- Interrupt a real self-check on the intended host and inspect for leftover fixture processes.
-- Compare catch-up reporting with real branch review history.
+- After acceptance, refresh installed tooling and prompts through the documented upgrade process.
+- Optionally verify one real SIGKILL/restart cycle in a disposable checkout.
 
 ### Covered by automated tests
 
-- Process ownership, shutdown, startup interruption, non-UTF-8 names, and scan failures.
-- Task-section repair, disposition escaping, scratch symlinks, recovery decisions, and catch-up ordering.
-- Recorded full gate: 746 tests passed.
+- Disposition parsing and diagnostics.
+- Append framing, locking, sync failures, marker retention, and reconciliation.
+- Attempt ordering and legacy compatibility.
+- Recovery boundary cuts, sidecar creation, and stale-file removal.
+- Add the long-sidecar regression described under N2.
 
 Reviewing does not constitute human acceptance.

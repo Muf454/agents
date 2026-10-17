@@ -307,7 +307,7 @@ IDs and duplicates rejected); `accepted` names existing tasks, `rejected` has ev
 `Convergence:` line. `--fresh` also requires accepted tasks to be TODO, every task that existed
 at START to keep its status and new tasks to be TODO. It prints `accepted=a rejected=r
 needs_human=h`; `--questions` prints at most 3 needs-human questions, one line of at most 300
-characters each, plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
+characters each (cut at a sentence or word boundary, ending in `…`), plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
 START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
 
@@ -459,8 +459,10 @@ fewer than two counted rounds, the reservation used) ends with the draft PR as b
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
-deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
-decorations do not match. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+deferred → draft PR. In both disposition tables the finding cell starts with the ID and may carry a
+severity suffix (`M1 (MAJOR)`) and a title (`M1 (MAJOR) title`, `M1 — title`, `M1: title`; a row counts
+for its first ID only); other decorations (`**M1**`, `M1 (CRITICAL)`, `M1,M2`, `M1x`) do not match, and the
+failure names the offending row and the row to write. In the Evidence and Task cells (here and in plan dispositions) write a pipe
 as `\|` (and a literal backslash before it as `\\`, so `\\|` is a backslash then a separator); it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that
@@ -696,7 +698,11 @@ line inside prose that contains no `{`, `}`, `[` or `]` (so no enclosing contain
 object or inline example can hide it; prose with any bracket escalates, the safe side);
 envelope and decision reject duplicate keys. Without a valid decision the escalation reason
 is `the recovery session gave no valid decision; it wrote: <excerpt>` (whitespace collapsed,
-at most 300 characters) when the answer is non-empty, else without the excerpt.
+at most 300 characters) when the answer is non-empty, else without the excerpt. A reason or
+human action longer than 300 characters is cut by `shorten` at a sentence end (if that keeps
+half the cap), else at a word boundary, and ends with `…`; the full text goes to
+`.ai/local/recovery-decision.txt` (removed at the start of every `ai-recover` and
+`recover-decision`) and the ⛔ notification ends with `Full text: <that path>`.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
 checks after the commit. Checkpoint scope: `git add --all` (ignored
 files stay out), then `checkpoint-guard` inspects every staged addition (renames count as
@@ -897,7 +903,44 @@ commits with its own record). `pr-body` titles the review section "Claude fallba
 `blocked`, `validation_failed`, `no_checkpoint`, `timeout`, `interrupted` or `error` per
 task attempt with the session model and the seconds from session start to result; the
 attempt number counts earlier lines for the same project (main repository name, shared by
-worktrees), branch and task. Failures to write are reported and never stop the run.
+worktrees), branch and task (kept for readers of the log; the report derives its numbers from
+`seq`). `seq` orders the attempt among all attempts the host recorded (allocated at the
+attempt open, or at the append for an attempt without one, from `attempt-seq` beside the log;
+gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
+order key). Failures to write are reported and never stop the run.
+
+Every line goes through `append_outcome`: on a read-write `O_APPEND` descriptor it takes
+`flock(LOCK_EX)` (so the tail check and the write are one step for every writer using the
+helper, across checkouts), then one `write`, prefixed with a newline when the log does not end
+in one (a torn earlier line never swallows the record), then `fsync` of the file, of the log's
+directory and of the parent of every directory it created; any sync error propagates, so
+success means the line and its directory entries are durable. An older installed copy without
+the lock in another checkout can still interleave until upgraded. A short write is a failure (`outcome` exits 1 with "Could not append
+the outcome line completely"), never retried: another checkout may have appended in between,
+and the next append's newline guard isolates the fragment. `read_outcomes` splits the bytes on
+`\n` only and decodes each line on its own, so a torn tail (even one cut inside a multibyte
+UTF-8 character) or a U+2028 in a title costs at most that one line. `read_outcomes(...,
+strict=True)` treats only a missing log as empty and lets any other read error propagate, so a
+transient failure never looks like "no record yet". `confirm_recorded(path, id)` opens an
+existing log (never creates it), takes the same lock, reads it to EOF and, when a task record
+carries `attempt_id == id`, fsyncs the file and then its directory before returning True.
+Removal rule: a marker goes only after `append_outcome` returned True for a record with its id
+or `confirm_recorded` returned True, so a line whose earlier sync failed is synced before its
+marker is removed (a sync attempt, not recovery of pages the kernel already dropped).
+
+Attempt markers live one file per attempt in `outcome attempt-dir` (`<review binding
+dir>/attempts/<id>.json`, id `^[0-9a-f]{16}$`). `write_marker` writes a fsynced `<id>.json.tmp`
+and hard-links it to the final name, which fails if the name exists, so a marker is never
+overwritten; `list_markers` returns `(path, record, error)` per marker: a valid record (all of
+`id`, `task`, `model`, `project`, `branch`, `started`, `pid`, `pid_start`, `id` equal to the file
+name), the `OSError` when opening or reading it failed (kept: a transient error never discards
+a marker), or both `None` for invalid content (discardable: the writer links only complete
+files). Entries without a record sort first by name, then valid ones oldest `started` first; a
+failing directory listing raises. `remove_marker` unlinks and syncs the directory.
+`open_attempt(task, model, pid)` prints the new id and flushes BEFORE publishing the marker, so
+a marker whose id the runner lacks cannot exist; an `OSError` after the print propagates (the
+runner keeps any valid printed id whatever the exit status). Residual: a marker whose directory
+sync failed may not survive a power loss, losing at most a `crashed` record.
 
 A `review recheck` line records, instead of finding counts, how many rejected BLOCKER and
 MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `withdrawn_blocker`,
@@ -921,6 +964,20 @@ nothing, and so does a stop because the approved gate changed (the handler never
 project helper after that, nor the plan-revision outcome line). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
 from the task's heading, or is empty.
 
+The runner backs every attempt with a marker (`outcome attempt-open TASK MODEL $$`, before the
+session; the line passes `--attempt ID`, which removes the marker once appended). It keeps any
+valid printed id whatever the helper's exit status (P13). A gate-change stop logs nothing, so
+its EXIT handler removes only this attempt's marker with a plain `rm` (no helper). A runner
+killed without its EXIT handler (SIGKILL, OOM) leaves the marker: every non-`--plan` start runs
+`outcome attempt-reconcile $$` right after the branch check and before the clean-checkpoint
+check, which logs it as `crashed` (attempt counted as usual, `seconds` null) once. The killed
+runner had already written `.ai/state.md`, so that start still stops with `Start from a clean
+checkpoint` until the interrupted bookkeeping is committed or reset; the crash is logged
+either way. The reconcile is best effort, writes host state only, and runs the same checkout
+helper `state-root-check` already ran before the gate baseline. Limits: only implementation
+attempts have markers; a checkout never started again keeps its marker; a sync the kernel
+already failed cannot be redone (T009).
+
 Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
 returns, and GNU `timeout` runs the session in its own process group, so neither a signal to
 the runner nor Ctrl-C reaches the session. The runner exits 130/143 only when the session
@@ -928,10 +985,12 @@ ends (or hits its limit), and the `interrupted` line's time is then, not the key
 pipeline launched in the background from a non-interactive shell (`nohup … &`) inherits SIGINT
 as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
 `outcomes-report` (`ai-status
---outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
-minutes) by category, and every attempt by the model that ran it ("Attempts by model",
+--outcomes`) aggregates per task the last attempt by `seq` (a crashed attempt reconciled late
+keeps its place; first-time pass = the first attempt by `seq` ended `done`; rows without `seq`
+(written before this version) come first, in file order) with done, attempts and summed
+minutes by category, and every attempt by the model that ran it ("Attempts by model",
 "Attempts by model and category": attempts, done, not done, first-time pass over tasks
-whose first line ran on that model, average minutes per attempt), and reviews by
+whose first attempt ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
 
 ## Observation records and the dashboard

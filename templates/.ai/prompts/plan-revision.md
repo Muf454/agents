@@ -27,7 +27,10 @@ Handle MINOR findings the same way when they are cheap and in scope; their rows 
 Do not blindly obey the reviewer, and do not dismiss findings without evidence.
 
 The runner created the section for this round at the end of
-`.ai/reviews/plan-dispositions.md`. Add one row per finding to its table (in a table cell, write a pipe as `\|`,
+`.ai/reviews/plan-dispositions.md`. Add one row per finding to its table: the finding ID alone in the first cell
+(no severity or title; the runner tolerates them, nothing before the ID), e.g.
+`| P1 | accepted | <evidence> | T012 |`; leave the Task cell empty for rejected and needs-human rows.
+(In a table cell, write a pipe as `\|`,
 better: avoid it, e.g. write "or"; an unescaped `|` splits the row and the runner stops),
 keep its header and its "Plan review HEAD:" line, and never edit earlier sections, the preamble or
 `.ai/reviews/plan.md`. Never change the status of an existing task; new tasks are TODO.

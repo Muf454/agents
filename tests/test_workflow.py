@@ -1,6 +1,8 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import ast
+import calendar
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -121,7 +123,10 @@ if 'RECOVERY CONTRACT' in prompt:
     decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     answer = json.dumps(decision)
-    if mode == 'prose-only':
+    if mode == 'escalate-long':
+        decision.update(action='escalate', reason=' '.join(f'Sentence number {n} explains the stop.' for n in range(1, 40)))
+        answer = json.dumps(decision)
+    elif mode == 'prose-only':
         answer = 'The session\tcrashed once;\n\nI could not decide what to do.'
     elif mode.startswith('prose-'):
         answer = 'The session crashed once and left nothing behind.\n' + answer + '\nThat is my verdict.'
@@ -316,7 +321,7 @@ if 'TRIAGE CONTRACT' in prompt:
     text = tasks_file.read_text()
     review = pathlib.Path('.ai/reviews/dispositions.md')
     convergence = os.environ.get('MOCK_CONVERGENCE')
-    if convergence is not None and '| M1 |' in review.read_text():
+    if convergence is not None and re.search(r'^\| M1 \|', review.read_text(), re.M):
         # Resuming a triage whose rows are recorded: only the convergence line is missing.
         review.write_text(review.read_text() + convergence + '\n')
         subprocess.run(['git','add','--','.ai/reviews/dispositions.md'],check=True)
@@ -385,6 +390,22 @@ if mode == 'timeout':
     time.sleep(30)
 if mode == 'self-kill':
     os.kill(os.getpid(), signal.SIGKILL)
+if mode == 'sigkill-runner':
+    # The runner dies without its exit handler (claude <- timeout <- ai-run): walk the ppids up to
+    # the first bash running ai-run, record it and every pid on the way for the test's cleanup.
+    pid, seen = os.getppid(), []
+    while pid > 1:
+        seen.append(pid)
+        argv = pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        if pathlib.Path(argv[0].decode()).name == 'bash' and any(b'ai-run' in part for part in argv):
+            break
+        pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+    else:
+        sys.exit('mock: no ai-run ancestor')
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'sigkill-runner.pids', 'a') as f:
+        f.write(''.join(f'{p}\n' for p in seen))
+    os.kill(pid, signal.SIGKILL)
+    sys.exit(0)
 if mode == 'hold':
     # Bounded wait for the test to signal the runner, then release and fail.
     pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
@@ -2998,6 +3019,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.assertIn(entry, ('Read', 'Glob', 'Grep'))
         prompt = (self.base / 'revision-prompts.log').read_text()
         self.assertIn('REVISION CONTRACT: This is plan review round 1', prompt)
+        self.assertIn('ID alone in the first cell', prompt)
         self.assertIn('Do not commit; the host validates the section and commits it.', prompt)
         self.assertNotIn('Convergence:', prompt.split('REVISION CONTRACT')[1])
         # The same report again: refused, no second commit or record.
@@ -4435,11 +4457,73 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_recovery_decision_prose_only_escalates_with_an_excerpt(self):
         reason = self.assert_prose_excerpt('The gate\ttimed out   twice.\n\nI cannot tell why. ' + 'x' * 400)
-        self.assertIn('it wrote: The gate timed out twice. I cannot tell why. xxx', reason)
-        self.assertEqual(len(reason), 300)
+        # Cut at the word boundary before the unbroken 400-character word, never mid-word.
+        self.assertTrue(reason.endswith('it wrote: The gate timed out twice. I cannot tell why.…'), reason)
+        self.assertLessEqual(len(reason), 300)
         # Nothing written: the reason stays as before.
         self.assertEqual(self.scan_decision('  \n '),
                          'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+
+    def test_recovery_reason_shorten_unit_cases(self):
+        wf = self.outcome_module()
+        sentences = ' '.join(f'Sentence {n} ends here.' for n in range(1, 40))
+        cut = wf.shorten(sentences, 300)
+        self.assertTrue(cut.endswith('.…'), cut)
+        self.assertLessEqual(len(cut), 300)
+        words = ' '.join(['word'] * 100)
+        cut = wf.shorten(words, 300)
+        self.assertTrue(cut.endswith('word…'), cut)
+        self.assertLessEqual(len(cut), 300)
+        self.assertEqual(wf.shorten('x' * 400, 300), 'x' * 299 + '…')
+        self.assertEqual(wf.shorten('a  short\ttext', 300), 'a short text')
+
+    def recovery_reason_decision(self, reason, human_action='look yourself'):
+        log = self.base / 'decision.json'
+        result = json.dumps({'action': 'escalate', 'reason': reason, 'human_action': human_action})
+        log.write_text(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result}))
+        return self.helper('recover-decision', str(log), '0').stdout.rstrip('\n').split('\t')
+
+    def test_recovery_reason_shorten_keeps_the_full_text_in_a_sidecar(self):
+        sidecar = self.project / '.ai/local/recovery-decision.txt'
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        full = ' '.join(f'Reason sentence {n} is here.' for n in range(1, 30))
+        self.assertGreater(len(full), 500)
+        action, reason, human = self.recovery_reason_decision(full)
+        self.assertEqual((action, human), ('escalate', 'look yourself'))
+        self.assertTrue(reason.endswith('.…'), reason)
+        self.assertLessEqual(len(reason), 300)
+        self.assertEqual(sidecar.read_text(), f'reason: {full}\nhuman_action: look yourself\n')
+        self.assertEqual(self.recovery_reason_decision('short reason'), ['escalate', 'short reason', 'look yourself'])
+        self.assertFalse(sidecar.exists())  # a short decision removes the stale file
+
+    def test_recovery_reason_shorten_prose_only_excerpt_stays_bounded(self):
+        reason = self.assert_prose_excerpt('word ' * 200)
+        self.assertTrue(reason.endswith('word…'), reason)
+        self.assertFalse((self.project / '.ai/local/recovery-decision.txt').exists())
+
+    def test_recovery_reason_shorten_notification_points_at_the_full_text(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate-long')
+        note = [line for line in self.notifications().splitlines() if '⛔' in line][-1]
+        self.assertTrue(note.endswith('Full text: .ai/local/recovery-decision.txt'), note)
+        self.assertIn('explains the stop.…', note)
+        self.assertTrue((self.project / '.ai/local/recovery-decision.txt').is_file())
+        # P4: an early escalation of a later invocation never points at the previous text.
+        before = len(self.notifications().splitlines())
+        (self.project / '.ai/local/last-error').write_text('Approved workflow gate changed during this run.')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        later = [line for line in self.notifications().splitlines()[before:] if '⛔' in line]
+        self.assertEqual(len(later), 1)
+        self.assertNotIn('Full text:', later[0])
+        self.assertFalse((self.project / '.ai/local/recovery-decision.txt').exists())
+
+    def test_recovery_reason_shorten_plan_questions_end_at_a_word(self):
+        wf = self.outcome_module()
+        question = ' '.join(['rollback'] * 60)
+        line = wf.bounded_questions([question]).splitlines()[0]
+        self.assertTrue(line.endswith('rollback…'), line)
+        self.assertLessEqual(len(line), 300)
 
     def test_recovery_decision_prose_with_brackets_escalates_with_an_excerpt(self):
         candidate = '{"action":"commit_and_rerun","reason":"example"}'
@@ -5533,6 +5617,49 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
         self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
 
+    def test_outcome_attempt_order_round6_equal_seconds(self):
+        done = {'task': 'T001', 'model': 'm', 'attempt': 1, 'first_pass': True, 'result': 'done', 'seconds': 5,
+                'started': 1000, 'seq': 2}
+        crashed = {'task': 'T001', 'model': 'm', 'attempt': 2, 'first_pass': False, 'result': 'crashed',
+                   'seconds': None, 'started': 1000, 'seq': 1}
+        reports = [self.outcome_report_for([done, crashed]), self.outcome_report_for([crashed, done]),
+                   self.outcome_report_for([done, {**crashed, 'started': 900}])]
+        for report in reports:
+            self.assertIn('1 task(s), 2 attempt(s)', report)
+            self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 2.0 | 0.1 |', report)
+            self.assertIn('| m | 2 | 1 | 1 | 0/1 (0%) |', report)
+        self.assertEqual(len(set(reports)), 1)
+
+    def test_outcome_attempt_order_pre_upgrade_rows_follow_file_order(self):
+        error = {'task': 'T001', 'result': 'error', 'time': '2026-10-17T10:05:00Z', 'seconds': 60}
+        done = {'task': 'T001', 'result': 'done', 'time': '2026-10-17T10:00:00Z', 'seconds': 600}
+        report = self.outcome_report_for([error, done])
+        self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 2.0 | 11.0 |', report)
+        report = self.outcome_report_for([done, error])
+        self.assertIn('| feature | 1 | 1/1 (100%) | 0 | 1 | 2.0 | 11.0 |', report)
+
+    def test_outcome_attempt_order_mixed_rows(self):
+        old = [{'task': 'T001', 'result': 'error', 'seconds': 60}, {'task': 'T001', 'result': 'done', 'seconds': 60}]
+        crashed = {'task': 'T001', 'model': 'm', 'result': 'crashed', 'seconds': None, 'seq': 1}
+        done = {'task': 'T001', 'model': 'm', 'result': 'done', 'seconds': 60, 'seq': 2}
+        reports = [self.outcome_report_for([*old, crashed, done]), self.outcome_report_for([*old, done, crashed])]
+        for report in reports:
+            self.assertIn('1 task(s), 4 attempt(s)', report)
+            self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 4.0 | 3.0 |', report)
+        self.assertEqual(reports[0], reports[1])
+
+    def test_outcome_attempt_order_real_log_started(self):
+        self.outcome_log_project()
+        before = int(time.time())
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        after = int(time.time())
+        row = self.outcome_rows()[-1]
+        self.assertIs(type(row['started']), int)
+        self.assertIs(type(row['seq']), int)
+        self.assertTrue(before - 5 <= row['started'] <= after - 5, (before, row['started'], after))
+        logged = calendar.timegm(time.strptime(row['time'], '%Y-%m-%dT%H:%M:%SZ'))
+        self.assertLessEqual(abs(row['started'] - (logged - 5)), 2)  # `time` minus `seconds`
+
     def catchup_report(self, rows, extra_files=()):
         self.setup_project()
         paths = []
@@ -5608,6 +5735,1079 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('Codex catch-up pending', self.catchup_report([self.claude_review(t), {'kind': 'catchup', 'time': t}]))
         self.assertIn('Codex catch-up pending', self.catchup_report([{'kind': 'catchup', 'time': t}, self.claude_review(t)]))
         self.assertIn('Codex catch-up pending', self.catchup_report([self.claude_review(t)], [[{'kind': 'catchup', 'time': t}]]))
+
+    def outcome_module(self):
+        spec = importlib.util.spec_from_file_location('workflow', HELPER)
+        wf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf)
+        return wf
+
+    def outcome_log_project(self):
+        self.setup_project()
+        self.commit()  # review records carry HEAD
+
+    def outcome_log_review(self, expected=0):
+        return self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5', expected=expected)
+
+    def outcome_log_records(self):
+        return self.outcome_module().read_outcomes([self.base / 'host-state/outcomes.jsonl'])
+
+    def test_outcome_log_io_appends_to_a_non_empty_log(self):
+        self.outcome_log_project()
+        for _ in range(3):
+            self.outcome_log_review()
+        self.assertEqual([r['kind'] for r in self.outcome_log_records()], ['review'] * 3)
+
+    def test_outcome_log_io_torn_line_without_final_newline(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        log.write_bytes(log.read_bytes() + b'{"time": "x", "kin')
+        self.outcome_log_review()
+        records = self.outcome_log_records()
+        self.assertEqual([(r['kind'], r['_at'][1]) for r in records], [('review', 0), ('review', 2)])
+        self.outcome_log_review()  # the log ends in a newline now: no empty line is inserted
+        self.assertEqual(log.read_bytes().count(b'\n'), 4)
+        self.assertEqual([r['_at'][1] for r in self.outcome_log_records()], [0, 2, 3])
+
+    def test_outcome_log_io_torn_multibyte_tail(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        log.write_bytes(log.read_bytes() + b'{"title": "caf\xc3')
+        self.assertEqual(len(self.outcome_log_records()), 1)
+        self.outcome_log_review()
+        self.assertEqual(len(self.outcome_log_records()), 2)
+        self.assertIn('codex', self.tool('ai-status', '--outcomes').stdout)
+
+    def test_outcome_log_io_line_separator_in_a_title(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        title = 'one\N{LINE SEPARATOR}two'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'title': title}))
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'title': 'three'}))
+        self.assertIn('\N{LINE SEPARATOR}'.encode(), log.read_bytes())  # written unescaped
+        self.assertEqual([r['title'] for r in wf.read_outcomes([log])], [title, 'three'])
+
+    def test_outcome_log_io_short_write_is_a_failure(self):
+        import runpy
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        real_write = os.write
+
+        def half_write(fd, data):
+            if b'"kind"' not in data:
+                return real_write(fd, data)
+            return real_write(fd, data[:len(data) // 2])
+
+        wf = self.outcome_module()
+        with mock.patch('os.write', half_write), mock.patch('os.fsync') as fsync:
+            self.assertFalse(wf.append_outcome(log, {'kind': 'review', 'reviewer': 'unit'}))
+        fsync.assert_not_called()
+        stderr = io.StringIO()
+        with mock.patch('os.write', half_write), mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', 'review', 'code', 'codex', 'm', 'high', '5']), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as stop:
+            runpy.run_path(str(HELPER), run_name='__main__')
+        self.assertEqual(stop.exception.code, 1)
+        self.assertIn('Could not append the outcome line completely', stderr.getvalue())
+        self.outcome_log_review()
+        records = self.outcome_log_records()
+        self.assertEqual([r['reviewer'] for r in records], ['codex', 'codex'])
+        self.assertEqual(log.read_bytes().count(b'\n'), 4)  # two records, two newline-isolated fragments
+
+    def test_outcome_write_protocol_lock_serializes_tail_check_and_write(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        log.parent.mkdir()
+        log.write_bytes(b'{"kind": "task", "title": "one"}\n')
+        fd = os.open(log, os.O_RDWR | os.O_APPEND)
+        self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(
+            wf.append_outcome(log, {'kind': 'task', 'title': 'two'})), daemon=True)
+        thread.start()
+        time.sleep(0.3 * TIMEOUT_SCALE)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(log.stat().st_size, len(b'{"kind": "task", "title": "one"}\n'))
+        os.write(fd, b'{"time": "x", "kin')
+        os.close(fd)  # releases the lock
+        fd = None
+        thread.join(SHORT_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+        self.assertTrue(log.read_bytes().endswith(b'{"time": "x", "kin\n{"kind": "task", "title": "two"}\n'))
+        self.assertEqual([r['title'] for r in wf.read_outcomes([log])], ['one', 'two'])
+
+    def outcome_write_protocol_syncs(self, wf, log):
+        """Inodes passed to os.fsync by one append, and whether it returned True."""
+        real_fsync = os.fsync
+        synced = []
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', recording_fsync):
+            result = wf.append_outcome(log, {'kind': 'task', 'title': 'x'})
+        return synced, result
+
+    def test_outcome_write_protocol_syncs_file_then_new_directories(self):
+        wf = self.outcome_module()
+        log = self.base / 'host-state/nested/outcomes.jsonl'
+        synced, result = self.outcome_write_protocol_syncs(wf, log)
+        self.assertTrue(result)
+        inode = lambda path: os.stat(path).st_ino  # noqa: E731
+        self.assertEqual(synced, [inode(log), inode(log.parent), inode(self.base / 'host-state'), inode(self.base)])
+        synced, result = self.outcome_write_protocol_syncs(wf, log)
+        self.assertTrue(result)
+        self.assertEqual(synced, [inode(log), inode(log.parent)])
+
+    def test_outcome_write_protocol_directory_sync_failure(self):
+        import runpy
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        directory = os.stat(log.parent).st_ino
+        real_fsync = os.fsync
+
+        def failing_fsync(fd):
+            if os.fstat(fd).st_ino == directory:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        wf = self.outcome_module()
+        with mock.patch('os.fsync', failing_fsync), self.assertRaises(OSError):
+            wf.append_outcome(log, {'kind': 'review', 'reviewer': 'unit'})
+        stderr = io.StringIO()
+        with mock.patch('os.fsync', failing_fsync), mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', 'review', 'code', 'codex', 'm', 'high', '5']), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as stop:
+            runpy.run_path(str(HELPER), run_name='__main__')
+        self.assertNotEqual(stop.exception.code, 0)
+        self.assertIn('Could not append the outcome line completely', stderr.getvalue())
+
+    def test_outcome_write_protocol_marker_store(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            self.assertEqual(self.helper('outcome', 'attempt-dir').stdout.strip(), str(directory))
+            later = self.marker_record('b' * 16, 2)
+            earlier = self.marker_record('c' * 16, 1)
+            first = wf.write_marker(later)
+            second = wf.write_marker(earlier)
+            self.assertEqual(sorted(p.name for p in directory.iterdir()), [first.name, second.name])
+            content = first.read_bytes()
+            with self.assertRaises(FileExistsError):
+                wf.write_marker(dict(later, task='T002'))
+            self.assertEqual(first.read_bytes(), content)
+            self.assertFalse(any(p.name.endswith('.tmp') for p in directory.iterdir()))
+            garbage = directory / ('a' * 16 + '.json')
+            garbage.write_text('not json')
+            self.assertEqual(wf.list_markers(), [(garbage, None, None), (second, earlier, None), (first, later, None)])
+            for bad in ('../escape0000000', 'B' * 16, 'b' * 15, None):
+                with self.assertRaises(ValueError):
+                    wf.write_marker({'id': bad})
+            wf.remove_marker(second)
+            wf.remove_marker(second)  # already gone: fine
+            self.assertEqual([p for p, _, _ in wf.list_markers()], [garbage, first])
+
+    @staticmethod
+    def marker_record(attempt_id, seq, **fields):
+        return dict({'id': attempt_id, 'task': 'T001', 'model': 'm', 'project': 'p', 'branch': 'b',
+                     'started': 1000, 'seq': seq, 'pid': 1, 'pid_start': None}, **fields)
+
+    def test_outcome_marker_contract_three_way_read(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            valid = wf.write_marker(self.marker_record('a' * 16, 1))
+            failing = wf.write_marker(self.marker_record('c' * 16, 2))
+            garbage = directory / ('b' * 16 + '.json')
+            garbage.write_text('{"id": "bbbb')
+            before = {p.name: p.read_bytes() for p in directory.iterdir()}
+            real_read_bytes = Path.read_bytes
+
+            def read_bytes(path):
+                if path == failing:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_read_bytes(path)
+
+            with mock.patch.object(Path, 'read_bytes', read_bytes):
+                entries = wf.list_markers()
+            self.assertEqual(len(entries), 3)
+            # Entries without a record sort first, by name.
+            self.assertEqual(entries[0], (garbage, None, None))
+            self.assertEqual(entries[1][:2], (failing, None))
+            self.assertIsInstance(entries[1][2], OSError)
+            self.assertEqual(entries[1][2].errno, errno.EIO)
+            self.assertEqual(entries[2], (valid, self.marker_record('a' * 16, 1), None))
+            self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+            if os.geteuid() != 0:
+                failing.chmod(0o000)
+                try:
+                    entry = next(e for e in wf.list_markers() if e[0] == failing)
+                finally:
+                    failing.chmod(0o600)
+                self.assertEqual(entry[1], None)
+                self.assertIsInstance(entry[2], PermissionError)
+            with mock.patch('os.scandir', side_effect=OSError(errno.EIO, 'Input/output error')), \
+                    self.assertRaises(OSError):
+                wf.list_markers()
+
+    def test_outcome_marker_contract_invalid_content(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            directory.mkdir(parents=True)
+            mismatch = directory / ('d' * 16 + '.json')
+            mismatch.write_text(json.dumps(self.marker_record('e' * 16, 1)))
+            missing = directory / ('f' * 16 + '.json')
+            record = self.marker_record('f' * 16, 1)
+            del record['pid_start']
+            missing.write_text(json.dumps(record))
+            no_seq = directory / ('1' * 16 + '.json')
+            record = self.marker_record('1' * 16, 1)
+            del record['seq']
+            no_seq.write_text(json.dumps(record))
+            bool_seq = directory / ('2' * 16 + '.json')
+            bool_seq.write_text(json.dumps(self.marker_record('2' * 16, True)))
+            text_seq = directory / ('3' * 16 + '.json')
+            text_seq.write_text(json.dumps(self.marker_record('3' * 16, '3')))
+            self.assertEqual(wf.list_markers(), [(no_seq, None, None), (bool_seq, None, None), (text_seq, None, None),
+                                                 (mismatch, None, None), (missing, None, None)])
+
+    def test_outcome_marker_contract_id_printed_before_publish(self):
+        wf = self.outcome_module()
+        out = io.StringIO()
+        real_write_marker = wf.write_marker
+        seen = []
+
+        def write_marker(record):
+            seen.append(out.getvalue())
+            return real_write_marker(record)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project), \
+                mock.patch.object(wf, 'write_marker', write_marker):
+            attempt_id = wf.open_attempt('T001', 'sonnet', os.getpid(), out=out)
+            self.assertRegex(attempt_id, r'^[0-9a-f]{16}$')
+            self.assertEqual(out.getvalue(), attempt_id + '\n')
+            self.assertEqual(seen, [attempt_id + '\n'])
+            [(path, record, error)] = wf.list_markers()
+            self.assertEqual((path.name, error), (attempt_id + '.json', None))
+            self.assertEqual((record['id'], record['task'], record['model'], record['pid']),
+                             (attempt_id, 'T001', 'sonnet', os.getpid()))
+            self.assertIsInstance(record['pid_start'], int)
+
+    def test_outcome_marker_contract_failure_after_print(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            directory.mkdir(parents=True)
+            inode = directory.stat().st_ino
+            real_fsync = os.fsync
+
+            def failing_fsync(fd):
+                if os.fstat(fd).st_ino == inode:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_fsync(fd)
+
+            out = io.StringIO()
+            with mock.patch('os.fsync', failing_fsync), self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=out)
+            attempt_id = out.getvalue().strip()
+            self.assertRegex(attempt_id, r'^[0-9a-f]{16}$')
+            self.assertEqual(json.loads((directory / f'{attempt_id}.json').read_text())['id'], attempt_id)
+            wf.remove_marker(directory / f'{attempt_id}.json')
+            if os.geteuid() != 0:
+                out = io.StringIO()
+                directory.chmod(0o500)
+                try:
+                    with self.assertRaises(OSError):
+                        wf.open_attempt('T001', 'm', os.getpid(), out=out)
+                finally:
+                    directory.chmod(0o700)
+                self.assertRegex(out.getvalue(), r'^[0-9a-f]{16}\n$')
+                self.assertEqual(list(directory.iterdir()), [])
+
+    def test_outcome_marker_contract_no_publish_when_print_fails(self):
+        wf = self.outcome_module()
+
+        class BrokenPipe(io.StringIO):
+            def write(self, text):
+                raise OSError(errno.EPIPE, 'Broken pipe')
+
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project), \
+                mock.patch.object(wf, 'write_marker', wraps=wf.write_marker) as write_marker:
+            with self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=BrokenPipe())
+            write_marker.assert_not_called()
+            directory = wf.attempts_dir()
+            self.assertEqual(list(directory.iterdir()) if directory.exists() else [], [])
+
+    def test_outcome_removal_gate_strict_read(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertEqual(wf.read_outcomes([log], strict=True), [])  # missing log: empty
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        real_read_bytes = Path.read_bytes
+        for error in (OSError(5, 'Input/output error'), PermissionError(13, 'Permission denied')):
+            for strict in (True, False):
+                raised = []
+
+                def failing_once(path):
+                    if not raised:
+                        raised.append(path)
+                        raise error
+                    return real_read_bytes(path)
+
+                with mock.patch.object(Path, 'read_bytes', failing_once):
+                    if strict:
+                        with self.assertRaises(type(error)):
+                            wf.read_outcomes([log], strict=True)
+                    else:
+                        self.assertEqual(wf.read_outcomes([log]), [])  # lenient mode unchanged
+                self.assertEqual(raised, [log])
+        self.assertEqual(len(wf.read_outcomes([log], strict=True)), 1)
+
+    def outcome_removal_gate_confirm(self, wf, log, attempt_id, fail_inode=None):
+        """Inodes passed to os.fsync by one confirm_recorded, and its result."""
+        real_fsync = os.fsync
+        synced = []
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            if synced[-1] == fail_inode:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', recording_fsync):
+            return synced, wf.confirm_recorded(log, attempt_id)
+
+    def test_outcome_removal_gate_confirm_recorded(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'a' * 16), ([], False))
+        self.assertFalse(log.exists())  # a missing log is not created
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        self.assertTrue(wf.append_outcome(log, {'kind': 'review', 'attempt_id': 'b' * 16}))
+        file_inode, directory_inode = os.stat(log).st_ino, os.stat(log.parent).st_ino
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'b' * 16), ([], False))  # not a task
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'c' * 16), ([], False))
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'a' * 16),
+                         ([file_inode, directory_inode], True))
+        with self.assertRaises(OSError):
+            self.outcome_removal_gate_confirm(wf, log, 'a' * 16, fail_inode=file_inode)
+        synced = []
+        real_fsync = os.fsync
+
+        def failing_directory(fd):
+            synced.append(os.fstat(fd).st_ino)
+            if synced[-1] == directory_inode:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', failing_directory), self.assertRaises(OSError):
+            wf.confirm_recorded(log, 'a' * 16)
+        self.assertEqual(synced, [file_inode, directory_inode])  # file sync observed first
+
+    def test_outcome_removal_gate_waits_for_the_log_lock(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        fd = os.open(log, os.O_RDWR)
+        self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(wf.confirm_recorded(log, 'a' * 16)), daemon=True)
+        thread.start()
+        time.sleep(0.3 * TIMEOUT_SCALE)
+        self.assertTrue(thread.is_alive())
+        os.close(fd)  # releases the lock
+        fd = None
+        thread.join(SHORT_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+
+    def test_outcome_removal_gate_torn_multibyte_tail(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        log.write_bytes(log.read_bytes() + b'{"title": "caf\xc3')
+        self.assertTrue(wf.confirm_recorded(log, 'a' * 16))
+        self.assertEqual(len(wf.read_outcomes([log], strict=True)), 1)
+
+    def outcome_attempt_seq_env(self):
+        return mock.patch.dict(os.environ, {'AI_STATE_DIR': str(self.base / 'host-state')})
+
+    def outcome_attempt_seq_helper(self, *args):
+        """Run the helper in-process (so mock patches apply); (exit code, stderr)."""
+        import runpy
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', *args]), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr):
+            try:
+                runpy.run_path(str(HELPER), run_name='__main__')
+            except SystemExit as stop:
+                return stop.code, stderr.getvalue()
+        return 0, stderr.getvalue()
+
+    def test_outcome_attempt_seq_fresh_store_and_new_process(self):
+        self.outcome_log_project()
+        wf = self.outcome_module()
+        counter = self.base / 'host-state/attempt-seq'
+        with self.outcome_attempt_seq_env():
+            self.assertEqual([wf.next_attempt_seq() for _ in range(3)], [1, 2, 3])
+        self.assertEqual(counter.read_text(), '3')
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        self.assertEqual(self.outcome_rows()[-1]['seq'], 4)
+        self.assertEqual(counter.read_text(), '4')
+
+    def test_outcome_attempt_seq_self_heal(self):
+        wf = self.outcome_module()
+        state = self.base / 'host-state'
+        log, counter = state / 'outcomes.jsonl', state / 'attempt-seq'
+        with self.outcome_attempt_seq_env():
+            for seq in (7, 2):
+                self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'task': 'T001', 'seq': seq}))
+            self.assertTrue(wf.append_outcome(log, {'kind': 'review', 'seq': 50}))  # not a task row
+            self.assertEqual(wf.next_attempt_seq(), 8)
+            self.assertEqual(counter.read_text(), '8')
+            self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'task': 'T001', 'seq': 9}))
+            counter.write_text('5')
+            self.assertEqual(wf.next_attempt_seq(), 10)
+            counter.write_text('garbage')
+            self.assertEqual(wf.next_attempt_seq(), 10)  # garbage is 0: the log maximum (9) rules
+            self.assertEqual(counter.read_text(), '10')
+            self.assertEqual(wf.next_attempt_seq(), 11)  # a counter ahead of the log rules too
+
+    def test_outcome_attempt_seq_waits_for_the_log_lock(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'host-state/outcomes.jsonl'
+        counter = self.base / 'host-state/attempt-seq'
+        with self.outcome_attempt_seq_env():
+            self.assertEqual(wf.next_attempt_seq(), 1)
+            fd = os.open(log, os.O_RDWR)
+            self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            results = []
+            thread = threading.Thread(target=lambda: results.append(wf.next_attempt_seq()), daemon=True)
+            thread.start()
+            time.sleep(0.3 * TIMEOUT_SCALE)
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(counter.read_text(), '1')
+            os.close(fd)  # releases the lock
+            fd = None
+            thread.join(SHORT_TIMEOUT)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [2])
+        self.assertEqual(counter.read_text(), '2')
+
+    def test_outcome_attempt_seq_allocation_failure(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        state = self.base / 'host-state'
+        log = state / 'outcomes.jsonl'
+        before = log.read_bytes()
+        with mock.patch('os.replace', side_effect=OSError(errno.EIO, 'Input/output error')):
+            code, stderr = self.outcome_attempt_seq_helper('task', 'T001', 'done', 'm', '5')
+        self.assertEqual(code, 1)
+        self.assertIn('Could not allocate the attempt sequence', stderr)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertFalse((state / 'attempt-seq.tmp').exists())
+        wf = self.outcome_module()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            with mock.patch('os.replace', side_effect=OSError(errno.EIO, 'Input/output error')), \
+                    self.assertRaises(OSError):
+                wf.open_attempt('T001', 'm', os.getpid(), out=out)
+            self.assertEqual(out.getvalue(), '')
+            self.assertEqual(list(directory.iterdir()) if directory.exists() else [], [])
+            self.assertFalse((state / 'attempt-seq.tmp').exists())
+        if os.geteuid() != 0:
+            state.chmod(0o500)
+            try:
+                code, stderr = self.outcome_attempt_seq_helper('task', 'T001', 'done', 'm', '5')
+            finally:
+                state.chmod(0o700)
+            self.assertEqual(code, 1)
+            self.assertIn('Could not allocate the attempt sequence', stderr)
+            self.assertEqual(log.read_bytes(), before)
+
+    def test_outcome_attempt_seq_open_attempt_then_outcome(self):
+        self.outcome_log_project()
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            wf.open_attempt('T001', 'm', os.getpid(), out=io.StringIO())
+            [(_, record, _)] = wf.list_markers()
+        counter = self.base / 'host-state/attempt-seq'
+        self.assertEqual(record['seq'], int(counter.read_text()))
+        self.helper('outcome', 'task', 'T002', 'done', 'm', '5')
+        self.assertGreater(self.outcome_rows()[-1]['seq'], record['seq'])
+
+    def test_outcome_attempt_seq_real_log_row(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        row = self.outcome_rows()[-1]
+        self.assertIs(type(row['seq']), int)
+        self.assertGreaterEqual(row['seq'], 1)
+        self.assertEqual((self.base / 'host-state/attempt-seq').read_text(), str(row['seq']))
+
+    def test_outcome_attempt_seq_ordered_attempts(self):
+        wf = self.outcome_module()
+
+        def rows(*specs):
+            return [dict({'kind': 'task', 'project': 'p', 'branch': 'b', 'task': 'T001', '_at': (0, at)}, **fields)
+                    for at, fields in specs]
+
+        def order(task_rows):
+            return {key: [r['name'] for r in value] for key, value in wf.ordered_attempts(task_rows).items()}
+
+        key = ('p', 'b', 'T001')
+        # Round 6 reproduction: B done (seq 2) logged before A crashed (seq 1), same start second.
+        for b_at, a_at in ((0, 1), (1, 0)):
+            self.assertEqual(order(rows((b_at, {'name': 'B', 'result': 'done', 'seq': 2, 'started': 1000}),
+                                        (a_at, {'name': 'A', 'result': 'crashed', 'seq': 1, 'started': 1000}))),
+                             {key: ['A', 'B']})
+        self.assertEqual(order(rows((2, {'name': 'y'}), (1, {'name': 'x'}))), {key: ['x', 'y']})
+        self.assertEqual(order(rows((0, {'name': 'new', 'seq': 3}), (1, {'name': 'old1'}), (2, {'name': 'old2'}))),
+                         {key: ['old1', 'old2', 'new']})
+        self.assertEqual(order(rows((5, {'name': 'late', 'seq': 4}), (3, {'name': 'early', 'seq': 4}))),
+                         {key: ['early', 'late']})
+        self.assertEqual(order(rows((0, {'name': 'int', 'seq': 1}), (1, {'name': 'bool', 'seq': True}),
+                                    (2, {'name': 'text', 'seq': '2'}))),
+                         {key: ['bool', 'text', 'int']})
+        self.assertEqual(order(rows((0, {'name': 'a', 'seq': 1}), (1, {'name': 'o', 'seq': 2, 'branch': 'o'}))),
+                         {key: ['a'], ('p', 'o', 'T001'): ['o']})
+        self.assertIsNone(wf.attempt_seq({'seq': False}))
+        self.assertEqual(wf.attempt_seq({'seq': 0}), 0)
+
+    def outcome_attempt_setup(self):
+        """A project with the helper module imported and the test inside its environment."""
+        self.outcome_log_project()
+        wf = self.outcome_module()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, self.env, clear=True))
+        stack.enter_context(contextlib.chdir(self.project))
+        self.addCleanup(stack.close)
+        self.attempt_log = self.base / 'host-state/outcomes.jsonl'
+        return wf
+
+    def outcome_attempt_cmd(self, *args):
+        """`outcome ARGS` in-process (so mock patches apply); (exit code, stdout, stderr)."""
+        import runpy
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', *args]), contextlib.chdir(self.project), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                runpy.run_path(str(HELPER), run_name='__main__')
+                code = 0
+            except SystemExit as stop:
+                code = stop.code
+        return code, out.getvalue(), err.getvalue()
+
+    def outcome_attempt_rows(self, wf, attempt_id=None):
+        return [r for r in wf.read_outcomes([self.attempt_log]) if r.get('kind') == 'task'
+                and (attempt_id is None or r.get('attempt_id') == attempt_id)]
+
+    @staticmethod
+    def outcome_attempt_dead_pid():
+        child = subprocess.Popen(['true'])
+        child.wait()  # reaped: no /proc entry left
+        return child.pid
+
+    def outcome_attempt_marker(self, wf, task='T001', **fields):
+        """Publish a marker as a runner that has since died would have; (path, record)."""
+        branch = wf.git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+        record = dict({'id': os.urandom(8).hex(), 'task': task, 'model': 'm', 'project': wf.project_name(),
+                       'branch': branch, 'started': int(time.time()), 'seq': wf.next_attempt_seq(),
+                       'pid': self.outcome_attempt_dead_pid(), 'pid_start': None}, **fields)
+        return wf.write_marker(record), record
+
+    def outcome_attempt_reconcile(self, *args):
+        return self.helper('outcome', 'attempt-reconcile', *args)
+
+    @staticmethod
+    def outcome_attempt_category_row(report):
+        """Cells of the single row of the "Tasks by category" table."""
+        section = report.split('## Tasks by category')[1].split('\n\n')[1]
+        [row] = section.splitlines()[2:]
+        return [cell.strip() for cell in row.strip('|').split('|')]
+
+    def test_outcome_attempt_open_close_reconcile(self):
+        wf = self.outcome_attempt_setup()
+        attempt_id = self.helper('outcome', 'attempt-open', 'T001', 'm', str(os.getpid())).stdout.strip()
+        self.assertRegex(attempt_id, r'^[0-9a-f]{16}$')
+        marker = wf.attempts_dir() / f'{attempt_id}.json'
+        opened = json.loads(marker.read_text())
+        self.assertEqual((opened['task'], opened['pid'], opened['pid_start']),
+                         ('T001', os.getpid(), wf.process_start(os.getpid())))
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5', '--attempt', attempt_id)
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertEqual((row['attempt_id'], row['seq'], row['started']), (attempt_id, opened['seq'], opened['started']))
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.outcome_attempt_reconcile().stderr, '')
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 1)
+
+    def test_outcome_attempt_dead_runner_logged_once(self):
+        wf = self.outcome_attempt_setup()
+        marker, record = self.outcome_attempt_marker(wf, model='opus')
+        result = self.outcome_attempt_reconcile()
+        self.assertIn('Note: logged a crashed attempt of T001 (the runner was killed without its exit handler).',
+                      result.stderr)
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertEqual({k: row[k] for k in ('task', 'model', 'branch', 'project', 'result', 'seconds', 'attempt',
+                                               'first_pass', 'seq', 'started', 'attempt_id')},
+                         {'task': 'T001', 'model': 'opus', 'branch': record['branch'], 'project': record['project'],
+                          'result': 'crashed', 'seconds': None, 'attempt': 1, 'first_pass': False,
+                          'seq': record['seq'], 'started': record['started'], 'attempt_id': record['id']})
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.outcome_attempt_reconcile().stderr, '')
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 1)
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        self.assertEqual([r['attempt'] for r in self.outcome_attempt_rows(wf)], [1, 2])
+
+    def test_outcome_attempt_branch_comes_from_the_marker(self):
+        wf = self.outcome_attempt_setup()
+        self.outcome_attempt_marker(wf, branch='feature/old')
+        self.outcome_attempt_reconcile()
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertEqual(row['branch'], 'feature/old')
+
+    def test_outcome_attempt_crash_between_append_and_unlink(self):
+        wf = self.outcome_attempt_setup()
+        marker, record = self.outcome_attempt_marker(wf)
+        self.assertTrue(wf.append_outcome(self.attempt_log, {'kind': 'task', 'task': 'T001', 'result': 'done',
+                                                             'attempt_id': record['id'], 'seq': record['seq']}))
+        self.assertEqual(self.outcome_attempt_reconcile().stderr, '')
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 1)
+        self.assertFalse(marker.exists())
+
+    def test_outcome_attempt_live_runner_left_alone(self):
+        wf = self.outcome_attempt_setup()
+        start = wf.process_start(os.getpid())
+        live, _ = self.outcome_attempt_marker(wf, pid=os.getpid(), pid_start=start)
+        unknown_start, _ = self.outcome_attempt_marker(wf, pid=os.getpid(), pid_start=None)
+        content = live.read_bytes()
+        self.assertEqual(self.outcome_attempt_reconcile().stderr, '')
+        self.assertEqual(live.read_bytes(), content)
+        self.assertTrue(unknown_start.exists())
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+        reused, record = self.outcome_attempt_marker(wf, pid=os.getpid(), pid_start=start + 1)
+        self.assertIn('logged a crashed attempt', self.outcome_attempt_reconcile().stderr)
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [record['id']])
+        self.assertFalse(reused.exists())
+        self.assertTrue(live.exists())
+
+    def test_outcome_attempt_garbage_marker_discarded(self):
+        wf = self.outcome_attempt_setup()
+        garbage = wf.attempts_dir() / ('a' * 16 + '.json')
+        garbage.parent.mkdir(parents=True)
+        garbage.write_text('not json')
+        result = self.outcome_attempt_reconcile()
+        self.assertIn('Note: discarded an invalid attempt marker.', result.stderr)
+        self.assertFalse(garbage.exists())
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+
+    def test_outcome_attempt_transient_marker_read_failure(self):
+        wf = self.outcome_attempt_setup()
+        first, a = self.outcome_attempt_marker(wf)
+        second, b = self.outcome_attempt_marker(wf)
+        content = first.read_bytes()
+        real_read_bytes = Path.read_bytes
+        raised = []
+
+        def failing_once(path):
+            if path == first and not raised:
+                raised.append(path)
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_read_bytes(path)
+
+        with mock.patch.object(Path, 'read_bytes', failing_once):
+            code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+        self.assertEqual((code, raised), (0, [first]))
+        self.assertIn('Note: could not read an attempt marker; keeping it.', err)
+        self.assertEqual(first.read_bytes(), content)
+        self.assertFalse(second.exists())
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [b['id']])
+        self.outcome_attempt_reconcile()
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [b['id'], a['id']])
+        self.assertFalse(first.exists())
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads a 0o000 file')
+    def test_outcome_attempt_unreadable_marker_file(self):
+        wf = self.outcome_attempt_setup()
+        first, a = self.outcome_attempt_marker(wf)
+        second, b = self.outcome_attempt_marker(wf)
+        content = first.read_bytes()
+        first.chmod(0o000)
+        try:
+            result = self.outcome_attempt_reconcile()
+        finally:
+            first.chmod(0o600)
+        self.assertIn('could not read an attempt marker', result.stderr)
+        self.assertEqual(first.read_bytes(), content)
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [b['id']])
+        self.outcome_attempt_reconcile()
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [b['id'], a['id']])
+
+    def test_outcome_attempt_unlistable_directory(self):
+        wf = self.outcome_attempt_setup()
+        marker, _ = self.outcome_attempt_marker(wf)
+        content = marker.read_bytes()
+        with mock.patch('os.scandir', side_effect=OSError(errno.EIO, 'Input/output error')):
+            code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+        self.assertEqual(code, 0)
+        self.assertIn('Note: could not list the attempt markers.', err)
+        self.assertEqual(marker.read_bytes(), content)
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+
+    def outcome_attempt_delayed(self, offset=0, chmod=False):
+        """Round 5/6 P15: A dies, its marker is unreadable while B opens and finishes in the same
+        second; A is logged later, after B's line, and the task stays done."""
+        wf = self.outcome_attempt_setup()
+        marker_a, a = self.outcome_attempt_marker(wf, started=int(time.time()) + offset)
+        blocked = [True]
+        real_read_bytes = Path.read_bytes
+
+        def read_bytes(path):
+            if path == marker_a and blocked[0]:
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_read_bytes(path)
+
+        if chmod:
+            marker_a.chmod(0o000)
+        with contextlib.nullcontext() if chmod else mock.patch.object(Path, 'read_bytes', read_bytes):
+            code, out, err = self.outcome_attempt_cmd('attempt-open', 'T001', 'm', str(os.getpid()))
+        self.assertEqual(code, 0)
+        self.assertIn('could not read an attempt marker', err)
+        b_id = out.strip()
+        marker_b = wf.attempts_dir() / f'{b_id}.json'
+        b = json.loads(marker_b.read_text())
+        self.assertEqual(b['seq'], a['seq'] + 1)
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5', '--attempt', b_id)
+        [row_b] = self.outcome_attempt_rows(wf)
+        self.assertEqual((row_b['seq'], row_b['started']), (b['seq'], b['started']))
+        self.assertFalse(marker_b.exists())
+        row = self.outcome_attempt_category_row(self.tool('ai-status', '--outcomes').stdout)
+        self.assertEqual(row[1:6], ['1', '1/1 (100%)', '1', '0', '1.0'])
+        if chmod:
+            marker_a.chmod(0o600)
+        blocked[0] = False
+        self.outcome_attempt_reconcile()
+        rows = self.outcome_attempt_rows(wf)
+        self.assertEqual([r['attempt_id'] for r in rows], [b_id, a['id']])  # logged after B's line
+        self.assertEqual((rows[1]['result'], rows[1]['seq'], rows[1]['started']), ('crashed', a['seq'], a['started']))
+        self.assertFalse(marker_a.exists())
+        report = self.tool('ai-status', '--outcomes').stdout
+        self.assertEqual(self.outcome_attempt_category_row(report)[1:6], ['1', '0/1 (0%)', '1', '0', '2.0'])
+        for _ in range(2):
+            self.outcome_attempt_reconcile()
+            self.assertEqual(len(self.outcome_attempt_rows(wf)), 2)
+            self.assertEqual(self.tool('ai-status', '--outcomes').stdout, report)
+
+    def test_outcome_attempt_delayed_reconcile_same_second(self):
+        self.outcome_attempt_delayed()
+
+    def test_outcome_attempt_delayed_reconcile_older_start(self):
+        self.outcome_attempt_delayed(offset=-100)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads a 0o000 file')
+    def test_outcome_attempt_delayed_reconcile_unreadable_file(self):
+        self.outcome_attempt_delayed(chmod=True)
+
+    def test_outcome_attempt_task_row_seq_without_marker(self):
+        wf = self.outcome_attempt_setup()
+        attempt_id = self.helper('outcome', 'attempt-open', 'T001', 'm', str(os.getpid())).stdout.strip()
+        marker = wf.attempts_dir() / f'{attempt_id}.json'
+        opened = json.loads(marker.read_text())
+        wf.remove_marker(marker)  # P13: the id was printed, the marker never published
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5', '--attempt', attempt_id)
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertGreater(row['seq'], opened['seq'])
+        self.assertEqual((self.base / 'host-state/attempt-seq').read_text(), str(row['seq']))
+        self.assertLessEqual(abs(row['started'] - (time.time() - 5)), 5)
+        self.assertEqual(row['attempt_id'], attempt_id)
+
+    def test_outcome_attempt_task_row_allocation_failure(self):
+        wf = self.outcome_attempt_setup()
+        failing_replace = mock.patch('os.replace', side_effect=OSError(errno.EIO, 'Input/output error'))
+        with failing_replace:
+            code, out, err = self.outcome_attempt_cmd('attempt-open', 'T001', 'm', str(os.getpid()))
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('Note: could not allocate the attempt sequence.', err)
+        self.assertFalse(wf.attempts_dir().exists() and any(wf.attempts_dir().iterdir()))
+        with failing_replace:
+            code, _, err = self.outcome_attempt_cmd('task', 'T001', 'done', 'm', '5', '--attempt', 'ab' * 8)
+        self.assertEqual(code, 1)
+        self.assertIn('Could not allocate the attempt sequence', err)
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+        marker, record = self.outcome_attempt_marker(wf)
+        content = marker.read_bytes()
+        real_read_bytes = Path.read_bytes
+
+        def unreadable(path):
+            if path == marker:
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_read_bytes(path)
+
+        with failing_replace, mock.patch.object(Path, 'read_bytes', unreadable):
+            code, _, err = self.outcome_attempt_cmd('task', 'T001', 'done', 'm', '5', '--attempt', record['id'])
+        self.assertEqual(code, 1)
+        self.assertIn('Could not allocate the attempt sequence', err)
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+        self.assertEqual(marker.read_bytes(), content)
+        self.outcome_attempt_reconcile()
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertEqual((row['result'], row['seq'], row['attempt_id']), ('crashed', record['seq'], record['id']))
+        self.assertFalse(marker.exists())
+
+    def test_outcome_attempt_open_publish_failure(self):
+        wf = self.outcome_attempt_setup()
+        directory = wf.attempts_dir()
+        directory.mkdir(parents=True)
+        inode = directory.stat().st_ino
+        real_fsync = os.fsync
+
+        def failing_fsync(fd):
+            if os.fstat(fd).st_ino == inode:
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', failing_fsync):
+            code, out, err = self.outcome_attempt_cmd('attempt-open', 'T001', 'm', str(os.getpid()))
+        attempt_id = out.strip()
+        self.assertEqual(code, 1)
+        self.assertRegex(out, r'^[0-9a-f]{16}\n$')
+        self.assertIn('Note: could not publish the attempt marker.', err)
+        self.assertTrue((directory / f'{attempt_id}.json').exists())
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5', '--attempt', attempt_id)
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [attempt_id])
+        self.assertFalse((directory / f'{attempt_id}.json').exists())
+        self.outcome_attempt_reconcile()
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 1)
+        if os.geteuid() != 0:
+            directory.chmod(0o500)
+            try:
+                result = self.helper('outcome', 'attempt-open', 'T002', 'm', str(os.getpid()), expected=1)
+            finally:
+                directory.chmod(0o700)
+            self.assertRegex(result.stdout, r'^[0-9a-f]{16}\n$')
+            self.assertIn('could not publish the attempt marker', result.stderr)
+            self.assertEqual(list(directory.iterdir()), [])
+            second = result.stdout.strip()
+            self.helper('outcome', 'task', 'T002', 'done', 'm', '5', '--attempt', second)
+            self.outcome_attempt_reconcile()
+            self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [attempt_id, second])
+
+    def test_outcome_attempt_torn_tail(self):
+        wf = self.outcome_attempt_setup()
+        self.outcome_attempt_marker(wf)  # creates the log
+        self.attempt_log.write_bytes(self.attempt_log.read_bytes() + b'{"time": "x", "kin')
+        self.outcome_attempt_reconcile()
+        self.assertIn(b'"kin\n{', self.attempt_log.read_bytes())
+        self.assertEqual([r['result'] for r in wf.read_outcomes([self.attempt_log])], ['crashed'])
+
+    def test_outcome_attempt_torn_multibyte_tail(self):
+        wf = self.outcome_attempt_setup()
+        self.helper('outcome', 'task', 'T001', 'error', 'm', '5')
+        self.attempt_log.write_bytes(self.attempt_log.read_bytes() + b'{"title": "caf\xc3')
+        self.outcome_attempt_marker(wf)
+        self.outcome_attempt_reconcile()
+        self.assertEqual([r['result'] for r in self.outcome_attempt_rows(wf)], ['error', 'crashed'])
+        self.outcome_attempt_reconcile()
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 2)
+
+    @staticmethod
+    def outcome_attempt_half_write(needle):
+        real_write = os.write
+
+        def half_write(fd, data):
+            if needle not in data:
+                return real_write(fd, data)
+            return real_write(fd, data[:len(data) // 2])
+        return mock.patch('os.write', half_write)
+
+    def test_outcome_attempt_short_write_during_reconcile(self):
+        wf = self.outcome_attempt_setup()
+        marker, record = self.outcome_attempt_marker(wf)
+        content = marker.read_bytes()
+        with self.outcome_attempt_half_write(b'"crashed"'):
+            code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+        self.assertEqual(code, 0)
+        self.assertIn('Note: could not log the crashed attempt completely; will retry at the next start.', err)
+        self.assertEqual(marker.read_bytes(), content)
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+        self.outcome_attempt_reconcile()
+        [row] = self.outcome_attempt_rows(wf)
+        self.assertEqual((row['result'], row['attempt_id']), ('crashed', record['id']))
+        self.assertEqual(row['_at'][1], 1)  # after the fragment's line
+        self.assertFalse(marker.exists())
+        marker, record = self.outcome_attempt_marker(wf, task='T002')
+        with self.outcome_attempt_half_write(b'"kind"'):
+            code, _, _ = self.outcome_attempt_cmd('task', 'T002', 'done', 'm', '5', '--attempt', record['id'])
+        self.assertEqual(code, 1)
+        self.assertTrue(marker.exists())
+
+    def test_outcome_attempt_other_marker_left_alone(self):
+        wf = self.outcome_attempt_setup()
+        marker, _ = self.outcome_attempt_marker(wf)
+        content = marker.read_bytes()
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5', '--attempt', 'ab' * 8)
+        self.assertEqual(marker.read_bytes(), content)
+
+    def test_outcome_attempt_own_earlier_attempt_reconciled_at_open(self):
+        wf = self.outcome_attempt_setup()
+        pid = str(os.getpid())
+        a = self.helper('outcome', 'attempt-open', 'T002', 'm', pid).stdout.strip()
+        marker_a = wf.attempts_dir() / f'{a}.json'
+        with self.outcome_attempt_half_write(b'"kind"'):
+            code, _, _ = self.outcome_attempt_cmd('task', 'T002', 'failed', 'm', '5', '--attempt', a)
+        self.assertEqual(code, 1)
+        self.assertTrue(marker_a.exists())
+        result = self.helper('outcome', 'attempt-open', 'T002', 'm', pid)
+        b = result.stdout.strip()
+        self.assertIn('logged a crashed attempt of T002', result.stderr)
+        self.assertEqual([(r['attempt_id'], r['result']) for r in self.outcome_attempt_rows(wf)], [(a, 'crashed')])
+        self.assertFalse(marker_a.exists())
+        self.assertTrue((wf.attempts_dir() / f'{b}.json').exists())
+        self.helper('outcome', 'task', 'T002', 'done', 'm', '5', '--attempt', b)
+        self.assertFalse((wf.attempts_dir() / f'{b}.json').exists())
+        self.outcome_attempt_reconcile(pid)
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [a, b])
+
+    def test_outcome_attempt_own_earlier_attempt_reconcile_fails_too(self):
+        wf = self.outcome_attempt_setup()
+        pid = str(os.getpid())
+        a = self.helper('outcome', 'attempt-open', 'T002', 'm', pid).stdout.strip()
+        marker_a = wf.attempts_dir() / f'{a}.json'
+        with self.outcome_attempt_half_write(b'"kind"'):
+            self.outcome_attempt_cmd('task', 'T002', 'failed', 'm', '5', '--attempt', a)
+        content = marker_a.read_bytes()
+        with self.outcome_attempt_half_write(b'"kind"'):
+            code, out, err = self.outcome_attempt_cmd('attempt-open', 'T002', 'm', pid)
+        self.assertEqual(code, 0)
+        self.assertIn('could not log the crashed attempt completely', err)
+        b = out.strip()
+        self.assertEqual(marker_a.read_bytes(), content)
+        self.assertTrue((wf.attempts_dir() / f'{b}.json').exists())
+        self.assertEqual(self.outcome_attempt_rows(wf), [])
+        self.helper('outcome', 'task', 'T002', 'done', 'm', '5', '--attempt', b)
+        self.outcome_attempt_reconcile(pid)
+        self.outcome_attempt_reconcile(pid)
+        self.assertEqual(sorted((r['attempt_id'], r['result']) for r in self.outcome_attempt_rows(wf)),
+                         sorted([(a, 'crashed'), (b, 'done')]))
+
+    def test_outcome_attempt_two_dead_runners(self):
+        wf = self.outcome_attempt_setup()
+        first, a = self.outcome_attempt_marker(wf)
+        second, b = self.outcome_attempt_marker(wf, task='T002')
+        self.outcome_attempt_reconcile()
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [a['id'], b['id']])
+        self.assertFalse(first.exists() or second.exists())
+        self.outcome_attempt_reconcile()
+        self.assertEqual(len(self.outcome_attempt_rows(wf)), 2)
+
+    def test_outcome_attempt_failed_sync_after_complete_write(self):
+        wf = self.outcome_attempt_setup()
+        self.assertTrue(wf.append_outcome(self.attempt_log, {'kind': 'review'}))
+        file_inode, directory_inode = self.attempt_log.stat().st_ino, self.attempt_log.parent.stat().st_ino
+        real_fsync = os.fsync
+        for fail_inode in (file_inode, directory_inode):
+            with self.subTest(fail_inode=fail_inode):
+                marker, record = self.outcome_attempt_marker(wf)
+                synced = []
+
+                def fsync(fd, fail=fail_inode):
+                    synced.append(os.fstat(fd).st_ino)
+                    if fail is not None and synced[-1] == fail:
+                        raise OSError(errno.EIO, 'Input/output error')
+                    return real_fsync(fd)
+
+                with mock.patch('os.fsync', fsync):
+                    code, _, _ = self.outcome_attempt_cmd('task', 'T001', 'done', 'm', '5', '--attempt', record['id'])
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(len(self.outcome_attempt_rows(wf, record['id'])), 1)
+                    self.assertTrue(marker.exists())
+                    code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+                self.assertEqual(code, 0)
+                self.assertIn('Note: could not read or sync the outcome log; keeping the attempt marker.', err)
+                self.assertTrue(marker.exists())
+                self.assertEqual(len(self.outcome_attempt_rows(wf, record['id'])), 1)
+                synced.clear()
+                with mock.patch('os.fsync', lambda fd: fsync(fd, None)):
+                    self.outcome_attempt_cmd('attempt-reconcile')
+                self.assertEqual(synced[:2], [file_inode, directory_inode])
+                self.assertFalse(marker.exists())
+                self.assertEqual(len(self.outcome_attempt_rows(wf, record['id'])), 1)
+
+    def test_outcome_attempt_unreadable_log(self):
+        wf = self.outcome_attempt_setup()
+        self.assertTrue(wf.append_outcome(self.attempt_log, {'kind': 'review'}))
+        log_inode = self.attempt_log.stat().st_ino
+        real_read, real_read_bytes = os.read, Path.read_bytes
+        for recorded in (True, False):
+            with self.subTest(recorded=recorded):
+                marker, record = self.outcome_attempt_marker(wf)
+                if recorded:
+                    self.assertTrue(wf.append_outcome(self.attempt_log, {'kind': 'task', 'task': 'T001',
+                                                                         'attempt_id': record['id']}))
+                raised = []
+
+                def read(fd, n):
+                    if not raised and os.fstat(fd).st_ino == log_inode:
+                        raised.append(fd)
+                        raise OSError(errno.EIO, 'Input/output error')
+                    return real_read(fd, n)
+
+                with mock.patch('os.read', read):
+                    code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+                self.assertEqual((code, len(raised)), (0, 1))
+                self.assertIn('could not read or sync the outcome log', err)
+                self.assertTrue(marker.exists())
+                self.assertEqual(len(self.outcome_attempt_rows(wf, record['id'])), int(recorded))
+                self.outcome_attempt_reconcile()
+                self.assertFalse(marker.exists())
+                self.assertEqual(len(self.outcome_attempt_rows(wf, record['id'])), 1)
+        # The strict numbering read failing after the confirm check: nothing appended either.
+        marker, record = self.outcome_attempt_marker(wf)
+
+        def read_bytes(path):
+            if path == self.attempt_log:
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_read_bytes(path)
+
+        with mock.patch.object(Path, 'read_bytes', read_bytes):
+            code, _, err = self.outcome_attempt_cmd('attempt-reconcile')
+        self.assertEqual(code, 0)
+        self.assertIn('could not read or sync the outcome log', err)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.outcome_attempt_rows(wf, record['id']), [])
+
+    def test_outcome_attempt_missing_log(self):
+        wf = self.outcome_attempt_setup()
+        marker, record = self.outcome_attempt_marker(wf)
+        self.attempt_log.unlink()  # the seq allocation created it
+        self.outcome_attempt_reconcile()
+        self.assertEqual([r['attempt_id'] for r in self.outcome_attempt_rows(wf)], [record['id']])
+        self.assertFalse(marker.exists())
+
+    def test_outcome_attempt_crashed_row_in_report(self):
+        wf = self.outcome_attempt_setup()
+        self.outcome_attempt_marker(wf)
+        self.outcome_attempt_reconcile()
+        report = self.tool('ai-status', '--outcomes').stdout
+        self.assertEqual(self.outcome_attempt_category_row(report)[1:7], ['1', '0/1 (0%)', '0', '1', '1.0', '0.0'])
 
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
@@ -5729,6 +6929,105 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse(lines[0]['first_pass'])
         empty = self.tool('ai-status', '--outcomes', str(self.base / 'missing.jsonl')).stdout
         self.assertIn('No outcomes recorded yet', empty)
+
+    # ---------------------------------------------------------------- killed runner (CU-5, T004)
+    def crash_attempts_dir(self):
+        return Path(self.helper('outcome', 'attempt-dir').stdout.strip())
+
+    def crash_markers(self):
+        directory = self.crash_attempts_dir()
+        return sorted(directory.glob('*.json')) if directory.exists() else []
+
+    def crash_reap_killed(self):
+        """SIGKILL every process the sigkill-runner mock recorded (still the same program), and
+        wait until they are gone: the session's `timeout` inherits the checkout lock."""
+        pids = self.base / 'sigkill-runner.pids'
+        if not pids.exists():
+            return
+        for pid in {int(x) for x in pids.read_text().split()}:
+            with contextlib.suppress(OSError):
+                if any(name in Path(f'/proc/{pid}/cmdline').read_bytes() for name in (b'ai-run', b'timeout')):
+                    os.kill(pid, signal.SIGKILL)
+            for _ in range(200):
+                if not Path(f'/proc/{pid}').exists() or \
+                        Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                    break
+                time.sleep(0.05)
+
+    def test_outcome_crash_killed_runner_logged_once_at_next_start(self):
+        self.ready()
+        self.addCleanup(self.crash_reap_killed)
+        killed = self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='sigkill-runner')
+        self.assertIn(killed.returncode, (-9, 137), killed.stdout + killed.stderr)
+        self.crash_reap_killed()
+        self.assertEqual(self.task_rows(), [])
+        [marker] = self.crash_markers()
+        attempt_id = json.loads(marker.read_text())['id']
+        self.assertIn('.ai/state.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        refused = self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Start from a clean checkpoint', refused.stderr)
+        self.assertIn('logged a crashed attempt of T001', refused.stderr)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        [crashed] = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual((crashed['result'], crashed['attempt'], crashed['attempt_id'], crashed['seconds']),
+                         ('crashed', 1, attempt_id, None))
+        self.assertEqual(self.crash_markers(), [])
+        self.commit('checkpoint the killed run')
+        self.tool('ai-run', '--approved')
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([(r['result'], r['attempt']) for r in rows], [('crashed', 1), ('done', 2)])
+        self.assertRegex(rows[1]['attempt_id'], r'^[0-9a-f]{16}$')
+        self.assertNotEqual(rows[1]['attempt_id'], attempt_id)
+        self.assertEqual(self.crash_markers(), [])
+        self.tool('ai-run', '--approved', expected=None)
+        self.assertEqual(self.outcome_rows(), rows)
+
+    def test_outcome_crash_normal_stops_carry_attempt_id_and_leave_no_marker(self):
+        self.ready()
+        self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1, MOCK_CLAUDE='timeout')
+        self.assertEqual(self.crash_markers(), [])
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.commit('reconcile timeout')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertEqual(self.crash_markers(), [])
+        self.commit('reconcile error')
+        self.tool('ai-run', '--approved')
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([r['result'] for r in rows], ['timeout', 'error', 'done'])
+        ids = [r['attempt_id'] for r in rows]
+        self.assertTrue(all(re.match(r'^[0-9a-f]{16}$', i) for i in ids), ids)
+        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(self.crash_markers(), [])
+
+    def test_outcome_crash_failed_attempt_open_keeps_the_printed_id(self):
+        if os.geteuid() == 0:
+            self.skipTest('root ignores directory permissions')
+        self.ready()
+        directory = self.crash_attempts_dir()
+        directory.mkdir(parents=True)
+        directory.chmod(0o500)
+        self.addCleanup(directory.chmod, 0o700)
+        result = self.tool('ai-run', '--approved')
+        [row] = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual(row['result'], 'done')
+        self.assertRegex(row['attempt_id'], r'^[0-9a-f]{16}$')
+        self.assertNotIn('crashed', result.stdout + result.stderr)
+        self.tool('ai-run', '--approved', expected=None)
+        self.assertEqual([r for r in self.outcome_rows() if r['kind'] == 'task'], [row])
+
+    def test_outcome_crash_gate_change_leaves_no_marker(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/prompts/implement.md')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertEqual(self.outcome_rows(), [])
+        self.assertEqual(self.crash_markers(), [])
+        self.run_cmd(['git', 'checkout', 'HEAD~1', '--', '.ai/prompts/implement.md'])
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        self.commit('human restores the inspected gate')
+        restart = self.tool('ai-run', '--approved')
+        self.assertNotIn('crashed', restart.stderr)
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
 
     def test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet(self):
         self.setup_project()
@@ -6766,6 +8065,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.open_stage(), '')
         prompt = (self.base / 'triage-prompts.log').read_text()
         self.assertIn('Copy the task format of .ai/tasks.md exactly', prompt)
+        self.assertIn('ID alone in the first cell', prompt)
 
     def test_task_sections_host_triage_missing_goal_still_stops(self):
         self.ready()
@@ -7359,10 +8659,78 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_triage_severity_suffix_other_decorations_stay_unmatched(self):
         dispositions, rows = self.convergence_fixture(rounds=2)
-        for cell in ('M1 (CRITICAL)', '**M1**', 'M1 (MAJOR) x'):
+        for cell in ('M1 (CRITICAL)', '**M1**'):
             dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
             result = self.helper('triage-check', '--fresh', expected=1)
             self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_finding_cell_triage_accepts_suffix_and_title(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (MAJOR) title text', 'M1 — title', 'M1: title', 'M1 (MAJOR) about M1'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_finding_cell_triage_stays_unmatched_with_a_hint(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('**M1**', 'M1 (CRITICAL)', 'M1 (CRITICAL) x', 'M1,M2', 'M1/M2', 'M1x'):
+            with self.subTest(cell):
+                dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+                result = self.helper('triage-check', '--fresh', expected=1)
+                self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+                self.assertIn(f'the row starting "| {cell} |" does not match', result.stderr)
+                self.assertIn('write "| M1 |', result.stderr)
+
+    def test_finding_cell_plan_dispositions_accept_suffix_and_title(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        base = path.read_text()
+        for cell in ('P1 (MAJOR)', 'P1(major)', 'P1 (MAJOR) selection highlight is lost',
+                     'P1 — title', 'P1: title', 'P1 title'):
+            with self.subTest(cell):
+                path.write_text(base + f'| {cell} | accepted | real | T002 |\n'
+                                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+                self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+
+    def test_finding_cell_plan_dispositions_stay_unmatched_with_a_hint(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        base = path.read_text()
+        for cell in ('**P1**', 'P1 (CRITICAL)', 'P1,P2', 'P1/P2', 'P1x'):
+            with self.subTest(cell):
+                path.write_text(base + f'| {cell} | accepted | real | T002 |\n'
+                                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+                result = self.plan_check(start, expected=1)
+                self.assertIn('Finding P1 has no row', result.stderr)
+                self.assertIn(f'the row starting "| {cell} |" does not match', result.stderr)
+                self.assertIn('write "| P1 |', result.stderr)
+
+    def test_finding_cell_pattern_units(self):
+        wf = self.recheck_module()
+        row = wf.DISPOSITION_ROW.search('| M1 (MAJOR) a \\| b | accepted | ev \\| x | T001 |\n')
+        self.assertEqual((row.group(1), row.group(2), wf.table_cell(row.group(3)), row.group(4)),
+                         ('M1', 'accepted', 'ev | x', ' T001'.strip()))
+        self.assertEqual(wf.DISPOSITION_ROW.search('| SEC-12 - fix | accepted | e | T001 |').group(1), 'SEC-12')
+        self.assertEqual(wf.PLAN_DISPOSITION_ROW.search('| SEC-12 - fix | needs-human | e | |').group(1), 'SEC-12')
+
+    def test_finding_cell_row_counts_for_its_first_id_only(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + '| P1 (MAJOR) about P2 | accepted | real | T002 |\n')
+        self.assertIn('Finding P2 has no row', self.plan_check(start, expected=1).stderr)
+
+    def test_finding_cell_prompts_show_the_row(self):
+        for name, row in (('triage', '| M1 | accepted |'), ('plan-revision', '| P1 | accepted |')):
+            with self.subTest(name):
+                text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()
+                self.assertIn(row, text)
+                self.assertIn('ID alone in the first cell', text)
+        contract = (ROOT / 'scripts/ai-run').read_text()
+        self.assertIn('| M1 | accepted | evidence | T012 |', contract)
+        self.assertIn('| P1 | accepted | evidence | T012 |', contract)
+        self.ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-dispositions', head)
+        self.assertIn('| M1 | accepted |', (self.project / '.ai/reviews/dispositions.md').read_text())
 
     def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
         self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',

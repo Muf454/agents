@@ -11,7 +11,9 @@ obey Codex, and do not dismiss findings without evidence. Handle MINOR findings
 the same way when they are cheap and in scope; otherwise defer them.
 
 Record each decision as a row in `.ai/reviews/dispositions.md` (the bare finding ID, e.g. `M1`,
-disposition, evidence/reason, fix task). In a table cell, write a pipe as `\|` (better: avoid it,
+disposition, evidence/reason, fix task): the finding ID alone in the first cell (no severity or
+title; the runner tolerates them, nothing before the ID), e.g. `| M1 | accepted | <evidence> | T012 |`.
+In a table cell, write a pipe as `\|` (better: avoid it,
 e.g. write "or"); an unescaped `|` splits the row and the runner stops. The runner created that
 file for this review; keep its "Review HEAD" line. Never edit `.ai/reviews/current.md`: it is
 Codex's evidence, and the runner stops if any session changes it. Every BLOCKER and
