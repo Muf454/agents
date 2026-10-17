@@ -312,7 +312,7 @@ tests, 413.8 s). docs/workflow.md "Outcome log" updated. Flow unchanged.
 
 
 ## T009 — CU-5 marker-removal gate: strict log read and `confirm_recorded` (CU-5, part 0c, round 3 redesign)
-Status: TODO
+Status: DONE
 Dependencies: T008
 Model: opus
 
@@ -373,6 +373,17 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17 (claude opus): `read_outcomes(paths, strict=False)` (missing file → no records in
+both modes; other `OSError` propagates with `strict=True`) and `confirm_recorded(path,
+attempt_id)` (O_RDWR open without create, `flock(LOCK_EX)`, `os.read` loop to EOF,
+`decode_outcome_lines`, match on `kind == 'task'` and `attempt_id`, then `os.fsync(fd)` and
+`fsync_dir(path.parent)`; removal rule and fsync residual in its docstring) in
+`scripts/lib/workflow.py`. The strict-read test patches `Path.read_bytes` (what the
+implementation uses) to raise `OSError(EIO)` / `PermissionError` once. Tests:
+`test_outcome_removal_gate_strict_read`, `_confirm_recorded`, `_waits_for_the_log_lock`,
+`_torn_multibyte_tail`. Evidence: `-k outcome_removal_gate` Ran 4 tests OK; `-k outcome` Ran 36
+tests OK; `.ai/bin/ai-check` PASS (766 tests, 403.5 s). docs/workflow.md "Outcome log" updated;
+flow unchanged (no caller yet: T003 wires it into reconcile).
 
 
 ## T010 — CU-5 marker failure contract: three-way marker read, id printed before publish (CU-5, part 0d, round 4 redesign)

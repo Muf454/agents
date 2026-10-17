@@ -3022,13 +3022,20 @@ def decode_outcome_lines(data):
     return records
 
 
-def read_outcomes(paths):
-    """Records in file order; each carries `_at` = (file index, line index), its write position."""
+def read_outcomes(paths, strict=False):
+    """Records in file order; each carries `_at` = (file index, line index), its write position.
+    Lenient by default (an unreadable file is skipped: reports and attempt numbering). With
+    `strict`, only a missing file counts as empty and any other OSError propagates: a transient
+    read failure must not look like "no record yet", or reconcile appends a duplicate."""
     records = []
     for file_index, path in enumerate(paths):
         try:
             data = Path(path).read_bytes()
+        except FileNotFoundError:
+            continue
         except OSError:
+            if strict:
+                raise
             continue
         for line_index, record in decode_outcome_lines(data):
             record['_at'] = (file_index, line_index)
@@ -3091,6 +3098,38 @@ def append_outcome(path, record):
     # append (no race over who created the file) and the parent of every directory created.
     fsync_dir(path.parent)
     sync_created(created)
+    return True
+
+
+def confirm_recorded(path, attempt_id):
+    """True when the log holds a task record with `attempt_id` and the file and its directory
+    were synced just now; False when it holds none (a missing log is not created). Other
+    OSErrors propagate. A complete write whose file or directory sync failed leaves a readable
+    line and a kept marker: this retry must finish the sync before the marker may go. Residual:
+    after a failed fsync the kernel may already have marked the dirty pages clean, so this
+    persists what is still dirty; it guarantees a successful sync attempt before removal, not
+    recovery of dropped data (advisory telemetry).
+    Removal rule: a marker is removed only after append_outcome returned True for a record
+    carrying its id, or after this returned True. This and a following append_outcome lock
+    separately; that is safe because a checkout's attempts are sequential under its lock, so
+    no other writer appends that id in between."""
+    path = Path(path)
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a writer mid-append finishes its line first
+        chunks = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        if not any(record.get('kind') == 'task' and record.get('attempt_id') == attempt_id
+                   for _, record in decode_outcome_lines(b''.join(chunks))):
+            return False
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_dir(path.parent)
     return True
 
 

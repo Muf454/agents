@@ -5791,6 +5791,99 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             wf.remove_marker(second)  # already gone: fine
             self.assertEqual([p for p, _ in wf.list_markers()], [garbage, first])
 
+    def test_outcome_removal_gate_strict_read(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertEqual(wf.read_outcomes([log], strict=True), [])  # missing log: empty
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        real_read_bytes = Path.read_bytes
+        for error in (OSError(5, 'Input/output error'), PermissionError(13, 'Permission denied')):
+            for strict in (True, False):
+                raised = []
+
+                def failing_once(path):
+                    if not raised:
+                        raised.append(path)
+                        raise error
+                    return real_read_bytes(path)
+
+                with mock.patch.object(Path, 'read_bytes', failing_once):
+                    if strict:
+                        with self.assertRaises(type(error)):
+                            wf.read_outcomes([log], strict=True)
+                    else:
+                        self.assertEqual(wf.read_outcomes([log]), [])  # lenient mode unchanged
+                self.assertEqual(raised, [log])
+        self.assertEqual(len(wf.read_outcomes([log], strict=True)), 1)
+
+    def outcome_removal_gate_confirm(self, wf, log, attempt_id, fail_inode=None):
+        """Inodes passed to os.fsync by one confirm_recorded, and its result."""
+        real_fsync = os.fsync
+        synced = []
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            if synced[-1] == fail_inode:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', recording_fsync):
+            return synced, wf.confirm_recorded(log, attempt_id)
+
+    def test_outcome_removal_gate_confirm_recorded(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'a' * 16), ([], False))
+        self.assertFalse(log.exists())  # a missing log is not created
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        self.assertTrue(wf.append_outcome(log, {'kind': 'review', 'attempt_id': 'b' * 16}))
+        file_inode, directory_inode = os.stat(log).st_ino, os.stat(log.parent).st_ino
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'b' * 16), ([], False))  # not a task
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'c' * 16), ([], False))
+        self.assertEqual(self.outcome_removal_gate_confirm(wf, log, 'a' * 16),
+                         ([file_inode, directory_inode], True))
+        with self.assertRaises(OSError):
+            self.outcome_removal_gate_confirm(wf, log, 'a' * 16, fail_inode=file_inode)
+        synced = []
+        real_fsync = os.fsync
+
+        def failing_directory(fd):
+            synced.append(os.fstat(fd).st_ino)
+            if synced[-1] == directory_inode:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', failing_directory), self.assertRaises(OSError):
+            wf.confirm_recorded(log, 'a' * 16)
+        self.assertEqual(synced, [file_inode, directory_inode])  # file sync observed first
+
+    def test_outcome_removal_gate_waits_for_the_log_lock(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        fd = os.open(log, os.O_RDWR)
+        self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(wf.confirm_recorded(log, 'a' * 16)), daemon=True)
+        thread.start()
+        time.sleep(0.3 * TIMEOUT_SCALE)
+        self.assertTrue(thread.is_alive())
+        os.close(fd)  # releases the lock
+        fd = None
+        thread.join(SHORT_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+
+    def test_outcome_removal_gate_torn_multibyte_tail(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'attempt_id': 'a' * 16}))
+        log.write_bytes(log.read_bytes() + b'{"title": "caf\xc3')
+        self.assertTrue(wf.confirm_recorded(log, 'a' * 16))
+        self.assertEqual(len(wf.read_outcomes([log], strict=True)), 1)
+
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []

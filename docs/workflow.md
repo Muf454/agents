@@ -911,7 +911,14 @@ the lock in another checkout can still interleave until upgraded. A short write 
 the outcome line completely"), never retried: another checkout may have appended in between,
 and the next append's newline guard isolates the fragment. `read_outcomes` splits the bytes on
 `\n` only and decodes each line on its own, so a torn tail (even one cut inside a multibyte
-UTF-8 character) or a U+2028 in a title costs at most that one line.
+UTF-8 character) or a U+2028 in a title costs at most that one line. `read_outcomes(...,
+strict=True)` treats only a missing log as empty and lets any other read error propagate, so a
+transient failure never looks like "no record yet". `confirm_recorded(path, id)` opens an
+existing log (never creates it), takes the same lock, reads it to EOF and, when a task record
+carries `attempt_id == id`, fsyncs the file and then its directory before returning True.
+Removal rule: a marker goes only after `append_outcome` returned True for a record with its id
+or `confirm_recorded` returned True, so a line whose earlier sync failed is synced before its
+marker is removed (a sync attempt, not recovery of pages the kernel already dropped).
 
 Attempt markers live one file per attempt in `outcome attempt-dir` (`<review binding
 dir>/attempts/<id>.json`, id `^[0-9a-f]{16}$`). `write_marker` writes a fsynced `<id>.json.tmp`

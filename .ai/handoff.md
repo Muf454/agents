@@ -2,7 +2,8 @@
 
 ## What has been implemented?
 Done so far: T001, T002, T007 (`append_outcome` + per-line `decode_outcome_lines` reader in
-`scripts/lib/workflow.py`; `outcome` fails with exit 1 on a short write). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
+`scripts/lib/workflow.py`; `outcome` fails with exit 1 on a short write), T008 (log lock,
+directory fsync, marker store), T009 (`read_outcomes(strict=True)`, `confirm_recorded`). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
 PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session):
 - T001 FL-16 (sonnet): both disposition tables read a first cell `ID`, `ID (SEVERITY)` or
   `ID (SEVERITY) title` (also `ID — title`, `ID: title`); decoration before the ID, unknown
@@ -118,4 +119,4 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Continue the queue (next unblocked task after T007; T008 builds on `append_outcome`).
+Continue the queue (T010 next: marker failure contract, builds on T008's marker store).
