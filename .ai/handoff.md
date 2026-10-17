@@ -43,6 +43,11 @@
   records a catch-up (a human command). 5 `test_outcome_catchup_*` tests.
 - T010 (done): README, `docs/workflow.md`, the vault flow chart and this handoff were checked
   against the code; no behaviour changed. `DocsConsistencyTest` and `flow_this_repo` pass.
+- T014 (done, review M1): `/proc/<pid>/stat` is read as bytes (decoded with
+  `surrogateescape`), so a non-UTF-8 process name anywhere on the host no longer makes
+  `Dispatcher.stop()` raise; `terminate()` signals the batch groups before any scan, and a scan
+  that raises (`Dispatcher.scan()` → None) never aborts the stop: the barrier keeps scanning to
+  its deadline and then reports `unknown (descendant scan failed: …)` (run fails).
 
 Planned: Branch `fix/flow-batch-4` (from `origin/master` at 7d22939, after
 PRs #27 and #28 merged) plans flow batch 4 (2026-10-16, Claude planning session), in priority
@@ -84,6 +89,7 @@ after 5 min), CU-4 (colour variables stripped for batches), CU-1 (attempts per m
 2026-10-17 after T008: `.ai/bin/ai-check` PASS (731 tests, 390.6 s on 8 workers).
 2026-10-17 after T009: `.ai/bin/ai-check` PASS (736 tests; recorded in the run log, not re-run here).
 2026-10-17 after T010: targeted `-k Docs` (3 tests) and `-k flow_this_repo` (1 test) OK; full gate: see the run log entry for T010.
+2026-10-17 after T014: `.ai/bin/ai-check` PASS (739 tests, 394.3 s on 8 workers); `-k parallel_runner` 32 OK.
 
 ## Assumptions
 - FL-27: `PR_SET_CHILD_SUBREAPER` + `/proc` walk (Linux only), no cgroups; non-Linux keeps the
@@ -120,8 +126,9 @@ catch-up rule is a reviewer-log rule, not a chart box). Nothing pending.
 ### Covered by automated tests
 Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its
 tests (the groups are added by the tasks named).
-- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002; T014 adds
-  `test_parallel_runner_tree_non_utf8_name`), `test_parallel_runner_startup_*` (T013).
+- `test_parallel_runner_subreaper_*` (T001), `test_parallel_runner_tree_*` (T002; T014 added
+  `test_parallel_runner_tree_non_utf8_name`, `test_parallel_runner_tree_non_utf8_stat_parse`
+  and `test_parallel_runner_tree_scan_failure_still_signals_batch_groups`), `test_parallel_runner_startup_*` (T013).
 - `test_task_sections_fill_*` (T003), `test_task_sections_host_*` (T004),
   `test_task_sections_prompts_show_the_format` (T006).
 - `test_disposition_pipes_*` (T005; T016 adds `test_disposition_pipes_missing_task_before_next_row`
@@ -146,5 +153,5 @@ tests (the groups are added by the tasks named).
 
 ## Next action
 Review round 1 triaged (`.ai/reviews/dispositions.md`): M1, M2, P7, N1 accepted, none
-rejected or deferred. Fix tasks T014 (opus, process scan), T015 (catch-up coverage) and T016
+rejected or deferred. T014 (process scan) is DONE; T015 (catch-up coverage) and T016
 (disposition row parsing) are TODO. Then re-review, the human's acceptance steps and the merge.

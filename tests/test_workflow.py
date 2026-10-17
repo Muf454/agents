@@ -7,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -9671,6 +9672,53 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertIn('raised RuntimeError injected failure', result.stdout, output)
         self.assertIn('during_stop [] rounds 1 errors 2 alive []', result.stdout, output)
         self.assert_gone(self.wait_pidfiles(stubs))
+
+    # Review M1: a process name is arbitrary bytes, and the scan reads every process on the host.
+    def test_parallel_runner_tree_non_utf8_stat_parse(self):
+        sys.path.insert(0, str(ROOT / 'tests'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'tests'))
+        import run_parallel
+        # Fields 5..52 hold their own numbers, so starttime (field 22) reads 22.
+        text = b'4321 (\xff) \xfe) Z 99 ' + ' '.join(str(field) for field in range(5, 53)).encode() + b'\n'
+        self.assertEqual(run_parallel.parse_stat(text), ('Z', 99, 22))
+        self.assertIsNone(run_parallel.parse_stat(b'4321 (\xff'))
+
+    def test_parallel_runner_tree_non_utf8_name(self):
+        self.tree_guard()
+        named = self.pidfile('named.pid')
+        # PR_SET_NAME is 15; the pid file only appears once /proc shows the non-UTF-8 name.
+        code = ('import ctypes, os, time; ctypes.CDLL(None).prctl(15, b"\\xff", 0, 0, 0); '
+                'assert open("/proc/self/comm", "rb").read() == b"\\xff\\n"; '
+                f'path = {str(named)!r}; open(path + ".tmp", "w").write(str(os.getpid())); '
+                'os.replace(path + ".tmp", path); time.sleep(120)')
+        self.write_tree_test('test_tree.py', f'exec {shlex.quote(sys.executable)} -c {shlex.quote(code)}')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        script = self.driver(self.FAIL_SECOND_LAUNCH, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, [named], (self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised OSError injected launch failure', result.stdout, output)
+        self.assertNotIn('UnicodeDecodeError', output)
+        self.assert_gone(self.wait_pidfiles([named]))
+
+    def test_parallel_runner_tree_scan_failure_still_signals_batch_groups(self):
+        self.tree_guard()
+        batch, child = self.pidfile('batch.pid'), self.pidfile('child.pid')
+        self.write_tree_test('test_tree.py', f'echo $PPID > {batch}.tmp; mv {batch}.tmp {batch}; '
+                             f'echo $$ > {child}.tmp; mv {child}.tmp {child}; exec sleep 120')
+        self.write('test_other.py', '    def test_a(self): pass\n')
+        scenario = self.FAIL_SECOND_LAUNCH + (
+            'def descendants(root, table=None):\n'
+            '    raise RuntimeError("injected scan failure")\n'
+            'run_parallel.descendants = descendants\n')
+        script = self.driver(scenario, [['test_tree.Sample.test_tree'], ['test_other.Sample.test_a']])
+        result = self.run_driver(script, [batch, child],
+                                 (self.rp.FINAL_WAIT + self.rp.TERMINATE_GRACE + 10) * TIMEOUT_SCALE)
+        output = result.stdout + result.stderr
+        self.assertIn('raised OSError injected launch failure', result.stdout, output)
+        # The failed scans never confirmed the tree gone, so the stop reports it.
+        self.assertIn('could not terminate descendants: unknown (descendant scan failed: '
+                      "RuntimeError('injected scan failure')", result.stderr)
+        self.assert_gone(self.wait_pidfiles([batch, child]))
 
     # FL-27 part 3: an interrupt while run() is still starting workers (after the first one
     # launched its batch) goes through stop() like any later interrupt.

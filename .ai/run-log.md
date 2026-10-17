@@ -336,3 +336,4 @@
 | 2026-10-16T23:56:01Z | runner | T010 | completed | PASS | b1ef55e | Claude checkpointed; continuing queue |
 | 2026-10-17T00:02:40Z | runner | none | queue complete; ready for independent review | PASS | 0eefd41 | Human acceptance remains |
 | 2026-10-17T00:08:36Z | runner | triage | review triaged into dispositions/tasks | n/a | 87a72fd | Fix tasks run next |
+| 2026-10-17 | claude (opus) | T014 | DONE: /proc stat read as bytes; batch groups signalled before any scan; failed scan → `Dispatcher.scan()` None, barrier reports `unknown (descendant scan failed: …)`; 3 `test_parallel_runner_tree_*` tests | PASS (ai-check, 739 tests; -k parallel_runner 32 OK) | parent 9e68f79 | Mutation: strict read_text → non_utf8_name fails; unguarded first scan → scan_failure fails; flow unchanged |

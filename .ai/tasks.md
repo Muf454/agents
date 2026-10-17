@@ -918,7 +918,7 @@ flow chart and next action updated. Targeted: `-k Docs` Ran 3 OK; `-k flow_this_
 Gate: `.ai/bin/ai-check` PASS (736 tests, 397.4 s on 8 workers). No human acceptance is implied.
 
 ## T014 — Process scan survives non-UTF-8 process names; a scan failure never skips batch termination (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T013
 Model: opus
 
@@ -957,6 +957,21 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner_tree` (must 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-17. `tests/run_parallel.py`: `parse_stat()` accepts bytes (decoded with
+`surrogateescape`, fields still after the last `)`); `proc_stat()` reads `read_bytes()` and
+skips an entry on `OSError` or `ValueError`. `terminate()` signals the batch groups before the
+first scan; every scan goes through `Dispatcher.scan()`, which returns None (and keeps
+`scan_error`) when `live_descendants()` raises: the grace wait and kill rounds treat it as
+nothing found that round, the completion barrier keeps scanning to its deadline and then sets
+`cleanup_failed = ['unknown (descendant scan failed: …)']` (stderr line, main exits 1).
+`stop_done`/single-owner logic unchanged. Tests: `test_parallel_runner_tree_non_utf8_stat_parse`
+(bytes with `\xff`/`\xfe` and an inner `)` → ('Z', 99, 22)), `test_parallel_runner_tree_non_utf8_name`
+(real child, `prctl(PR_SET_NAME, b"\xff")` confirmed via /proc/self/comm, driver stop → gone),
+`test_parallel_runner_tree_scan_failure_still_signals_batch_groups` (patched `descendants`
+raises; batch and its child gone, stderr names the scan failure). Mutation checks: strict
+`read_text()` → non_utf8_name fails; old order with an unguarded first scan → scan_failure
+fails. Targeted `-k parallel_runner_tree`: Ran 11 OK; `-k parallel_runner`: Ran 32 OK.
+`.ai/bin/ai-check`: PASS (739 tests, 394.3 s). README and docs/workflow.md updated; flow unchanged.
 
 ## T015 — A Codex re-check does not cover a full Claude code review (review M2, CU-2)
 Status: TODO

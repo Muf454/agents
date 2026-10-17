@@ -55,7 +55,10 @@ exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1
 started) is owned by its first caller: it signals the batch groups
 and walks the `/proc` ppid tree below the runner, SIGTERM then up to three SIGKILL rounds
 (each pid checked against its recorded start time), then a bounded completion barrier until
-`/proc` shows no live descendant; survivors are printed to stderr and fail the run. No
+`/proc` shows no live descendant; survivors are printed to stderr and fail the run. The
+batch groups are signalled before any scan, `/proc/<pid>/stat` is read as bytes (a process
+name is arbitrary bytes), and a scan that fails never aborts the stop: the barrier then
+reports `unknown (descendant scan failed: …)` and the run fails. No
 adopted zombie is reaped until the stop has finished, so no pid is reused meanwhile. It exits non-zero when a batch
 fails (its test IDs are listed), crashes, collects zero tests, or when the batches ran a
 different number of tests than it collected. On Python 3.12+ it reports the 15 slowest

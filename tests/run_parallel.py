@@ -191,8 +191,12 @@ def enable_subreaper():
 
 
 def parse_stat(text):
-    """Return (state, ppid, starttime) from the text of /proc/<pid>/stat, or None. The fields
-    are read after the LAST ')': the command name may contain spaces and parentheses."""
+    """Return (state, ppid, starttime) from the text (or bytes) of /proc/<pid>/stat, or None.
+    The fields are read after the LAST ')': the command name may contain spaces and
+    parentheses. It is arbitrary bytes too (any process can set it with PR_SET_NAME), so
+    bytes are decoded losslessly; only the numeric fields after it are used."""
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', 'surrogateescape')
     try:
         fields = text.rsplit(')', 1)[1].split()
         return fields[0], int(fields[1]), int(fields[19])
@@ -201,9 +205,11 @@ def parse_stat(text):
 
 
 def proc_stat(pid):
+    # Bytes, not text: a strict decode of a non-UTF-8 name of ANY process on the host would
+    # raise out of process_table(). One odd entry is skipped, never fatal.
     try:
-        return parse_stat(Path(f'/proc/{pid}/stat').read_text())
-    except OSError:
+        return parse_stat(Path(f'/proc/{pid}/stat').read_bytes())
+    except (OSError, ValueError):
         return None
 
 
@@ -281,6 +287,7 @@ class Dispatcher:
         self.stop_done = threading.Event()
         self.kill_rounds = 0
         self.cleanup_failed = []
+        self.scan_error = None
         self.running = set()
         self.results = {}
         self.busy = [0.0] * self.workers
@@ -380,10 +387,20 @@ class Dispatcher:
         return {pid: starttime for pid, (state, starttime) in descendants(os.getpid()).items()
                 if state != 'Z'}
 
+    def scan(self):
+        """live_descendants(), or None when the scan raised: a scan failure must never abort a
+        stop (stop_done is set regardless, so nobody would retry the cleanup)."""
+        try:
+            return self.live_descendants()
+        except Exception as error:
+            self.scan_error = error
+            return None
+
     def terminate(self, children):
-        tree = self.live_descendants() if self.reap else {}
+        # The batch groups first: they need no scan, so a failing scan cannot spare them.
         for process in children:
             signal_group(process, signal.SIGTERM)
+        tree = (self.scan() or {}) if self.reap else {}
         # GNU `timeout` and detached sessions are outside the batches' groups.
         for pid, starttime in tree.items():
             signal_pid(pid, starttime, signal.SIGTERM)
@@ -394,7 +411,7 @@ class Dispatcher:
             except subprocess.TimeoutExpired:
                 pass
         while tree and time.monotonic() < deadline:
-            live = self.live_descendants()
+            live = self.scan() or {}
             if not any(live.get(pid) == starttime for pid, starttime in tree.items()):
                 break
             time.sleep(KILL_POLL)
@@ -407,24 +424,28 @@ class Dispatcher:
         # Zombies are left alone: reap_adopted() waits until stop_done, so their pids stay
         # reserved and a SIGKILL never reaches a reused pid.
         for _ in range(KILL_ROUNDS):
-            live = self.live_descendants()
-            if not live:
+            live = self.scan()
+            if live == {}:
                 break
-            for pid, starttime in live.items():
+            for pid, starttime in (live or {}).items():
                 signal_pid(pid, starttime, signal.SIGKILL)
             time.sleep(KILL_POLL)
-        # Completion barrier: SIGKILL is asynchronous, only /proc says a process is gone.
+        # Completion barrier: SIGKILL is asynchronous, only /proc says a process is gone. A
+        # failed scan proves nothing, so the barrier keeps scanning until its deadline.
         deadline = time.monotonic() + FINAL_WAIT
         while True:
-            live = self.live_descendants()
-            if not live:
+            live = self.scan()
+            if live == {}:
                 return
             if time.monotonic() >= deadline:
                 break
-            for pid, starttime in live.items():
+            for pid, starttime in (live or {}).items():
                 signal_pid(pid, starttime, signal.SIGKILL)
             time.sleep(KILL_POLL)
-        self.cleanup_failed = sorted(live)
+        if live is None:
+            self.cleanup_failed = [f'unknown (descendant scan failed: {self.scan_error!r})']
+        else:
+            self.cleanup_failed = sorted(live)
         print('run_parallel: could not terminate descendants: ' + ' '.join(map(str, self.cleanup_failed)),
               file=sys.stderr, flush=True)
 
