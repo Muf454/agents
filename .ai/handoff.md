@@ -50,8 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k Docs` 3 OK; other groups
-and the full gate see the task result. Without the new `! armed_resume` guard the partial
+T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k plan_review` 20 OK,
+`-k recovery` 65 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (887 tests, 531.5 s). Without the new `! armed_resume` guard the partial
 checkpoint test fails as round 5 P3 describes (`Commit the plan before reviewing it.` →
 recovery decision).
 T011: `-k limit_relaunch_preserved` 20 OK, `-k recheck` 32 OK, `-k recovery` 65 OK;

@@ -1079,7 +1079,7 @@ continues preserved work", README "Recovery"; vault flow chart relaunch node.
 
 
 ## T016 — Armed resume re-enters at implementation: stage-bound arm, plan review loop not entered while armed (MC-01 part 1, plan review round 5 P3 design task)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T011
 Model: opus
 
@@ -1251,8 +1251,10 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 - Docs: docs/workflow.md (schedule signature, manifest field, transition (c), new "Which stop
   can leave preserved work" paragraph, armed resume re-enters at implementation); README
   Recovery clause; vault flow chart relaunch branch and hub log.
-- Validation: `-k limit_relaunch_reenter` 8 OK; `-k limit_relaunch` 70 OK; `-k Docs` 3 OK;
-  further groups and the gate below.
+- Validation: `-k limit_relaunch_reenter` 8 OK; `-k limit_relaunch` 70 OK; `-k plan_review` 20
+  OK; `-k recovery` 65 OK; `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (887 tests, 531.5 s). The
+  first session timed out at 1800 s during its gate (WIP 7088074); the rerun reconciled it with
+  no code change.
 
 
 ## T018 — Recovery is terminal while the tree is armed; the armed checkpoint comes after ai-run's complete startup (MC-01 part 1, plan review round 7 P16/P17 design task)
