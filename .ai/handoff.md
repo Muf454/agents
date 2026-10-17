@@ -50,7 +50,10 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tests, 434.3 s on 8 workers).
+T001: `.ai/bin/ai-check` ran 824 tests in 628.5 s (over the 600 s tool limit, so it finished in
+the background); 823 passed, and the one failure, `test_pr_body_flow_this_repo_declares_the_flow_chart`,
+came from the planner's "## Flow chart" line in this handoff. That line is fixed and the test
+now passes on its own. The full gate rerun is left to the host's post-task `ai-check`.
 
 ## Assumptions
 - MC-01: the relaunch also covers a Codex limit stop (same message and mechanism); default cap 2;
@@ -65,7 +68,7 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
   is not detected (documented limitation).
 
 ## Flow chart
-To be updated by T002/T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+Flow unchanged so far (T001 adds helpers only). To be updated by T002/T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -108,10 +111,10 @@ the task named).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos
-- Commit this plan, then start `ai-pipeline --approved` on `feature/limits-plan-stage`.
 - Merge order: PR #29, PR #30, then this branch (it builds on both).
 - Installed copies and watchdog timers: upgrade and reinstall after merging (see Needs you 1).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
 
 ## Next action
-Commit the plan and start the pipeline; the first task is T001.
+T001 done (limit-stop record, manifest relaunch schedule helpers, `observe relaunch`,
+`AI_LIMIT_RELAUNCH_MAX` in the settings lists); next is T002 (watchdog).

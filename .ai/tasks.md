@@ -25,7 +25,7 @@ duration. No profiling commands (denied). Test helper scripts written into temp 
 inside the checkout (allowed since FL-22); check its git mode is 100755 before committing.
 
 ## T001 — Limit stop record and run-manifest relaunch schedule (MC-01 part 1, helpers)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -148,6 +148,31 @@ Targeted: `python3 -m unittest discover -s tests -k usage_limit` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- `common.sh` `ai_limit_pause`: before the budget `ai_die` (message unchanged), it runs
+  `ai_helper limit-stop-write AGENT RESET` (reset is 0 unless it is in the future). In `workflow.py`,
+  `limit-stop-write` validates its arguments, pins `.ai/local` and uses `write_record`.
+  `limit-stop [--now]` reads `last-error` and `limit-stop` through `read_record`, which never
+  follows symlinks or opens non-regular files. It checks the exact message, the agent and an
+  age of 0–120 s, then prints `<Agent> <relaunch epoch>`.
+- run-manifest: `LIMIT_FIELDS`, with validation in `limit_fields_valid`, plus
+  `limit_relaunch()` for the `limit-schedule/due/at/hold/claim/verify/arm/armed/disarm/count`
+  actions. `clear-attempts` drops the four fields, and `start` already writes a fresh dict.
+  `limit-verify` keys on `limit_head`, which stays after a claim, so the claimed relaunch can verify.
+- `observe relaunch AT NOTE` sets `relaunch_at`. `previous_observation` keeps only the base
+  fields, so every other write drops it.
+- `AI_LIMIT_RELAUNCH_MAX` is in `RUN_SETTINGS`, the `ai_config` keys, both `ai-recover` lists
+  and the README config list. README and `docs/workflow.md` (usage limits, observation fields)
+  are updated.
+- Tests: 7 `test_limit_relaunch_record_*`. The planted `limit-stop.tmp` symlink comes from a
+  wrapped mock `claude` mid-run, because ai-run's startup `paths` check refuses it earlier.
+- Evidence: `-k limit_relaunch_record` Ran 7 OK. `-k usage_limit -k limit -k settings -k Docs`
+  Ran 35 OK.
+- Full gate: `ai-check` ran 824 tests in 628.5 s, longer than the 600 s tool limit. It had one
+  failure, `test_pr_body_flow_this_repo_declares_the_flow_chart`, caused by the planner's
+  handoff "## Flow chart" line rather than by T001 code. That line is fixed and the test now
+  passes on its own (`-k flow_this_repo`). The full rerun is left to the host's post-task
+  `ai-check`.
+- Flow unchanged. The vault hub has a Log line for this task.
 
 
 ## T002 — Watchdog starts a due limit relaunch; `--timer-recovers`; no stall alarm while it waits (MC-01 part 1, watchdog)

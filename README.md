@@ -433,8 +433,8 @@ A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
 the reset time from the error (or wait `AI_LIMIT_RETRY`, default 1800 s), notify,
 sleep, and retry the same step. Total waiting per command is capped by
 `AI_LIMIT_MAX_WAIT` (default 28800 s); a weekly limit beyond that stops with a
-notification so you can rerun after the reset. Pauses are logged in the ignored
-`.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+notification so you can rerun after the reset (it records the agent and reset time in
+`.ai/local/limit-stop`). Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
 
 ### Claude fallback reviewer
@@ -549,7 +549,7 @@ subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
-`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
+`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_LIMIT_RELAUNCH_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
 `AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
 
 ```bash

@@ -5066,6 +5066,234 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.base / 'sleep.log').exists())
         self.assertIn('⛔ STOPPED, needs you: runner stopped at T001', self.notifications())
 
+    # ---------------------------------------------------------------- limit relaunch (MC-01)
+    LIMIT_MESSAGE = 'Claude usage limit: the reset is beyond the 60s wait budget. Rerun after it resets.'
+
+    def limit_far_stop(self, prepare=None):
+        self.ready()
+        if prepare:
+            prepare()
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertIn(self.LIMIT_MESSAGE, result.stderr)
+        self.assertEqual((self.project / '.ai/local/last-error').read_text(), self.LIMIT_MESSAGE + '\n')
+        self.assertFalse((self.base / 'sleep.log').exists())
+        return result
+
+    def limit_stop(self, *args, expected=0, **env):
+        result = self.run_cmd(['python3', str(HELPER), 'limit-stop', *args], expected=expected,
+                              env=dict(self.env, **env))
+        if expected:
+            self.assertEqual(result.stdout, '')
+        return result.stdout.strip()
+
+    def test_limit_relaunch_record_beyond_budget_stop(self):
+        self.limit_far_stop()
+        record = (self.project / '.ai/local/limit-stop')
+        self.assertFalse(record.is_symlink())
+        agent, reset = record.read_text().split()
+        self.assertEqual(agent, 'Claude')
+        self.assertLess(abs(int(reset) - (time.time() + 7 * 86400)), 300)
+        self.assertEqual(self.limit_stop(), f'Claude {int(reset) + 60}')
+
+    def test_limit_relaunch_record_planted_temp_symlink_is_not_followed(self):
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep me\n')
+
+        def plant():
+            # Planted by the session (ai-run's startup path check refuses it earlier).
+            claude = self.mock_bin / 'claude'
+            claude.rename(self.mock_bin / 'claude-real')
+            claude.write_text(f'#!/usr/bin/env bash\nln -s {shlex.quote(str(sentinel))} .ai/local/limit-stop.tmp\n'
+                              f'exec {shlex.quote(str(self.mock_bin / "claude-real"))} "$@"\n')
+            os.chmod(claude, 0o755)
+        self.limit_far_stop(plant)
+        self.assertTrue((self.project / '.ai/local/limit-stop.tmp').is_symlink())
+        self.assertEqual(sentinel.read_text(), 'keep me\n')
+        self.assertRegex((self.project / '.ai/local/limit-stop').read_text(), r'^Claude \d+\n$')
+
+    def test_limit_relaunch_record_limit_stop_rejects_anything_else(self):
+        self.setup_project()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+
+        def records(error=self.LIMIT_MESSAGE + '\n', stop='Claude 0\n'):
+            for name in ('last-error', 'limit-stop'):
+                (local / name).unlink(missing_ok=True)
+            if stop is not None:
+                (local / 'limit-stop').write_text(stop)
+            (local / 'last-error').write_text(error)
+
+        records()
+        self.assertEqual(self.limit_stop('--now', '1000', AI_LIMIT_RETRY='600'), 'Claude 1600')
+        records(stop='Claude 900\n')
+        self.assertEqual(self.limit_stop('--now', '1000'), 'Claude 1000')  # the reset has passed
+        records(stop='Claude 5000\n')
+        self.assertEqual(self.limit_stop('--now', '1000'), 'Claude 5060')
+        for error, stop in ((self.LIMIT_MESSAGE + '\nsomething else\n', 'Claude 0\n'),
+                            ('other text: ' + self.LIMIT_MESSAGE + '\n', 'Claude 0\n'),
+                            ('runner stopped\n', 'Claude 0\n'),
+                            (self.LIMIT_MESSAGE + '\n', None),
+                            (self.LIMIT_MESSAGE + '\n', 'garbage\n'),
+                            (self.LIMIT_MESSAGE + '\n', 'Codex 0\n')):
+            with self.subTest(error=error, stop=stop):
+                records(error, stop)
+                self.limit_stop('--now', '1000', expected=1)
+        records()
+        when = (local / 'last-error').stat().st_mtime
+        os.utime(local / 'limit-stop', (when - 300, when - 300))
+        self.limit_stop('--now', '1000', expected=1)  # a stale record from an earlier stop
+
+    def test_limit_relaunch_record_manifest_schedule_lifecycle(self):
+        self.setup_project()
+        self.approve_run()
+        manifest_path = next((self.base / 'host-state').rglob('run.json'))
+
+        def manifest():
+            return json.loads(manifest_path.read_text())
+
+        head, other = 'a' * 40, 'b' * 40
+        self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '0\n')
+        self.helper('run-manifest', 'limit-at', expected=1)
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2', head).stdout, '1\n')
+        self.assertEqual(manifest()['attempts'], 0)
+        self.assertEqual(self.helper('run-manifest', 'limit-due', '99', expected=1).stdout, '')
+        self.assertEqual(self.helper('run-manifest', 'limit-due', '100').stdout, '100\n')
+        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', head, expected=1)
+        self.assertIn('a relaunch is already scheduled', failed.stderr)
+        self.assertEqual(manifest()['limit_relaunches'], 1)
+        # Still waiting: the recovery's reservation is given back, the schedule kept.
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'limit-hold', '99').stdout, '100\n')
+        self.assertEqual((manifest()['attempts'], manifest()['limit_relaunch_at']), (0, 100))
+        self.helper('run-manifest', 'limit-claim', '99', expected=1)
+        self.helper('run-manifest', 'limit-hold', '100', expected=1)
+        self.assertEqual(self.helper('run-manifest', 'limit-at').stdout, '100\n')
+        # Due: claimed once, the attempt given back (never below 0).
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'limit-claim', '100').stdout, '1\n')
+        self.assertNotIn('limit_relaunch_at', manifest())
+        self.assertEqual(manifest()['attempts'], 0)
+        self.helper('run-manifest', 'limit-claim', '100', expected=1)
+        self.helper('run-manifest', 'limit-claim', '100', expected=1)
+        self.helper('run-manifest', 'limit-at', expected=1)
+        self.helper('run-manifest', 'limit-due', '100', expected=1)
+        self.assertEqual(manifest()['attempts'], 0)
+        # The relaunch checks the checkout it resumes; verify writes nothing.
+        moved = self.helper('run-manifest', 'limit-verify', other, expected=1)
+        self.assertIn('moved to another commit', moved.stderr)
+        before = manifest_path.read_bytes()
+        self.helper('run-manifest', 'limit-verify', head)
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-arm', other, expected=1)
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-armed', head, expected=1)
+        self.helper('run-manifest', 'limit-arm', head)
+        self.helper('run-manifest', 'limit-armed', head)
+        self.helper('run-manifest', 'limit-armed', other, expected=1)
+        self.helper('run-manifest', 'limit-disarm')
+        self.helper('run-manifest', 'limit-armed', head, expected=1)
+        self.helper('run-manifest', 'limit-disarm')  # missing is fine
+        # The cap counts relaunches per human-started run.
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2', other).stdout, '2\n')
+        self.helper('run-manifest', 'limit-claim', '300')
+        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', head, expected=1)
+        self.assertIn('usage limit: already relaunched 2 time(s) in this run', capped.stderr)
+        self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '2\n')
+        self.helper('run-manifest', 'limit-arm', other)
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertFalse(set(manifest()) & {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume'})
+        unscheduled = self.helper('run-manifest', 'limit-verify', head, expected=1)
+        self.assertIn('no scheduled relaunch', unscheduled.stderr)
+        self.helper('run-manifest', 'limit-schedule', '500', '2', head)
+        self.helper('run-manifest', 'limit-arm', head)
+        self.approve_run()
+        self.assertFalse(set(manifest()) & {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume'})
+        for key, value in (('limit_relaunches', '1'), ('limit_relaunch_at', '100'),
+                           ('limit_head', 'x' * 40), ('limit_resume', 7), ('limit_relaunches', True)):
+            with self.subTest(key=key, value=value):
+                manifest_path.write_text(json.dumps(dict(manifest(), **{key: value})) + '\n')
+                invalid = self.helper('run-manifest', 'limit-count', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.approve_run()
+
+    def test_limit_relaunch_record_setting_recorded_with_the_run(self):
+        self.setup_project()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', 'c' * 64, 'main', '--approved'],
+                     env=dict(self.env, AI_LIMIT_RELAUNCH_MAX='3'))
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_LIMIT_RELAUNCH_MAX'], '3')
+        restored = self.helper('run-manifest', 'env').stdout
+        self.assertIn('AI_LIMIT_RELAUNCH_MAX=3\0', restored)
+
+    def test_limit_relaunch_record_write_never_follows_planted_files(self):
+        self.setup_project()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep me\n')
+
+        def write(*args, expected=0):
+            started = time.monotonic()
+            result = self.run_cmd(['python3', str(HELPER), 'limit-stop-write', *args], expected=expected,
+                                  timeout=SHORT_TIMEOUT)
+            self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+            return result
+
+        def regular_record(expected):
+            path = local / 'limit-stop'
+            self.assertTrue(path.is_file() and not path.is_symlink())
+            self.assertEqual(path.read_text(), expected)
+
+        for name in ('limit-stop', 'limit-stop.tmp'):
+            with self.subTest(symlink=name):
+                (local / name).unlink(missing_ok=True)
+                (local / name).symlink_to(sentinel)
+                write('Claude', '123')
+                self.assertEqual(sentinel.read_text(), 'keep me\n')
+                regular_record('Claude 123\n')
+        (local / 'limit-stop').unlink()
+        os.mkfifo(local / 'limit-stop')
+        write('Codex', '0')  # never blocks on the FIFO: it is replaced
+        regular_record('Codex 0\n')
+        for args in (('Gemini', '1'), ('Claude', 'soon'), ('Claude', '1' * 13), ('Claude',)):
+            with self.subTest(args=args):
+                write(*args, expected=1)
+                regular_record('Codex 0\n')
+        # The first temp name of an in-process writer, planted as a symlink and as a FIFO.
+        wf = self.outcome_module()
+        first = local / f'.limit-stop.{os.getpid()}.tmp'
+        for plant in (lambda: first.symlink_to(sentinel), lambda: os.mkfifo(first)):
+            plant()
+            started = time.monotonic()
+            with mock.patch.dict(os.environ, AI_ROOT=str(self.project)):
+                wf.limit_stop_write(['Claude', '77'])
+            self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+            self.assertEqual(sentinel.read_text(), 'keep me\n')
+            regular_record('Claude 77\n')
+            first.unlink()
+        # .ai/local replaced by a symlink: nothing is written anywhere.
+        outside = self.base / 'outside'
+        outside.mkdir()
+        shutil.rmtree(local)
+        local.symlink_to(outside)
+        write('Claude', '5', expected=1)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_limit_relaunch_record_observe_relaunch(self):
+        self.setup_project()
+        observation = self.project / '.ai/local/observation.json'
+        observation.parent.mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'build', 'T001')
+        self.helper('observe', 'relaunch', '1700000000', 'note')
+        record = json.loads(observation.read_text())
+        self.assertEqual((record['state'], record['note'], record['relaunch_at']), ('paused', 'note', 1700000000))
+        self.assertEqual((record['stage'], record['detail']), ('build', 'T001'))
+        self.helper('observe', 'step', 'build', 'x')
+        self.assertNotIn('relaunch_at', json.loads(observation.read_text()))
+        self.helper('observe', 'relaunch', 'later', 'note')  # warns, never fails the caller
+        self.assertNotIn('relaunch_at', json.loads(observation.read_text()))
+
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
         self.tool('ai-run', '--approved')

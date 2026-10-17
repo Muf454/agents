@@ -235,7 +235,18 @@ Limits bound new agent invocations and validation execution. GNU timeout termina
 timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
-stops and crashes. No infinite loop, boot startup, or monetary spending guarantee is added.
+stops and crashes. A limit beyond the wait budget stops with an unchanged message and first
+records `<Agent> <reset epoch or 0>` in `.ai/local/limit-stop` (`workflow.py limit-stop-write`,
+through the pinned `.ai/local` and an exclusive `O_NOFOLLOW|O_NONBLOCK` temp file, never a
+shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` only when
+`last-error` is exactly that one-line message and `limit-stop` names the same agent and is at
+most 120 s older (relaunch: reset + 60 s, `now + AI_LIMIT_RETRY` for reset 0, `now` once
+passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `limit_head` and
+`limit_resume` hold the relaunch schedule (`run-manifest limit-schedule AT CAP HEAD`,
+`limit-due`, `limit-at`, `limit-hold`, `limit-claim`, `limit-verify`, `limit-arm`,
+`limit-armed`, `limit-disarm`, `limit-count`; schedule, hold and claim give back the attempt
+`ai-recover` reserved; a human start and `clear-attempts` drop them; cap
+`AI_LIMIT_RELAUNCH_MAX`). No infinite loop, boot startup, or monetary spending guarantee is added.
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
@@ -1004,7 +1015,9 @@ inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agen
 `observation.json` holds the stage (`planning`, `plan_review`, `plan_revision`, `setup`,
 `build`, `checks`, `review`, `triage`, `recheck`, `pr`; the dashboard draws nine boxes, Plan
 first, and a finished `planning` record is shown as status `planned`), state (`active`,
-`paused`, `recovering`, `stopped`, `done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
+`paused`, `recovering`, `stopped`, `done`), detail, note and `since`/`updated` times, plus `pid` and `branch`
+(and `relaunch_at`, set only by `observe relaunch AT NOTE` while a usage-limit relaunch is
+scheduled; every other action drops it); written by
 `workflow.py observe` from `ai-pipeline`, `ai-run`, `ai-review`, `ai-recover` and the
 pause/resume helpers in `common.sh`. `notifications.log` keeps the last 200 notification
 lines (`notify-log`, also when no `AI_NOTIFY_CMD` is set). Every notification is mirrored

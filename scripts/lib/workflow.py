@@ -1276,6 +1276,110 @@ def binding_dir():
     return base / 'reviews' / key
 
 
+# Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
+# used, the pending relaunch time, the HEAD it was scheduled at and the armed resume HEAD.
+LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_resume')
+
+
+def limit_fields_valid(data):
+    count, at = data.get('limit_relaunches', 0), data.get('limit_relaunch_at', 0)
+    return (type(count) is int and 0 <= count <= 100 and type(at) is int and at >= 0
+            and all(re.fullmatch(r'[0-9a-f]{40}', data[key]) if isinstance(data.get(key), str)
+                    else key not in data for key in ('limit_head', 'limit_resume')))
+
+
+def limit_relaunch(path, data, action, arguments):
+    """run-manifest limit-* actions. A schedule is pending (AT > NOW) until one recovery claims
+    it once it is due, so it is never left due after a recovery saw it. Schedule, hold and claim
+    each give back the attempt `ai-recover` reserved before it could know the stop was a usage
+    limit: waiting for a reset is not a failed recovery."""
+    def number(value, usage):
+        if not re.fullmatch(r'\d{1,12}', value):
+            fail(f'Usage: run-manifest {usage}')
+        return int(value)
+
+    def head(value, usage):
+        if not re.fullmatch(r'[0-9a-f]{40}', value):
+            fail(f'Usage: run-manifest {usage}')
+        return value
+
+    def clock(usage):
+        if len(arguments) > 1:
+            fail(f'Usage: run-manifest {usage}')
+        return number(arguments[0], usage) if arguments else int(time.time())
+
+    def give_back():
+        data['attempts'] = max(0, data['attempts'] - 1)
+
+    at = data.get('limit_relaunch_at')
+    count = data.get('limit_relaunches', 0)
+    if action == 'limit-schedule':
+        usage = 'limit-schedule AT CAP HEAD'
+        if len(arguments) != 3:
+            fail(f'Usage: run-manifest {usage}')
+        when, cap, start = number(arguments[0], usage), number(arguments[1], usage), head(arguments[2], usage)
+        if at is not None:
+            fail('usage limit: a relaunch is already scheduled')
+        if count >= min(cap, 100):
+            fail(f'usage limit: already relaunched {count} time(s) in this run')
+        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start)
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count + 1)
+    elif action == 'limit-due':
+        if at is None or at > clock('limit-due [NOW]'):
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-at':
+        if arguments:
+            fail('Usage: run-manifest limit-at')
+        if at is None:
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-hold':
+        # Still waiting: the recovery gives its reservation back and restores the wait.
+        if at is None or at <= clock('limit-hold [NOW]'):
+            sys.exit(1)
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(at)
+    elif action == 'limit-claim':
+        # Due: consumed in the same write, so any later stop of this relaunch is terminal.
+        if at is None or at > clock('limit-claim [NOW]'):
+            sys.exit(1)
+        data.pop('limit_relaunch_at')
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count)
+    elif action == 'limit-verify':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest limit-verify HEAD')
+        if 'limit_head' not in data:
+            fail('no scheduled relaunch')
+        if arguments[0] != data['limit_head']:
+            fail('the branch moved to another commit')
+    elif action == 'limit-arm':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest limit-arm HEAD')
+        if arguments[0] != data.get('limit_head'):
+            sys.exit(1)
+        data['limit_resume'] = arguments[0]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-armed':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest limit-armed HEAD')
+        if arguments[0] != data.get('limit_resume'):
+            sys.exit(1)
+    elif action == 'limit-disarm':
+        if 'limit_resume' in data:
+            data.pop('limit_resume')
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-count':
+        print(count)
+    else:
+        fail('Unknown run-manifest action.')
+
+
 def run_manifest(arguments):
     """Host-side record of the human-approved run (outside the checkout, like review
     bindings): approved gate digest, branch, arguments and the recovery attempt budget.
@@ -1313,11 +1417,14 @@ def run_manifest(arguments):
         valid = (isinstance(data, dict) and isinstance(data.get('gate'), str)
                  and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
                  and all(isinstance(a, str) for a in data['args'])
-                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100)
+                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
+                 and limit_fields_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
         fail('No valid run manifest; rerun ai-pipeline --approved by hand.')
+    if action.startswith('limit-'):
+        return limit_relaunch(path, data, action, arguments[1:])
     if action == 'gate':
         print(data['gate'])
     elif action == 'branch':
@@ -1336,6 +1443,8 @@ def run_manifest(arguments):
         print(data['attempts'])
     elif action == 'clear-attempts':
         data['attempts'] = 0
+        for key in LIMIT_FIELDS:
+            data.pop(key, None)
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
@@ -1978,7 +2087,7 @@ def disputes_record(arguments):
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
-                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
+                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RELAUNCH_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                 'AI_SUPERVISE_ESCALATE_MODEL')
@@ -4201,6 +4310,13 @@ def observation_update(record, action, values):
     if action == 'pause':
         needs((1, 1), 'pause NOTE')
         return {**record, 'state': 'paused', 'note': values[0]}
+    if action == 'relaunch':
+        # Waiting for a scheduled usage-limit relaunch. previous_observation keeps only the
+        # base fields, so every other action drops `relaunch_at`.
+        needs((2, 2), 'relaunch AT NOTE')
+        if not re.fullmatch(r'\d{1,12}', values[0]):
+            raise RecordError('usage: observe relaunch AT NOTE')
+        return {**record, 'state': 'paused', 'note': values[1], 'relaunch_at': int(values[0])}
     if action == 'resume':
         needs((0, 0), 'resume')
         # Only a pause is lifted: a stop or recovery recorded meanwhile stays visible.
@@ -4281,6 +4397,65 @@ def observe(arguments):
         write_record(local_fd, 'observation.json', json.dumps(record, ensure_ascii=False) + '\n')
     finally:
         close_fds(lock, root_fd, ai_fd, local_fd)
+
+
+LIMIT_STOP_ERROR = (r'(Claude|Codex) usage limit: the reset is beyond the \d+s wait budget\. '
+                    r'Rerun after it resets\.')
+
+
+def limit_stop_write(arguments):
+    """limit-stop-write AGENT RESET: record `AGENT RESET` in .ai/local/limit-stop of AI_ROOT
+    (else the current directory) through the pinned `.ai/local` and write_record, so a symlink
+    or FIFO planted at the temp or final name is replaced, never written through."""
+    if len(arguments) != 2 or not re.fullmatch(r'Claude|Codex', arguments[0]) \
+            or not re.fullmatch(r'\d{1,12}', arguments[1]):
+        fail('Usage: limit-stop-write Claude|Codex RESET')
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None:
+        fail('.ai/local is missing, a symlink or not a directory')
+    try:
+        write_record(local_fd, 'limit-stop', f'{arguments[0]} {arguments[1]}\n')
+    except RecordError as error:
+        fail(str(error))
+    finally:
+        os.close(local_fd)
+
+
+def limit_stop(arguments):
+    """limit-stop [--now EPOCH]: print `<Agent> <relaunch epoch>` when the last stop of this
+    checkout was only a usage limit beyond the wait budget (last-error is exactly that message
+    and limit-stop, written just before it, names the same agent); else exit 1 silently."""
+    if arguments and not (len(arguments) == 2 and arguments[0] == '--now'
+                          and re.fullmatch(r'\d{1,12}', arguments[1])):
+        sys.exit(1)
+    current = int(arguments[1]) if arguments else int(time.time())
+    retry = os.environ.get('AI_LIMIT_RETRY') or '1800'
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None or not re.fullmatch(r'\d{1,9}', retry):
+        close_fds(local_fd)
+        sys.exit(1)
+    try:
+        error = read_record(local_fd, 'last-error', SMALL_LIMIT)
+        record = read_record(local_fd, 'limit-stop', SMALL_LIMIT)
+    finally:
+        os.close(local_fd)
+    if error is None or record is None:
+        sys.exit(1)
+    text = error[0][:-1] if error[0].endswith('\n') else error[0]
+    message = re.fullmatch(LIMIT_STOP_ERROR, text)
+    stop = re.fullmatch(r'(Claude|Codex) (\d{1,12})\n?', record[0])
+    # A record from an earlier stop never qualifies: written just before this last-error.
+    age = error[1].st_mtime - record[1].st_mtime
+    if not message or not stop or message.group(1) != stop.group(1) or not 0 <= age <= 120:
+        sys.exit(1)
+    reset = int(stop.group(2))
+    if reset > current:
+        relaunch = reset + 60
+    elif reset == 0:
+        relaunch = current + int(retry)
+    else:
+        relaunch = current
+    print(f'{stop.group(1)} {relaunch}')
 
 
 def log_entry(line):
@@ -4471,6 +4646,10 @@ def main():
         revision_queue_repair(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
+    elif command == 'limit-stop':
+        limit_stop(arguments)
+    elif command == 'limit-stop-write':
+        limit_stop_write(arguments)
     elif command == 'claude-text':
         claude_text(arguments)
     elif command == 'review-allowlist':

@@ -37,7 +37,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -97,8 +97,13 @@ ai_limit_pause() {
   local max=${AI_LIMIT_MAX_WAIT:-28800} retry=${AI_LIMIT_RETRY:-1800}
   now=$(date +%s)
   if (( reset > now )); then wait=$(( reset - now + 60 )); else wait=$retry; fi
-  (( AI_WAITED + wait <= max )) || \
+  if (( AI_WAITED + wait > max )); then
+    # Machine-readable record for ai-recover (`workflow.py limit-stop`). Written through the
+    # pinned .ai/local, never a redirection: a planted symlink or FIFO there is not followed.
+    (( reset > now )) || reset=0
+    ai_helper limit-stop-write "$agent" "$reset" 2>/dev/null || true
     ai_die "$agent usage limit: the reset is beyond the ${max}s wait budget. Rerun after it resets."
+  fi
   until=$(date -d "@$(( now + wait ))" '+%a %H:%M')
   printf '%s usage limit reached; pausing %ss (until %s), then resuming.\n' "$agent" "$wait" "$until"
   # Pauses go to an ignored local log: touching tracked files would dirty the checkpoint.
