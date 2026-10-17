@@ -1,130 +1,110 @@
-# Plan: Flow batch 4: FL-27, FL-25, FL-26, FL-12, CU-2
+# Plan: Flow batch 5: FL-16, CU-5, R13
 
-## Assessment (verified at 7d22939, 2026-10-16)
-Open: FL-27, FL-25 (a and b), FL-26, FL-12, CU-2. Already done and dropped: FL-21 (5-minute
-stall confirmation in the watchdog), CU-4 (colour variables stripped for batches, ANSI-tolerant
-summary), CU-1 (attempts credited to their own model), CU-3 (re-check severity totals).
-Evidence and line references: `.ai/project-spec.md` → "Verified against the code".
+## Assessment (verified at df0d3c2, 2026-10-17)
+Branch `fix/flow-batch-5` builds on PR #29 (`fix/flow-batch-4`, not merged). PR #29's T005/T016
+gave both disposition tables one cell pattern (`TABLE_CELL`, `table_cell`) and line-bound rows
+(`[ \t]*`); FL-16 builds on that. Details, line references and the list of backlog items
+found already done are in `.ai/project-spec.md` ("Verified against the code").
 
 ## Architecture
-Small, local changes; no new runtime dependency, no new executable, no daemon.
-1. **Process ownership in the self-check (T001, T002; opus: process handling, signals,
-   concurrency).** `run_parallel.py main()` calls `enable_subreaper()` (Linux `prctl(36, 1)`
-   through `ctypes.CDLL(None, use_errno=True)`; False elsewhere). The Dispatcher gets a
-   `reap` flag: `run()` joins its threads with a short timeout in a loop and, under the
-   dispatcher lock, reaps adopted zombies (`/proc/<pid>/stat`: ppid == own pid, state `Z`,
-   pid not a running batch) with `waitpid(pid, WNOHANG)`. Never `waitpid(-1)`: it would steal
-   a batch's exit status (Popen then reports 0). `stop()` additionally walks the `/proc` tree
-   below the runner (ppid map; `comm` parsed after the last `)`), SIGTERMs every descendant,
-   waits up to `TERMINATE_GRACE` for them to be gone or zombies, re-walks and SIGKILLs
-   survivors whose start time still matches, up to a few rounds (forks during the stop), then
-   a bounded final wait (`FINAL_WAIT`) confirms every descendant is gone or a zombie; on
-   expiry it names the survivors on stderr and the run exits non-zero. Shutdown has one owner
-   (the first `stop()` caller; later callers wait on `stop_done`), and `reap_adopted()` does
-   nothing while termination is in progress, so the reap loop never frees a PID mid-stop
-   (plan review P4). `run()`'s cleanup-protected `try:` also covers the worker start loop
-   (T013, plan review round 2 P6): an interrupt during a later `thread.start()` calls `stop()`
-   and joins only the threads that started.
-   ```mermaid
-   flowchart LR
-     M[main: enable_subreaper] --> D[Dispatcher.run: workers + reap loop]
-     D -- worker error / SIGINT / SIGTERM --> S[stop: batch groups + /proc descendant tree]
-     S --> T[SIGTERM all, grace]
-     T --> K[re-walk, SIGKILL survivors with same start time]
-     K --> W[final wait: all gone or zombies, else report + exit 1]
-     W --> R[reap adopted zombies, join, re-raise]
-   ```
-   Tests run the dispatcher in a child Python driver (the flag must never be set on a test
-   process) and the real script for SIGTERM/SIGINT, with `timeout 120 sleep 120`.
-2. **Record-format tolerance (T003–T006).** A pure helper `workflow.py tasks fill-sections`
-   (fence-aware through `queue_segments`, atomic write, TODO tasks only) runs on the host after
-   triage, planning and plan-revision sessions, before the reorder / `tasks check` there. The
-   two disposition regexes read cells as `(?:\\.|[^\\|\n])*?` (a backslash always pairs with
-   the next character, so `\|` is never split; plan review P2) and unescape `\|`; one shared
-   cell pattern for both. Prompts and contracts show the task format and the pipe rule.
-3. **Scratch files (T011 opus: deletion; T007 sonnet: prompts/docs).** `workflow.py
-   clear-scratch` pins `.ai/local` with `local_dir_fd` (no symlink followed anywhere on the
-   path) and unlinks / `shutil.rmtree(…, dir_fd=…)`s `scratch` relative to it; unsafe paths
-   warn and continue. `claude_session` calls it before each `claude` call and after the
-   post-session `ai_guard_verify` (the checkout helper is trusted only after that). A
-   path-based `rm -rf` would follow a symlinked `.ai/local` or `.ai` (plan review P1). No
-   permission change: `Bash(rm *)` cannot be limited to untracked or in-checkout paths.
-4. **Recovery answer (T012 scanner, T008 excerpt/prompt/docs; opus: recovery authority).**
-   Design note "Recovery answer scanner" (convergence: plan review P3 hit this area in rounds
-   1 and 2, each time with a new way to hide a candidate inside an enclosing container, a
-   scan at each `{` and then character counts fooled by brackets inside JSON strings; a
-   string-aware count over prose is ill-defined because prose quotes need not balance). The
-   whole area is replaced by one rule that needs no parsing outside the object:
-   `recover_decision` keeps the strict path for a whole-text JSON value; otherwise the first
-   `{` of the text is the only candidate. It must start its line, `raw_decode` from it
-   (duplicate-key hook) must give a dict that ends its line, and the prose before and after
-   it must contain none of `{`, `}`, `[`, `]`. An enclosing container needs a bracket before
-   and after the object, so none can exist; a second object needs a `{` after it, so at most
-   one candidate exists. It is used only when it is a valid decision; everything else
-   escalates. Escalation keeps a cleaned excerpt (T008). Cost: prose with any bracket
-   escalates even before a valid decision; the prompt asks for the object alone.
-5. **Catch-up coverage (T009).** Pure report logic in `outcomes_report` plus a `catchup`
-   outcome kind written by `ai-status --catch-up-done BRANCH...`. "Later" is ordered by
-   `(time, file, line)`: equal seconds cover only within one file at a later line (P5).
+### FL-16 — one finding-cell pattern for both tables (T001, T002)
+- `scripts/lib/workflow.py`: a module constant `FINDING_CELL` (string, like `TABLE_CELL`) with
+  exactly ONE capturing group (the ID); severity suffix and title text are non-capturing. Both
+  `DISPOSITION_ROW` and `PLAN_DISPOSITION_ROW` start with `^\|[ \t]*` + `FINDING_CELL` +
+  `[ \t]*\|`, so groups 1–4 (ID, disposition, evidence, task) stay as every reader uses them.
+- Title text: after the ID (and suffix), a separator of whitespace, or `:` directly after the
+  ID/suffix, optionally followed by `—`, `–` or `-` and whitespace (a dash needs whitespace or
+  the suffix before it, so an ID like `SEC-1` or text `M1-2` is never split), then text that
+  does not start with `(` and contains no unescaped `|` and no newline (reuse the `TABLE_CELL`
+  alternation `(?:\\.|[^\\|\n])`). The text is ignored.
+- Diagnostics: a helper `unmatched_cell_hint(text, finding)` returns ` (the row starting
+  "| <first cell> |" does not match; write "| M1 | accepted | … | T012 |")` when a `|` line's
+  first cell contains the ID as a word but no row matched it. Appended to "MAJOR finding M1 has
+  no disposition." and "Finding P1 has no row in the round N section." (prefixes unchanged, so
+  existing `assertIn` checks hold).
+- Prompts/contracts (T002): show `| M1 | accepted | <evidence> | T012 |` and
+  `| P1 | accepted | <evidence> | T012 |`, ID alone (a severity suffix or title is tolerated).
+
+### CU-5 — attempt marker + reconcile (T003 helper, T004 wiring)
+```mermaid
+sequenceDiagram
+  participant R as ai-run
+  participant H as workflow.py outcome
+  participant S as host state (binding_dir)
+  R->>H: attempt-reconcile (start, under the lock)
+  H->>S: leftover attempt.json? runner dead -> append crashed (once), unlink
+  R->>H: attempt-open TASK MODEL $$
+  H->>S: attempt.json (tmp, fsync, rename, dir fsync), prints id
+  Note over R: session ... SIGKILL here leaves attempt.json
+  R->>H: outcome task ... --attempt ID
+  H->>S: append line (one write, fsync), then unlink attempt.json if id matches
+```
+- Marker: `binding_dir() / 'attempt.json'` (per checkout, host state, outside agent-write roots).
+  One marker per checkout is enough: attempts in one checkout are sequential under the lock.
+- Idempotence: every task outcome written with `--attempt` carries `attempt_id`; reconcile
+  appends `crashed` only when no task record with that id exists, and removes the marker in
+  every terminal case. A crash between append and unlink is therefore harmless.
+- Liveness: pid alive AND `/proc/<pid>/stat` start time equal to the recorded one → a live
+  runner owns it: leave it (should not happen under the lock; comment). Unknown start time
+  recorded (no `/proc`) → treat a live pid as alive.
+- Torn tail: before each append (every kind), if the log is non-empty and its last byte is not
+  `\n`, the one `os.write` on an `O_APPEND` fd starts with `\n`. Concurrent writers from other
+  checkouts can at worst produce an empty line (skipped by `read_outcomes`).
+- `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
+  branch/task/model from the marker, `attempt` numbered as today.
+- Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker path once at
+  start (`outcome attempt-path`) and removes that file with `rm -f --` in that case.
+
+### R13 — boundary cut + full text (T005)
+- `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
+  prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
+  when it keeps at least half the cap, else at the last space, else hard cut; then `…`.
+- `recover_decision`: `clean` uses it; when the reason or human action was cut, it writes both in
+  full (collapsed, at most 4000 characters each) to `.ai/local/recovery-decision.txt`
+  (`atomic`); it removes a stale file at the start of every call. Output stays three TSV fields.
+- `ai-recover` `escalate`: when the file exists, the ⛔ notification ends with
+  `Full text: .ai/local/recovery-decision.txt`.
+- `bounded_questions` uses `shorten(…, QUESTION_CAP)` (no file: the questions' full text is in
+  `plan-dispositions.md`, which the existing pointer line names).
 
 ## Phases / tasks
-Priority order (the most valuable lands first if the night runs short):
-T001 (subreaper + reaping, opus) → T002 (stop kills the descendant tree, opus) → T013
-(interrupt during worker startup goes through `stop()`, opus) → T003
-(`tasks fill-sections`, sonnet) → T004 (host runs it after sessions, sonnet; flow chart) → T005
-(escaped pipes, sonnet) → T006 (FL-25 prompt wording, haiku) → T011 (scratch deletion through
-pinned descriptors, opus; placed before T007 in the queue) → T007 (scratch prompts/docs, sonnet;
-flow chart) → T012 (recovery answer scanner, opus) → T008 (recovery excerpt, prompt, docs,
-opus; flow chart if it describes the answer) → T009 (CU-2, sonnet) → T010 (docs/handoff
-audit, haiku).
-Dependencies: T002 needs T001; T013 needs T002; T004 needs T003; T006 needs T004 and T005 (it
-describes them); T007 needs T011; T008 needs T012; T010 needs all. New tasks sit right after
-their dependency (the queue check wants dependencies earlier in the file). T001/T002 first because the gate itself runs `tests/run_parallel.py`: a
-regression there shows up at once in every later gate run.
-The handoff's "## Flow chart" line reads `Flow unchanged so far` until T004 switches it to
-`Flow chart updated` (`test_pr_body_flow_this_repo_declares_the_flow_chart` needs one of them).
+| Task | Item | Model | Depends |
+| --- | --- | --- | --- |
+| T001 | FL-16 finding cell pattern + hint | sonnet | none |
+| T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
+| T003 | CU-5 helper: marker, reconcile, safe append | opus | none |
+| T004 | CU-5 ai-run wiring, SIGKILL end-to-end, docs, flow chart | opus | T003 |
+| T005 | R13 boundary cut and full recovery text | sonnet | none |
+| T006 | Docs, handoff and final audit | haiku | T001–T005 |
 
 ## Risks
-- The gate runs the changed runner (T001/T002). A reaper that steals a batch's status would
-  turn failures into passes: T001 asserts a failing batch still fails with the subreaper on.
-- Subreaper adoption keeps orphaned fixture processes as the runner's children during a normal
-  run; they are reaped when they exit and, as before, reparent to init when the runner exits.
-  Normal runs do not kill leftovers (unchanged behaviour).
-- PID reuse during a stop: start-time check before SIGKILL; zombies are not reaped until the
-  kill rounds end, so adopted PIDs cannot be reused meanwhile.
-- `test_recovery_decision_parsing_is_strict` stays unchanged: an inline `Decision: {…}` is
-  still escalated (the first `{` must start its line). Accepting prose widens what counts as a
-  decision: guarded by bracket-free prose around a single line-start object (T012), which
-  rules out enclosure without parsing prose, and duplicate-key escalation. Prose containing
-  any bracket escalates (false escalations notify the human; never a wrong action).
-- An interrupt during worker startup used to skip `stop()` entirely (T013 closes it).
-- Scratch clearing deletes on the host after an agent session: only through descriptors pinned
-  without following symlinks (T011); a symlinked parent means a warning, never a delete.
-- A descendant that cannot be confirmed gone after the final wait makes the self-check fail
-  loudly rather than leaving a silent leftover (T002).
-- Filling `### Likely affected modules` with `(not listed)` hides a planner omission; the host
-  prints which tasks it filled, so the log shows it.
-- Installed copies (`.ai/bin`, `.ai/prompts` here and in other projects) keep the old
-  behaviour until the human runs `setup-project --upgrade` (handoff).
+- FL-16 loosening could let a row meant for two findings count for one: it only ever counts
+  for its FIRST ID, and every BLOCKER/MAJOR still needs its own row, so a missing one still
+  fails. `test_triage_severity_suffix_other_decorations_stay_unmatched` changes on purpose
+  (`M1 (MAJOR) x` now matches); its other cases stay.
+- CU-5 durability: plan reviews of `fix/catchup-review` (rounds 5–7) found edge cases in a
+  larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
+  only: unique random ids, one write per line with a newline guard, fsync of the new line and
+  of the marker, reconcile idempotent by id. Durability of earlier rows is a non-goal
+  (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
+  be deferred, not grown into a redesign tonight.
+- CU-5 end-to-end test kills `ai-run` with SIGKILL: its `timeout`/mock children are orphaned;
+  the test must kill them in `addCleanup` (the self-check's subreaper from PR #29 also cleans
+  up on failure).
+- Time: about 5 h until 09:00 with ~7 min per gate run; T003/T004 are the long ones.
 
 ## Validation strategy
-Each task: its targeted `-k` tests, then `.ai/bin/ai-check` (parallel; gate note in
-`.ai/tasks.md`). All tests offline (mock agents, generated suites, real `/proc` on Linux with
-skips elsewhere).
+Per task: the targeted `-k` groups in `.ai/tasks.md`, then `.ai/bin/ai-check` in the
+foreground (600000 ms tool timeout). Tests with time bounds use `tests/timeouts.py` scaling.
 
 ## Assumptions (unattended run; recorded instead of asked)
-- FL-27 uses `PR_SET_CHILD_SUBREAPER` plus a `/proc` walk, not cgroups (no systemd/root
-  dependency); non-Linux keeps the T014 behaviour.
-- FL-25 repairs only the two content-free sections, only in TODO tasks, only on the host paths
-  right after a session; an interrupted triage whose committed queue lacks them still stops
-  (rare after this fix; recorded limitation).
-- FL-25 (b): escaped pipes are accepted, unescaped pipes still split (a row cannot be
-  repaired without guessing).
-- FL-26: no permission change; the host clears `.ai/local/scratch` (gitignored, so the tier-1
-  `git add --all` never stages it).
-- FL-12: prose around one decision is accepted; no `--json-schema` (the CLI flag and the mock
-  would both change; not verifiable offline).
-- CU-2: a later Codex review of the same project and branch covers earlier Claude reviews of
-  the same family; a catch-up on another branch needs the explicit `--catch-up-done` record.
-- Sessions may edit the vault flow chart and append a hub Log line; if denied, the task
-  records it and the handoff lists the pending change.
+- FL-16: tolerating title text after the ID is acceptable (the backlog offers "accept" or
+  "show the form"; both are done). Text before the ID or unknown parenthesised words stay
+  unmatched.
+- CU-5: worth doing now in the limited form above although its backlog note says "do when
+  outcome data drives automatic decisions"; the planner judged the limited form small and safe.
+  Only implementation attempts are tracked (as today).
+- R13: the 300-character caps stay; only where the cut falls and where the full text goes change.
+- R15 is a publishing-policy decision for Zack, so it is listed as a human todo, not planned.
+- The batch builds on PR #29; if #29 changes before merging, this branch is rebased or merged
+  by the human.
