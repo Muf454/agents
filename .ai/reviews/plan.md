@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 7abd705ecfc63bce079b0e82a0551c2467c728c003281bfec6466adec247c9a3; HEAD 0fcb163092dcf7627f8ae611aa85280fd2ae1827; saved 2026-10-17T07:27:43Z. -->
+<!-- Plan review of plan digest 963df3514ddd179831021d7f7f516b7efeda6b7300b89fe3ca368403624580da; HEAD a48e3bdf44c7fd4a2400284ee0e91f34139e20a0; saved 2026-10-17T07:39:04Z. -->
 
 # Plan review
 
-Reviewed HEAD: `0fcb163092dcf7627f8ae611aa85280fd2ae1827`
+Reviewed HEAD: `a48e3bdf44c7fd4a2400284ee0e91f34139e20a0`
 
 Overall verdict: CHANGES REQUIRED before unattended implementation.
-Finding counts: BLOCKER=0 MAJOR=4 MINOR=0
+Finding counts: BLOCKER=0 MAJOR=3 MINOR=0
 
 ## BLOCKER findings
 
@@ -13,37 +13,35 @@ None.
 
 ## MAJOR findings
 
-- P3: Preserved work still cannot resume when the limited session already marked the last task DONE.
+- P2: Restoring an interrupted schedule can leave watchdog stall suppression missing.
 
-  **Location:** `.ai/tasks.md:338`, `.ai/tasks.md:346`; `scripts/ai-pipeline:499`, `scripts/ai-pipeline:507`.
+  **Location:** `.ai/tasks.md:223`, `.ai/tasks.md:252`, `.ai/tasks.md:294`; `scripts/lib/watchdog.py:119`, `scripts/lib/watchdog.py:443`.
 
-  T011 assumes the resumed pipeline reaches an implementation session. A session can mark its last task DONE and then hit the limit before committing—the existing runner explicitly supports validated checkpoints of uncommitted DONE work. On relaunch, `tasks complete` skips `ai-run`, so the arm is never consumed. The review/publish path subsequently refuses the dirty checkout. The new IN_PROGRESS-only regression does not cover this case.
+  Scheduling persists the manifest before appending `pauses.log`. A kill between those operations leaves a pending schedule without its pause entry. The prescribed `limit-hold` path restores the observation and removes the error and marker, but never restores `pauses.log`. T002 suppresses stalls using only `paused_until(local)`, which returns zero without that entry. Two subsequent probes can therefore announce a stalled implementation while its scheduled relaunch is still days away.
 
-  **Plan change:** Define how an armed resume reconciles the interrupted task when no runnable task remains. Preserve validation and checkpoint safeguards, and add a regression where the last task is marked DONE with uncommitted source before the limit; relaunch must complete without a recovery decision session.
+  The proposed interrupted-scheduling tests start from a completed scheduling run, so they retain the pause entry and miss this case.
 
-- P4: Failed ownership revocation can still let a later run override human `--draft` intent.
+  **Plan change:** Make pending-wait restoration rebuild stall-suppression evidence through AT, or make the watchdog recognize pending host schedules directly. Add a regression with a persisted schedule and no pause entry, then recover and run two probes before AT; neither may emit ⛔ or launch an early retry.
 
-  **Location:** `.ai/tasks.md:680`, `.ai/tasks.md:686`.
+- P9: Tree verification can be bypassed by the bookkeeping commit or an early resume path.
 
-  The revision clears ownership during `--draft`, but explicitly treats a failed clear as a warning. If deletion fails while the old record remains readable, the run can finish successfully with that ownership intact. A subsequent clean run reads the matching record and un-drafts the PR. The three-run test covers only successful deletion.
+  **Location:** `.ai/tasks.md:237`, `.ai/tasks.md:337`, `.ai/tasks.md:348`; `scripts/ai-recover:149`, `scripts/ai-recover:165`.
 
-  **Plan change:** Require durable revocation before reporting a successful `--draft` run. If revocation cannot be persisted, stop with an explicit state-repair requirement. Add fault injection for a failed clear with an existing readable record, followed by a clean run, and verify human draft intent remains protected.
+  T012 verifies the saved tree only through `limit-arm`, called when the checkout remains dirty **after** recording stop leftovers. The existing leftovers block commits changes confined to `.ai/state.md`, `.ai/run-log.md` and `.ai/handoff.md`. A human edit to one of those files during the wait is therefore committed before verification; the resulting clean checkout skips `limit-arm` entirely. This contradicts the explicit promise to include bookkeeping changes in the binding and escalate with nothing committed.
 
-- P8: The detached launcher’s predictable log redirection can truncate another file or block.
+  Clean checkouts whose HEAD changed during the wait also skip verification. The open-stage resume branch returns before reaching it.
 
-  **Location:** `.ai/tasks.md:521`.
+  **Plan change:** Verify the scheduled HEAD/index/worktree binding immediately after claiming and passing authority checks, before any checkout mutation or resume branch. Define permitted host bookkeeping transitions only after that verification. Add regressions for a bookkeeping-only human edit, a clean changed HEAD, and an in-scope human edit during an open stage; each must stop without committing or starting a session.
 
-  T006 prescribes a second-resolution filename and `>"$log"` before the child performs its checkout checks. A planted symlink at that path redirects the write outside the checkout; a FIFO can block startup. Two launches within the same second also reuse and truncate the same log, including when the second child subsequently fails to acquire the lock. T001’s safe limit-record writer does not protect this separate write.
+- P10: The proposed tree digest ignores changes inside submodules.
 
-  **Plan change:** Create each detached log exclusively through a safe `.ai/local` directory, and redirect through the already-open descriptor. Add sentinel-symlink, FIFO, unsafe-directory and simultaneous-launch regressions; logs must remain distinct and outside files unchanged.
+  **Location:** `.ai/tasks.md:329`; `scripts/lib/workflow.py:2245`; `tests/test_workflow.py:9663`.
 
-- P9: The preserved-work exception identifies a commit, not the preserved tree.
+  T012 hashes a gitlink/submodule directory as `dir`. The parent index and HEAD do not change when someone edits files or creates a commit inside an initialized submodule. Consequently, those human changes leave the proposed digest unchanged and pass `limit-arm`. A later automatic checkpoint can stage the changed gitlink and absorb the human’s submodule commit.
 
-  **Location:** `.ai/tasks.md:80`, `.ai/tasks.md:331`; `.ai/current-plan.md:60`; `scripts/ai-run:689`.
+  Submodules are supported by existing runner tests. The existing `tree_snapshot()` already recursively includes submodule HEAD, index and working contents, with additional handling for uninitialized submodules.
 
-  Both `limit-arm` and `limit-armed` compare only HEAD. Scheduling releases the checkout lock, potentially for days. Human edits made during that wait leave HEAD unchanged and therefore pass the exception. The resumed session can modify those edits, and its validated automatic checkpoint stages all remaining files. This breaks the stated promise to admit exactly the limited session’s preserved work and removes the existing protection against absorbing unrelated human changes.
-
-  **Plan change:** Bind the resume exception to the preserved index/worktree contents when scheduling, and verify that binding after reacquiring the lock, accounting explicitly for host bookkeeping. Add a regression that edits or adds an unrelated file during the wait without changing HEAD; recovery must preserve it and refuse automatic reconciliation.
+  **Plan change:** Reuse or extend the existing recursive snapshot implementation instead of treating directories as constants. Add digest and relaunch regressions for a changed submodule file and a changed submodule HEAD while the parent HEAD/index remain unchanged; recovery must preserve the changes and refuse automatic continuation.
 
 ## MINOR findings
 
@@ -51,15 +49,17 @@ None.
 
 ## Scope and validation
 
-Inspected repository instructions, spec, revised plan and all eleven tasks, dispositions, state, handoff, relevant documentation, affected scripts/helpers, installation logic, test fixtures and `.ai/validate`.
+Inspected repository instructions, spec, revised plan, all thirteen tasks, latest dispositions, state, handoff, relevant documentation, affected scripts/helpers, installation logic, test fixtures and `.ai/validate`.
 
-The revised plan covers P1, P2, P5, the original P6 limit-record write, and P7. P3 and P4 remain incomplete in the cases above.
+The revised plan covers P1, P3–P8. P2 and P9 remain incomplete in the cases above. These findings concern proposed behavior; implementation has not begun.
 
 Observed checks passed:
 
 - Task queue validation.
 - Documentation consistency: **3 tests**.
 - Shell syntax: **13 files**.
-- Python AST parsing: **6 files**.
+- Python AST parsing: **8 files**.
 
-The full gate and fixture-based integration tests were not run because they require writes unavailable in this read-only review. These checks validate the existing baseline, not the proposed behavior. No files were modified; no network or MCP integrations were invoked.
+The full gate and fixture-based integration tests were not run because they require writes unavailable in this read-only review. These checks validate the baseline, not the proposed behavior.
+
+After implementation, retain the planned supervised checks for real limit recovery, detached planning and PR draft ownership. No files were modified; no network or MCP integrations were invoked.
