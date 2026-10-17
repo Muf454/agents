@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 392914fc2e6fbdde37e3d95642386d7e59f3170217bb7cf819bc08f6a899141a; HEAD ff5f8fdbd7c337918d0b72a02ed987d2462dc885; saved 2026-10-17T08:43:06Z. -->
+<!-- Plan review of plan digest 304d17cc4a953e3f044c2144f543521ae637532a12b30b95c22c6369049967be; HEAD 1281a0f2596c3f63ebdfe486fb6c5fed0eb20f22; saved 2026-10-17T19:02:51Z. -->
 
-# Plan review
+# Plan review — round 9
 
-Overall verdict: CHANGES REQUIRED before unattended implementation.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=1
+Overall verdict: APPROVE WITH MINOR PLAN CORRECTIONS
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `ff5f8fdbd7c337918d0b72a02ed987d2462dc885`
+Reviewed HEAD: `1281a0f2596c3f63ebdfe486fb6c5fed0eb20f22`
 
 ## BLOCKER findings
 
@@ -13,50 +13,42 @@ None.
 
 ## MAJOR findings
 
-- P16: Disarming before task-consistency checks still permits recovery to commit rejected preserved work.
+None.
 
-  **Location:** `.ai/tasks.md:735`, `.ai/tasks.md:778`, `.ai/tasks.md:832`; `.ai/current-plan.md:234`.
-
-  T018 protects the earlier re-check stop, but T011 explicitly removes the arm **before** checking whether another task became DONE or whether the next runnable task matches the bound task. It then states that these failures use normal recovery.
-
-  With approved `AI_AUTO_RECOVER=1`, either consistency failure reaches `stop implementation` and ordinary recovery (`scripts/ai-pipeline:155`). Neither prescribed message matches the recovery hard rules (`scripts/ai-recover:137`), and T018’s new check cannot fire because the arm is gone. A `commit_and_rerun` decision can therefore validate and commit the inconsistent task queue and preserved source (`scripts/ai-recover:200`). If both tasks were marked DONE, the resumed pipeline can skip implementation altogether.
-
-  This defeats T011’s acceptance criterion requiring no session and nothing committed for the additional-DONE case. The fixture’s default `AI_AUTO_RECOVER=0` conceals it.
-
-  **Concrete plan change:** Keep the arm until the preserved-work consistency checks and bound-task routing checks pass. These failures must reach T018’s terminal recovery rule with the arm retained. Run both inconsistent-queue regressions with `AI_AUTO_RECOVER=1` and `MOCK_RECOVER=commit_and_rerun`; assert one escalation, no recovery session, unchanged HEAD/files, and the arm retained. Ordinary recovery may resume after a successful handoff to the bound task.
+The current plan addresses round 8’s P16 through T011/T018/T019: consistency checks, dependency setup and routing occur before disarming, with recovery-enabled regressions requiring no recovery session or commit. T002 also covers P19’s duplicate stall notification after a due relaunch is refused. Neither finding is carried forward.
 
 ## MINOR findings
 
-- P19: A refused due relaunch can also trigger the ordinary stalled-run alarm.
+- P20: T019’s textual span test includes legitimate final-handoff code.
 
-  **Location:** `.ai/tasks.md:169`, `.ai/tasks.md:185`, `.ai/tasks.md:222`.
+  **Location:** `.ai/tasks.md:1197`; `scripts/ai-run:623`.
 
-  T002 continues normal incident detection after handling a due schedule, while suppressing stalls only until AT. A scheduled implementation run retains phase `implementing`. When recovery is refused because the gate changed, no runner starts and no last-error is written (`scripts/lib/watchdog.py:311`).
+  The proposed scan from `limit-disarm` before the task loop to its first `claude_session` would include the loop’s entire `active_task == none` branch. That branch contains three `ai_die` calls, a `git commit` and `exit 0`, which the scan explicitly forbids. These statements are unreachable on the checked session route, but a textual scan still finds them. T011’s planned extraction of `checkpoint_done` does not remove this branch.
 
-  The first due probe records `stall_seen_ns`; a second probe ten minutes later emits the ordinary “killed runner?” escalation (`scripts/lib/watchdog.py:443`). Deduplicating `relaunch:<AT>` does not suppress this separate `stalled` incident. Consequently, the second probe sends another notification despite the acceptance criterion requiring silence.
+  **Concrete plan change:** make the assertion specific to the executable session route, or explicitly extract the final-handoff branch into a separate function before scanning. Keep the behavioral regressions; do not whitelist final-handoff commits as permitted operations before the session.
 
-  **Concrete plan change:** Exclude a due relaunch handled by the probe from ordinary stall detection. Preserve normal stall handling once the schedule is absent. Extend the refusal regression with phase `implementing`, no last-error, and two probes separated by more than `STALL_CONFIRM_NS`; assert exactly one notification overall.
+- P21: A detached planner that finishes before acknowledgement is reported as failed.
 
-## Previous findings re-evaluated
+  **Location:** `.ai/tasks.md:1583`; `scripts/ai-run:373`.
 
-T018 covers P16’s original uncommitted-review-record scenario. The remaining P16 finding concerns the same recovery bypass at T011’s subsequent consistency checks.
+  T006 accepts only a matching `planning/active` observation. If the child completes between polls, its observation becomes `planning/done`; the subsequent child-exit path forces a nonzero result even when `wait` returns zero. A successful plan can therefore produce an “ended early” failure. The sleeping-child acceptance test avoids this case.
 
-P17 is addressed by dependency setup before the preserved DONE checkpoint, including the no-runnable-task case and installer-failure coverage. P18’s message assertions now match the task-bound output. Other previously reported scenarios remain covered by explicit tasks and acceptance criteria.
+  **Concrete plan change:** specify successful completion before acknowledgement as another success case. Require the child’s zero exit status and matching PID’s `planning/done` observation, print the PID and log path, and return zero. Add a regression that deliberately delays the parent’s first observation read until the child finishes.
 
-All 18 tasks specify a model; no additional model-selection finding was identified.
+## Validation observed
 
-## Validation and limitations
+- Task queue check passed: `python3 -B scripts/lib/workflow.py tasks check`.
+- Shell syntax passed for 13 script/template files.
+- Python AST parsing passed for eight source/test files.
+- `git diff --check 88b28e7..HEAD` passed.
+- Working tree remained clean.
 
-Inspected repository instructions, spec, plan, all tasks, state, handoff, dispositions, revision history, relevant source, tests, documentation, and `.ai/validate`.
+The full gate and fixture-based tests were not run: they require filesystem writes unavailable in this read-only review. These static checks do not validate the proposed implementation.
 
-Observed checks passed:
+## Scope, security and architecture
 
-- Task queue validation.
-- Three documentation consistency tests.
-- Shell syntax checks for 13 files.
-- AST parsing for eight Python files.
-- `git diff --check 47e2eab..HEAD`.
+Inspected repository instructions, spec, plan, all 19 tasks, dispositions, state/handoff, relevant documentation, validation entry points, and affected source and test fixtures. No additional security or architecture findings were identified in those inspected areas. Explicit task models fit their described risks.
 
-Read-only, in-memory probes confirmed that both consistency-error messages bypass existing recovery hard rules, and that the planned stall predicate permits the second alarm described in P19.
+## Manual testing recommendations
 
-The full `./scripts/ai-check` and integration fixtures were not run because they require filesystem writes. Proposed behavior remains unimplemented. No files were modified or network/MCP integrations invoked.
+Retain T010’s real limit-resume, detached planning and PR draft-ownership checks, including installed-copy upgrades and watchdog timer reinstallation. This plan review is not human acceptance.
