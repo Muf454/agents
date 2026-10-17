@@ -1,13 +1,11 @@
-<!-- Plan review of plan digest 8118993f2167523afa944932b06f9916c3b22c36120f089b94285b18a81cb4e5; HEAD a557aff4702622ea8f1f437b7fc72c68bcecb718; saved 2026-10-17T02:19:48Z. -->
+<!-- Plan review of plan digest 1ad52147bd2d4078331bd6d74e54d0cc529693bc6066dde72abc783bcd980a08; HEAD 615cbcc68605937599ae40b8644d039261ea85d9; saved 2026-10-17T02:32:14Z. -->
 
-# Plan review — round 6
+# Plan review — round 7
 
-Overall verdict: REVISE BEFORE IMPLEMENTATION
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=0
+Reviewed HEAD: `615cbcc68605937599ae40b8644d039261ea85d9`
 
-Reviewed HEAD: `a557aff4702622ea8f1f437b7fc72c68bcecb718`
-
-The revision addresses P15 when attempt start timestamps differ. Equal timestamps still reproduce the defect, and one new acceptance criterion contradicts the proposed ordering rule.
+Overall verdict: PASS — no findings in the inspected plan and affected code.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
 
 ## BLOCKER findings
 
@@ -15,43 +13,30 @@ None.
 
 ## MAJOR findings
 
-- P15: Delayed reconciliation can still overwrite a successful retry when attempts start in the same second.
-
-  **Location:** `.ai/tasks.md:436`, `.ai/tasks.md:474`, `.ai/tasks.md:513`; `.ai/current-plan.md:194`.
-
-  Markers store `started: int(time.time())`, and T011 breaks timestamp ties using append position. Suppose A opens and dies early, then B opens within the same second while A’s marker remains unreadable. B eventually succeeds; A becomes readable afterward and reconciliation appends its `crashed` row. Both starts are equal, so A sorts last: the task becomes not done and B incorrectly counts as a first-time pass.
-
-  The claim that delayed reconciliation makes equal starts impossible does not hold. Neither the runner nor the helper imposes a minimum interval between opens; B’s duration and the later reconciliation delay do not change its start timestamp.
-
-  **Evidence:** An in-memory evaluation of T011’s specified sort with B’s `done` followed by A’s `crashed`, both with `started=1000`, selects `crashed` as the final result and reports first-time pass as true. The planned regression artificially separates starts by 100 seconds and misses this case.
-
-  **Concrete plan change:** Assign new attempts an ordering key at open that distinguishes sequential attempts independently of append order, such as a persisted sequence, and carry it unchanged into normal and reconciled outcomes. Define legacy compatibility separately. Add a deterministic regression with equal wall-clock seconds and A unreadable through B’s successful completion; repeated reconciliation must leave B as the final attempt.
-
-- P16: T011’s legacy-row acceptance case requires the wrong final result.
-
-  **Location:** `.ai/tasks.md:469`.
-
-  The specified `done` row starts at 09:50, while the `error` row starts at 10:04. Ordering by start time therefore makes `error` the final result, yet the acceptance criterion requires the task to be done. Correct implementation cannot satisfy both this test and T011’s implementation instructions. The stated expectation instead preserves the existing last-appended-line behavior.
-
-  **Concrete plan change:** Keep these inputs and require not done, with `error` as the final result regardless of file order. If a successful final result is intended, change the timestamps so `done` starts later. Explicitly test both file orders.
+None.
 
 ## MINOR findings
 
 None.
 
-## Validation and scope
+## Revision assessment
 
-Inspected repository instructions, spec, plan, all eleven tasks, prior dispositions, state, handoff, affected source, prompts, tests, documentation and `.ai/validate`.
+- **P15 addressed:** T012 replaces wall-clock ordering with a persisted sequence allocated under the shared log lock. T003 preserves that sequence through reconciliation, and T011 derives report results from it. Regression criteria cover equal-second starts and a crash record appended after a successful retry.
+- **P16 addressed:** T011 now specifies consistent results for both file orders of legacy rows and explicitly tests mixed legacy and sequenced records.
 
-Observed passing checks:
+The inspected tasks have explicit models appropriate to their risk, valid dependency ordering, and concrete regression criteria. Earlier fixes for append framing, sync failures, retained markers and restart ordering remain covered.
 
-- Task queue validation.
-- Three `DocsConsistencyTest` tests.
-- Python syntax parsing for four relevant files.
-- Shell syntax checks for five relevant files.
+## Scope and validation
 
-The ordering reproductions ran entirely in memory against the specified algorithm. The full gate and integration tests were not run because they require writable fixtures and artifacts. Implementation remains absent.
+Inspected repository instructions, spec, plan, all task definitions, dispositions, state, handoff, relevant documentation, source, test fixtures, record formats and `.ai/validate`.
 
-No additional authorization or model-selection findings were identified in the inspected scope. After implementation, verify that delayed reconciliation preserves a successful retry’s reported result.
+Observed validation:
 
-No files were modified. No network or MCP integrations were invoked.
+- Task queue check passed.
+- Documentation tests passed: **3 tests**.
+- Shell syntax checks passed for `ai-run`, `ai-recover`, `ai-check` and `.ai/validate`.
+- Python AST parsing passed for the affected workflow module, workflow tests and parallel test runner.
+
+The full gate and fixture-based integration tests were not run because they require writes in this read-only review. The planned behavior tests remain implementation acceptance criteria; current syntax and documentation checks do not validate that future behavior.
+
+Implementation should retain the documented storage-failure limits and complete the planned installed-copy upgrade and disposable-checkout crash checks. This verdict reviews the plan; it does not establish implementation correctness or human acceptance.
