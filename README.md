@@ -439,7 +439,8 @@ relaunch for just after the reset (⏸, exit 75) and the watchdog timer installe
 `AI_LIMIT_RELAUNCH_MAX` (default 2) times per run. Past that cap, without such a timer, with
 `AI_LIMIT_RELAUNCH_MAX=0` or outside the pipeline it stops with a notification so you can rerun
 after the reset (it records the agent and reset time in `.ai/local/limit-stop`). A relaunch
-whose branch moved to another commit during the wait stops without touching anything. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+first checks that HEAD and the whole checkout (submodules included) are exactly as the stop left
+them: any change during the wait, even to a bookkeeping file, stops it with nothing committed. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
 
 ### Claude fallback reviewer

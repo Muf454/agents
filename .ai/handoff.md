@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T014: `-k limit_relaunch_verify` 9 OK; full gate and the other groups see the task result.
+Mutation: moving the `relaunch_verify` call below the leftovers commit fails all 9.
 T012: `.ai/bin/ai-check` PASS (844 tests); `-k limit_relaunch` 27 OK, `-k recovery` 65 OK,
 `-k usage_limit` 6 OK.
 T003: `-k limit_relaunch` 22 OK, `-k recovery` 65 OK, `-k Docs` 3 OK; full gate see the task
@@ -73,8 +75,9 @@ fails 4 of the 8 tests.
 ## Flow chart
 Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path;
 T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recovering timer, cap),
-the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording). Still to
-be updated by T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording; T014: the
+relaunch node verifies HEAD and tree first, else ⛔ with nothing committed). Still to
+be updated by T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -122,9 +125,11 @@ the task named).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
 
 ## Next action
-T001–T003 and T012 done (limit-stop record and manifest schedule helpers; watchdog starts a due
+T001–T003, T012 and T014 done (limit-stop record and manifest schedule helpers; watchdog starts a due
 relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`; ai-recover
 schedules a limit-only stop, restores a pending wait, and resumes a claimed relaunch after
 verifying HEAD and the whole tree (`worktree-digest` = `tree_snapshot`, submodules included);
-`limit_resume` binds `{head, tree}`; `tasks newly-done REV` for T011). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
+`limit_resume` binds `{head, tree}`; `tasks newly-done REV` for T011; T014: that verification
+is the one site before any commit, stage resume or session, followed by a four-row transition
+table). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
 into ai-pipeline's "Start from a clean checkpoint" stop. Next: the queue's next task.

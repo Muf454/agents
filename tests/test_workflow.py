@@ -3,6 +3,7 @@ import ast
 import calendar
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -5488,9 +5489,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def git_head(self):
         return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
 
-    def limit_relaunch_scheduled(self, timer=True, expected=75, **env):
+    def limit_relaunch_scheduled(self, timer=True, expected=75, prepare=None, **env):
         # A pipeline stopped at a usage limit beyond the wait budget, recovering timer installed.
+        # PREPARE runs on the feature branch before the approved run starts.
         self.ready()
+        if prepare:
+            prepare()
         self.mock_systemctl()
         if timer:
             self.watchdog('--install-timer', '--recover')
@@ -5731,6 +5735,167 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'newly-done', 'no-such-revision', expected=1)
         queue.write_text(task('T001', 'DONE') + task('T001'))
         self.helper('tasks', 'newly-done', 'HEAD', expected=1)
+
+    # ---------------------------------------------- relaunch verification contract (T014)
+    def porcelain(self):
+        return self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout
+
+    def subjects_now(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+
+    def verify_refused(self, reason, *changed):
+        # The due relaunch refuses the checkout exactly as found: one ⛔ with REASON, nothing
+        # committed or touched (CHANGED stay byte-identical), no arm, no session, no resume.
+        head, status, subjects = self.git_head(), self.porcelain(), self.subjects_now()
+        contents = [path.read_bytes() for path in changed]
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn(f'Recovery: {reason} while the usage-limit relaunch waited; nothing was committed. '
+                      'Next: inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertNotIn('🔧', notes)
+        self.assertEqual((self.git_head(), self.porcelain(), self.subjects_now()), (head, status, subjects))
+        self.assertEqual([path.read_bytes() for path in changed], contents)
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_verify_bookkeeping_only_edit_escalates(self):
+        # Round 3 P9: confined to the bookkeeping files, the edit used to be committed as leftovers.
+        self.limit_relaunch_scheduled()
+        bookkeeping = [self.project / name for name in ('.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')]
+        with bookkeeping[0].open('a') as file:
+            file.write('A human note during the wait.\n')
+        self.assertLessEqual({line[3:] for line in self.porcelain().splitlines()},
+                             {'.ai/state.md', '.ai/run-log.md', '.ai/handoff.md'})
+        self.verify_refused('the checkout changed', *bookkeeping)
+        self.assertFalse([s for s in self.subjects_now() if s.startswith('chore(ai): record stop during')])
+
+    def test_limit_relaunch_verify_clean_checkout_moved_head_escalates(self):
+        # Round 3 P9: a clean checkout on another commit used to resume.
+        self.limit_relaunch_scheduled()
+        if self.porcelain():
+            self.commit('a human records the stop')
+        (self.project / 'moved.txt').write_text('a human commit during the wait\n')
+        self.commit('human commit')
+        self.assertEqual(self.porcelain(), '')
+        self.verify_refused('the branch moved to another commit')
+
+    def open_host_stage(self, name):
+        # The host record `run-manifest stage-set NAME HEAD` writes (as ai-pipeline does before
+        # a stage); written directly because stage-set needs a published review, which this
+        # fixture (stopped during implementation) has none of.
+        branch, head = 'feature/test', self.git_head()
+        state = next((self.base / 'host-state').rglob('run.json')).parent
+        path = state / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+        digest = {'triage': 'review_digest', 'plan-revision': 'report_digest'}[name]
+        path.write_text(json.dumps({'branch': branch, 'stage': {'name': name, 'start_head': head,
+                                                                digest: '0' * 64}}) + '\n')
+        self.assertEqual(self.helper('run-manifest', 'stage').stdout.split()[:2], [name, head])
+        return path
+
+    def verify_open_stage_edit(self, name, scoped):
+        # Round 3 P9: an in-scope edit while a stage is open used to resume (and be completed).
+        self.limit_relaunch_scheduled()
+        record = self.open_host_stage(name)
+        before = record.read_bytes()
+        edited = self.project / scoped
+        edited.parent.mkdir(parents=True, exist_ok=True)
+        with edited.open('a') as file:
+            file.write('| P1 | accepted | a human edit during the wait | |\n')
+        self.verify_refused('the checkout changed', edited)
+        self.assertEqual(record.read_bytes(), before)
+        self.assertEqual(self.helper('run-manifest', 'stage').stdout.split()[0], name)
+
+    def test_limit_relaunch_verify_triage_stage_in_scope_edit_escalates(self):
+        self.verify_open_stage_edit('triage', '.ai/reviews/dispositions.md')
+
+    def test_limit_relaunch_verify_plan_revision_stage_in_scope_edit_escalates(self):
+        self.verify_open_stage_edit('plan-revision', '.ai/reviews/plan-dispositions.md')
+
+    def scheduled_with_submodule(self):
+        subs = []
+
+        def prepare():
+            subs.append(self.binding_submodule())
+            self.commit('add submodule')
+        self.limit_relaunch_scheduled(prepare=prepare)
+        return subs[0], self.project / 'sub'
+
+    def parent_index(self):
+        return (self.git_head(), self.run_cmd(['git', 'diff', '--cached', '--binary']).stdout,
+                self.run_cmd(['git', 'ls-files', '-s', '--', 'sub']).stdout)
+
+    def test_limit_relaunch_verify_submodule_file_edit_escalates(self):
+        # Round 3 P10: neither the parent HEAD nor its index sees an edit inside a submodule.
+        _, sub = self.scheduled_with_submodule()
+        before = self.parent_index()
+        (sub / 'file.txt').write_text('a human edit inside the submodule\n')
+        self.assertEqual(self.parent_index(), before)
+        self.verify_refused('the checkout changed', sub / 'file.txt')
+        self.assertEqual(self.parent_index(), before)
+
+    def test_limit_relaunch_verify_submodule_commit_escalates(self):
+        # Round 3 P10: a commit inside the submodule moves only its own HEAD.
+        sub_git, sub = self.scheduled_with_submodule()
+        before = self.parent_index()
+        (sub / 'file.txt').write_text('a human commit inside the submodule\n')
+        sub_git(sub, 'commit', '-qam', 'human')
+        sub_head = self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout
+        self.assertEqual(self.parent_index(), before)
+        self.verify_refused('the checkout changed', sub / 'file.txt')
+        # No `git add` of the submodule path: the gitlink and the submodule's HEAD are as found.
+        self.assertEqual(self.parent_index(), before)
+        self.assertEqual(self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout, sub_head)
+
+    def verify_resumes(self, scheduled_head):
+        # The positive control: nothing changed during the wait → the relaunch resumes, records the
+        # stop's leftovers on the scheduled HEAD and the pipeline completes.
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2): feature/test.', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.helper('tasks', 'complete')
+        log = self.run_cmd(['git', 'log', '--format=%H %P %s']).stdout.splitlines()
+        record = next(line for line in log if 'record stop during usage limit relaunch' in line)
+        self.assertEqual(record.split()[1], scheduled_head)
+
+    def test_limit_relaunch_verify_unchanged_checkout_resumes(self):
+        self.limit_relaunch_scheduled()
+        self.verify_resumes(self.git_head())
+
+    def test_limit_relaunch_verify_unchanged_checkout_with_submodule_resumes(self):
+        _, sub = self.scheduled_with_submodule()
+        scheduled, sub_head = self.git_head(), self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout
+        self.verify_resumes(scheduled)
+        self.assertEqual(self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout, sub_head)
+
+    def test_limit_relaunch_verify_single_site_before_any_checkout_mutation(self):
+        self.setup_project()
+        for script in (ROOT / 'scripts/ai-recover', self.project / '.ai/bin/ai-recover'):
+            with self.subTest(script=str(script)):
+                lines = script.read_text().splitlines()
+                calls = [n for n, line in enumerate(lines) if line.strip() == 'relaunch_verify']
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(sum('relaunch_verify' in line and not line.lstrip().startswith('#')
+                                     for line in lines), 2)  # the definition and the one call
+                # Nothing before the call writes to the checkout, reads it to decide or starts a session.
+                mutating = re.compile(r'git (add|commit|stash|checkout|switch|reset|restore|status)|'
+                                      r'claude |limit-arm|_scope|plan-revisions|^\s*resume |'
+                                      r'resume_open_stage|record_stop_leftovers')
+                early = [line for line in lines[:calls[0]] if mutating.search(line)
+                         and not line.lstrip().startswith('#')]
+                self.assertEqual(early, [])
+                text = script.read_text()
+                self.assertIn("\"${1#Error: } while the usage-limit relaunch waited; nothing was committed.\" \\\n"
+                              "    'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'", text)
 
     def test_limit_relaunch_recover_cap_reached_escalates(self):
         self.limit_relaunch_scheduled(AI_LIMIT_RELAUNCH_MAX='1')

@@ -596,7 +596,7 @@ signatures: `limit_relaunch_fixture`, `test_limit_relaunch_watchdog_absent_sched
 
 
 ## T014 — Relaunch binding verification contract: one verification site before any checkout mutation (MC-01 part 1, plan review round 3 P9/P10 design task)
-Status: TODO
+Status: DONE
 Dependencies: T003, T012
 Model: opus
 
@@ -681,6 +681,40 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- Audit of `scripts/ai-recover` (lock → `resume`). Before the single `relaunch_verify` call:
+  only `.ai/local/` writes (`recovery-decision.txt` removal, `pauses.log`, `last-error`,
+  `pipeline.active`, via `relaunch_wait`/`escalate`), host-state actions (`state-root-check`,
+  `run-manifest gate`/`reserve-attempt`/`env`/`limit-hold`/`limit-claim`), observations and
+  notifications, and the read-only gate/branch checks (`ai_guard_digest`, `ai_gate_check`,
+  `git symbolic-ref`). After it: `run-manifest args`, `plan-revisions decision` (+ its
+  `stage-clear`), `resume_open_stage` (`run-manifest stage`, `triage-scope`/`plan-revision-scope`,
+  `resume`), `record_stop_leftovers` (`git status`, `git add`, `git commit`, `ai_gate_check`),
+  the dirty test and `limit-arm`, `resume` (exec ai-pipeline); the non-relaunch path (limit
+  schedule, hard rules, Claude session, `git add --all`/commit/reset) also lies below it. No
+  statement needed moving: T003 already placed the call there.
+- Transition table added as a comment right after `▶ RESUMED` (a)–(d) as the plan states.
+  `limit-arm` refusing in (c) escalates with the verify wording; no host step between the
+  verification and the arm touches the checkout and the checkout lock is held, so only an
+  out-of-band writer ignoring the lock could reach it.
+- Escalation texts: T003's and T012's tests assert the helper reason + `while the usage-limit
+  relaunch waited` and `nothing was committed` (no drift, unchanged); the new tests assert the
+  whole `Recovery: … nothing was committed. Next: inspect the checkout, commit or discard what
+  changed, then rerun ai-pipeline.` text.
+- 9 `test_limit_relaunch_verify_*` tests: bookkeeping-only edit, clean moved HEAD, in-scope edit
+  with an open triage stage (`.ai/reviews/dispositions.md`) and with an open plan-revision stage
+  (`.ai/reviews/plan-dispositions.md`), submodule file edit, submodule commit (gitlink and sub
+  HEAD unchanged), positive controls without and with an untouched submodule, single call site
+  in `scripts/ai-recover` and the fixture's `.ai/bin/ai-recover` with no mutating/deciding
+  statement before it. Deviation: the open-stage tests write the host stage record that
+  `run-manifest stage-set` writes (same file, fields and branch) instead of calling
+  `stage-set`, which requires a published review/plan review that this fixture (stopped during
+  implementation) does not have; `run-manifest stage` reads it back before the relaunch.
+- Mutation: the call moved below `record_stop_leftovers` fails all 9 tests.
+- docs/workflow.md: "What a relaunch accepts" paragraph in the recovery contract, a pointer in
+  "Interruption, limits, and recovery"; README recovery sentence; vault flow chart relaunch node.
+- Validation: `-k limit_relaunch_verify` 9 OK; `-k limit_relaunch` 36 OK; `-k recovery` 65 OK;
+  `-k usage_limit` 6 OK; `-k watchdog` 61 OK; `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (853
+  tests, 464.9 s).
 
 
 ## T017 — Preserved work is bound to the interrupted task: manifest task record, task-bound arm (MC-01 part 1, plan review round 6 P3 design task)

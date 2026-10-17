@@ -217,6 +217,13 @@ record_stop_leftovers() {
 if [[ "$relaunch" == yes ]]; then
   # The claimed relaunch resumes the approved run: no Claude decision, no recovery attempt.
   ai_notify "▶ RESUMED after the usage limit (relaunch $count/$cap): $branch."
+  # The only transitions of the VERIFIED tree (relaunch_verify passed; the lock is held):
+  #   (a) an open stage → resume (its scope check kept);
+  #   (b) dirty only in .ai/state.md, .ai/run-log.md, .ai/handoff.md → the leftovers commit →
+  #       ai_gate_check → resume;
+  #   (c) dirty otherwise → limit-arm → resume (a refusal escalates with the verify wording);
+  #   (d) clean → resume.
+  # Nothing else is permitted: a new branch here needs this table (and docs/workflow.md) changed.
   resume_open_stage quiet
   record_stop_leftovers
   if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then

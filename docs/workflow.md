@@ -249,7 +249,9 @@ the relaunch schedule (`run-manifest limit-schedule AT CAP`, which records HEAD 
 `ai-recover` reserved; a human start and `clear-attempts` drop them; cap
 `AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
-and the watchdog timer (`--recover`) starts it after the reset. No infinite loop, boot startup, or monetary spending guarantee is added.
+and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
+checkout it stopped with, verified before anything else touches it (see "What a relaunch
+accepts"). No infinite loop, boot startup, or monetary spending guarantee is added.
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
@@ -722,6 +724,22 @@ paused <AT-now>s: <Agent> usage limit relaunch (resume ~<time>)` to `pauses.log`
 `relaunch AT`, notifies `⏸ PAUSED: <branch> stopped at a <Agent> usage limit during <stage>;
 relaunches by itself after <time> (relaunch k/cap).`, removes `last-error`, `limit-stop` and the
 marker, and exits 75 with no ⛔.
+
+**What a relaunch accepts.** One verification, one site: `relaunch_verify` is called exactly
+once in `ai-recover`, after the gate and branch checks and before anything that commits,
+stashes, checks out, writes a tracked file, reads the checkout to decide (the plan-revision
+decision, the open-stage scope check, the leftovers and dirty tests) or starts a session. It
+compares HEAD and the whole tree (`worktree-digest`) with what `limit-schedule` recorded. A
+change anywhere in the checkout during the wait (tracked, untracked, staged, a bookkeeping file
+alone, a commit, a file or a commit inside a submodule, an in-scope edit while a triage or
+plan-revision stage is open) escalates with `nothing was committed.`, `Next: inspect the
+checkout, commit or discard what changed, then rerun ai-pipeline.`, and leaves the checkout
+exactly as found. Only a verified tree is then transformed, in exactly four ways (the table
+after the `▶ RESUMED` notification in `ai-recover`): (a) an open stage → resume (its scope
+check kept); (b) dirty only in `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md` → the
+leftovers commit → gate check → resume; (c) dirty otherwise → `limit-arm` → resume; (d) clean →
+resume. `limit-arm` refusing in (c) escalates with the verify wording; no host step between the
+verification and the arm touches the checkout, and the checkout lock is held throughout.
 
 The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
