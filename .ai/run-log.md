@@ -347,3 +347,4 @@
 | 2026-10-17 | claude (opus) | T017 | DONE: `process_table()` lets a `/proc` listing `OSError` propagate (`{}` only without `/proc`), so a stop reports `unknown (descendant scan failed: …)`; `reap_adopted()` skips that round; 2 `test_parallel_runner_tree_proc_listdir_*` tests; docs/workflow.md; handoff Next action current (N2) | PASS (ai-check, 746 tests; -k parallel_runner 34 OK) | parent aff6dae | Mutation: old `return {}` and unguarded reap each fail; flow unchanged |
 | 2026-10-17T01:23:41Z | runner | T017 | completed | PASS | dcc02bf | Claude checkpointed; continuing queue |
 | 2026-10-17T01:30:17Z | runner | none | queue complete; ready for independent review | PASS | fda736b | Human acceptance remains |
+| 2026-10-17T01:33:12Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/29 | PASS | 5235203 | Human acceptance and merge remain |
