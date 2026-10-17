@@ -584,7 +584,7 @@ by `seq`), T010 `test_outcome_marker_contract_invalid_content` adds missing / `t
 
 
 ## T011 — CU-5 report derives result, attempts and first pass from the attempt sequence; `started` on task records; docs (CU-5, part 0f, round 5 redesign as revised in round 6)
-Status: TODO
+Status: DONE
 Dependencies: T012
 Model: opus
 
@@ -661,6 +661,16 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17 (claude opus). `outcome task` rows carry `started` (`int(time.time()) - seconds`);
+`attempt`/`first_pass` still written, commented as unread by the report. `outcomes_report` uses
+`ordered_attempts`: `final` = last row, `first_row` = first row, first-time pass = first row
+`done`, avg attempts = list length; no read of `first_pass`/`attempt` remains. Tests:
+`test_outcome_attempt_order_round6_equal_seconds`, `_pre_upgrade_rows_follow_file_order`,
+`_mixed_rows`, `_real_log_started`. Existing report tests (credits_each_attempt, old_lines,
+old_line_followed_by_new_attempt, runner_logs_task_outcomes_and_report) pass unchanged.
+README "Outcome log" and docs/workflow.md "Outcome log" document `seq`/`started` and the seq
+order. Evidence: -k outcome_attempt_order 4 OK; -k outcome 52 OK; -k Docs 3 OK; ai-check PASS
+(782 tests, 403.7 s). Flow unchanged.
 
 
 ## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)

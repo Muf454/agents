@@ -492,7 +492,9 @@ only a re-check, never a full review) exists, or you record a catch-up done on a
 `~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
-no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration; for reviews: mode, reviewer
+no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration,
+`seq` (host-wide order key, allocated when the attempt opens; gaps are normal) and `started`
+(epoch seconds, informational); for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
 line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
 `reviewed_head` instead (omitted when the re-check report cannot be verified).
@@ -500,7 +502,9 @@ line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_m
 category (per task) and per model and model/category (per attempt, each credited to the
 model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks
 per reviewer, and the
-Claude-only reviews awaiting the Codex catch-up. Use it to see which categories could
+Claude-only reviews awaiting the Codex catch-up. It orders a task's attempts by `seq`, so an
+attempt recorded late keeps its place (rows written before `seq` existed come first, in file
+order). Use it to see which categories could
 move to haiku and which keep failing on sonnet.
 
 ### Models

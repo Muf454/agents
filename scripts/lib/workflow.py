@@ -3380,7 +3380,11 @@ def outcome(arguments):
         title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
+        # `attempt` and `first_pass` are counted at append time and kept for readers of the log;
+        # the report no longer reads them (it derives both from the seq order).
         attempt = len(earlier) + 1
+        # The attempt's start as the runner measured it (epoch seconds; informational, never an order key).
+        started = int(time.time()) - int(seconds)
         seq = None  # T003: the marker's seq for an --attempt row with a readable marker
         if seq is None:
             # A row is never written without seq: one without would sort as a pre-upgrade row,
@@ -3391,7 +3395,7 @@ def outcome(arguments):
                 fail(f'Could not allocate the attempt sequence: {attempt_seq_path()}.')
         record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
                       result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
-                      seconds=int(seconds), seq=seq)
+                      seconds=int(seconds), started=started, seq=seq)
     elif kind == 'review':
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
@@ -3436,33 +3440,30 @@ def outcomes_report(arguments):
         print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
         return
     task_rows = [r for r in records if r.get('kind') == 'task']
-    final, spent = {}, {}
-    for r in task_rows:  # a task's last line is its result; its time is the sum of its attempts
-        key = (r.get('project'), r.get('branch'), r.get('task'))
-        final[key] = r
-        spent[key] = spent.get(key, 0) + (r.get('seconds') or 0)
+    ordered = ordered_attempts(task_rows)
+    # A task's last attempt in sequence order is its result; a crashed attempt may be appended
+    # late; rows without `seq` are pre-upgrade rows in file order. Its time is the sum of its attempts.
+    final = {key: rows[-1] for key, rows in ordered.items()}
+    first_row = {key: rows[0] for key, rows in ordered.items()}
+    spent = {key: sum(r.get('seconds') or 0 for r in rows) for key, rows in ordered.items()}
 
     def table(title, key):
         groups = {}
         for task_key, r in final.items():
-            groups.setdefault(key(r), []).append((r, spent[task_key]))
+            groups.setdefault(key(r), []).append(task_key)
         lines = [f'## Tasks by {title}', '',
                  f'| {title} | tasks | first-time pass | done | not done | avg attempts | avg minutes |',
                  '| --- | --- | --- | --- | --- | --- | --- |']
         for name in sorted(groups, key=str):
-            rows = groups[name]
-            count = len(rows)
-            first = sum(bool(r.get('first_pass')) for r, _ in rows)
-            done = sum(r.get('result') == 'done' for r, _ in rows)
-            attempts = sum(r.get('attempt', 1) for r, _ in rows) / count
-            minutes = sum(seconds for _, seconds in rows) / count / 60
+            keys = groups[name]
+            count = len(keys)
+            first = sum(first_row[k].get('result') == 'done' for k in keys)
+            done = sum(final[k].get('result') == 'done' for k in keys)
+            attempts = sum(len(ordered[k]) for k in keys) / count
+            minutes = sum(spent[k] for k in keys) / count / 60
             lines.append(f'| {name} | {count} | {first}/{count} ({100 * first // count}%) | {done} | '
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
-
-    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
-    for r in task_rows:
-        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
 
     def attempts_table(title, key):
         groups = {}
@@ -3476,7 +3477,7 @@ def outcomes_report(arguments):
             rows = groups[name]
             done = sum(r.get('result') == 'done' for r, _ in rows)
             starts = [r for r, is_first in rows if is_first]
-            first = sum(bool(r.get('first_pass')) for r in starts)
+            first = sum(r.get('result') == 'done' for r in starts)
             rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
             minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
             lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')

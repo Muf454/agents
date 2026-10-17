@@ -99,7 +99,8 @@ tests (the groups are added by the tasks named).
   `ordered_attempts` puts rows without `seq` first in file order and the rest by `seq`; done).
 - `test_outcome_attempt_order_*` (T011: a crashed attempt appended after a later `done` of
   the same task keeps its place by `seq`, also with equal wall-clock seconds, so the task
-  stays done with both attempts counted; rows without `seq` keep today's file order).
+  stays done with both attempts counted; rows without `seq` keep today's file order; a real
+  row carries an int `started`; done).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
   runner kept, garbage marker, an unreadable marker kept while the others are processed,
   torn last line, short write keeps the marker, a failed first outcome survives the second

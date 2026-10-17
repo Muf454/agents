@@ -899,7 +899,11 @@ commits with its own record). `pr-body` titles the review section "Claude fallba
 `blocked`, `validation_failed`, `no_checkpoint`, `timeout`, `interrupted` or `error` per
 task attempt with the session model and the seconds from session start to result; the
 attempt number counts earlier lines for the same project (main repository name, shared by
-worktrees), branch and task. Failures to write are reported and never stop the run.
+worktrees), branch and task (kept for readers of the log; the report derives its numbers from
+`seq`). `seq` orders the attempt among all attempts the host recorded (allocated at the
+attempt open, or at the append for an attempt without one, from `attempt-seq` beside the log;
+gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
+order key). Failures to write are reported and never stop the run.
 
 Every line goes through `append_outcome`: on a read-write `O_APPEND` descriptor it takes
 `flock(LOCK_EX)` (so the tail check and the write are one step for every writer using the
@@ -963,10 +967,12 @@ ends (or hits its limit), and the `interrupted` line's time is then, not the key
 pipeline launched in the background from a non-interactive shell (`nohup … &`) inherits SIGINT
 as ignored, and bash cannot trap a signal ignored on entry: stop such a pipeline with SIGTERM.
 `outcomes-report` (`ai-status
---outcomes`) aggregates the last line per task (first-time pass, done, attempts, summed
-minutes) by category, and every attempt by the model that ran it ("Attempts by model",
+--outcomes`) aggregates per task the last attempt by `seq` (a crashed attempt reconciled late
+keeps its place; first-time pass = the first attempt by `seq` ended `done`; rows without `seq`
+(written before this version) come first, in file order) with done, attempts and summed
+minutes by category, and every attempt by the model that ran it ("Attempts by model",
 "Attempts by model and category": attempts, done, not done, first-time pass over tasks
-whose first line ran on that model, average minutes per attempt), and reviews by
+whose first attempt ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
 
 ## Observation records and the dashboard

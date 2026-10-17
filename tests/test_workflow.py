@@ -1,5 +1,6 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import ast
+import calendar
 import contextlib
 import errno
 import importlib.util
@@ -5534,6 +5535,49 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             {'task': 'T010', 'model': 'opus', 'attempt': 2, 'result': 'done', 'first_pass': False, 'seconds': 120}])
         self.assertIn('| default | 1 | 0 | 1 | 0/1 (0%) | 1.0 |', report)
         self.assertIn('| opus | 1 | 1 | 0 | - | 2.0 |', report)
+
+    def test_outcome_attempt_order_round6_equal_seconds(self):
+        done = {'task': 'T001', 'model': 'm', 'attempt': 1, 'first_pass': True, 'result': 'done', 'seconds': 5,
+                'started': 1000, 'seq': 2}
+        crashed = {'task': 'T001', 'model': 'm', 'attempt': 2, 'first_pass': False, 'result': 'crashed',
+                   'seconds': None, 'started': 1000, 'seq': 1}
+        reports = [self.outcome_report_for([done, crashed]), self.outcome_report_for([crashed, done]),
+                   self.outcome_report_for([done, {**crashed, 'started': 900}])]
+        for report in reports:
+            self.assertIn('1 task(s), 2 attempt(s)', report)
+            self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 2.0 | 0.1 |', report)
+            self.assertIn('| m | 2 | 1 | 1 | 0/1 (0%) |', report)
+        self.assertEqual(len(set(reports)), 1)
+
+    def test_outcome_attempt_order_pre_upgrade_rows_follow_file_order(self):
+        error = {'task': 'T001', 'result': 'error', 'time': '2026-10-17T10:05:00Z', 'seconds': 60}
+        done = {'task': 'T001', 'result': 'done', 'time': '2026-10-17T10:00:00Z', 'seconds': 600}
+        report = self.outcome_report_for([error, done])
+        self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 2.0 | 11.0 |', report)
+        report = self.outcome_report_for([done, error])
+        self.assertIn('| feature | 1 | 1/1 (100%) | 0 | 1 | 2.0 | 11.0 |', report)
+
+    def test_outcome_attempt_order_mixed_rows(self):
+        old = [{'task': 'T001', 'result': 'error', 'seconds': 60}, {'task': 'T001', 'result': 'done', 'seconds': 60}]
+        crashed = {'task': 'T001', 'model': 'm', 'result': 'crashed', 'seconds': None, 'seq': 1}
+        done = {'task': 'T001', 'model': 'm', 'result': 'done', 'seconds': 60, 'seq': 2}
+        reports = [self.outcome_report_for([*old, crashed, done]), self.outcome_report_for([*old, done, crashed])]
+        for report in reports:
+            self.assertIn('1 task(s), 4 attempt(s)', report)
+            self.assertIn('| feature | 1 | 0/1 (0%) | 1 | 0 | 4.0 | 3.0 |', report)
+        self.assertEqual(reports[0], reports[1])
+
+    def test_outcome_attempt_order_real_log_started(self):
+        self.outcome_log_project()
+        before = int(time.time())
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        after = int(time.time())
+        row = self.outcome_rows()[-1]
+        self.assertIs(type(row['started']), int)
+        self.assertIs(type(row['seq']), int)
+        self.assertTrue(before - 5 <= row['started'] <= after - 5, (before, row['started'], after))
+        logged = calendar.timegm(time.strptime(row['time'], '%Y-%m-%dT%H:%M:%SZ'))
+        self.assertLessEqual(abs(row['started'] - (logged - 5)), 2)  # `time` minus `seconds`
 
     def catchup_report(self, rows, extra_files=()):
         self.setup_project()
