@@ -65,7 +65,7 @@ PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 - R15 (un-draft PRs) is not planned: it changes what the pipeline publishes (human decision).
 
 ## Flow chart
-T004 updated the "Outcome log" bullet of `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
+Flow chart updated (T004): the "Outcome log" bullet of `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
 (an attempt whose runner was killed is logged as crashed at the next start); T005 updates the notifications text only if the chart states the 300-character cut.
 
 ## Manual testing for the human
