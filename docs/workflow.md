@@ -901,6 +901,14 @@ task attempt with the session model and the seconds from session start to result
 attempt number counts earlier lines for the same project (main repository name, shared by
 worktrees), branch and task. Failures to write are reported and never stop the run.
 
+Every line goes through `append_outcome`: one `write` on a read-write `O_APPEND` descriptor,
+prefixed with a newline when the log does not end in one (a torn earlier line never swallows
+the record), then `fsync`. A short write is a failure (`outcome` exits 1 with "Could not append
+the outcome line completely"), never retried: another checkout may have appended in between,
+and the next append's newline guard isolates the fragment. `read_outcomes` splits the bytes on
+`\n` only and decodes each line on its own, so a torn tail (even one cut inside a multibyte
+UTF-8 character) or a U+2028 in a title costs at most that one line.
+
 A `review recheck` line records, instead of finding counts, how many rejected BLOCKER and
 MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `withdrawn_blocker`,
 `withdrawn_major`) and the full SHA the re-checked review covered (`reviewed_head`), read from the

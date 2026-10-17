@@ -1,7 +1,8 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet in this batch. Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
+Done so far: T001, T002, T007 (`append_outcome` + per-line `decode_outcome_lines` reader in
+`scripts/lib/workflow.py`; `outcome` fails with exit 1 on a short write). Branch `fix/flow-batch-5` (from `fix/flow-batch-4` at df0d3c2;
 PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session):
 - T001 FL-16 (sonnet): both disposition tables read a first cell `ID`, `ID (SEVERITY)` or
   `ID (SEVERITY) title` (also `ID — title`, `ID: title`); decoration before the ID, unknown
@@ -42,7 +43,8 @@ FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage hal
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-None yet in this batch. PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
+2026-10-17 T007: `.ai/bin/ai-check` PASS (758 tests, 417.3 s on 8 workers); `-k outcome` 28 OK.
+PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 
 ## Assumptions
 - FL-16: tolerating title text after the ID is fine; a row counts only for its first ID.
@@ -77,7 +79,7 @@ tests (the groups are added by the tasks named).
 - `test_finding_cell_*` (T001: severity suffix and title accepted in both tables, decorations
   still rejected with a hint; T002: `test_finding_cell_prompts_show_the_row`).
 - `test_outcome_log_io_*` (T007: append to a non-empty log, newline guard, torn multibyte tail
-  skipped, short write reported as failure).
+  skipped, U+2028 in a title, short write reported as failure).
 - `test_outcome_write_protocol_*` (T008: append waits for the log lock so a concurrent partial
   line cannot swallow it, file/directory fsync order, directory-sync failure, marker store
   never overwrites).
@@ -116,4 +118,4 @@ tests (the groups are added by the tasks named).
 - Merge order: PR #29 before this branch (it builds on #29).
 
 ## Next action
-Start the pipeline on `fix/flow-batch-5` (plan review, then T001).
+Continue the queue (next unblocked task after T007; T008 builds on `append_outcome`).

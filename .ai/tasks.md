@@ -152,7 +152,7 @@ Limitation: the installed `.ai/prompts` copy changes only after `setup-project -
 
 
 ## T007 — Outcome log I/O: readable append descriptor, complete-write check, per-line UTF-8 reader (CU-5, part 0)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -216,6 +216,16 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-17: `append_outcome` (O_RDWR|O_APPEND|O_CREAT, pread newline guard, one write, short
+write → False without fsync, no retry) and `decode_outcome_lines` (split on b'\n', strict
+per-line UTF-8, line index kept) in `scripts/lib/workflow.py`; `read_outcomes` uses it;
+`outcome` appends through `append_outcome` and fails `Could not append the outcome line
+completely: <path>.` (exit 1) on False/OSError; `ai-run`/`ai-review` already ignore a failed
+`outcome` call (`|| printf 'Note: …'`). Five `test_outcome_log_io_*` tests (non-empty append,
+torn line with/without final newline, torn multibyte tail + `ai-status --outcomes`, U+2028
+title, short write unit + CLI exit 1 via runpy). `-k outcome_log_io` Ran 5 OK; `-k outcome`
+Ran 28 OK; `.ai/bin/ai-check` PASS (758 tests). `docs/workflow.md` "Outcome log" describes it.
+No lock or directory fsync (T008).
 
 
 ## T008 — CU-5 write protocol: locked append with directory sync, one marker file per attempt (CU-5, part 0b)

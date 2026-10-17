@@ -5610,6 +5610,88 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('Codex catch-up pending', self.catchup_report([{'kind': 'catchup', 'time': t}, self.claude_review(t)]))
         self.assertIn('Codex catch-up pending', self.catchup_report([self.claude_review(t)], [[{'kind': 'catchup', 'time': t}]]))
 
+    def outcome_module(self):
+        spec = importlib.util.spec_from_file_location('workflow', HELPER)
+        wf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf)
+        return wf
+
+    def outcome_log_project(self):
+        self.setup_project()
+        self.commit()  # review records carry HEAD
+
+    def outcome_log_review(self, expected=0):
+        return self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5', expected=expected)
+
+    def outcome_log_records(self):
+        return self.outcome_module().read_outcomes([self.base / 'host-state/outcomes.jsonl'])
+
+    def test_outcome_log_io_appends_to_a_non_empty_log(self):
+        self.outcome_log_project()
+        for _ in range(3):
+            self.outcome_log_review()
+        self.assertEqual([r['kind'] for r in self.outcome_log_records()], ['review'] * 3)
+
+    def test_outcome_log_io_torn_line_without_final_newline(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        log.write_bytes(log.read_bytes() + b'{"time": "x", "kin')
+        self.outcome_log_review()
+        records = self.outcome_log_records()
+        self.assertEqual([(r['kind'], r['_at'][1]) for r in records], [('review', 0), ('review', 2)])
+        self.outcome_log_review()  # the log ends in a newline now: no empty line is inserted
+        self.assertEqual(log.read_bytes().count(b'\n'), 4)
+        self.assertEqual([r['_at'][1] for r in self.outcome_log_records()], [0, 2, 3])
+
+    def test_outcome_log_io_torn_multibyte_tail(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        log.write_bytes(log.read_bytes() + b'{"title": "caf\xc3')
+        self.assertEqual(len(self.outcome_log_records()), 1)
+        self.outcome_log_review()
+        self.assertEqual(len(self.outcome_log_records()), 2)
+        self.assertIn('codex', self.tool('ai-status', '--outcomes').stdout)
+
+    def test_outcome_log_io_line_separator_in_a_title(self):
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        title = 'one\N{LINE SEPARATOR}two'
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'title': title}))
+        self.assertTrue(wf.append_outcome(log, {'kind': 'task', 'title': 'three'}))
+        self.assertIn('\N{LINE SEPARATOR}'.encode(), log.read_bytes())  # written unescaped
+        self.assertEqual([r['title'] for r in wf.read_outcomes([log])], [title, 'three'])
+
+    def test_outcome_log_io_short_write_is_a_failure(self):
+        import runpy
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        real_write = os.write
+
+        def half_write(fd, data):
+            if b'"kind"' not in data:
+                return real_write(fd, data)
+            return real_write(fd, data[:len(data) // 2])
+
+        wf = self.outcome_module()
+        with mock.patch('os.write', half_write), mock.patch('os.fsync') as fsync:
+            self.assertFalse(wf.append_outcome(log, {'kind': 'review', 'reviewer': 'unit'}))
+        fsync.assert_not_called()
+        stderr = io.StringIO()
+        with mock.patch('os.write', half_write), mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', 'review', 'code', 'codex', 'm', 'high', '5']), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as stop:
+            runpy.run_path(str(HELPER), run_name='__main__')
+        self.assertEqual(stop.exception.code, 1)
+        self.assertIn('Could not append the outcome line completely', stderr.getvalue())
+        self.outcome_log_review()
+        records = self.outcome_log_records()
+        self.assertEqual([r['reviewer'] for r in records], ['codex', 'codex'])
+        self.assertEqual(log.read_bytes().count(b'\n'), 4)  # two records, two newline-isolated fragments
+
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []

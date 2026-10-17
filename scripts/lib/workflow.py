@@ -3005,23 +3005,56 @@ def task_category(title):
     return 'feature'
 
 
+def decode_outcome_lines(data):
+    """(line index, record) for every valid JSON object line of an outcome log's bytes.
+    Each line is decoded on its own: a torn tail can end inside a multibyte character, and a
+    whole-file decode raised before any line was parsed. Splitting on b'\\n' only, because
+    str.splitlines also splits on U+2028 inside ensure_ascii=False records."""
+    records = []
+    for line_index, line in enumerate(data.split(b'\n')):
+        try:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError:  # UnicodeDecodeError is a ValueError
+            continue
+        if isinstance(record, dict):
+            records.append((line_index, record))
+    return records
+
+
 def read_outcomes(paths):
     """Records in file order; each carries `_at` = (file index, line index), its write position."""
     records = []
     for file_index, path in enumerate(paths):
         try:
-            lines = Path(path).read_text().splitlines()
+            data = Path(path).read_bytes()
         except OSError:
             continue
-        for line_index, line in enumerate(lines):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                record['_at'] = (file_index, line_index)
-                records.append(record)
+        for line_index, record in decode_outcome_lines(data):
+            record['_at'] = (file_index, line_index)
+            records.append(record)
     return records
+
+
+def append_outcome(path, record):
+    """Append one record as one line; False when the write was short. OSError propagates."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Read-write: the newline guard reads the last byte, and os.pread on O_WRONLY raises EBADF.
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        size = os.fstat(fd).st_size
+        # A torn earlier line (no final newline) must not swallow this record.
+        prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
+        data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+        # One write call; a short write is a failure, never success. No retry of the remainder:
+        # another checkout may have appended in between, and the next append's newline guard
+        # isolates the fragment instead.
+        if os.write(fd, data) != len(data):
+            return False
+        os.fsync(fd)
+        return True
+    finally:
+        os.close(fd)
 
 
 def outcome_title(task_id):
@@ -3101,9 +3134,12 @@ def outcome(arguments):
         record['branch'] = rest[0]
     else:
         fail(f'Unknown outcome kind: {kind}')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as log:
-        log.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n')
+    try:
+        complete = append_outcome(path, record)
+    except OSError:
+        complete = False
+    if not complete:
+        fail(f'Could not append the outcome line completely: {path}.')
 
 
 def outcomes_report(arguments):
