@@ -1,11 +1,13 @@
-<!-- Plan review of plan digest 6ae36a6ae582d84501fcdcbe6a9d907830e48fe62d505fcc764bd450ed9420ae; HEAD e957b52432fa9523e5bd4d146aafde77b1cb5dbc; saved 2026-10-17T01:43:16Z. -->
+<!-- Plan review of plan digest 0e6f1698d8f35c7994f2c3339324cdf0d3cb64bcfdb2c5856138ad675e0dd7b5; HEAD b62dd2920c9cda15b2adfc1b3cac3439c08d57ce; saved 2026-10-17T01:48:48Z. -->
 
 # Plan review
 
-Review scope: HEAD `e957b52432fa9523e5bd4d146aafde77b1cb5dbc`.
+Review scope: HEAD `b62dd2920c9cda15b2adfc1b3cac3439c08d57ce`, round 2.
 
 Overall verdict: Revise before unattended implementation.
-Finding counts: BLOCKER=0 MAJOR=3 MINOR=2
+Finding counts: BLOCKER=0 MAJOR=3 MINOR=0
+
+The revised plan covers P1–P5, including the requested regression cases. The findings below concern remaining gaps in the proposed CU-5 implementation.
 
 ## BLOCKER findings
 
@@ -13,59 +15,48 @@ None.
 
 ## MAJOR findings
 
-- P1: The proposed append descriptor cannot read the log tail.
+- P6: Opening another attempt can overwrite a marker retained after an append failure.
 
-  **Location:** `.ai/tasks.md:155–158` (T003).
+  **Location:** `.ai/tasks.md:212–228`, `.ai/tasks.md:301–304`; `scripts/ai-run:208–211,677–684`.
 
-  The plan opens the log with `O_WRONLY|O_APPEND|O_CREAT`, then calls `os.pread` on that descriptor. Reading a write-only descriptor raises `OSError: [Errno 9] Bad file descriptor`. Once the log contains a record, subsequent appends would fail, affecting task, review and reconciliation outcomes.
+  T003 requires `attempt-open` to reconcile the singleton marker and then replace it. Reconciliation can legitimately leave that marker intact. For example, a normal task outcome receives a short write, retains its marker, and the runner continues to another task. Reconciliation sees the same runner PID still alive and leaves the old marker; `attempt-open` then overwrites it. The failed outcome is permanently lost. Repeated reconciliation failures at startup have the same overwrite risk.
 
-  **Concrete plan change:** Open with `O_RDWR|O_APPEND|O_CREAT`, or use a separate readable descriptor. Explicitly require a regression test that appends successfully to a nonempty log, both with and without its final newline.
+  **Concrete plan change:** Make unresolved markers survive subsequent attempt openings while preserving nonfatal telemetry behavior. For example, retain pending markers by attempt ID and reconcile them separately. Add a two-task regression where the first outcome append fails, the second task completes, and the first attempt remains recoverable and is eventually recorded exactly once.
 
-- P2: Torn UTF-8 tails prevent reading and reconciliation before the newline guard can help.
+- P7: The newline guard races with another checkout’s partial append.
 
-  **Location:** `.ai/tasks.md:155–159,193–194`; `scripts/lib/workflow.py:2984–2996,3082`.
+  **Location:** `.ai/tasks.md:147–154,243–244`; `.ai/current-plan.md:51–57`.
 
-  The planned torn-tail test uses ASCII only. Existing outcomes use `ensure_ascii=False`, so a damaged tail can end inside a multibyte character. `read_outcomes` decodes the entire file before parsing individual lines; an incomplete UTF-8 character raises `UnicodeDecodeError`, bypassing the malformed-line skip. Task outcome numbering and crash reconciliation both depend on this reader.
+  The tail check and append are separate operations without a shared lock. Writer A can observe a final newline, writer B can then append a partial record, and A can append its complete record without a leading newline. A’s record joins B’s fragment and becomes unreadable, although A reports success and removes its marker.
 
-  This is a pre-existing reader limitation that T003 must address to deliver its new torn-tail guarantee.
+  An in-memory probe of the prescribed sequence reproduced this: A’s write returned its full byte count, but parsing retained only the earlier record. The claim that concurrent writers can produce only an empty line is therefore incorrect.
 
-  **Concrete plan change:** Read and decode records independently, skipping invalid fragments while preserving valid records. Add a regression with a truncated multibyte character, verifying that earlier records remain readable, a subsequent append is readable, and reconciliation records the attempt once.
+  **Concrete plan change:** Make framing safe across this interleaving. Either serialize the tail check and write across all checkouts, or always prefix each record with a newline and tolerate blank lines. Update the acceptance criteria and add a deterministic test that inserts B’s partial append between A’s tail check and write.
 
-- P3: A short `os.write` can be mistaken for a completed durable append.
+- P8: Creating the outcome log lacks the directory sync needed for power-loss durability.
 
-  **Location:** `.ai/tasks.md:152–168` (T003).
+  **Location:** `.ai/tasks.md:147–154,219–221`; `.ai/project-spec.md:28–32,62–73`.
 
-  The design specifies one `os.write`, followed by `fsync` and marker removal, without requiring a check of the returned byte count. A regular-file write can return fewer bytes than requested, including when storage fills. Fsyncing that fragment does not complete the JSON record. Reconciliation could then unlink its marker despite having written no readable outcome, permanently losing the attempt.
+  T007 creates `outcomes.jsonl` with `O_CREAT` and fsyncs its file descriptor, but never fsyncs its parent directory. File fsync alone does not guarantee persistence of a newly created directory entry. T003 can subsequently remove and durably sync the attempt marker in another directory. After power loss, the newly created log can be absent with no marker available to reconstruct the attempt.
 
-  **Concrete plan change:** Require the returned byte count to equal the complete encoded record length before treating the append as successful or removing its marker. Treat a short write as a best-effort telemetry failure and retain the marker. Add fault-injection coverage showing that a later reconciliation writes one complete record after the fragment and then removes the marker.
+  This affects the new outcome’s durability, which CU-5 promises; it does not require repairing historical rows.
+
+  **Concrete plan change:** Persist the log’s directory entry before append success permits marker removal, including necessary newly created parent directories. Treat sync failures as telemetry failures that retain the marker. Add fault-injection tests for sync ordering and directory-sync failure.
 
 ## MINOR findings
 
-- P4: An early recovery escalation can link to a previous recovery’s full text.
-
-  **Location:** `.ai/tasks.md:282–289`; `scripts/ai-recover:101–142,192`.
-
-  T005 removes stale `recovery-decision.txt` only when `recover_decision` runs, but `ai-recover` has several escalation paths before that call. After a previous long decision, an early stop could therefore append “Full text” pointing to unrelated old advice.
-
-  **Concrete plan change:** Clear the sidecar after acquiring the recovery lock, or append its pointer only when the current invocation generated it. Test a long-decision escalation followed by an early escalation.
-
-- P5: The proposed diagnostic search cannot satisfy the `M1x` acceptance case.
-
-  **Location:** `.ai/tasks.md:50–54,68–71`.
-
-  The hint searches for `\bM1\b`, but the acceptance criteria require a quoted-cell hint for `M1x`. There is no word boundary between `1` and `x`, so the prescribed implementation cannot produce that hint.
-
-  **Concrete plan change:** Add diagnostic-only recognition of glued ID suffixes while keeping those rows rejected, and retain the explicit `M1x` regression.
+None.
 
 ## Validation and limitations
 
-Inspected repository guidance, spec, plan, all six tasks, state, handoff, relevant scripts, prompts, tests, documentation, validation entry point and Git history.
+Inspected repository guidance, all seven tasks, spec, plan, dispositions, state, handoff, relevant source, prompts, tests, documentation, validation scripts and revision history.
 
 Observed:
 
 - Task queue validation passed.
 - Relevant shell syntax and Python AST checks passed.
-- Existing shared-prompt-contract and table-cell-pattern test methods passed without fixture setup.
-- Read-only probes reproduced the write-only descriptor error, UTF-8 reader failure and `M1x` diagnostic mismatch.
+- Three documentation consistency tests passed.
+- Existing shared-prompt-contract and table-cell-pattern methods passed through direct invocation without fixture setup.
+- The in-memory concurrency probe reproduced P7.
 
-The full gate and fixture-based integration suite were not run because they require filesystem writes unavailable in this review sandbox. No files were modified. Task model selections are appropriate for the stated work; no model-selection findings were identified.
+The full gate and fixture-based integration tests require filesystem writes and were not run in this read-only sandbox. Power-loss behavior was assessed from the prescribed sync ordering, not experimentally tested. Model selections are appropriate. No files were modified or network integrations invoked.
