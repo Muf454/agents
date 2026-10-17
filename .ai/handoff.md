@@ -12,12 +12,15 @@ PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session
 - T007/T008 CU-5 (opus): one outcome append path (readable descriptor, `flock` across
   checkouts, newline guard, complete-write check, file and directory fsync), a per-line UTF-8
   reader, and a store of one never-overwritten marker file per attempt (`outcome attempt-dir`).
+- T009 CU-5 (opus): the marker-removal gate: a strict log reader (missing log = empty, any
+  other read failure keeps the marker) and `confirm_recorded` (locked read, then file and
+  directory sync before a marker whose record exists may go).
 - T003 CU-5 (opus): `workflow.py outcome attempt-open / attempt-reconcile`, durable attempt
   markers in host state, `attempt_id` on task outcomes; a marker whose outcome could not be
   appended survives later attempts and is recorded once.
-- T004 CU-5 (opus): `ai-run` reconciles a leftover marker at start, opens one per attempt and
-  removes it on a gate-broken stop; a SIGKILLed runner's attempt is logged as `crashed` once at
-  the next start.
+- T004 CU-5 (opus): `ai-run` reconciles leftover markers at start (before the clean-checkpoint
+  check), opens one per attempt and removes it on a gate-broken stop; a SIGKILLed runner's
+  attempt is logged as `crashed` once at the next start.
 - T005 R13 (sonnet): recovery reasons, human actions and needs-human questions are cut at a
   sentence or word boundary with `…`; a cut recovery decision is kept in full in
   `.ai/local/recovery-decision.txt`, named in the ⛔ notification.
@@ -51,8 +54,10 @@ T005 updates the notifications text only if the chart states the 300-character c
 2. On the next real plan revision or triage, glance at the dispositions table: rows use the
    bare ID (the prompts now show it); if a session still writes `P1 (MAJOR) title`, the run
    continues instead of stopping.
-3. Optional: on a disposable checkout, `kill -9` a running `ai-run` during a task session,
-   start it again, and check `.ai/bin/ai-status --outcomes` shows that attempt as `crashed`.
+3. Optional: on a disposable checkout, `kill -9` a running `ai-run` during a task session and
+   start it again: that start logs the attempt and then stops with `Start from a clean
+   checkpoint` (the killed runner left `.ai/state.md` dirty); check `.ai/bin/ai-status
+   --outcomes` shows the attempt as `crashed`, commit or reset the leftovers, and start again.
 
 ### Covered by automated tests
 Each group below is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs its
@@ -64,11 +69,15 @@ tests (the groups are added by the tasks named).
 - `test_outcome_write_protocol_*` (T008: append waits for the log lock so a concurrent partial
   line cannot swallow it, file/directory fsync order, directory-sync failure, marker store
   never overwrites).
+- `test_outcome_removal_gate_*` (T009: strict reader tells a missing log from an unreadable
+  one, `confirm_recorded` syncs file then directory before confirming and waits for the log
+  lock).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
   runner kept, garbage marker, torn last line, short write keeps the marker, a failed first
-  outcome survives the second attempt and is recorded once).
-- `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, normal
-  paths unchanged, gate-broken stop leaves no marker).
+  outcome survives the second attempt and is recorded once, a failed sync is finished before
+  the marker goes, an unreadable log keeps the marker and never duplicates).
+- `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, which
+  then refuses the dirty checkout; normal paths unchanged, gate-broken stop leaves no marker).
 - `test_recovery_reason_shorten_*` (T005: boundary cuts, full-text file, ⛔ notification names it).
 
 ## Human todos

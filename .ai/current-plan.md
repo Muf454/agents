@@ -32,8 +32,8 @@ sequenceDiagram
   participant R as ai-run
   participant H as workflow.py outcome
   participant S as host state (binding_dir)
-  R->>H: attempt-reconcile (start, under the lock)
-  H->>S: leftover attempt.json? runner dead -> append crashed (once), unlink
+  R->>H: attempt-reconcile $$ (start, under the lock, before the clean-checkpoint check)
+  H->>S: each leftover attempts/*.json: runner dead -> confirm_recorded (strict read + sync) else append crashed (once), remove
   R->>H: attempt-open TASK MODEL $$
   H->>S: reconcile leftovers (own pid too), then attempts/ID.json (tmp, fsync, link, dir fsync), prints id
   Note over R: session ... SIGKILL here leaves attempts/ID.json
@@ -43,8 +43,9 @@ sequenceDiagram
 - Markers: one file per attempt, `binding_dir() / 'attempts' / '<id>.json'` (per checkout,
   host state, outside agent-write roots), never overwritten (see the round 2 redesign below).
 - Idempotence: every task outcome written with `--attempt` carries `attempt_id`; reconcile
-  appends `crashed` only when no task record with that id exists, and removes the marker in
-  every terminal case. A crash between append and unlink is therefore harmless.
+  appends `crashed` only when no task record with that id exists, and removes the marker only
+  through the removal gate below (round 3 redesign). A crash between append and unlink is
+  therefore harmless.
 - Liveness: pid alive AND `/proc/<pid>/stat` start time equal to the recorded one → a live
   runner owns it: leave it (should not happen under the lock; comment). Unknown start time
   recorded (no `/proc`) → treat a live pid as alive.
@@ -88,6 +89,46 @@ checkout can interleave until upgraded; its buffered append only tears on a cras
   at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
   that case.
 
+### CU-5 marker-removal gate (round 3 redesign, T009)
+Round 3 (P9, P10) found the round 2 invariant ("a marker is removed only when the log durably
+holds a record with its id") broken on reconcile's decision inputs: the existing-record path
+removed without any sync, and the reader it decided on returns `[]` for an unreadable log
+(`read_outcomes`, workflow.py:2988–2991) as well as for an empty one. Third round in the
+CU-5 marker area, so the decision inputs are redesigned once instead of patched per path:
+1. **Strict read.** `read_outcomes(paths, strict=False)` keeps today's lenient mode for
+   reports (`OSError` → skip the file). `strict=True` treats only a missing file as an empty
+   log and lets every other `OSError` propagate. Reconcile and attempt numbering inside it use
+   the strict mode; a read failure keeps the marker, prints a note and appends nothing.
+2. **Confirmation.** `confirm_recorded(path, attempt_id) -> bool` is the ONLY way reconcile
+   may conclude "already recorded": open the log `O_RDWR` (missing → False, nothing created),
+   `flock LOCK_EX`, read the descriptor to EOF with the per-line decoder of T007, look for a
+   task record with that `attempt_id`; absent → False; present → `fsync` the descriptor, then
+   `fsync_dir` of the log's directory → True. Any `OSError` propagates (caller keeps the
+   marker). Rationale: a complete write whose file or directory sync failed leaves a readable
+   line and a retained marker; the retry at reconcile must finish the sync before the marker
+   may go (P9).
+3. **One removal rule.** A marker is removed after `append_outcome` returned True for a record
+   carrying its id (`outcome task --attempt`, and reconcile's `crashed` append: the append
+   already synced under the lock), or after `confirm_recorded` returned True. No other path
+   removes a readable marker. `confirm_recorded` and a following `append_outcome` take the lock
+   separately; no duplicate can slip in between because attempts of a checkout are sequential
+   under its lock, so no other writer appends that id.
+Residual (comment + Risks): after a failed `fsync` Linux may already have marked the dirty
+pages clean, so the retried sync can only persist what is still dirty; the gate guarantees a
+successful sync attempt before removal, not recovery from a kernel that dropped the data. Still
+advisory telemetry: never fatal, never a stop.
+
+### CU-5 start order in ai-run (round 3, P11)
+`ai-run:626` writes tracked `.ai/state.md` (`update_state`, workflow.py:763–785) before every
+task session, so a runner killed during a session always leaves a dirty checkout, and
+`ai-run:136–137` refuses a dirty checkout before the gate baseline at :148. The reconcile
+therefore runs right after `ai_branch` (:114), before the clean-checkpoint refusal, in every
+non-`--plan` mode: best effort, host state only, through the same checkout helper that
+`state-root-check` (:109) already runs there (no new trust class; the gate baseline stays at
+:148). The first restart after a kill logs the `crashed` attempt and then refuses with
+`Start from a clean checkpoint`; the human (or the recovery session) commits the leftovers,
+and the next start runs the task. T004's end-to-end test follows exactly this order.
+
 ### R13 — boundary cut + full text (T005)
 - `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
   prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
@@ -108,10 +149,11 @@ checkout can interleave until upgraded; its buffered append only tears on a cras
 | T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
 | T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
 | T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
-| T003 | CU-5 helper: marker, reconcile (uses T007/T008) | opus | T008 |
-| T004 | CU-5 ai-run wiring, SIGKILL end-to-end, docs, flow chart | opus | T003 |
+| T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009) | opus | T009 |
+| T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check), SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
@@ -122,9 +164,16 @@ checkout can interleave until upgraded; its buffered append only tears on a cras
   larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
   only: unique random ids, one locked write per line with a newline guard, fsync of the new
   line, the marker and the directories they live in, one never-overwritten marker per attempt,
-  reconcile idempotent by id (design: "CU-5 write protocol"). Durability of earlier rows is a non-goal
+  reconcile idempotent by id, marker removal only after a strict read and a successful sync
+  (designs: "CU-5 write protocol", "CU-5 marker-removal gate"). Durability of earlier rows is a non-goal
   (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
   be deferred, not grown into a redesign tonight.
+- CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
+  `confirm_recorded`'s retried sync cannot restore them; the gate only guarantees that no
+  marker is removed without a successful sync attempt (T009 comment and docs).
+- CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
+  reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
+  there until the leftovers are committed; T004's test and the handoff state this order.
 - CU-5 end-to-end test kills `ai-run` with SIGKILL: its `timeout`/mock children are orphaned;
   the test must kill them in `addCleanup` (the self-check's subreaper from PR #29 also cleans
   up on failure).

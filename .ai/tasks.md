@@ -165,7 +165,8 @@ ends in a torn line cut inside a multibyte UTF-8 character. (Plan review round 1
   U+2028 inside `ensure_ascii=False` records).
 - No marker, no `ai-run` change here (T003/T004). The cross-checkout lock and the directory
   sync of `append_outcome` are T008's (plan review round 2, P7/P8); write T007 so T008 only
-  adds them.
+  adds them. Factor the per-line decoding into `decode_outcome_lines(data: bytes) -> list[dict]`
+  (line index kept) so T009's strict reader and `confirm_recorded` reuse it.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py
@@ -265,9 +266,73 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
-## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+## T009 — CU-5 marker-removal gate: strict log read and `confirm_recorded` (CU-5, part 0c, round 3 redesign)
 Status: TODO
 Dependencies: T008
+Model: opus
+
+### Goal
+Reconcile can tell an unreadable outcome log from an empty one, and no attempt marker is ever
+removed on the "already recorded" path without a successful sync of the log file and its
+directory, so the round 2 invariant ("a marker goes only when the log durably holds its id")
+holds on every path. (Plan review round 3, P9 and P10; design note `.ai/current-plan.md`
+"CU-5 marker-removal gate (round 3 redesign)".)
+
+### Implementation notes
+- `scripts/lib/workflow.py`, next to `read_outcomes` (~2984) and T008's `append_outcome`.
+- `read_outcomes(paths, strict=False)`: the lenient default is today's behaviour (`OSError`
+  → skip the file; `outcomes_report` and `outcome task` numbering keep using it). With
+  `strict=True`: `FileNotFoundError` on a path → that file contributes no records (a missing
+  log IS empty); any other `OSError` propagates to the caller. Comment why (P10: a transient
+  read failure must not look like "no record yet"; reconcile would append a duplicate).
+- `confirm_recorded(path, attempt_id) -> bool`: `fd = os.open(path, os.O_RDWR)`
+  (`FileNotFoundError` → return False without creating the log); in `try/finally: os.close`:
+  `fcntl.flock(fd, LOCK_EX)`; read the descriptor to EOF (loop on `os.read`); decode with
+  T007's `decode_outcome_lines`; no task record with `attempt_id == attempt_id` → False;
+  found → `os.fsync(fd)`, then T008's `fsync_dir(path.parent)` → True. Every other `OSError`
+  propagates. Comment the rule (P9): a complete write whose file or directory sync failed
+  leaves a readable line and a kept marker; the retry must finish the sync before the marker
+  may go. Comment the residual: after a failed `fsync` the kernel may already have marked the
+  dirty pages clean, so this persists what is still dirty; it guarantees a successful sync
+  attempt before removal, not recovery of dropped data (advisory telemetry).
+- Removal rule for T003 (write it as a comment on `confirm_recorded`): a marker is removed only
+  after `append_outcome` returned True for a record carrying its id, or after
+  `confirm_recorded` returned True; `confirm_recorded` and a following `append_outcome` lock
+  separately, which is safe because a checkout's attempts are sequential under its lock, so no
+  other writer appends that id in between.
+- No marker store change, no reconcile, no `ai-run` change here (T003/T004).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_outcome_removal_gate_*` in tests/test_workflow.py (unit, `AI_STATE_DIR`
+  in the test's temp dir):
+  - strict read: a missing log gives `[]`; `os.read` (or `Path.read_bytes`, whichever the
+    implementation uses; name it in the result) patched to raise `OSError(EIO)` once → `strict=True`
+    raises, `strict=False` returns `[]` (lenient mode unchanged); a `PermissionError` likewise;
+  - `confirm_recorded`: id absent → False and no fsync; id present → True after `os.fsync` of
+    the log inode and then of its directory inode (wrapper records inodes in order); a missing
+    log → False and the log is not created; `os.fsync` patched to raise for the file inode →
+    `OSError` propagates; patched to raise for the directory inode only → `OSError` propagates
+    (file sync observed first);
+  - `confirm_recorded` waits for the log lock: the test holds `flock(LOCK_EX)` on the log, calls
+    it in a thread, asserts the thread is alive after a short scaled wait and finishes (scaled
+    join) with True after the release;
+  - a torn multibyte tail after the record (as in T007) does not hide the record.
+- All existing `outcome` tests pass unchanged (`-k outcome`).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k outcome_removal_gate` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T003 — Outcome helper: durable attempt marker, idempotent crash reconcile, torn-line-safe append (CU-5, part 1)
+Status: TODO
+Dependencies: T009
 Model: opus
 
 ### Goal
@@ -276,7 +341,8 @@ attempt whose runner died without its exit handler into exactly one `crashed` ou
 without ever losing or duplicating a line.
 
 ### Implementation notes
-- Design: `.ai/current-plan.md` "CU-5 — attempt marker + reconcile". `scripts/lib/workflow.py`,
+- Design: `.ai/current-plan.md` "CU-5 — attempt marker + reconcile", "CU-5 write protocol
+  (round 2 redesign)" and "CU-5 marker-removal gate (round 3 redesign)". `scripts/lib/workflow.py`,
   next to `outcome()` (~3029–3082). Markers: one file per attempt through T008's store
   (`attempts_dir()` = `binding_dir() / 'attempts'`, `write_marker`, `list_markers`,
   `remove_marker`; `binding_dir` ~1247 runs `check_state_root`). Never a singleton file, never
@@ -301,15 +367,20 @@ without ever losing or duplicating a line.
   `pid_start` null → pid exists) AND pid ≠ OWN_PID → leave it, silent. A marker of OWN_PID
   (with a matching start time) is an earlier, finished attempt of the calling runner whose
   outcome append failed (attempts are sequential under the lock), so it is reconciled like a
-  dead runner's (P6). Otherwise: if any task record in the log has `attempt_id == id` → only
-  remove. Else append a
+  dead runner's (P6). Otherwise, per marker, inside one `try` whose `OSError` keeps the marker
+  (stderr `Note: could not read or sync the outcome log; keeping the attempt marker.`, exit 0):
+  `confirm_recorded(path, id)` (T009: strict read under the lock, then file + directory sync)
+  → True → only remove (P9: the earlier append's failed sync is finished here first); False →
+  number the attempt from `read_outcomes([path], strict=True)` (P10: never the lenient reader
+  here) and append a
   task record with `result: "crashed"`, task/model/project/branch from the marker (not the
   current branch), `seconds: null`, `attempt` numbered as `outcome task` does, `first_pass:
   false`, `attempt_id`, and title/category as today; then remove ONLY if `append_outcome`
   returned True (a short write keeps the marker, stderr `Note: could not log the crashed
   attempt completely; will retry at the next start.`). stderr `Note: logged a crashed
   attempt of <task> (the runner was killed without its exit handler).` Never raises: any
-  `OSError`/`ValueError` → stderr note, exit 0, marker kept.
+  `OSError`/`ValueError` → stderr note, exit 0, marker kept. No other code path removes a
+  readable marker (T009's removal rule).
 - Known limit (comment + T004 docs): a short write of a normal `outcome task --attempt` line
   keeps the marker, so the next start logs that attempt as `crashed` (storage was full; the
   conservative record).
@@ -358,6 +429,19 @@ scripts/lib/workflow.py, tests/test_workflow.py
     A and B both exist afterwards, A byte-identical, and a later unpatched reconcile records A
     once;
   - two markers of dead runners: one reconcile records both, once each;
+  - failed sync after a complete write (P9; `os.fsync` wrapped to raise for the log's file
+    inode, variant: for its directory inode only): `outcome task T001 done m 5 --attempt A`
+    exits non-zero, the line is readable, marker A kept; reconcile with the same fault still
+    active → nothing appended, marker kept, the "could not read or sync" note; reconcile
+    unpatched → the wrapper records a file fsync then a directory fsync, marker A removed, the
+    log still has exactly one record with `attempt_id` A;
+  - unreadable log (P10; a dead runner's marker whose record is already in the log; the read
+    primitive T009 names patched to raise `OSError(EIO)` once): reconcile appends nothing,
+    keeps the marker, prints the note, exit 0; the unpatched retry removes the marker and the
+    log has exactly one record for A; variant without a record: the failed reconcile appends
+    nothing, the retry appends exactly one `crashed` record;
+  - missing log with a dead runner's marker: reconcile creates the log with exactly one
+    `crashed` record and removes the marker;
   - `ai-status --outcomes` on a log with a `crashed` row (seconds null) renders without error
     and counts it as not done.
 - All existing `outcome` tests pass unchanged (`-k outcome`).
@@ -380,10 +464,17 @@ A runner killed by SIGKILL during a task session leaves an attempt that the next
 `ai-run --approved` start logs as `crashed`, once; normal stops behave exactly as today.
 
 ### Implementation notes
-- `scripts/ai-run`: after `ai_lock` (~111) and once the approved gate is verified (the first
-  point where other `ai_helper` calls are trusted; check the order), in every `--approved` mode:
+- `scripts/ai-run`: right after `ai_branch` (~114) and BEFORE the mode branch at ~126 (so
+  before the clean-checkpoint refusal at ~136–137 and the gate baseline at ~148), guarded by
+  `[[ -n "$plan_file" ]] ||` (every non-`--plan` mode; triage/revision never open attempts but
+  may reconcile leftovers):
   `attempt_dir=$(ai_helper outcome attempt-dir 2>/dev/null) || attempt_dir=` and
-  `ai_helper outcome attempt-reconcile "$$" || true`. Not in `--plan` mode (no attempts there).
+  `ai_helper outcome attempt-reconcile "$$" || true`. Comment (plan review round 3, P11, plan
+  note "CU-5 start order in ai-run"): `ai_helper state implementing` (~626) dirties tracked
+  `.ai/state.md` before every session, so a killed runner always leaves a dirty checkout and the
+  restart refuses at ~136 before anything later could run; the reconcile is best effort, writes
+  host state only and runs the same checkout helper that `state-root-check` (~109) already runs
+  before the baseline, so it adds no new trust class. Do not move the gate baseline.
 - Attempt open (~262–267, inside `claude_session` where `attempt_open=yes` is set):
   `attempt_id=$(ai_helper outcome attempt-open "$active_task" "${task_model:-$model}" "$$" 2>/dev/null) || attempt_id=`
   before `attempt_open=yes` (a limit retry stays in the same attempt, as today).
@@ -398,8 +489,11 @@ A runner killed by SIGKILL during a task session leaves an attempt that the next
   it SIGKILL and exits. The test SIGKILLs every pid it recorded (and the `timeout` parent) in
   `addCleanup`.
 - Docs: README "Outcome log" and `docs/workflow.md` outcome section: a killed runner's attempt
-  is logged as `crashed` (seconds unknown) at the next `ai-run --approved` start; limits
-  (only implementation attempts; a checkout never started again keeps its marker).
+  is logged as `crashed` (seconds unknown) at the next `ai-run --approved` start, before the
+  clean-checkpoint check, so that start still stops with `Start from a clean checkpoint`
+  until the interrupted bookkeeping (`.ai/state.md` at least) is committed or reset; limits
+  (only implementation attempts; a checkout never started again keeps its marker; a sync that
+  the kernel already failed cannot be redone, T009).
 - Vault (flow change in a described step): `agents-flow.md` "Outcome log" bullet (~147) gains
   "an attempt whose runner was killed is logged as crashed at the next start"; `updated:`
   bumped; hub Log line.
@@ -411,10 +505,14 @@ agents.md (Log)
 ### Acceptance criteria
 - Tests named `test_outcome_crash_*` in tests/test_workflow.py:
   - `ai-run --approved` with `MOCK_CLAUDE=sigkill-runner`: the runner dies (exit -9 / 137), the
-    outcome log has no line for the task and the marker exists; a second `ai-run --approved`
-    (mock mode that implements and checkpoints the task) logs `crashed` (attempt 1,
-    `attempt_id` = the marker's id, `seconds` null) then `done` (attempt 2, its own
-    `attempt_id`), and the marker is gone; a third start appends nothing;
+    outcome log has no line for the task, the marker exists and `git status --porcelain` names
+    `.ai/state.md` (P11: the runner wrote it at ~626); a second ordinary `ai-run --approved`
+    exits 1 with `Start from a clean checkpoint`, ran no session, and the log now has exactly
+    one `crashed` line (attempt 1, `attempt_id` = the marker's id, `seconds` null) with the
+    marker gone; the test then checkpoints the fixture's leftovers (stage and commit everything
+    `git status --porcelain` lists, in the temp repo); a third `ai-run --approved` (mock mode
+    that implements and checkpoints the task) logs `done` (attempt 2, its own `attempt_id`)
+    and no second `crashed`; a fourth start appends nothing;
   - the existing interrupted/timeout/error outcome paths (e.g. `test_runner_logs_task_outcomes_and_report`
     and the session-timeout outcome tests) log exactly what they did before, now with
     `attempt_id`, and leave no marker;
@@ -496,7 +594,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T006 — Docs, handoff and final audit for the batch
 Status: TODO
-Dependencies: T001, T002, T007, T008, T003, T004, T005
+Dependencies: T001, T002, T007, T008, T009, T003, T004, T005
 Model: haiku
 
 ### Goal
@@ -524,7 +622,7 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md 
   `.ai/local/recovery-decision.txt`; `docs/workflow.md` states the finding-cell rule for both
   tables.
 - `test_pr_body_flow_this_repo_declares_the_flow_chart` passes.
-- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
+- The handoff names `test_finding_cell_*`, `test_outcome_log_io_*`, `test_outcome_write_protocol_*`, `test_outcome_removal_gate_*`, `test_outcome_attempt_*`, `test_outcome_crash_*` and
   `test_recovery_reason_shorten_*` under "Covered by automated tests", and every group exists
   (`python3 -m unittest discover -s tests -k <group>` runs ≥ 1 test each).
 

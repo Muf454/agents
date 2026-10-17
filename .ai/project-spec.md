@@ -75,12 +75,18 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   a marker is removed only after a complete, synced append of a record with its id.
   The reader decodes each line on its own, so a torn tail (also inside a multibyte UTF-8
   character) skips only that line.
-  At the next attempt open or `ai-run --approved` start (under the checkout lock) every leftover
-  marker whose runner is not alive (pid gone or start time different), or which belongs to an
-  earlier attempt of the calling runner itself, is reconciled: exactly one `crashed` outcome
-  for that attempt (seconds unknown), never a second one when the log already has its id, then
-  the marker is removed. A stop that deliberately logs nothing (approved gate changed) removes
-  the marker without running a helper. Advisory telemetry only: never fatal, never a stop.
+  At the next attempt open or `ai-run --approved` start (under the checkout lock, before the
+  clean-checkpoint refusal, since a killed runner always leaves `.ai/state.md` dirty) every
+  leftover marker whose runner is not alive (pid gone or start time different), or which
+  belongs to an earlier attempt of the calling runner itself, is reconciled: exactly one
+  `crashed` outcome for that attempt (seconds unknown), never a second one when the log
+  already has its id, then the marker is removed. Reconcile decides on a strict read of the
+  log (a missing log is empty; any other read failure keeps the marker, appends nothing and
+  prints a note) and removes a marker whose record already exists only after it has
+  successfully synced the log file and its directory under the log lock (a complete write whose
+  sync failed is finished here). A stop that deliberately logs nothing (approved gate changed)
+  removes the marker without running a helper. Advisory telemetry only: never fatal, never a
+  stop; a sync the kernel already failed cannot be redone (dirty pages may be gone).
 - **R13 recovery text.** Reasons, human actions and needs-human questions longer than their
   300-character cap are cut at a sentence end, else a word boundary, and end with `…`; the full
   recovery reason and human action are written to `.ai/local/recovery-decision.txt` when cut,
