@@ -20,7 +20,10 @@ on 2026-10-17 (Claude planning session, unattended):
   the pending schedule from the manifest, not from the local pause log. Plan review round 4:
   T015 makes the resumed run accept the armed tree through one predicate on the whole path to
   ai-run (a settled re-check no longer refuses it) with no commit while armed; T002's probe
-  treats a missing schedule as absent, never as due.
+  treats a missing schedule as absent, never as due. Plan review round 5: T016 binds the arm
+  to an `implementation` stop and makes the armed resume re-enter at implementation (no plan
+  review loop on the preserved tree, so a partial checkpoint that made the plan review stale
+  no longer ends in a recovery decision); T006's `ai-plan` creates `.ai/local` on first use.
 - **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
   `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
   confirmed detached start printing PID and log), planning sessions in the outcome log and run
@@ -47,7 +50,7 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
   is not detected (documented limitation).
 
 ## Flow chart
-To be updated by T002/T003/T014/T011/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+To be updated by T002/T003/T014/T011/T016/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -79,10 +82,11 @@ the task named).
 - `test_limit_relaunch_binding_*` (T012: tree digest = `tree_snapshot` incl. submodules, verify/arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
 - `test_limit_relaunch_verify_*` (T014: the relaunch verifies before any commit or resume; bookkeeping-only edits, a moved HEAD on a clean tree, in-scope edits during an open stage and submodule changes all stop with the checkout untouched).
 - `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once; a task DONE before the limit is checkpointed without a session; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
+- `test_limit_relaunch_reenter_*` (T016: the arm is granted only for an implementation stop; an armed resume skips the plan review loop, so a committed partial checkpoint with a stale plan review completes without a plan review or recovery decision; a clean resume still re-reviews; a needs-human plan decision still stops).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state, accepted-plus-rejected findings with a verified re-check included, commits nothing before ai-run consumes the arm, and fails closed on inconsistent review records).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006), `test_plan_outcome_*` (T007).
+- `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos

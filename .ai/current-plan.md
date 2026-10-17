@@ -23,7 +23,7 @@ flowchart TD
   probe --> launch["start_recovery(stage 'usage limit relaunch')"]
   launch --> claim["ai-recover, right after reserve-attempt:<br/>limit-hold (still waiting → restore wait, exit 75)<br/>or limit-claim (schedule consumed: later stops are terminal)"]
   claim --> verify["gate/branch checks, then limit-verify (T014):<br/>HEAD and tree digest equal the scheduled ones, else ⛔ (nothing committed)"]
-  verify --> due["open stage → resume; bookkeeping-only leftovers → commit;<br/>dirty task work → limit-arm (T012); ▶ RESUMED, exec ai-pipeline"]
+  verify --> due["open stage → resume; bookkeeping-only leftovers → commit;<br/>dirty task work of an implementation stop → limit-arm (T012, T016); ▶ RESUMED, exec ai-pipeline<br/>(armed: no plan review loop, straight to ai-run)"]
   due -. "limit again" .-> only
 ```
 - **Record (T001).** `ai_limit_pause` writes `.ai/local/limit-stop` (`<Agent> <reset epoch or 0>`,
@@ -41,7 +41,9 @@ flowchart TD
   them): `limit-schedule AT CAP HEAD`, `limit-due [NOW]` and `limit-at` (read only, watchdog),
   `limit-hold [NOW]`, `limit-claim [NOW]`, `limit-verify HEAD` / `limit-arm HEAD` /
   `limit-armed HEAD` / `limit-disarm`, `limit-count`; exact semantics in T001 and "Relaunch
-  schedule lifecycle" below (T012 extends the verify/arm family to the tree digest). New setting
+  schedule lifecycle" below (T012 extends the verify/arm family to the tree digest; T016 adds
+  the STAGE argument and `limit_stage`, so the arm is granted only for an `implementation`
+  stop). New setting
   `AI_LIMIT_RELAUNCH_MAX` (0–9, default 2) in `RUN_SETTINGS`, `ai_config`'s key list and both
   lists in `ai-recover`. `limit-stop` is written by `workflow.py limit-stop-write` through the
   pinned `.ai/local` descriptor and `write_record` (exclusive `O_NOFOLLOW|O_NONBLOCK` temp,
@@ -146,10 +148,11 @@ flowchart TD
        when nothing is there to commit; otherwise the run stops BEFORE the commit, fail closed,
        with the arm untouched and nothing committed (`recheck_fail 'preserved task work carries
        uncommitted review records; inspect them.'`, also for a `pending` status, whose re-check
-       would commit). The plan review loop cannot commit on an armed tree: the plan review was
-       current at the first start, and an implementation session changes the plan digest's
-       inputs only through `.ai/tasks.md` statuses, which make `tasks untouched` fail and skip
-       the loop; an open stage is excluded by `armed_resume`. Such a stop is an inconsistency
+       would commit). The plan review loop is not entered on an armed resume at all ("Armed
+       resume re-enters at implementation" below, T016; the round 4 argument that an
+       implementation session cannot make the loop act was wrong: `tasks untouched` tolerates
+       IN_PROGRESS and a committed partial checkpoint makes the plan digest stale); an open
+       stage is excluded by `armed_resume`. Such a stop is an inconsistency
        that a limit stop in an implementation session cannot produce (review records are
        committed before any task runs, by `reconcile_disputes` on every start, resume and
        triage); it is reported as today's re-check stop, never absorbed.
@@ -164,6 +167,49 @@ flowchart TD
        exactly once and no commit before it; the reviewer's scenario (one accepted and one
        rejected finding, a verified re-check, a limit during the fix task) completes with no
        recovery decision session.
+  - *Armed resume re-enters at implementation (plan review round 5 redesign, T016).* Round 5
+    (P3) showed rule 2's argument wrong: `tasks untouched` (workflow.py ~638–641) fails only
+    on a DONE task, and `plan_digest()` (~2328–2334) hashes HEAD's whole tree minus the
+    bookkeeping paths, so a session that committed part of its source while its task was still
+    IN_PROGRESS, edited more and then hit the limit leaves an armed tree, an untouched queue
+    and a stale plan review: ai-pipeline ~429 enters the loop, ~447 finds the review due, ~460
+    runs `ai-review --plan`, which refuses the dirty checkout (ai-review ~286 `Commit the plan
+    before reviewing it.`) → `stop 'plan review'` → the Claude decision session. Four rounds
+    specified the resumed run's path as checks to pass through; this gap is not a check but a
+    STAGE the resumed run must never re-enter. The redesign states where an armed resume
+    re-enters the run, as one rule for the whole path:
+    1. *The arm is bound to the stage as well as to the tree.* `limit-schedule AT CAP STAGE`
+       records `limit_stage` = the stop's pipeline stage (ai-recover's `--stage`, which
+       ai-pipeline's `stop()` passes; host-owned, never read from the checkout). `limit-arm`
+       arms only when `limit_stage` is `implementation`: `ai-run --approved` at ai-pipeline
+       ~501 (`stop implementation`) is the single site whose session legitimately leaves
+       uncommitted task work, first tasks and fix rounds alike; triage and plan revision run
+       under an open stage and take transition (a); plan and implementation reviews start on a
+       clean tree. A dirty tree after any other stage's limit stop is an inconsistency:
+       `limit-arm` exits 1 with `the usage-limit stop left uncommitted changes outside an
+       implementation session` and ai-recover escalates it fail closed (`…; nothing was
+       committed.`), the checkout as found.
+    2. *An armed resume re-enters at implementation.* ai-pipeline enters the plan review loop
+       only when `plan_review == yes`, `armed_resume` is false and `tasks untouched` holds. The
+       arm proves that this run already passed the plan-approval boundary (an `implementation`
+       stop exists only after the loop broke out with a current review, after
+       `--skip-plan-review`, or after the supervised revisions), so nothing is skipped that the
+       run had not passed; the committed partial checkpoint is reviewed like every other task
+       commit, by the implementation review of the committed range. A clean resume (no arm)
+       takes today's path unchanged, including a re-review of a stale plan. The two
+       `plan_decision_check` calls that bracket the loop (~410, ~494) still run: a recorded
+       needs-human decision stops the armed resume too (host record, no commit, arm kept).
+       After `limit-disarm` the loop is behind the run for good (it precedes the `while true`
+       at ~495).
+    3. *The path is a list of stages, not of checks.* Between the resume and ai-run the
+       resumed run passes exactly: start checks (rule 1 of the acceptance contract) →
+       `reconcile_disputes` (rule 2) → `base_reached` → `plan_decision_check` → queue check →
+       `plan_decision_check` → implementation (`tasks complete` not consulted while armed).
+       T016 audits ai-pipeline against this list (anything else that runs a session, a review
+       or a commit on the way is a defect to fix there) and the matrix gains the
+       partial-checkpoint case: zero DONE tasks, a committed source change, further preserved
+       edits, plan review on → completes with no plan review, no recovery decision session and
+       no commit before the disarm; and the control that a clean resume still re-reviews.
   - *What the resumed run does with the tree.* ai-pipeline does not skip ai-run while the tree
     is armed (`tasks complete` at ai-pipeline ~499 is not consulted then). ai-run consumes the
     arm before any session and asks `tasks newly-done HEAD` (T012: IDs DONE in the working
@@ -284,6 +330,7 @@ flowchart TD
 | T012 | MC-01 | preserved-work binding: tree digest (= `tree_snapshot`), verify/arm on the exact tree, `tasks newly-done` | opus |
 | T014 | MC-01 | relaunch binding verification contract: one verification site before any mutation, host transitions, submodule and bookkeeping regressions | opus |
 | T011 | MC-01 | relaunch continues preserved task work once (armed resume; DONE → armed checkpoint) | opus |
+| T016 | MC-01 | armed resume re-enters at implementation: stage-bound arm (`limit_stage`), plan review loop not entered while armed, partial-checkpoint regression | opus |
 | T015 | MC-01 | armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed, state matrix incl. a settled re-check | opus |
 | T004 | MC-01, DB-04 | dashboard: waiting relaunch is paused, killed planning is a stop | sonnet |
 | T005 | DB-04 | `ai-run --plan --read-dir` (permission boundary) | opus |
@@ -315,7 +362,13 @@ flowchart TD
   path to ai-run's first session and makes no commit while it is armed (T015); a state in
   which the path would have to commit first (uncommitted review records, a pending re-check)
   cannot follow a limit stop in an implementation session and stops fail closed with nothing
-  committed.
+  committed. The arm is granted only for an `implementation` stop and the armed resume never
+  enters the plan review loop (T016): a partial checkpoint committed by the limited session
+  (source in HEAD, task still IN_PROGRESS) makes the saved plan review stale, and
+  `ai-review --plan` cannot run on the preserved tree; the committed part is reviewed by the
+  implementation review like any task commit. Residual, unchanged from today: a CLEAN resume
+  after such a partial checkpoint re-reviews the stale plan before implementation continues
+  (the same happens after a crash resume); not in MC-01's scope.
 - Watchdog probe on an unscheduled checkout: `limit-at` exit 1 is "absent", not "due at 0"
   (round 4, P11); T002 tests the no-manifest, approved-unscheduled and finished-run probes for
   "no launch, no notification".
@@ -336,7 +389,8 @@ flowchart TD
 ## Validation strategy
 Targeted `python3 -m unittest discover -s tests -k <prefix>` per task, then `.ai/bin/ai-check`
 (about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*` (incl. `test_limit_relaunch_preserved_*`,
-`test_limit_relaunch_binding_*`, `test_limit_relaunch_verify_*`, `test_limit_relaunch_accept_*`), `test_exec_logged_*`,
+`test_limit_relaunch_binding_*`, `test_limit_relaunch_verify_*`, `test_limit_relaunch_reenter_*`,
+`test_limit_relaunch_accept_*`), `test_exec_logged_*`,
 `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*`, `test_plan_read_dir_*`,
 `test_ai_plan_*`, `test_plan_outcome_*`, `test_pr_undraft_*`.
 

@@ -103,7 +103,14 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   re-check), which a limit stop in an implementation session cannot produce (round 4, P3). The
   watchdog's stall alarm stays silent while a relaunch is pending in the manifest, whether or
   not the local pause log still carries the wait (round 3, P2); a checkout without a schedule
-  (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11).
+  (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11). The arm
+  is granted only for a stop of the `implementation` stage (recorded in the manifest when the
+  relaunch is scheduled; a dirty tree after any other stage's limit stop escalates with
+  nothing committed) and an armed resume re-enters the run at implementation: it never enters
+  the plan review loop, so a partial checkpoint the limited session committed while its task
+  was still IN_PROGRESS (which makes the saved plan review stale) cannot make the resume run a
+  plan review on the preserved tree; a needs-human plan decision still stops it, and a clean
+  resume behaves as today (round 5, P3).
 - The dashboard shows a gone run as paused only with evidence of a currently scheduled
   relaunch (`relaunch_at` in the observation); a newer last-error still wins.
 - `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same
@@ -113,6 +120,9 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   commits. A planning session killed without a plan shows as a stop on the Plan box. The
   detached log is created exclusively (unique name, no symlink or FIFO followed) inside the
   pinned `.ai/local` and becomes the runner's stdout/stderr through that descriptor (P8).
+  `ai-plan` works as the first toolkit command in a freshly installed checkout: like every
+  other command it runs `ai_root` first, which refuses a symlinked `.ai`/`.ai/local` and then
+  creates a missing `.ai/local` before the detached launch (round 5, P12).
 - `ai-pipeline` un-drafts an existing draft PR only when host state records that the pipeline
   drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft,
   and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it. A
