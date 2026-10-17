@@ -83,13 +83,21 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   (`▶ RESUMED`) without consuming the `AI_RECOVER_MAX` budget. A further limit stop beyond
   `AI_LIMIT_RELAUNCH_MAX` (default 2) relaunches, a missing/non-recovering timer, or
   `AI_LIMIT_RELAUNCH_MAX=0`, escalates with ⛔ as today (the message names the reset time).
+  A due schedule is consumed by the first recovery that sees it (a later escalation is one
+  terminal ⛔, never a launch loop); a recovery started while the schedule is still in the
+  future restores the wait without counting a relaunch or retrying early; uncommitted work of
+  the limited implementation session is continued once by the normal implementation session
+  (validated before any commit), not escalated (plan review round 1, P1–P3).
+- The dashboard shows a gone run as paused only with evidence of a currently scheduled
+  relaunch (`relaunch_at` in the observation); a newer last-error still wins.
 - `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same
   edit allowlist as `ai-run --plan`, Read access to each `--read-dir`, a `planning` dashboard
   stage while it runs, an outcome record `kind: plan` and a run-log line; `--detach` returns
   after the session has confirmably started and prints its PID and log path. The session never
   commits. A planning session killed without a plan shows as a stop on the Plan box.
 - `ai-pipeline` un-drafts an existing draft PR only when host state records that the pipeline
-  drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft.
+  drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft,
+  and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it.
 - Every behaviour change has an offline regression test in the existing style; `.ai/bin/ai-check`
   passes; README.md and `docs/workflow.md` describe the new behaviour; the vault flow chart is
   updated in the tasks that change the flow.

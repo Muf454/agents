@@ -36,10 +36,20 @@ relaunches per human-started run, giving back the recovery attempt `ai-recover` 
 
 ### Implementation notes
 - Design: `.ai/current-plan.md` "MC-01 part 1", bullets "Record" and "Schedule".
-- `scripts/lib/common.sh` `ai_limit_pause` (~95–112): just before the budget `ai_die`, write
-  `.ai/local/limit-stop` as `<agent> <reset>` (`reset` = the parsed epoch, `0` when it was not
-  in the future) through `printf … > .ai/local/limit-stop.tmp && mv -f` (best effort: `|| true`,
-  only when `.ai/local` is a directory). The die message stays byte-identical.
+- `scripts/lib/common.sh` `ai_limit_pause` (~95–112): just before the budget `ai_die`, run
+  `ai_helper limit-stop-write "$agent" "$reset" 2>/dev/null || true` (`reset` = the parsed
+  epoch, `0` when it was not in the future). Never a shell redirection: `.ai/local` is
+  agent-writable, and `> file.tmp` follows a planted symlink (truncating its target) or blocks
+  on a FIFO (plan review round 1, P6). `workflow.py limit-stop-write AGENT RESET` validates
+  both (`^(Claude|Codex)$`, `^\d{1,12}$`), pins `.ai/local` with `local_dir_fd(root)` (~3995;
+  None → exit 1) and replaces `limit-stop` with the existing `write_record(dir_fd, 'limit-stop',
+  …)` (~4106: `O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK` temp on the pinned descriptor, regular-file
+  check, `os.replace` relative to it), so a symlink or FIFO at the temp or final name is never
+  written through. The die message stays byte-identical.
+- `observe` (~4262): new action `relaunch AT NOTE` (AT validated int): `state=paused`, `note`,
+  new optional field `relaunch_at` = AT, stage and detail kept. Every other action drops
+  `relaunch_at`, so only a currently scheduled relaunch carries it (the dashboard's evidence,
+  T004; P5).
 - `scripts/lib/workflow.py`: command `limit-stop` (register in `main()`): reads
   `.ai/local/last-error` and `.ai/local/limit-stop` of the current checkout (regular files only,
   not symlinks); exit 0 printing `<Agent> <relaunch epoch>` only when last-error, stripped of the
@@ -49,24 +59,39 @@ relaunches per human-started run, giving back the recovery attempt `ai-recover` 
   `last-error mtime - limit-stop mtime` is between 0 and 120 s. Relaunch epoch: `reset + 60` when
   `reset > now`, `now + AI_LIMIT_RETRY` (default 1800, validated int) when `reset == 0`, else
   `now`. Optional `--now EPOCH` argument for tests. Anything else: exit 1, no output.
-- `run_manifest` (~1279–1397): optional fields `limit_relaunches` (int 0–100) and
-  `limit_relaunch_at` (int); a manifest with a wrong-typed field is invalid as today's fields
-  are. Actions: `limit-schedule AT CAP` (validated ints; `limit_relaunches >= CAP` →
-  `fail(f'usage limit: already relaunched {n} time(s) in this run')`; else count += 1, at = AT,
-  `attempts = max(0, attempts - 1)`, one atomic write, print the count); `limit-due [NOW]`
-  (print AT, exit 0 when set and `AT <= NOW`, default `int(time.time())`; else exit 1 silently);
-  `limit-resume` (drop `limit_relaunch_at`, `attempts = max(0, attempts - 1)`, atomic, print the
-  count; no schedule → exit 1); `limit-count` (print the count, 0 when absent).
-  `clear-attempts` also drops both fields; `start` already writes a fresh dict (check). Comment
-  why the attempt is given back (a limit wait is not a failed recovery; `ai-recover` reserves
-  before it can know, ~70).
+- `run_manifest` (~1279–1397): optional fields `limit_relaunches` (int 0–100),
+  `limit_relaunch_at` (int), `limit_head` (40-hex) and `limit_resume` (40-hex); a manifest with
+  a wrong-typed field is invalid as today's fields are. Lifecycle (plan "Relaunch schedule
+  lifecycle"): a schedule is pending (`AT > NOW`), then claimed exactly once, never left due
+  after a recovery saw it. Actions, each one atomic write, NOW defaulting to
+  `int(time.time())`:
+  - `limit-schedule AT CAP HEAD` (validated; `limit_relaunch_at` already set → fail `usage limit:
+    a relaunch is already scheduled`; `limit_relaunches >= CAP` →
+    `fail(f'usage limit: already relaunched {n} time(s) in this run')`; else count += 1,
+    at = AT, `limit_head` = HEAD, `attempts = max(0, attempts - 1)`, print the count);
+  - `limit-due [NOW]` (read only, for the watchdog: print AT, exit 0 when set and `AT <= NOW`;
+    else exit 1 silently);
+  - `limit-hold [NOW]` (schedule set and `AT > NOW` → `attempts = max(0, attempts - 1)`, print
+    AT, exit 0; else exit 1, nothing written): an `ai-recover` that finds the run still
+    waiting gives its reservation back and restores the wait (P2);
+  - `limit-claim [NOW]` (schedule set and `AT <= NOW` → drop `limit_relaunch_at`,
+    `attempts = max(0, attempts - 1)`, print the count; else exit 1): consumes the schedule, so
+    any later stop of that recovery is terminal and no probe launches it again (P1);
+  - `limit-arm HEAD` (exit 0 and set `limit_resume = HEAD` only when HEAD equals `limit_head`;
+    else exit 1, nothing written); `limit-armed HEAD` (read only: exit 0 when `limit_resume ==
+    HEAD`); `limit-disarm` (drop `limit_resume`; missing is fine). P3, used by T003/T011;
+  - `limit-count` (print the count, 0 when absent).
+  `clear-attempts` also drops all four fields; `start` already writes a fresh dict (check).
+  Comment why the attempt is given back (a limit wait is not a failed recovery; `ai-recover`
+  reserves before it can know, ~70).
 - Setting `AI_LIMIT_RELAUNCH_MAX`: add to `RUN_SETTINGS` (~1980), the `ai_config` key list
   (common.sh ~40) and both lists in `scripts/ai-recover` (~74, ~77). Validation (0–9, default 2)
   is T003's.
 - No ai-recover logic, no watchdog change here (T002/T003). Flow unchanged in this task.
 
 ### Likely affected modules
-scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-recover, tests/test_workflow.py
+scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-recover, tests/test_workflow.py,
+tests/test_dashboard.py (only if an observation schema test lists the fields)
 
 ### Acceptance criteria
 - Tests named `test_limit_relaunch_record_*` in tests/test_workflow.py:
@@ -77,11 +102,27 @@ scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-recover, tests/test_w
     `limit-stop`, agent mismatch, `limit-stop` older than last-error by 300 s (`os.utime`);
     with reset `0` it prints `now + AI_LIMIT_RETRY` (`--now` fixed; `AI_LIMIT_RETRY=600`), with a
     past reset it prints the `--now` value;
-  - manifest units (after `run-manifest start` as `approve_run` does): `reserve-attempt` then
-    `limit-schedule 100 2` → count 1, `attempts` 0, `limit-due 99` exit 1, `limit-due 100` prints
-    100; `limit-resume` → count 1, schedule gone, `attempts` never below 0; second schedule →
-    2; third with cap 2 fails with `already relaunched 2 time(s)`; `clear-attempts` and a new
-    `start` drop both fields; a manifest with `limit_relaunches: "1"` is invalid.
+  - manifest units (after `run-manifest start` as `approve_run` does; H = 40 hex): `reserve-attempt`
+    then `limit-schedule 100 2 H` → count 1, `attempts` 0, `limit-due 99` exit 1, `limit-due 100`
+    prints 100; a second `limit-schedule` while one is set fails `already scheduled` and leaves
+    the count 1; `reserve-attempt`, `limit-hold 99` → prints 100, `attempts` 0, schedule kept;
+    `limit-claim 99` exit 1; `limit-hold 100` exit 1; `reserve-attempt`, `limit-claim 100` →
+    count 1, schedule gone, `attempts` 0 (never below 0); a second `limit-claim` exits 1;
+    `limit-arm <other>` exit 1, `limit-arm H` exit 0, `limit-armed H` 0, `limit-disarm`, then
+    `limit-armed H` 1; second schedule → 2; third with cap 2 fails with `already relaunched 2
+    time(s)`; `clear-attempts` and a new `start` drop all four fields; a manifest with
+    `limit_relaunches: "1"` is invalid;
+  - `limit-stop-write` safety (CLI, plus one in-process case that plants the first temp name
+    `.limit-stop.<os.getpid()>.tmp` before calling the function): symlinks at
+    `.ai/local/limit-stop`, `.ai/local/limit-stop.tmp` and the first temp name, each pointing at
+    a sentinel file outside the checkout → the sentinel is byte-identical afterwards and
+    `limit-stop` is a regular file holding the record; a FIFO at `.ai/local/limit-stop` and at the
+    first temp name → returns within a scaled bound (never blocks) and `limit-stop` ends a regular
+    file; `.ai/local` replaced by a symlink → exit 1, nothing written outside; the
+    `limit-far` run above with a sentinel symlink at `.ai/local/limit-stop.tmp` leaves the
+    sentinel unchanged and still stops with the unchanged message;
+  - `observe relaunch 1700000000 'note'` → `state: paused`, `relaunch_at` 1700000000; a following
+    `observe step build x` has no `relaunch_at`.
 - `AI_LIMIT_RELAUNCH_MAX` is recorded in the manifest `env` when set at start (as
   `AI_RECOVER_MAX` in the test at ~4705).
 - `test_usage_limit_beyond_wait_budget_stops` and all existing `limit`/`recovery` tests pass unchanged.
@@ -139,7 +180,7 @@ scripts/lib/watchdog.py, tests/test_workflow.py, docs/workflow.md, vault agents-
 - Tests named `test_limit_relaunch_watchdog_*` in tests/test_workflow.py (fixtures as
   `test_watchdog_recover_starts_ai_recover_after_a_crash`: `approve_run`, `mock_systemd_run`,
   `host_watchdog`):
-  - schedule due (`run-manifest limit-schedule <now-10> 2` via the helper, no marker, no
+  - schedule due (`run-manifest limit-schedule <now-10> 2 <HEAD>` via the helper, no marker, no
     runner): `host_watchdog('--recover')` launches `…/ai-recover --stage usage limit relaunch`,
     writes no last-error, sends no notification;
   - schedule in the future (`AI_WATCHDOG_NOW` before AT): nothing launched, no notification;
@@ -175,21 +216,41 @@ with the feature off, it escalates as today.
 ### Implementation notes
 - Design: `.ai/current-plan.md` "MC-01 part 1", bullet "ai-recover". File `scripts/ai-recover`.
 - Validate `AI_LIMIT_RELAUNCH_MAX` (`^[0-9]$`, default 2) next to `max` (~98).
-- Insert after the plan-revision decision block (~129) and BEFORE the hard rules (~131):
-  1. Due relaunch: `ai_helper run-manifest limit-due` exit 0 → `count=$(ai_helper run-manifest
-     limit-resume)`; `ai_notify "▶ RESUMED after the usage limit (relaunch $count/$cap): $branch."`;
-     then the existing open-stage branch (~149–163) if a stage is open, else the
-     record-stop-leftovers block (~165–171, factor it into a function used by both paths), a
-     clean-checkout check (escalate `the usage-limit relaunch found uncommitted changes.` /
-     `inspect and commit or discard them, then rerun ai-pipeline.`) and `resume`. `resume` takes
-     an optional notification so the relaunch does not also say `🔧 Recovered (n/max)`.
+- Schedule lifecycle first (plan "Relaunch schedule lifecycle", P1/P2): right after
+  `reserve-attempt` (~70–71) and the settings restoration (~72–80, which cannot escalate and
+  gives `ai_notify` the run's `AI_NOTIFY_CMD`), before the trap (~91), the marker (~97) and
+  every later escalation:
+  a. `at=$(ai_helper run-manifest limit-hold)` exit 0 → the run is still waiting (a probe
+     launched crash recovery after an interrupted scheduling or cleanup, or anything else
+     started recovery early): restore the waiting state without Claude, a new reservation
+     (`limit-hold` gave it back) or a count change: remove `.ai/local/last-error` (the limit
+     message or the watchdog's crash default), `.ai/local/limit-stop` and the stale
+     `.ai/local/pipeline.active`, `ai_observe relaunch "$at" …`, notify the same ⏸ PAUSED line
+     as the scheduling path (a repeat is harmless; none at all is not), print `Still waiting for
+     the usage-limit relaunch after <time>.` and `exit 75` (no trap is set yet, so nothing else
+     reports it).
+  b. `count=$(ai_helper run-manifest limit-claim)` exit 0 → `relaunch=yes`. The schedule is
+     consumed now, so a later escalation (`AI_AUTO_RECOVER=0`, gate, branch, plan decision,
+     leftovers) is that relaunch's one terminal ⛔ and no probe starts it again.
+- After the plan-revision decision block (~129) and BEFORE the hard rules (~131):
+  1. `relaunch == yes`: `ai_notify "▶ RESUMED after the usage limit (relaunch $count/$cap):
+     $branch."`; then the existing open-stage branch (~149–163) if a stage is open, else the
+     record-stop-leftovers block (~165–171, factor it into a function used by both paths); then,
+     when the checkout is still dirty: `ai_helper run-manifest limit-arm "$(git rev-parse HEAD)"`
+     exit 0 → keep the preserved task work uncommitted and `resume` (the resumed pipeline and
+     ai-run accept exactly this tree once, T011); exit 1 (HEAD moved since the stop) → escalate
+     `the usage-limit relaunch found uncommitted changes on a different commit.` / `inspect and
+     commit or discard them, then rerun ai-pipeline.`. Clean → `resume`. `resume` takes an
+     optional notification so the relaunch does not also say `🔧 Recovered (n/max)`.
   2. Limit-only stop: `read -r agent at < <(ai_helper limit-stop)` succeeds →
      cap 0 → fall through (hard rule, today's ⛔);
      `"$AI_BIN/ai-watchdog" "$AI_ROOT" --timer-recovers` fails → escalate with the reset time
      (`date -d @"$at" '+%a %H:%M'`) and the install hint (current-plan wording);
-     `ai_helper run-manifest limit-schedule "$at" "$cap"` fails → escalate `usage limit again after
-     $cap relaunch(es) in this run.` / `rerun ai-pipeline after the reset.`;
-     else append the pauses.log line, `ai_observe pause …`, the ⏸ notification, remove
+     `ai_helper run-manifest limit-schedule "$at" "$cap" "$(git rev-parse HEAD)"` fails →
+     escalate `usage limit again after $cap relaunch(es) in this run.` / `rerun ai-pipeline after
+     the reset.`;
+     else append the pauses.log line, `ai_observe relaunch "$at" …` (not `pause`: the
+     dashboard's evidence of a scheduled relaunch, T004), the ⏸ notification, remove
      `.ai/local/last-error`, `.ai/local/limit-stop` and `.ai/local/pipeline.active`, set
      `AI_STOP_NOTIFIED=1`, `trap - EXIT`, print `Paused at a <agent> usage limit; the watchdog
      relaunches the run after <time>.` and `exit 75`.
@@ -222,13 +283,111 @@ scripts/ai-recover, tests/test_workflow.py, README.md, docs/workflow.md, vault a
     `usage limit again after 1 relaunch(es)`;
   - `AI_LIMIT_RELAUNCH_MAX=0` → ⛔ `this kind of stop always needs a human` (today);
   - no timer installed → ⛔ naming the reset time and `--install-timer --recover`; no schedule;
-  - a last-error with the limit message plus another line → today's hard-rule ⛔, no schedule.
+  - a last-error with the limit message plus another line → today's hard-rule ⛔, no schedule;
+  - terminal escalation after a claim (P1): schedule (as above), switch the fixture to another
+    branch, set AT into the past, then two `host_watchdog('--recover')` probes with
+    `mock_systemd_run` (if the mock only records the command, the test runs the recorded
+    `ai-recover` command itself between the probes, as the existing watchdog-recover tests do):
+    exactly one ⛔ naming `not the approved run's branch`, `recovery_calls()` empty, the manifest
+    has no `limit_relaunch_at`, and the second probe launches nothing (`systemd-run` recorded
+    once);
+  - interrupted scheduling (P2), three variants after a real scheduling run, each followed by
+    `ai-recover --stage 'crash (pipeline killed or restarted)'` while AT is still in the future:
+    (i) last-error and limit-stop restored as they were and `pipeline.active` holding a dead PID
+    (a kill right after `limit-schedule`); (ii) last-error removed, `pipeline.active` with a dead
+    PID (a kill during cleanup; the watchdog's crash last-error written as `start_recovery`
+    does); (iii) a watchdog probe on (ii) with `--recover`, which launches crash recovery for the
+    dead marker → every variant exits 75 with `Still waiting`, `limit_relaunches` still 1,
+    `attempts` 0, no `recovery_calls()`, no `🔧`/`⛔`, last-error, limit-stop and
+    pipeline.active gone, observation `relaunch_at` = AT; then with AT in the past one relaunch
+    resumes as above (`relaunch 1/2`).
 - `test_recovery_*`, `test_usage_limit_*`, `test_watchdog_*` pass unchanged.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
+## T011 — Limit relaunch resumes preserved task work in the normal implementation session (MC-01 part 1, plan review round 1 P3)
+Status: TODO
+Dependencies: T003
+Model: opus
+
+### Goal
+A usage limit that stops an implementation session after it edited source or marked its task
+IN_PROGRESS no longer ends in ⛔ after the reset: the scheduled relaunch hands exactly that
+preserved tree, once, to the normal implementation session of the same run, which reconciles it
+under the unchanged validation and checkpoint safeguards, with no recovery decision session.
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "Relaunch schedule lifecycle", part "Preserved task work".
+  T001 provides `run-manifest limit-arm HEAD` / `limit-armed HEAD` / `limit-disarm`; T003 arms it
+  in ai-recover's claimed-relaunch path when the checkout is dirty and HEAD equals the HEAD
+  recorded at scheduling.
+- An armed tree is accepted only where today's clean-checkout checks stand between the resumed
+  pipeline and ai-run's first implementation session, and only when ALL hold: the process is a
+  resume (`AI_RECOVERY_ATTEMPT` set; a human start runs `run-manifest start`, which drops the
+  arm), `ai_helper run-manifest limit-armed "$(git rev-parse HEAD)"` exits 0, and no stage is
+  open. Sites (re-check line numbers): `scripts/ai-pipeline` ~123–125 (start-from-clean) and
+  `reconcile_disputes` ~326–327 (with status `none` and a dirty tree it would `recheck_fail`;
+  with an armed tree and status `none` it returns as for a clean one; a pending/verified
+  re-check keeps today's rule); `scripts/ai-run` ~148–149. The `tasks untouched` plan-review
+  gate (~429) needs no change (a touched queue skips the plan review, as today). Trace every
+  other check on that path (e.g. `ensure_validated`, ~236; anything between ~384 and ~501) and
+  list in the result which you changed and why the rest are not reached; do not relax any check
+  after the first implementation session.
+- ai-run consumes the arm exactly once: when the armed exception admits the dirty tree it runs
+  `ai_helper run-manifest limit-disarm` (failure → `ai_die`, nothing started) before the
+  session loop, prints `Resuming preserved work of the usage-limit stop.`, and the first
+  iteration works on `tasks next` as today (the IN_PROGRESS task first, workflow.py ~642–647);
+  its prompt already says `Reconcile interrupted work first`. A clean tree never consumes it
+  (`clear-attempts` at finish drops it).
+- After the session nothing is relaxed: DONE → `ai-check`, tier-1 commit with
+  `checkpoint-guard`, `committed-matches-worktree` (~669–701; update the comment "The session
+  started from a clean tree" to say an armed resume started from its own preserved task work);
+  BLOCKED → must be checkpointed; anything else → `no_checkpoint` stop as today.
+- ai-recover's later stops after an armed resume follow the normal recovery rules (the arm is
+  gone, so a second crash does not get the exception).
+- docs/workflow.md "Interruption, limits, and recovery" and README "Recovery": a limit stop
+  keeps the session's uncommitted work and the relaunch continues it once; a moved HEAD
+  escalates.
+- Flow chart (vault): the relaunch branch notes "uncommitted task work is continued, not
+  committed by recovery".
+
+### Likely affected modules
+scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `test_limit_relaunch_preserved_*` in tests/test_workflow.py (fixtures as T003's
+  `test_limit_relaunch_recover_*`):
+  - new mock mode `MOCK_CLAUDE=limit-far-dirty`: the session sets the active task IN_PROGRESS in
+    `.ai/tasks.md` and writes a source file, then reports the far limit (as `limit-far`).
+    `ai-pipeline --approved … --no-pr` → exit 75 and scheduled as in T003, the tree still holds
+    both edits; AT set into the past; `ai-recover --stage 'usage limit relaunch'` with a normal
+    mock that completes the task → the pipeline completes; the source file is in a validated
+    checkpoint commit; `recovery_calls()` empty (no recovery decision session); notifications
+    contain `▶ RESUMED after the usage limit` and no `⛔`; the manifest has no `limit_resume`;
+  - HEAD moved after scheduling (a commit made by the test, tree still dirty) → ⛔ `on a
+    different commit`, nothing committed by recovery, no session ran;
+  - an armed tree reaching a session that does NOT complete (mock returns without DONE) → the
+    existing `No completed/blocked checkpoint` stop, the arm is gone, and a following
+    `ai-recover --stage implementation` takes the normal path (dirty tree → Claude decision),
+    not the exception;
+  - a human `ai-pipeline --approved` on a dirty tree with an armed manifest → refused with
+    `Start from a clean checkpoint` (`run-manifest start` dropped the arm);
+  - `ai-run --approved` on a dirty tree with an arm for a different HEAD → `Start from a clean
+    checkpoint`.
+- `test_recovery_*`, `test_usage_limit_*`, the re-check/dispute tests and all pipeline tests pass
+  unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_preserved` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recheck` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
@@ -244,11 +403,17 @@ Model: sonnet
 planning session that died without a plan as a stop on the Plan box.
 
 ### Implementation notes
-- `scripts/lib/dashboard.py` `inspect` (~382–392), when `liveness` is `gone`:
-  observation `state == 'paused'` → status `paused`; observation `stage == 'planning'` and
-  `state == 'active'` → status `needs_you` with `run['last_error']` (when empty) set to
-  `planning session ended without a plan (killed?)` so `stop_note` and the ⛔ marker show it.
-  Order: `crashed`, `alive`, then these two, then today's `stopped`/errored/done/idle.
+- `observation_of` (~250–264) also returns `relaunch_at` (an int from the record, else None;
+  T001's `observe relaunch` is its only writer and every other action drops it).
+- `scripts/lib/dashboard.py` `inspect` (~382–392), when `liveness` is `gone`, in this order
+  (plan review round 1, P5: a plain `paused` state is NOT evidence of a relaunch, since
+  `ai_limit_pause` writes it for every in-process wait, and a newer error always wins):
+  `crashed`; `alive`; `state == 'stopped'` or `errored` (a last-error newer than the
+  observation) → `needs_you` (today, unchanged); `state == 'paused'` with an int `relaunch_at`
+  → status `paused` (waiting for the scheduled relaunch); `stage == 'planning'` and `state` in
+  `active`, `paused` → status `needs_you` with `run['last_error']` set to `planning session
+  ended without a plan (killed?)` so `stop_note` and the ⛔ marker show it; then today's
+  done/idle (a gone standalone runner killed during an in-process pause stays `idle`, as today).
 - `position`/`marker_text` already handle `paused` and `needs_you`; check the paused marker
   reads `⏸ <note>` under the stage box for a gone run, and the compact line (`✗Plan`) and the
   golden widths (`test_dashboard_plan_nine_boxes_fit_120_without_truncation`, 40–200 columns)
@@ -264,8 +429,15 @@ scripts/lib/dashboard.py, tests/test_dashboard.py, docs/workflow.md
 ### Acceptance criteria
 - Tests named `test_dashboard_limit_relaunch_*` and `test_dashboard_plan_killed_*` in
   tests/test_dashboard.py (fixtures as `planned_checkout`):
-  - steps `('step', 'build', 'T003')`, `('pause', 'Claude limit · relaunch after Sat 09:05')`, no
-    runner, no marker → `--json` status `paused`, stage `build`; the view shows `⏸` and the note;
+  - steps `('step', 'build', 'T003')`, `('relaunch', '1700000000', 'Claude limit · relaunch after
+    Sat 09:05')`, no runner, no marker → `--json` status `paused`, stage `build`; the view shows
+    `⏸` and the note;
+  - the same relaunch observation plus a `last-error` written after it → `needs_you` with that
+    error (newer error wins);
+  - killed during an in-process pause, no schedule: steps `('step', 'build', 'T003')`,
+    `('pause', 'Claude until Sat 09:05')`, no runner → status `idle` (as today), never `paused`;
+    steps `('step', 'planning', 'opus · first plan')`, `('pause', 'Claude until Sat 09:05')`, no
+    runner → `needs_you` with `planning session ended without a plan`;
   - steps `('step', 'planning', 'opus · first plan')`, no runner → status `needs_you`, stage
     `planning`, `║ Plan ║` styled `stopped`, the ⛔ line contains
     `planning session ended without a plan`, compact starts `  ✗Plan ·PlanCheck`;
@@ -285,7 +457,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ## T005 — `ai-run --plan --read-dir DIR`: read-only reference directories for the planning session (DB-04)
 Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 A planning session can read the directories mission control's launcher grants (vault, plans,
@@ -504,7 +676,11 @@ itself drafted becomes ready; a PR a human drafted stays a draft.
   `unresolved == 1` or `disputes != 0`; `make_draft` as today.
 - Existing PR, `make_draft=yes`: after a successful `gh pr ready --undo` + isDraft check, when
   `policy_draft=yes` and `human_draft=no` → `ai_helper pr-draft record "$url" converted`.
-  Already a draft → no record change.
+  Already a draft → no record change, except under `--draft` (below).
+- `human_draft=yes` (`--draft` given) revokes pipeline ownership: whatever the PR's state (new,
+  converted, already a draft), `ai_helper pr-draft clear` runs once the PR step has the PR (a
+  failure warns, as an un-draft failure does), so a later run without `--draft` never un-drafts
+  a PR the human asked to keep draft (plan review round 1, P4). Nothing is recorded in that run.
 - New PR created with `--draft`, `policy_draft=yes`, `human_draft=no` → `pr-draft record "$url"
   created` after `gh pr create` succeeded.
 - Existing PR, `make_draft=no`: `is_draft=$(gh pr view … isDraft)`; when `true` and
@@ -540,6 +716,10 @@ scripts/ai-pipeline, tests/test_workflow.py, README.md, docs/workflow.md, vault 
     says `left as draft`, the PR stays draft;
   - `--draft` run: the PR is drafted but nothing is recorded; a later run without `--draft` and
     a clean review leaves it draft;
+  - three runs (P4): run 1 drafts for policy (record written); run 2 passes `--draft` with
+    `MOCK_GH_EXISTING=1` and the PR still draft → the record is cleared, no plain `pr ready`;
+    run 3 without `--draft`, clean review → no plain `pr ready` call, `gh-draft` still present,
+    output says `left as draft`;
   - `MOCK_GH_READY_FAIL=1` on the un-draft → the pipeline finishes (exit 0), warns, keeps the record;
   - an existing ready PR with a stale record → the record is cleared.
 - `test_existing_ready_pr_is_converted_to_draft`, `test_failed_draft_conversion_stops`,
@@ -556,7 +736,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, flow chart and handoff audit (all items)
 Status: TODO
-Dependencies: T004, T007, T009
+Dependencies: T011, T004, T007, T009
 Model: haiku
 
 ### Goal
