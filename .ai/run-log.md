@@ -339,3 +339,4 @@
 | 2026-10-17 | claude (opus) | T014 | DONE: /proc stat read as bytes; batch groups signalled before any scan; failed scan → `Dispatcher.scan()` None, barrier reports `unknown (descendant scan failed: …)`; 3 `test_parallel_runner_tree_*` tests | PASS (ai-check, 739 tests; -k parallel_runner 32 OK) | parent 9e68f79 | Mutation: strict read_text → non_utf8_name fails; unguarded first scan → scan_failure fails; flow unchanged |
 | 2026-10-17T00:26:18Z | runner | T014 | completed | PASS | a52b5ea | Claude checkpointed; continuing queue |
 | 2026-10-17 | claude (sonnet) | T015 | DONE: catch-up `covers` map (Codex recheck covers only recheck; code covers code and recheck); 2 new `test_outcome_catchup_*` tests; README/docs line | PASS (ai-check, 741 tests; -k outcome_catchup 7 OK) | parent d636931 | flow unchanged |
+| 2026-10-17T00:40:05Z | runner | T015 | completed | PASS | bd4a419 | Claude checkpointed; continuing queue |
