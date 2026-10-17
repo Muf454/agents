@@ -50,6 +50,10 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k Docs` 3 OK; other groups
+and the full gate see the task result. Without the new `! armed_resume` guard the partial
+checkpoint test fails as round 5 P3 describes (`Commit the plan before reviewing it.` →
+recovery decision).
 T011: `-k limit_relaunch_preserved` 20 OK, `-k recheck` 32 OK, `-k recovery` 65 OK;
 `.ai/bin/ai-check` PASS (879 tests, 520.3 s).
 T014: `-k limit_relaunch_verify` 9 OK; full gate and the other groups see the task result.
@@ -79,8 +83,9 @@ Flow chart updated (T002: "When something goes wrong" gained the usage-limit rel
 T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recovering timer, cap),
 the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording; T014: the
 relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
-continues uncommitted task work in its own session or the validated checkpoint). Still to
-be updated by T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
+is for implementation stops only and the armed resume re-enters at implementation). Still to
+be updated by T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -136,4 +141,6 @@ verifying HEAD and the whole tree (`worktree-digest` = `tree_snapshot`, submodul
 is the one site before any commit, stage resume or session, followed by a four-row transition
 table). T017 binds the arm to the task; T011: the resumed run admits the armed tree
 (`clean_or_armed`) and ai-run continues it once (the bound task's session, or the validated
-`checkpoint_done` when it is already DONE), no recovery decision. Next: the queue's next task.
+`checkpoint_done` when it is already DONE), no recovery decision. T016: `limit-schedule AT CAP
+STAGE` records `limit_stage`; `limit-arm` arms only an `implementation` stop; ai-pipeline skips
+the plan review loop while armed. Next: the queue's next task.

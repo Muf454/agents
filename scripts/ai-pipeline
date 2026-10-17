@@ -443,7 +443,11 @@ queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || {
   printf 'Task queue is invalid: %s\n' "${queue_error#Error: }" > .ai/local/last-error
   stop "$queue_stage"
 }
-if [[ "$plan_review" == yes ]] && ai_helper tasks untouched 2>/dev/null; then
+# An armed resume re-enters at implementation: the arm is bound to an `implementation` stop,
+# which exists only after this loop broke out in the same run. A committed partial checkpoint
+# makes plan-review-info stale and ai-review --plan cannot run on the preserved tree; the
+# committed part is reviewed by the implementation review like any task commit.
+if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>/dev/null; then
   while true; do
     ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
     plan_decision_check

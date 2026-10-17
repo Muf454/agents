@@ -441,7 +441,8 @@ relaunch for just after the reset (⏸, exit 75) and the watchdog timer installe
 after the reset (it records the agent and reset time in `.ai/local/limit-stop`). A relaunch
 first checks that HEAD and the whole checkout (submodules included) are exactly as the stop left
 them: any change during the wait, even to a bookkeeping file, stops it with nothing committed.
-A limit stop keeps the session's uncommitted work, and the relaunch continues it once: the task's
+A limit stop of an implementation session keeps its uncommitted work, and the relaunch continues it
+once, going straight back to implementation (no plan review re-run on the preserved work): the task's
 own session reconciles it, or, when the task was already DONE, the runner validates and commits
 it (`checkpoint T… (validated; the session did not commit)`), never a recovery commit. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".

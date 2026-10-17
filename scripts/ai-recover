@@ -221,8 +221,10 @@ if [[ "$relaunch" == yes ]]; then
   #   (a) an open stage → resume (its scope check kept);
   #   (b) dirty only in .ai/state.md, .ai/run-log.md, .ai/handoff.md → the leftovers commit →
   #       ai_gate_check → resume;
-  #   (c) dirty otherwise → limit-arm → resume (a refusal escalates with the verify wording;
-  #       no task recorded at the stop → escalates with that reason, nothing committed);
+  #   (c) dirty otherwise, and the stop's recorded stage is `implementation` → limit-arm →
+  #       resume (a refusal escalates with the verify wording; a stop outside an
+  #       implementation session or no task recorded at the stop → ⛔ with that reason,
+  #       nothing committed);
   #   (d) clean → resume.
   # Nothing else is permitted: a new branch here needs this table (and docs/workflow.md) changed.
   resume_open_stage quiet
@@ -230,11 +232,12 @@ if [[ "$relaunch" == yes ]]; then
   if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
     # Preserved task work: kept uncommitted; the resumed run accepts exactly this tree once.
     # Nothing touched the checkout since the verification (we hold the lock): a refusal is an
-    # inconsistency, reported as the verification would. The arm also names the task the work
-    # belongs to; without one recorded at the stop, it fails closed.
+    # inconsistency, reported as the verification would. The arm is bound to an implementation
+    # stop (the stage recorded at scheduling) and names the task the work belongs to; a stop
+    # of another stage or without a recorded task fails closed.
     if ! why=$(ai_helper run-manifest limit-arm 2>&1); then
       why=${why#Error: }
-      [[ "$why" != *'no task recorded'* ]] || \
+      [[ "$why" != *'outside an implementation session'* && "$why" != *'no task recorded'* ]] || \
         escalate "$why; nothing was committed." 'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
       relaunch_moved "$why"
     fi
@@ -251,7 +254,8 @@ if (( cap > 0 )) && limit=$(ai_helper limit-stop 2>/dev/null); then
   fi
   # Records HEAD and the tree digest now: the stop's bookkeeping is written and nothing is
   # committed yet, and after this the host writes nothing tracked (only .ai/local/, host state).
-  count=$(ai_helper run-manifest limit-schedule "$at" "$cap" 2>/dev/null) || \
+  # The stop's stage is recorded too: only an implementation stop's tree can be armed later.
+  count=$(ai_helper run-manifest limit-schedule "$at" "$cap" "$stage" 2>/dev/null) || \
     escalate "usage limit again after $cap relaunch(es) in this run." 'rerun ai-pipeline after the reset.'
   relaunch_wait "$at" "$agent usage limit" "stopped at a $agent usage limit during $stage" "$count"
   AI_STOP_NOTIFIED=1

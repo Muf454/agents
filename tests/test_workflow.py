@@ -328,7 +328,8 @@ if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
         return text[:start] + re.sub(r'^Status:.*$', 'Status: ' + status, text[start:end], count=1, flags=re.M) + text[end:]
     queue = pathlib.Path('.ai/tasks.md')
     text = queue.read_text()
-    own = {'limit-far-dirty': 'IN_PROGRESS', 'limit-far-keep': None}.get(mode, 'DONE')
+    own = {'limit-far-dirty': 'IN_PROGRESS', 'limit-far-keep': None, 'limit-far-dirty-checkpoint': 'IN_PROGRESS',
+           'limit-far-clean-checkpoint': 'IN_PROGRESS'}.get(mode, 'DONE')
     if own:
         text = set_status(text, task_id, own)
     for item in os.environ.get('MOCK_LIMIT_ALSO', '').split():
@@ -341,6 +342,12 @@ if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
         subprocess.run(['git', 'add', '--', '.ai/tasks.md', 'preserved.txt'], check=True)
         subprocess.run(['git', 'commit', '-qm', 'implement ' + task_id], check=True)
         pathlib.Path('preserved-after.txt').write_text('edited after the commit\n')
+    if mode in ('limit-far-dirty-checkpoint', 'limit-far-clean-checkpoint'):
+        # A partial checkpoint: the task stays IN_PROGRESS in HEAD; -dirty edits further.
+        subprocess.run(['git', 'add', '--', '.ai/tasks.md', 'preserved.txt'], check=True)
+        subprocess.run(['git', 'commit', '-qm', 'partial ' + task_id], check=True)
+        if mode == 'limit-far-dirty-checkpoint':
+            pathlib.Path('preserved-after.txt').write_text('edited after the partial checkpoint\n')
     if os.environ.get('MOCK_LIMIT_APPEND'):
         with open(os.environ['MOCK_LIMIT_APPEND'], 'a') as f: f.write('planted by the limited session\n')
     mode = 'limit-far'
@@ -1147,7 +1154,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('bootstrap')
         self.approve_run()
         self.mock_systemd_run()
-        self.helper('run-manifest', 'limit-schedule', str(at), '2')
+        self.helper('run-manifest', 'limit-schedule', str(at), '2', 'implementation')
         self.watchdog_phase('implementing')
         (self.project / '.ai/local').mkdir(exist_ok=True)
 
@@ -1266,7 +1273,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     if run:
                         self.approve_run()
                     if run == 'finish':
-                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2')
+                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2', 'implementation')
                         self.helper('run-manifest', 'clear-attempts')
                     self.watchdog_phase(phase)
                     self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
@@ -5357,11 +5364,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'limit-at', expected=1)
         self.helper('run-manifest', 'reserve-attempt')
         self.helper('run-manifest', 'task-set', 'T001')  # the arm names its task (T017)
-        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2').stdout, '1\n')
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation').stdout, '1\n')
         self.assertEqual(manifest()['attempts'], 0)
         self.assertEqual(self.helper('run-manifest', 'limit-due', '99', expected=1).stdout, '')
         self.assertEqual(self.helper('run-manifest', 'limit-due', '100').stdout, '100\n')
-        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', expected=1)
+        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', 'implementation', expected=1)
         self.assertIn('a relaunch is already scheduled', failed.stderr)
         self.assertEqual(manifest()['limit_relaunches'], 1)
         # Still waiting: the recovery's reservation is given back, the schedule kept.
@@ -5397,21 +5404,22 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for action in ('limit-verify', 'limit-arm', 'limit-armed'):
             self.helper('run-manifest', action, 'a' * 40, expected=1)  # no binding argument
         # The cap counts relaunches per human-started run.
-        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2').stdout, '2\n')
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2', 'implementation').stdout, '2\n')
         self.helper('run-manifest', 'limit-claim', '300')
-        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', expected=1)
+        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', 'implementation', expected=1)
         self.assertIn('usage limit: already relaunched 2 time(s) in this run', capped.stderr)
         self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '2\n')
         self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(manifest()['limit_stage'], 'implementation')
         fields = {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
-                  'limit_resume', 'task'}
+                  'limit_stage', 'limit_resume', 'task'}
         self.helper('run-manifest', 'clear-attempts')
         self.assertFalse(set(manifest()) & fields)
         for action in ('limit-verify', 'limit-arm'):
             unscheduled = self.helper('run-manifest', action, expected=1)
             self.assertIn('no scheduled relaunch', unscheduled.stderr)
         self.helper('run-manifest', 'task-set', 'T001')
-        self.helper('run-manifest', 'limit-schedule', '500', '2')
+        self.helper('run-manifest', 'limit-schedule', '500', '2', 'implementation')
         self.helper('run-manifest', 'limit-arm')
         self.approve_run()
         self.assertFalse(set(manifest()) & fields)
@@ -5424,6 +5432,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                            ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'other': 1}),
                            ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'task': 'x1'}),
                            ('limit_task', 7), ('limit_task', 'T1'),
+                           ('limit_stage', 7), ('limit_stage', ''), ('limit_stage', 'x' * 41),
                            ('limit_relaunches', True)):
             with self.subTest(key=key, value=value):
                 manifest_path.write_text(json.dumps(dict(manifest(), **{key: value})) + '\n')
@@ -5528,17 +5537,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def git_head(self):
         return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
 
-    def limit_relaunch_scheduled(self, timer=True, expected=75, prepare=None, mode='limit-far', queue=None, **env):
+    def limit_relaunch_scheduled(self, timer=True, expected=75, prepare=None, mode='limit-far', queue=None,
+                                 args=(), **env):
         # A pipeline stopped at a usage limit beyond the wait budget, recovering timer installed.
         # PREPARE runs on the feature branch before the approved run starts; MODE is the
-        # limited session's mock mode, QUEUE the task queue.
+        # limited session's mock mode, QUEUE the task queue, ARGS more ai-pipeline arguments.
         self.ready(queue)
         if prepare:
             prepare()
         self.mock_systemctl()
         if timer:
             self.watchdog('--install-timer', '--recover')
-        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', *args, expected=expected,
                          AI_AUTO_RECOVER='1', MOCK_CLAUDE=mode, AI_LIMIT_MAX_WAIT='60', **env)
 
     def assert_relaunch_waiting(self, at):
@@ -5700,7 +5710,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         def schedule():
             self.helper('run-manifest', 'clear-attempts')
             self.helper('run-manifest', 'task-set', 'T001')
-            self.helper('run-manifest', 'limit-schedule', '100', '2')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
 
         def refused(reason):
             before = manifest_path.read_bytes()
@@ -5796,7 +5806,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Scheduled without a task: no limit_task, and the arm of the dirty tree fails closed.
         with (self.project / 'notes.txt').open('a') as file:
             file.write('preserved edit\n')
-        self.helper('run-manifest', 'limit-schedule', '100', '2')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
         self.assertNotIn('limit_task', self.manifest())
         before = path.read_bytes()
         refused = self.helper('run-manifest', 'limit-arm', expected=1)
@@ -5807,7 +5817,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         # Scheduled with a task: copied into limit_task, then named by the arm.
         self.helper('run-manifest', 'clear-attempts')
         self.helper('run-manifest', 'task-set', 'T001')
-        self.helper('run-manifest', 'limit-schedule', '100', '2')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
         self.assertEqual(self.manifest()['limit_task'], 'T001')
         self.helper('run-manifest', 'task-clear')  # the arm reads limit_task, never task
         self.helper('run-manifest', 'limit-arm')
@@ -5821,7 +5831,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for reset in (lambda: self.helper('run-manifest', 'clear-attempts'), self.approve_run):
             self.helper('run-manifest', 'clear-attempts')
             self.helper('run-manifest', 'task-set', 'T002')
-            self.helper('run-manifest', 'limit-schedule', '100', '2')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
             self.assertEqual((self.manifest()['task'], self.manifest()['limit_task']), ('T002', 'T002'))
             reset()
             self.assertFalse({'task', 'limit_task'} & set(self.manifest()))
@@ -5861,20 +5871,22 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.stderr.count('Note: could not record the task in the run manifest.'), 1)
         self.helper('tasks', 'complete')
 
-    def bound_limit_stop(self, record_task):
+    def bound_limit_stop(self, record_task, stage='implementation', edit=True):
         # A pipeline stopped at the limit with its preserved work: the schedule is reset and the
-        # stop rewritten around an uncommitted source edit, then ai-recover schedules it again.
+        # stop rewritten around an uncommitted source edit (EDIT), then ai-recover --stage STAGE
+        # schedules it again.
         self.limit_relaunch_scheduled()
         self.manifest(limit_relaunches=None, limit_relaunch_at=None, limit_head=None, limit_tree=None,
-                      limit_task=None, task=None)
+                      limit_task=None, limit_stage=None, task=None)
         if record_task:
             self.helper('run-manifest', 'task-set', 'T001')
         edited = self.project / 'CLAUDE.md'
-        edited.write_bytes(edited.read_bytes() + b'preserved work of the limited session\n')
+        if edit:
+            edited.write_bytes(edited.read_bytes() + b'preserved work of the limited session\n')
         local = self.project / '.ai/local'
         (local / 'limit-stop').write_text(f'Claude {int(time.time()) + 3600}\n')
         (local / 'last-error').write_text(self.LIMIT_MESSAGE + '\n')
-        self.tool('ai-recover', '--stage', 'implementation', expected=75)
+        self.tool('ai-recover', '--stage', stage, expected=75)
         self.assertEqual(self.manifest()['limit_relaunches'], 1)
         return edited
 
@@ -5906,6 +5918,171 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('limit_resume', self.manifest())
         self.helper('run-manifest', 'limit-task', expected=1)
         self.assertIn('CLAUDE.md', self.commit_of(self.UNCOMMITTED.format('T001'))[2])
+
+    # ---------------------------------------------- armed resume re-enters at implementation (T016)
+    def plan_review_commits(self):
+        return self.subjects_now().count('chore(ai): record plan review')
+
+    def plant_plan_decision(self):
+        # A needs-human revision record of the current plan review in host state (what a
+        # supervised revision that asked the human records), bound to HEAD.
+        content = (self.project / '.ai/reviews/plan.md').read_text()
+        store = next((self.base / 'host-state').rglob('run.json')).parent / \
+            f"plan-revisions-{hashlib.sha256(b'feature/test').hexdigest()[:16]}.json"
+        store.write_text(json.dumps([{
+            'commit': self.git_head(), 'report_digest': hashlib.sha256(content.encode()).hexdigest(),
+            'round': 1, 'accepted': 0, 'rejected': 0, 'needs_human': 1,
+            'questions': 'Keep option A or switch to B?'}]) + '\n')
+        self.helper('plan-revisions', 'decision')
+
+    def assert_no_plan_commit_refusal(self, *outputs):
+        local = self.project / '.ai/local'
+        texts = [self.notifications(), (self.project / '.ai/run-log.md').read_text(), *outputs]
+        texts += [path.read_text() for path in (local / 'last-error', local / 'observation.json') if path.exists()]
+        for text in texts:
+            self.assertNotIn('Commit the plan before reviewing it', text)
+
+    def reenter_partial_checkpoint(self, *args):
+        # Round 5 P3: a partial checkpoint (source committed, T001 still IN_PROGRESS, zero DONE),
+        # more edits preserved, then the far limit; the relaunch must not re-run the plan review.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint', args=args)
+        partial, _, files = self.commit_of('partial T001')
+        self.assertIn('preserved.txt', files)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.helper('tasks', 'untouched')
+        self.assertIn('preserved-after.txt', self.porcelain())
+        if not args:
+            self.assertTrue(self.helper('plan-review-info').stdout.startswith('stale'))
+        plans, plan_commits = self.plan_calls(), self.plan_review_commits()
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual((self.plan_calls(), self.plan_review_commits()), (plans, plan_commits))
+        self.assert_no_plan_commit_refusal(result.stdout, result.stderr)
+        # Between the partial checkpoint and ai-run's checkpoint of the task only the relaunch's
+        # stop record and T001's own session may commit: no plan review, no host record.
+        checkpoint, _, files = self.commit_of(self.UNCOMMITTED.format('T001'))
+        self.assertIn('preserved-after.txt', files)
+        between = self.run_cmd(['git', 'log', '--format=%s', f'{partial}..{checkpoint}^']).stdout.split('\n')
+        self.assertLessEqual(set(filter(None, between)),
+                             {'chore(ai): record stop during usage limit relaunch', 'implement T001'})
+        return plans
+
+    def test_limit_relaunch_reenter_partial_checkpoint_skips_the_plan_review(self):
+        self.assertEqual(self.reenter_partial_checkpoint(), 1)  # reviewed once, before the limit
+
+    def test_limit_relaunch_reenter_partial_checkpoint_with_skip_plan_review(self):
+        self.assertEqual(self.reenter_partial_checkpoint('--skip-plan-review'), 0)
+
+    def test_limit_relaunch_reenter_clean_resume_re_reviews_the_plan(self):
+        # Control: the partial checkpoint with a clean tree is never armed; the resumed run
+        # re-reviews the stale plan on the clean checkout as today, then completes.
+        self.limit_relaunch_scheduled(mode='limit-far-clean-checkpoint')
+        self.assertEqual(self.porcelain().replace(' M .ai/state.md\n', '').replace(' M .ai/run-log.md\n', '')
+                         .replace(' M .ai/handoff.md\n', ''), '')
+        self.assertEqual(self.plan_calls(), 1)
+        result = self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertNotIn(self.RESUMING.format('T001'), result.stdout)  # never armed
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses()[-1], 'clean')
+        self.assertEqual(self.plan_review_commits(), 2)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('limit_resume', self.manifest())
+        self.helper('tasks', 'complete')
+
+    def test_limit_relaunch_reenter_plan_decision_on_the_relaunch_escalates_unarmed(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint')
+        self.plant_plan_decision()
+        head, status, subjects = self.git_head(), self.porcelain(), self.subjects_now()
+        edits = {path: path.read_bytes() for path in (self.project / 'preserved-after.txt', self.project / '.ai/tasks.md')}
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('plan review needs your decision', notes.splitlines()[-1])
+        manifest = self.manifest()
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: terminal
+        self.assertNotIn('limit_resume', manifest)
+        self.assertEqual((self.git_head(), self.porcelain(), self.subjects_now()), (head, status, subjects))
+        self.assertEqual({path: path.read_bytes() for path in edits}, edits)
+        self.assertEqual(self.sessions_run(), 1)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_reenter_plan_decision_stops_an_armed_resume(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint')
+        self.plant_plan_decision()
+        head, status, plans = self.git_head(), self.porcelain(), self.plan_calls()
+        edits = {path: path.read_bytes() for path in (self.project / 'preserved-after.txt', self.project / '.ai/tasks.md')}
+        self.armed_resume(expected=1, AI_SETTINGS_FROM_MANIFEST='1')
+        self.assert_armed_stop('plan review needs your decision', head, edits)
+        self.assertEqual((self.porcelain(), self.plan_calls()), (status, plans))
+        self.assertIn('plan review needs your decision',
+                      (self.project / '.ai/local/last-error').read_text())
+
+    def test_limit_relaunch_reenter_stage_bound_arm_helper(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        self.commit('bootstrap')
+        self.approve_run()
+        path = next((self.base / 'host-state').rglob('run.json'))
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('preserved edit\n')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.assertEqual(self.manifest()['limit_stage'], 'implementation')
+        self.helper('run-manifest', 'limit-arm')
+        self.assertIn('limit_resume', self.manifest())
+        # Another stage's stop on the same dirty tree is never armed (checked before the task).
+        for record_task in (True, False):
+            self.helper('run-manifest', 'clear-attempts')
+            self.assertNotIn('limit_stage', self.manifest())
+            if record_task:
+                self.helper('run-manifest', 'task-set', 'T001')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'review')
+            self.assertEqual(self.manifest()['limit_stage'], 'review')
+            before = path.read_bytes()
+            refused = self.helper('run-manifest', 'limit-arm', expected=1)
+            self.assertIn('the usage-limit stop left uncommitted changes outside an implementation session',
+                          refused.stderr)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertNotIn('limit_resume', self.manifest())
+        self.helper('run-manifest', 'clear-attempts')
+        before = path.read_bytes()
+        for stage in ('', 'x' * 41, 'tab\there'):
+            self.helper('run-manifest', 'limit-schedule', '100', '2', stage, expected=1)
+            self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-schedule', '100', '2', expected=1)
+        self.assertEqual(path.read_bytes(), before)
+        self.manifest(limit_stage=7)
+        self.assertIn('No valid run manifest', self.helper('run-manifest', 'limit-count', expected=1).stderr)
+
+    def test_limit_relaunch_reenter_stage_bound_arm_end_to_end(self):
+        edited = self.bound_limit_stop(record_task=True, stage='review')
+        self.assertEqual(self.manifest()['limit_stage'], 'review')
+        head, status, content = self.git_head(), self.porcelain(), edited.read_bytes()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the usage-limit stop left uncommitted changes outside an implementation session; '
+                      'nothing was committed.', stop)
+        self.assertIn('inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertEqual((self.git_head(), self.porcelain(), edited.read_bytes()), (head, status, content))
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: terminal
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_reenter_stage_bound_clean_tree_resumes(self):
+        self.bound_limit_stop(record_task=True, stage='review', edit=False)
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
 
     # ---------------------------------------------- relaunch verification contract (T014)
     def porcelain(self):

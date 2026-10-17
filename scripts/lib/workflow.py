@@ -1294,10 +1294,14 @@ def binding_dir():
 
 
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
-# used, the pending relaunch time, the HEAD, tree digest and task it was scheduled at and the
-# armed resume binding ({"head", "tree", "task"}).
+# used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
+# scheduled at and the armed resume binding ({"head", "tree", "task"}).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
-                'limit_resume')
+                'limit_stage', 'limit_resume')
+
+
+def limit_stage_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'[ -~]{1,40}', value) is not None
 
 
 def task_id_valid(value):
@@ -1314,6 +1318,7 @@ def limit_fields_valid(data):
             and ('limit_head' not in data or hexes(data['limit_head'], 40))
             and ('limit_tree' not in data or hexes(data['limit_tree'], 64))
             and ('limit_task' not in data or task_id_valid(data['limit_task']))
+            and ('limit_stage' not in data or limit_stage_valid(data['limit_stage']))
             and ('limit_resume' not in data
                  or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
                      and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
@@ -1361,8 +1366,8 @@ def limit_relaunch(path, data, action, arguments):
     at = data.get('limit_relaunch_at')
     count = data.get('limit_relaunches', 0)
     if action == 'limit-schedule':
-        usage = 'limit-schedule AT CAP'
-        if len(arguments) != 2:
+        usage = 'limit-schedule AT CAP STAGE'
+        if len(arguments) != 3 or not limit_stage_valid(arguments[2]):
             fail(f'Usage: run-manifest {usage}')
         when, cap = number(arguments[0], usage), number(arguments[1], usage)
         if at is not None:
@@ -1373,7 +1378,10 @@ def limit_relaunch(path, data, action, arguments):
         # before any commit, so this is exactly the checkout the relaunch must find; the
         # relaunch verifies it before it touches the checkout (ai-recover relaunch_verify).
         start, tree = limit_binding()
-        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree)
+        # The stage is ai-recover's --stage (host-owned, passed by ai-pipeline's stop()): the arm
+        # reads it from here, never from the relaunch's own arguments.
+        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree,
+                    limit_stage=arguments[2])
         # The task whose output the stopped tree is (ai-run's record); absent stays absent.
         data.pop('limit_task', None)
         if 'task' in data:
@@ -1412,7 +1420,10 @@ def limit_relaunch(path, data, action, arguments):
             fail(f'Usage: run-manifest {action}')
         if 'limit_head' not in data or 'limit_tree' not in data:
             fail('no scheduled relaunch')
-        # Preserved work is armed only for the task it belongs to: no record fails closed.
+        # Only an implementation session legitimately leaves uncommitted task work: the arm is
+        # bound to that stage first, then to the task it belongs to; no record fails closed.
+        if action == 'limit-arm' and data.get('limit_stage') != 'implementation':
+            fail('the usage-limit stop left uncommitted changes outside an implementation session')
         if action == 'limit-arm' and 'limit_task' not in data:
             fail('the usage-limit stop left uncommitted changes with no task recorded')
         why = limit_mismatch(data['limit_head'], data['limit_tree'])

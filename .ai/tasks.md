@@ -1079,7 +1079,7 @@ continues preserved work", README "Recovery"; vault flow chart relaunch node.
 
 
 ## T016 — Armed resume re-enters at implementation: stage-bound arm, plan review loop not entered while armed (MC-01 part 1, plan review round 5 P3 design task)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T011
 Model: opus
 
@@ -1209,6 +1209,50 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- `workflow.py`: `limit_stage` in `LIMIT_FIELDS` (so `clear-attempts` drops it; `start` writes a
+  fresh manifest), validated by `limit_stage_valid` (`[ -~]{1,40}`; wrong type → invalid
+  manifest). `limit-schedule AT CAP STAGE` (3 arguments, STAGE validated, nothing written on a
+  usage error) records it. `limit-arm` checks `limit_stage == 'implementation'` first (else exit 1
+  `the usage-limit stop left uncommitted changes outside an implementation session`, nothing
+  written), then T017's task, then T012's binding. `limit-verify`/`-armed`/`-disarm` unchanged.
+- `ai-recover`: schedules with `"$stage"`; transition (c) escalates the stage reason as
+  `…; nothing was committed.` with the `Next:` of T014 (the tree reasons keep `while the
+  usage-limit relaunch waited`); the transition table comment says (c) requires an
+  implementation stop.
+- `ai-pipeline`: the plan review loop is entered only when `! armed_resume`, with the comment
+  at the site. `relaunch_verify` (1 call) and `limit-disarm` (1 call site, ai-run) unchanged.
+- Audit of ai-pipeline from the resume to `ai-run --approved` (statements that run a session, a
+  review or `host_commit`): open-stage completion (`ai-run --triage`/`--revise-plan`) — not
+  reachable armed (`armed_resume` requires no open stage); `reconcile_disputes` (`ai-review
+  --recheck`, `host_commit` of re-check/dispute records) — a listed stage, and armed it fails
+  closed on a pending re-check or dirty review records before either runs (T011/T015);
+  `revision-queue-repair` — guarded by `! armed_resume`; plan review loop (`ai-review --plan`,
+  `host_commit 'chore(ai): record plan review'`, `complete_plan_stage` → `ai-run --revise-plan`)
+  — now guarded by `! armed_resume`; `ai-run --approved` — implementation. Everything else on the
+  path (`run-manifest start` only on a human start, `fix-rounds init`, timer status, ▶ notify,
+  `base_reached`, both `plan_decision_check`, `tasks check`) only reads or stops. Nothing else to fix.
+- Tests (tests/test_workflow.py), 8 `test_limit_relaunch_reenter_*`: `partial_checkpoint_skips_the_plan_review`
+  (new mock `limit-far-dirty-checkpoint`; `plan-review-info` stale; no plan reviewer call or
+  plan-review commit after the relaunch; `Commit the plan before reviewing it` nowhere; only the
+  session's own commit between the partial checkpoint and ai-run's checkpoint; one `Resuming
+  preserved work … (T001).`; no recovery call, no ⛔, no `limit_resume`),
+  `partial_checkpoint_with_skip_plan_review`, `clean_resume_re_reviews_the_plan` (mock
+  `limit-far-clean-checkpoint`: never armed, second plan review on a clean checkout, completes),
+  `plan_decision_on_the_relaunch_escalates_unarmed`, `plan_decision_stops_an_armed_resume`,
+  `stage_bound_arm_helper`, `stage_bound_arm_end_to_end` (`ai-recover --stage review`),
+  `stage_bound_clean_tree_resumes`. Without the new guard the first test fails with `Commit the
+  plan before reviewing it.` → recovery decision (round 5 P3 reproduced).
+- Updated for STAGE: `test_limit_relaunch_record_manifest_schedule_lifecycle` (also asserts
+  `limit_stage` recorded/dropped and invalid values), `test_limit_relaunch_bound_manifest_task_record_and_arm`,
+  the T012/T014 helper-level arm tests using `limit-schedule 100 2`, the watchdog fixtures at
+  the `limit-schedule str(at) 2` / `str(start - 10) 2` sites, and `bound_limit_stop` (stage and
+  edit parameters; drops `limit_stage` on reset). T003/T011 end-to-end tests go through
+  ai-recover and needed no change.
+- Docs: docs/workflow.md (schedule signature, manifest field, transition (c), new "Which stop
+  can leave preserved work" paragraph, armed resume re-enters at implementation); README
+  Recovery clause; vault flow chart relaunch branch and hub log.
+- Validation: `-k limit_relaunch_reenter` 8 OK; `-k limit_relaunch` 70 OK; `-k Docs` 3 OK;
+  further groups and the gate below.
 
 
 ## T018 — Recovery is terminal while the tree is armed; the armed checkpoint comes after ai-run's complete startup (MC-01 part 1, plan review round 7 P16/P17 design task)
