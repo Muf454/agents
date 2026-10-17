@@ -2018,6 +2018,26 @@ def _scan_decision(text):
     return decision
 
 
+def shorten(text, cap):
+    """Whitespace collapsed; longer than cap is cut at a sentence end (if that keeps at least
+    half of cap), else at a word boundary, else hard, plus '…' (total at most cap)."""
+    text = ' '.join(text.split())
+    if len(text) <= cap:
+        return text
+    room = text[:cap - 1]
+    ends = [i + 1 for i in range(len(room)) if room[i] in '.!?' and text[i + 1] == ' ']
+    if ends and ends[-1] >= cap // 2:
+        cut = room[:ends[-1]]
+    elif ' ' in room or text[cap - 1] == ' ':
+        cut = room[:room.rfind(' ')] if text[cap - 1] != ' ' else room
+    else:
+        cut = room
+    return cut.rstrip() + '…'
+
+
+RECOVERY_DECISION_FILE = '.ai/local/recovery-decision.txt'
+
+
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
@@ -2026,7 +2046,14 @@ def recover_decision(arguments):
     wrote something, the reason quotes the start of it."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
-    clean = lambda value: ' '.join(value.split())[:300]
+    Path(RECOVERY_DECISION_FILE).unlink(missing_ok=True)
+    cut = []
+
+    def clean(value):
+        short = shorten(value, 300)
+        if short != ' '.join(value.split()):
+            cut.append(True)
+        return short
     try:
         envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
@@ -2036,8 +2063,8 @@ def recover_decision(arguments):
         print(escalate)
         return
     if envelope['result'].strip():
-        escalate = ('escalate\t' + clean('the recovery session gave no valid decision; it wrote: '
-                                         + envelope['result']) + '\tinspect the stop yourself')
+        escalate = ('escalate\t' + shorten('the recovery session gave no valid decision; it wrote: '
+                                           + envelope['result'], 300) + '\tinspect the stop yourself')
     # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
@@ -2052,7 +2079,11 @@ def recover_decision(arguments):
             or not fields[1].strip():
         print(escalate)
         return
-    print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
+    reason, human_action = clean(fields[1]), clean(fields[2])
+    if cut:
+        full = lambda value: ' '.join(value.split())[:4000]
+        atomic(RECOVERY_DECISION_FILE, f'reason: {full(fields[1])}\nhuman_action: {full(fields[2])}\n')
+    print(f'{fields[0]}\t{reason}\t{human_action}')
 
 
 def committed_matches_worktree(arguments):
@@ -2587,7 +2618,7 @@ def task_statuses(text):
 
 def bounded_questions(questions):
     """At most three questions, each on one line of at most 300 characters, plus a pointer to the rest."""
-    lines = [' '.join(re.sub(r'<br\s*/?>', ' ', question, flags=re.I).split())[:QUESTION_CAP]
+    lines = [shorten(re.sub(r'<br\s*/?>', ' ', question, flags=re.I), QUESTION_CAP)
              for question in questions[:QUESTION_LIMIT]]
     if len(questions) > QUESTION_LIMIT:
         lines.append(f'(+{len(questions) - QUESTION_LIMIT} more in {PLAN_DISPOSITIONS})')

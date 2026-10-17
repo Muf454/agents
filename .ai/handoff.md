@@ -51,6 +51,7 @@ FL-15, FL-17, FL-18, FL-19, FL-22, FL-24, DB-02, DB-03, DB-05 and the triage hal
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+2026-10-17 T005: `.ai/bin/ai-check` PASS (817 tests, 434.4 s on 8 workers); `-k recovery` 65 OK.
 2026-10-17 T004: `.ai/bin/ai-check` PASS (812 tests, 442.0 s on 8 workers); `-k test_outcome_crash`
 plus the existing runner outcome/tamper tests 9 OK.
 2026-10-17 T003: `.ai/bin/ai-check` PASS (808 tests, 428.8 s on 8 workers).
@@ -66,7 +67,7 @@ PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 394.6 s on 8 workers).
 
 ## Flow chart
 Flow chart updated (T004): the "Outcome log" bullet of `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`
-(an attempt whose runner was killed is logged as crashed at the next start); T005 updates the notifications text only if the chart states the 300-character cut.
+(an attempt whose runner was killed is logged as crashed at the next start). T005 left the chart unchanged (it does not state the 300-character cut).
 
 ## Manual testing for the human
 

@@ -973,7 +973,7 @@ flow bullet and hub Log updated. Validation: `-k outcome_crash` 4 OK, `-k outcom
 `.ai/bin/ai-check` PASS (812 tests).
 
 ## T005 — Recovery reasons and plan questions are cut at a sentence or word boundary; the full text is kept (R13)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -1033,6 +1033,12 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done. `shorten(text, cap)` in scripts/lib/workflow.py; `recover_decision` uses it (300), writes/removes
+`.ai/local/recovery-decision.txt`; `ai-recover` removes it after the lock and `escalate` appends
+`Full text: …`; `bounded_questions` uses `shorten`. README and docs/workflow.md updated. Tests
+`test_recovery_reason_shorten_*` (5, mock mode `escalate-long`);
+`test_recovery_decision_prose_only_escalates_with_an_excerpt` updated on purpose (no longer a hard
+300 cut). Gate PASS (817 tests). Vault `agents-flow.md` does not state the 300-character cut: flow unchanged.
 
 
 ## T006 — Docs, handoff and final audit for the batch

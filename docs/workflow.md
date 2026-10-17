@@ -307,7 +307,7 @@ IDs and duplicates rejected); `accepted` names existing tasks, `rejected` has ev
 `Convergence:` line. `--fresh` also requires accepted tasks to be TODO, every task that existed
 at START to keep its status and new tasks to be TODO. It prints `accepted=a rejected=r
 needs_human=h`; `--questions` prints at most 3 needs-human questions, one line of at most 300
-characters each, plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
+characters each (cut at a sentence or word boundary, ending in `…`), plus `(+k more in .ai/reviews/plan-dispositions.md)`. `plan-revision-scope
 START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
 
@@ -698,7 +698,11 @@ line inside prose that contains no `{`, `}`, `[` or `]` (so no enclosing contain
 object or inline example can hide it; prose with any bracket escalates, the safe side);
 envelope and decision reject duplicate keys. Without a valid decision the escalation reason
 is `the recovery session gave no valid decision; it wrote: <excerpt>` (whitespace collapsed,
-at most 300 characters) when the answer is non-empty, else without the excerpt.
+at most 300 characters) when the answer is non-empty, else without the excerpt. A reason or
+human action longer than 300 characters is cut by `shorten` at a sentence end (if that keeps
+half the cap), else at a word boundary, and ends with `…`; the full text goes to
+`.ai/local/recovery-decision.txt` (removed at the start of every `ai-recover` and
+`recover-decision`) and the ⛔ notification ends with `Full text: <that path>`.
 `ai-run` commits validated leftovers of a DONE task itself (tier 1), with the same
 checks after the commit. Checkpoint scope: `git add --all` (ignored
 files stay out), then `checkpoint-guard` inspects every staged addition (renames count as

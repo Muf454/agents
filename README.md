@@ -416,7 +416,9 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    `escalate`. The answer is one JSON decision object; a diagnosis written before or after it
    still counts when the object starts its own line and the prose around it contains no `{`,
    `}`, `[` or `]`. Any other answer escalates, and the ⛔ reason quotes the start of what the
-   session wrote (`the recovery session gave no valid decision; it wrote: …`).
+   session wrote (`the recovery session gave no valid decision; it wrote: …`). A reason or
+   human action over 300 characters is cut at a sentence or word boundary (never mid-word);
+   the full text is then in `.ai/local/recovery-decision.txt` and the ⛔ says so.
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
    pipeline was killed or the machine restarted.
 

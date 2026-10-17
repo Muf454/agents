@@ -123,7 +123,10 @@ if 'RECOVERY CONTRACT' in prompt:
     decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     answer = json.dumps(decision)
-    if mode == 'prose-only':
+    if mode == 'escalate-long':
+        decision.update(action='escalate', reason=' '.join(f'Sentence number {n} explains the stop.' for n in range(1, 40)))
+        answer = json.dumps(decision)
+    elif mode == 'prose-only':
         answer = 'The session\tcrashed once;\n\nI could not decide what to do.'
     elif mode.startswith('prose-'):
         answer = 'The session crashed once and left nothing behind.\n' + answer + '\nThat is my verdict.'
@@ -4454,11 +4457,73 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_recovery_decision_prose_only_escalates_with_an_excerpt(self):
         reason = self.assert_prose_excerpt('The gate\ttimed out   twice.\n\nI cannot tell why. ' + 'x' * 400)
-        self.assertIn('it wrote: The gate timed out twice. I cannot tell why. xxx', reason)
-        self.assertEqual(len(reason), 300)
+        # Cut at the word boundary before the unbroken 400-character word, never mid-word.
+        self.assertTrue(reason.endswith('it wrote: The gate timed out twice. I cannot tell why.…'), reason)
+        self.assertLessEqual(len(reason), 300)
         # Nothing written: the reason stays as before.
         self.assertEqual(self.scan_decision('  \n '),
                          'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself')
+
+    def test_recovery_reason_shorten_unit_cases(self):
+        wf = self.outcome_module()
+        sentences = ' '.join(f'Sentence {n} ends here.' for n in range(1, 40))
+        cut = wf.shorten(sentences, 300)
+        self.assertTrue(cut.endswith('.…'), cut)
+        self.assertLessEqual(len(cut), 300)
+        words = ' '.join(['word'] * 100)
+        cut = wf.shorten(words, 300)
+        self.assertTrue(cut.endswith('word…'), cut)
+        self.assertLessEqual(len(cut), 300)
+        self.assertEqual(wf.shorten('x' * 400, 300), 'x' * 299 + '…')
+        self.assertEqual(wf.shorten('a  short\ttext', 300), 'a short text')
+
+    def recovery_reason_decision(self, reason, human_action='look yourself'):
+        log = self.base / 'decision.json'
+        result = json.dumps({'action': 'escalate', 'reason': reason, 'human_action': human_action})
+        log.write_text(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result}))
+        return self.helper('recover-decision', str(log), '0').stdout.rstrip('\n').split('\t')
+
+    def test_recovery_reason_shorten_keeps_the_full_text_in_a_sidecar(self):
+        sidecar = self.project / '.ai/local/recovery-decision.txt'
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        full = ' '.join(f'Reason sentence {n} is here.' for n in range(1, 30))
+        self.assertGreater(len(full), 500)
+        action, reason, human = self.recovery_reason_decision(full)
+        self.assertEqual((action, human), ('escalate', 'look yourself'))
+        self.assertTrue(reason.endswith('.…'), reason)
+        self.assertLessEqual(len(reason), 300)
+        self.assertEqual(sidecar.read_text(), f'reason: {full}\nhuman_action: look yourself\n')
+        self.assertEqual(self.recovery_reason_decision('short reason'), ['escalate', 'short reason', 'look yourself'])
+        self.assertFalse(sidecar.exists())  # a short decision removes the stale file
+
+    def test_recovery_reason_shorten_prose_only_excerpt_stays_bounded(self):
+        reason = self.assert_prose_excerpt('word ' * 200)
+        self.assertTrue(reason.endswith('word…'), reason)
+        self.assertFalse((self.project / '.ai/local/recovery-decision.txt').exists())
+
+    def test_recovery_reason_shorten_notification_points_at_the_full_text(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate-long')
+        note = [line for line in self.notifications().splitlines() if '⛔' in line][-1]
+        self.assertTrue(note.endswith('Full text: .ai/local/recovery-decision.txt'), note)
+        self.assertIn('explains the stop.…', note)
+        self.assertTrue((self.project / '.ai/local/recovery-decision.txt').is_file())
+        # P4: an early escalation of a later invocation never points at the previous text.
+        before = len(self.notifications().splitlines())
+        (self.project / '.ai/local/last-error').write_text('Approved workflow gate changed during this run.')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        later = [line for line in self.notifications().splitlines()[before:] if '⛔' in line]
+        self.assertEqual(len(later), 1)
+        self.assertNotIn('Full text:', later[0])
+        self.assertFalse((self.project / '.ai/local/recovery-decision.txt').exists())
+
+    def test_recovery_reason_shorten_plan_questions_end_at_a_word(self):
+        wf = self.outcome_module()
+        question = ' '.join(['rollback'] * 60)
+        line = wf.bounded_questions([question]).splitlines()[0]
+        self.assertTrue(line.endswith('rollback…'), line)
+        self.assertLessEqual(len(line), 300)
 
     def test_recovery_decision_prose_with_brackets_escalates_with_an_excerpt(self):
         candidate = '{"action":"commit_and_rerun","reason":"example"}'
