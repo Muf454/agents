@@ -4,6 +4,7 @@
 The shell scripts own the workflow. This module never invokes an AI agent.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -3035,13 +3036,45 @@ def read_outcomes(paths):
     return records
 
 
+def fsync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def make_dirs(directory):
+    """Create `directory` with its missing ancestors; returns the ones created, deepest first.
+    The caller syncs each one's parent (`sync_created`) once the new entries matter."""
+    directory = Path(directory)
+    created = []
+    for candidate in (directory, *directory.parents):
+        if candidate.exists():
+            break
+        created.append(candidate)
+    directory.mkdir(parents=True, exist_ok=True)
+    return created
+
+
+def sync_created(created):
+    for directory in created:  # deepest first
+        fsync_dir(directory.parent)
+
+
 def append_outcome(path, record):
-    """Append one record as one line; False when the write was short. OSError propagates."""
+    """Append one record as one line; False when the write was short. OSError propagates,
+    including one from a file or directory sync: True means the line is durable."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    created = make_dirs(path.parent)
     # Read-write: the newline guard reads the last byte, and os.pread on O_WRONLY raises EBADF.
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
+        # The lock makes "tail check, then write" one step for every writer using this helper,
+        # in any checkout on the host; os.close in the finally releases it. Known limit: an
+        # older installed copy (path.open('a'), no lock) can still interleave until upgraded;
+        # its buffered write only leaves a partial line on a crash or a full disk.
+        fcntl.flock(fd, fcntl.LOCK_EX)
         size = os.fstat(fd).st_size
         # A torn earlier line (no final newline) must not swallow this record.
         prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
@@ -3052,9 +3085,89 @@ def append_outcome(path, record):
         if os.write(fd, data) != len(data):
             return False
         os.fsync(fd)
-        return True
     finally:
         os.close(fd)
+    # A file fsync does not persist a new directory entry: sync the log's directory on every
+    # append (no race over who created the file) and the parent of every directory created.
+    fsync_dir(path.parent)
+    sync_created(created)
+    return True
+
+
+def attempts_dir():
+    """Host-side attempt markers, one file per attempt, never overwritten."""
+    return binding_dir() / 'attempts'
+
+
+MARKER_ID = re.compile(r'^[0-9a-f]{16}$')
+
+
+def marker_path(attempt_id):
+    if not isinstance(attempt_id, str) or not MARKER_ID.match(attempt_id):
+        raise ValueError(f'Invalid attempt id: {attempt_id!r}')
+    return attempts_dir() / f'{attempt_id}.json'
+
+
+def write_marker(record):
+    """Publish one attempt marker: complete, fsynced tmp file, then a hard link to the final
+    name (fails if it exists, so a marker is never overwritten), then a directory sync."""
+    final = marker_path(record.get('id'))
+    created = make_dirs(final.parent)
+    sync_created(created)
+    temp = final.with_name(final.name + '.tmp')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            data = (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+            if os.write(fd, data) != len(data):
+                raise OSError(f'Short write of attempt marker {temp}')
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(temp, final)  # FileExistsError propagates
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+    fsync_dir(final.parent)
+    return final
+
+
+def read_marker(path):
+    """The marker's record, or None for invalid content."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    try:
+        record = json.loads(data.decode('utf-8'))
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or record.get('id') != Path(path).stem \
+            or not MARKER_ID.match(str(record.get('id'))):
+        return None
+    return record
+
+
+def marker_sort_key(entry):
+    path, record = entry
+    return (str(record.get('started', '')) if record else '', path.name)
+
+
+def list_markers():
+    """(path, record or None) for every `*.json` marker, oldest attempt first."""
+    directory = attempts_dir()
+    if not directory.is_dir():
+        return []
+    entries = [(path, read_marker(path)) for path in directory.glob('*.json')]
+    return sorted(entries, key=marker_sort_key)
+
+
+def remove_marker(path):
+    path = Path(path)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    with contextlib.suppress(FileNotFoundError):  # no directory: no entry to persist
+        fsync_dir(path.parent)
 
 
 def outcome_title(task_id):
@@ -3087,8 +3200,14 @@ def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
-    | catchup BRANCH (the human recorded a Codex catch-up of that branch)"""
+    | catchup BRANCH (the human recorded a Codex catch-up of that branch)
+    | attempt-dir (prints the attempt marker directory)"""
     kind, *rest = arguments
+    if kind == 'attempt-dir':
+        if rest:
+            fail('Usage: outcome attempt-dir')
+        print(attempts_dir())
+        return
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:

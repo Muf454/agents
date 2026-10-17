@@ -901,13 +901,23 @@ task attempt with the session model and the seconds from session start to result
 attempt number counts earlier lines for the same project (main repository name, shared by
 worktrees), branch and task. Failures to write are reported and never stop the run.
 
-Every line goes through `append_outcome`: one `write` on a read-write `O_APPEND` descriptor,
-prefixed with a newline when the log does not end in one (a torn earlier line never swallows
-the record), then `fsync`. A short write is a failure (`outcome` exits 1 with "Could not append
+Every line goes through `append_outcome`: on a read-write `O_APPEND` descriptor it takes
+`flock(LOCK_EX)` (so the tail check and the write are one step for every writer using the
+helper, across checkouts), then one `write`, prefixed with a newline when the log does not end
+in one (a torn earlier line never swallows the record), then `fsync` of the file, of the log's
+directory and of the parent of every directory it created; any sync error propagates, so
+success means the line and its directory entries are durable. An older installed copy without
+the lock in another checkout can still interleave until upgraded. A short write is a failure (`outcome` exits 1 with "Could not append
 the outcome line completely"), never retried: another checkout may have appended in between,
 and the next append's newline guard isolates the fragment. `read_outcomes` splits the bytes on
 `\n` only and decodes each line on its own, so a torn tail (even one cut inside a multibyte
 UTF-8 character) or a U+2028 in a title costs at most that one line.
+
+Attempt markers live one file per attempt in `outcome attempt-dir` (`<review binding
+dir>/attempts/<id>.json`, id `^[0-9a-f]{16}$`). `write_marker` writes a fsynced `<id>.json.tmp`
+and hard-links it to the final name, which fails if the name exists, so a marker is never
+overwritten; `list_markers` returns `(path, record or None)` (None for invalid content) oldest
+`started` first; `remove_marker` unlinks and syncs the directory.
 
 A `review recheck` line records, instead of finding counts, how many rejected BLOCKER and
 MAJOR findings Codex upheld and withdrew (`upheld_blocker`, `upheld_major`, `withdrawn_blocker`,

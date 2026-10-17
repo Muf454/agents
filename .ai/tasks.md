@@ -229,7 +229,7 @@ No lock or directory fsync (T008).
 
 
 ## T008 — CU-5 write protocol: locked append with directory sync, one marker file per attempt (CU-5, part 0b)
-Status: TODO
+Status: DONE
 Dependencies: T007
 Model: opus
 
@@ -299,6 +299,16 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-17. `append_outcome` now: `make_dirs` (records created ancestors) → open →
+`flock(LOCK_EX)` → tail check → one write → fsync file → `fsync_dir(path.parent)` →
+`sync_created` (parent of each created dir, deepest first) → True; sync OSErrors propagate.
+Marker store: `attempts_dir`, `marker_path` (id validated `^[0-9a-f]{16}$`), `write_marker`
+(tmp O_EXCL 0o600 + fsync + `os.link` + tmp unlink + dir fsync), `read_marker` (one place for
+T010's read-error case), `marker_sort_key` (one place for T012's `seq`), `list_markers`,
+`remove_marker`; `outcome attempt-dir`. Tests: 4 `test_outcome_write_protocol_*` (lock
+interleaving, sync order with/without new dirs, dir-sync failure via `outcome`, marker store).
+Evidence: `-k outcome_write_protocol` Ran 4 OK; `-k outcome` Ran 32 OK; ai-check PASS (762
+tests, 413.8 s). docs/workflow.md "Outcome log" updated. Flow unchanged.
 
 
 ## T009 — CU-5 marker-removal gate: strict log read and `confirm_recorded` (CU-5, part 0c, round 3 redesign)

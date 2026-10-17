@@ -5692,6 +5692,105 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual([r['reviewer'] for r in records], ['codex', 'codex'])
         self.assertEqual(log.read_bytes().count(b'\n'), 4)  # two records, two newline-isolated fragments
 
+    def test_outcome_write_protocol_lock_serializes_tail_check_and_write(self):
+        import fcntl
+        wf = self.outcome_module()
+        log = self.base / 'state/outcomes.jsonl'
+        log.parent.mkdir()
+        log.write_bytes(b'{"kind": "task", "title": "one"}\n')
+        fd = os.open(log, os.O_RDWR | os.O_APPEND)
+        self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(
+            wf.append_outcome(log, {'kind': 'task', 'title': 'two'})), daemon=True)
+        thread.start()
+        time.sleep(0.3 * TIMEOUT_SCALE)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(log.stat().st_size, len(b'{"kind": "task", "title": "one"}\n'))
+        os.write(fd, b'{"time": "x", "kin')
+        os.close(fd)  # releases the lock
+        fd = None
+        thread.join(SHORT_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+        self.assertTrue(log.read_bytes().endswith(b'{"time": "x", "kin\n{"kind": "task", "title": "two"}\n'))
+        self.assertEqual([r['title'] for r in wf.read_outcomes([log])], ['one', 'two'])
+
+    def outcome_write_protocol_syncs(self, wf, log):
+        """Inodes passed to os.fsync by one append, and whether it returned True."""
+        real_fsync = os.fsync
+        synced = []
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        with mock.patch('os.fsync', recording_fsync):
+            result = wf.append_outcome(log, {'kind': 'task', 'title': 'x'})
+        return synced, result
+
+    def test_outcome_write_protocol_syncs_file_then_new_directories(self):
+        wf = self.outcome_module()
+        log = self.base / 'host-state/nested/outcomes.jsonl'
+        synced, result = self.outcome_write_protocol_syncs(wf, log)
+        self.assertTrue(result)
+        inode = lambda path: os.stat(path).st_ino  # noqa: E731
+        self.assertEqual(synced, [inode(log), inode(log.parent), inode(self.base / 'host-state'), inode(self.base)])
+        synced, result = self.outcome_write_protocol_syncs(wf, log)
+        self.assertTrue(result)
+        self.assertEqual(synced, [inode(log), inode(log.parent)])
+
+    def test_outcome_write_protocol_directory_sync_failure(self):
+        import runpy
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        self.outcome_log_review()
+        directory = os.stat(log.parent).st_ino
+        real_fsync = os.fsync
+
+        def failing_fsync(fd):
+            if os.fstat(fd).st_ino == directory:
+                raise OSError(5, 'Input/output error')
+            return real_fsync(fd)
+
+        wf = self.outcome_module()
+        with mock.patch('os.fsync', failing_fsync), self.assertRaises(OSError):
+            wf.append_outcome(log, {'kind': 'review', 'reviewer': 'unit'})
+        stderr = io.StringIO()
+        with mock.patch('os.fsync', failing_fsync), mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, 'argv', [str(HELPER), 'outcome', 'review', 'code', 'codex', 'm', 'high', '5']), \
+                contextlib.chdir(self.project), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as stop:
+            runpy.run_path(str(HELPER), run_name='__main__')
+        self.assertNotEqual(stop.exception.code, 0)
+        self.assertIn('Could not append the outcome line completely', stderr.getvalue())
+
+    def test_outcome_write_protocol_marker_store(self):
+        wf = self.outcome_module()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.project):
+            directory = wf.attempts_dir()
+            self.assertEqual(self.helper('outcome', 'attempt-dir').stdout.strip(), str(directory))
+            later = {'id': 'b' * 16, 'started': '2026-01-01T00:00:02Z', 'task': 'T001'}
+            earlier = {'id': 'c' * 16, 'started': '2026-01-01T00:00:01Z', 'task': 'T001'}
+            first = wf.write_marker(later)
+            second = wf.write_marker(earlier)
+            self.assertEqual(sorted(p.name for p in directory.iterdir()), [first.name, second.name])
+            content = first.read_bytes()
+            with self.assertRaises(FileExistsError):
+                wf.write_marker(dict(later, task='T002'))
+            self.assertEqual(first.read_bytes(), content)
+            self.assertFalse(any(p.name.endswith('.tmp') for p in directory.iterdir()))
+            garbage = directory / ('a' * 16 + '.json')
+            garbage.write_text('not json')
+            self.assertEqual(wf.list_markers(), [(garbage, None), (second, earlier), (first, later)])
+            for bad in ('../escape0000000', 'B' * 16, 'b' * 15, None):
+                with self.assertRaises(ValueError):
+                    wf.write_marker({'id': bad})
+            wf.remove_marker(second)
+            wf.remove_marker(second)  # already gone: fine
+            self.assertEqual([p for p, _ in wf.list_markers()], [garbage, first])
+
     def outcome_rows(self):
         path =self.base / 'host-state/outcomes.jsonl'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
