@@ -194,3 +194,10 @@ Plan review HEAD: 73d04f1ea56799ec8c52408641647b0a7e45d4da
 | P5 | accepted | Verified: `ai_limit_pause` writes `ai_observe pause` for every in-process wait (common.sh:108), and T004's rule placed `paused` before the errored/stopped check (dashboard.py :387). Fix: T001 adds `observe relaunch AT NOTE` (`relaunch_at`, dropped by every other action), T003 uses it when scheduling and restoring, T004 requires `relaunch_at` for a gone run to be `paused`, keeps `stopped`/newer last-error first, and treats a gone planning run in `active` or `paused` as the planning stop; tests for a newer error, a killed standalone pause (stays `idle`) and a killed planning pause (`needs_you`). | T001, T003, T004 |
 | P6 | accepted | Correct: `printf … > .ai/local/limit-stop.tmp` follows a planted symlink and blocks on a FIFO, and `.ai/local` is agent-writable. T001 now writes through `workflow.py limit-stop-write`, which pins `.ai/local` with `local_dir_fd` (workflow.py:3995) and uses the existing `write_record` (:4106–4132: `O_CREAT+O_EXCL+O_NOFOLLOW+O_NONBLOCK` temp on the pinned descriptor, regular-file check, `os.replace` on it). Tests: sentinel symlinks at the final, old temp and first temp names stay untouched, FIFOs never block, a symlinked `.ai/local` writes nothing, and the end-to-end limit stop keeps its message. | T001 |
 | P7 | accepted | CLAUDE.md puts authorization/permission work on opus, and T005 builds `--add-dir` and `Read(…)` permission entries. T005 `Model:` is now opus; plan table updated; its path-validation and no-Edit/Write criteria are unchanged. | T005 |
+
+## Plan review round 2 (report 3fc3114e2c6249f6a8a59e655ff3e2edc39b88bf7eaab88402a136826a355edb)
+
+Plan review HEAD: 1dafbd71d386317f691261ec5f8961d82ca6624b
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
