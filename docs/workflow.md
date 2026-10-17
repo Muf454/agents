@@ -459,8 +459,10 @@ fewer than two counted rounds, the reservation used) ends with the draft PR as b
 Triage: the host writes `.ai/reviews/dispositions.md` bound to the reviewed HEAD
 (`start-dispositions`), Claude adds one row per finding, and `triage-check` requires a
 row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evidence,
-deferred → draft PR. The finding cell may carry a severity suffix (`M1 (MAJOR)`); other
-decorations do not match. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+deferred → draft PR. In both disposition tables the finding cell starts with the ID and may carry a
+severity suffix (`M1 (MAJOR)`) and a title (`M1 (MAJOR) title`, `M1 — title`, `M1: title`; a row counts
+for its first ID only); other decorations (`**M1**`, `M1 (CRITICAL)`, `M1,M2`, `M1x`) do not match, and the
+failure names the offending row and the row to write. In the Evidence and Task cells (here and in plan dispositions) write a pipe
 as `\|` (and a literal backslash before it as `\\`, so `\\|` is a backslash then a separator); it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that

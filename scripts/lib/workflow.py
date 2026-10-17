@@ -991,9 +991,30 @@ def table_cell(text):
     return re.sub(r'\\([\\|])', r'\1', text).strip()
 
 
+# The finding cell of a disposition row (FL-16: sessions write `ID (SEVERITY) title`). One
+# capturing group, the ID; a row only ever counts for its first ID. Optional severity suffix,
+# then optional title text after a separator: whitespace, or `:` right after the ID/suffix; a
+# dash (`—`, `–`, `-`) counts only after whitespace or the suffix. The title may not start with
+# `(` (so `M1 (CRITICAL)` stays unmatched) and has no unescaped `|` or newline.
+FINDING_CELL = (r'([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?'
+                r'(?:(?:[ \t]+|:[ \t]*|(?<=\))(?=[—–-]))(?![ \t]*\()(?:\\.|[^\\|\n])+)?')
+
 # `[ \t]*`, not `\s*`: a row's match must never cross a newline into the next row.
-DISPOSITION_ROW = re.compile(r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
+DISPOSITION_ROW = re.compile(r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
                              r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
+
+
+def unmatched_cell_hint(text, finding, row=None):
+    """For a finding without a row: name the first table line whose first cell mentions it but
+    that does not match the row pattern, and the row to write. Diagnostic only."""
+    row = row or DISPOSITION_ROW
+    mention = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(finding) + r'(?!\d)')
+    for line in text.splitlines():
+        cell = re.match(r'\|((?:\\.|[^\\|])*)', line)
+        if cell and mention.search(cell.group(1)) and not row.match(line):
+            return (f' (the row starting "| {cell.group(1).strip()[:60]} |" does not match; '
+                    f'write "| {finding} | <disposition> | <evidence> | <task> |")')
+    return ''
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -1039,7 +1060,7 @@ def triage_check(arguments):
     for level in ('BLOCKER', 'MAJOR'):
         for finding in finding_ids(review, level):
             if finding not in rows:
-                fail(f'{level} finding {finding} has no disposition.')
+                fail(f'{level} finding {finding} has no disposition.' + unmatched_cell_hint(text, finding))
             disposition, evidence, task_ref = rows[finding]
             if disposition == 'accepted':
                 refs = set(re.findall(r'T\d{3,}', task_ref))
@@ -2443,7 +2464,7 @@ def plan_rounds(arguments):
 PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
-    r'^\|[ \t]*([A-Z][A-Z0-9]{0,4}-?\d+)[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
+    r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
     r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 
 
@@ -2630,7 +2651,8 @@ def plan_dispositions_check(arguments):
         rows[finding] = (row.group(2).lower(), table_cell(row.group(3)), table_cell(row.group(4)))
     for finding in required:
         if finding not in rows:
-            fail(f'Finding {finding} has no row in the round {number} section.')
+            fail(f'Finding {finding} has no row in the round {number} section.'
+                 + unmatched_cell_hint(body, finding, PLAN_DISPOSITION_ROW))
     queue = {task['id']: task['status'] for task in tasks()}
     counts = {'accepted': 0, 'rejected': 0, 'needs-human': 0}
     questions = []

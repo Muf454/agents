@@ -7359,10 +7359,64 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_triage_severity_suffix_other_decorations_stay_unmatched(self):
         dispositions, rows = self.convergence_fixture(rounds=2)
-        for cell in ('M1 (CRITICAL)', '**M1**', 'M1 (MAJOR) x'):
+        for cell in ('M1 (CRITICAL)', '**M1**'):
             dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
             result = self.helper('triage-check', '--fresh', expected=1)
             self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+
+    def test_finding_cell_triage_accepts_suffix_and_title(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('M1 (MAJOR) title text', 'M1 — title', 'M1: title', 'M1 (MAJOR) about M1'):
+            dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+            self.assertEqual(self.helper('triage-check', '--fresh').stdout.strip(), 'accepted=1 deferred=0')
+
+    def test_finding_cell_triage_stays_unmatched_with_a_hint(self):
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        for cell in ('**M1**', 'M1 (CRITICAL)', 'M1 (CRITICAL) x', 'M1,M2', 'M1/M2', 'M1x'):
+            with self.subTest(cell):
+                dispositions.write_text(rows.replace('| M1 |', f'| {cell} |'))
+                result = self.helper('triage-check', '--fresh', expected=1)
+                self.assertIn('MAJOR finding M1 has no disposition', result.stderr)
+                self.assertIn(f'the row starting "| {cell} |" does not match', result.stderr)
+                self.assertIn('write "| M1 |', result.stderr)
+
+    def test_finding_cell_plan_dispositions_accept_suffix_and_title(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        base = path.read_text()
+        for cell in ('P1 (MAJOR)', 'P1(major)', 'P1 (MAJOR) selection highlight is lost',
+                     'P1 — title', 'P1: title', 'P1 title'):
+            with self.subTest(cell):
+                path.write_text(base + f'| {cell} | accepted | real | T002 |\n'
+                                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+                self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+
+    def test_finding_cell_plan_dispositions_stay_unmatched_with_a_hint(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        base = path.read_text()
+        for cell in ('**P1**', 'P1 (CRITICAL)', 'P1,P2', 'P1/P2', 'P1x'):
+            with self.subTest(cell):
+                path.write_text(base + f'| {cell} | accepted | real | T002 |\n'
+                                '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+                result = self.plan_check(start, expected=1)
+                self.assertIn('Finding P1 has no row', result.stderr)
+                self.assertIn(f'the row starting "| {cell} |" does not match', result.stderr)
+                self.assertIn('write "| P1 |', result.stderr)
+
+    def test_finding_cell_pattern_units(self):
+        wf = self.recheck_module()
+        row = wf.DISPOSITION_ROW.search('| M1 (MAJOR) a \\| b | accepted | ev \\| x | T001 |\n')
+        self.assertEqual((row.group(1), row.group(2), wf.table_cell(row.group(3)), row.group(4)),
+                         ('M1', 'accepted', 'ev | x', ' T001'.strip()))
+        self.assertEqual(wf.DISPOSITION_ROW.search('| SEC-12 - fix | accepted | e | T001 |').group(1), 'SEC-12')
+        self.assertEqual(wf.PLAN_DISPOSITION_ROW.search('| SEC-12 - fix | needs-human | e | |').group(1), 'SEC-12')
+
+    def test_finding_cell_row_counts_for_its_first_id_only(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + '| P1 (MAJOR) about P2 | accepted | real | T002 |\n')
+        self.assertIn('Finding P2 has no row', self.plan_check(start, expected=1).stderr)
 
     def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
         self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',

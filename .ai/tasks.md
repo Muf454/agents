@@ -25,7 +25,7 @@ duration. No profiling commands (denied). Test helper scripts written into temp 
 `os.chmod` from Python.
 
 ## T001 — Finding cells accept a severity suffix and a title in both disposition tables (FL-16)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -85,6 +85,12 @@ Targeted: `python3 -m unittest discover -s tests -k disposition_pipes` (must say
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Added `FINDING_CELL`, used by `DISPOSITION_ROW` and `PLAN_DISPOSITION_ROW`, and
+`unmatched_cell_hint` appended to both "no disposition"/"no row" failures. Tests
+`test_finding_cell_*` (6) added; `test_triage_severity_suffix_other_decorations_stay_unmatched`
+changed on purpose: `M1 (MAJOR) x` moved to the matched cases
+(`test_finding_cell_triage_accepts_suffix_and_title`). docs/workflow.md updated. Targeted
+`finding_cell` (6), `triage_severity_suffix` (3), `disposition_pipes` (9) pass; `.ai/bin/ai-check`: 752 tests OK.
 
 
 ## T002 — Prompts and host contracts show the exact disposition row (FL-16, prompts)
