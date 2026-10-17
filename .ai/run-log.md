@@ -380,3 +380,4 @@
 | 2026-10-17T06:10:00Z | claude (opus) | T004 | DONE (resumed): gate failure was the handoff flow line, already fixed in c55d20d; no code change needed | PASS (ai-check, 812 tests, 509.2 s) | parent dd9ab1c | flow unchanged since a0fc937 |
 | 2026-10-17T06:04:58Z | runner | T004 | completed | PASS | 609408e | Claude checkpointed; continuing queue |
 | 2026-10-17T06:30:00Z | claude (sonnet) | T005 | DONE: `shorten` cuts recovery reasons/human actions and plan questions at sentence/word boundaries; full text in `.ai/local/recovery-decision.txt`, named in the ⛔; 5 `test_recovery_reason_shorten_*` tests | PASS (ai-check, 817 tests, 434.4 s; -k recovery 65 OK) | parent 234f6f5 | flow unchanged |
+| 2026-10-17T06:31:46Z | runner | T005 | completed | PASS | 6224bf7 | Claude checkpointed; continuing queue |
