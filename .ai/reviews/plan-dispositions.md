@@ -159,3 +159,10 @@ Plan review HEAD: d2725179cc03d43297e9a4a09e9712075be9bf4c
 | P14 | accepted | Verified: T008's acceptance bullet required `outcome task … --attempt` to keep the marker after a directory-sync failure, but `--attempt` is T003's interface and T003 depends on T009 → T008, so T008 could not satisfy it at its own checkpoint. T008's bullet now asserts only the non-zero exit and that `append_outcome` has not returned True; the marker-retention half is already T003's P9 bullet ("`outcome task T001 done m 5 --attempt A` exits non-zero, the line is readable, marker A kept", with the directory-inode variant), which T008's bullet now names. | T008 |
 
 Convergence: the CU-5 marker area repeats for the fourth round (round 1 P1–P3 append, round 2 P6–P8 write protocol, round 3 P9–P10 removal decision, now P12–P13 on failure semantics of the marker operations themselves), so no per-path patch: the design task T010 ("CU-5 marker failure contract", three-way marker read, id printed before publish, runner keeps the printed id, one invariant for every marker operation) redesigns what each marker operation guarantees on failure, and T003/T004 only consume it; P14 is a task-ordering defect in T008's acceptance text, fixed in place.
+
+## Plan review round 5 (report 2ccca13daa5355998d0108f925d1844198767fef319b48b9631315a3e2249353)
+
+Plan review HEAD: e1f6384f4872c61b8cb11d632bcacfd2f157c647
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
