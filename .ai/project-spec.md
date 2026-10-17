@@ -108,9 +108,17 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   stop, like every stop while the tree is armed, is terminal for recovery too: ai-recover
   escalates an armed manifest before any rule, commit or decision session, whatever the
   recovery settings (round 7, P16). The armed checkpoint runs after ai-run's complete startup,
-  dependency setup included, also when no runnable task remains (round 7, P17). The
+  dependency setup included, also when no runnable task remains (round 7, P17). The arm ends
+  at the act: ai-run's own checks of the preserved work (another task newly DONE, a next task
+  other than the interrupted one, a blocked or unknown bound task, a failing dependency setup)
+  run while the manifest is still armed and are therefore terminal too, and the arm is
+  consumed as the last statement before the armed checkpoint or the bound task's session
+  (round 8, P16). The
   watchdog's stall alarm stays silent while a relaunch is pending in the manifest, whether or
-  not the local pause log still carries the wait (round 3, P2); a checkout without a schedule
+  not the local pause log still carries the wait (round 3, P2), and while a due relaunch is the
+  probe's to handle (launched, or refused with the probe's own single ⛔); it applies again once
+  the schedule is gone or when no recovering probe can handle it (round 8, P19); a checkout
+  without a schedule
   (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11). The arm
   is granted only for a stop of the `implementation` stage (recorded in the manifest when the
   relaunch is scheduled; a dirty tree after any other stage's limit stop escalates with

@@ -34,7 +34,11 @@ on 2026-10-17 (Claude planning session, unattended):
   manifest terminal for ai-recover (a stop of the resumed run before the preserved work is
   continued is one ⛔ with nothing committed, also with auto-recovery on, so the fail-closed
   stop can no longer end in a recovery commit of the preserved tree); T011's armed checkpoint
-  runs after dependency setup, also when no runnable task remains.
+  runs after dependency setup, also when no runnable task remains. Plan review round 8: T019
+  makes the arm end at the act (ai-run's own consistency and routing checks run while the
+  manifest is still armed, so they are terminal too; `limit-disarm` is the last statement
+  before the armed checkpoint or the session), and T002's probe no longer raises the ordinary
+  stall alarm on top of a refused or launched due relaunch.
 - **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
   `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
   confirmed detached start printing PID and log), planning sessions in the outcome log and run
@@ -61,7 +65,7 @@ Not run on this branch yet. PR #30's last gate: `.ai/bin/ai-check` PASS (817 tes
   is not detected (documented limitation).
 
 ## Flow chart
-To be updated by T002/T003/T014/T017/T011/T016/T018/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+To be updated by T002/T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -88,7 +92,7 @@ and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T
 Each group is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs it (added by
 the task named).
 - `test_limit_relaunch_record_*` (T001: limit-stop record, relaunch time, manifest schedule/cap/attempt give-back).
-- `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once, no stall alarm while waiting, nothing launched or reported for a checkout without a schedule, `--timer-recovers`).
+- `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once with no stall alarm on top of it, no stall alarm while waiting, nothing launched or reported for a checkout without a schedule, `--timer-recovers`).
 - `test_limit_relaunch_recover_*` (T003: pause instead of ⛔, resume without Claude, cap, off switch, no timer, mixed reason, terminal escalation after a claim, interrupted scheduling restores the wait).
 - `test_limit_relaunch_binding_*` (T012: tree digest = `tree_snapshot` incl. submodules, verify/arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
 - `test_limit_relaunch_verify_*` (T014: the relaunch verifies before any commit or resume; bookkeeping-only edits, a moved HEAD on a clean tree, in-scope edits during an open stage and submodule changes all stop with the checkout untouched).
@@ -96,6 +100,7 @@ the task named).
 - `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once, decided by the bound task's status; a task DONE before the limit, committed or not, is checkpointed without a session, dependency setup first; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
 - `test_limit_relaunch_reenter_*` (T016: the arm is granted only for an implementation stop; an armed resume skips the plan review loop, so a committed partial checkpoint with a stale plan review completes without a plan review or recovery decision; a clean resume still re-reviews; a needs-human plan decision still stops).
 - `test_limit_relaunch_terminal_*` (T018: a stop of the resumed run while the tree is armed is one ⛔ with nothing committed and no recovery decision session, also with auto-recovery on; the relaunch itself and stops after the disarm are unaffected).
+- `test_limit_relaunch_consume_*` (T019: ai-run's own checks of the preserved work, another task newly DONE, a wrong next task, a blocked or unknown bound task, a failing dependency setup, stop terminal with auto-recovery on and the arm retained; the disarm is the last statement before the checkpoint or the session).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state, accepted-plus-rejected findings with a verified re-check included, commits nothing before ai-run consumes the arm, and fails closed on inconsistent review records).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).

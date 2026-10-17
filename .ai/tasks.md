@@ -182,8 +182,17 @@ scheduled limit relaunch is due, reports once when it cannot, never calls the wa
   Pending (`scheduled_ns > now`) → nothing launched; the value only feeds the stall rule below
   (a pending schedule without `--recover` still suppresses the stall alarm: the run is
   waiting, not killed). Comment the three states at the site.
-- Stall incident (~443–451): add `now >= max(paused_until(local), scheduled_ns or 0)` (absence
-  is zero ONLY here). The host schedule is the authority (plan review round 3, P2:
+- Stall incident (~443–451): one predicate `relaunch_quiet`, written out beside the three
+  states and commented: the stall rule is skipped while `now < paused_until(local)`, while the
+  schedule is pending (`scheduled_ns is not None and scheduled_ns > now`), and while a due
+  schedule is this probe's to handle (`scheduled_ns is not None and scheduled_ns <= now and
+  args.recover`: launched, so ai-recover announces itself, or refused, so the `relaunch:<AT>`
+  ⛔ is the one report). Plan review round 8, P19: a refusal writes no last-error, the phase
+  stays `implementing`, `alive` was computed before the launch, and the `relaunch:<AT>` key does
+  not dedupe `stalled`, so without this the second probe `STALL_CONFIRM_NS` later raised the
+  ordinary `killed runner?` ⛔ on top of the refusal ⛔. Absent (`None`) → the stall rule as
+  today; due without `--recover` → as today too (nothing relaunches; the killed-runner alarm is
+  right). The host schedule is the authority (plan review round 3, P2:
   `limit-hold` restores a schedule whose pauses.log line was never written, and `.ai/local` is
   agent-writable anyway); ai-recover's pauses.log line (T003) stays as the quiet-time input of
   the hung rule and as history.
@@ -207,7 +216,9 @@ scripts/lib/watchdog.py, tests/test_workflow.py, docs/workflow.md, vault agents-
   `host_watchdog`):
   - schedule due (`run-manifest limit-schedule <now-10> 2 <HEAD>` via the helper, no marker, no
     runner): `host_watchdog('--recover')` launches `…/ai-recover --stage usage limit relaunch`,
-    writes no last-error, sends no notification;
+    writes no last-error, sends no notification, and with phase `implementing` and no
+    last-error records no `stall_seen_ns` and no `stalled` key (the launch is this probe's
+    handling of the due schedule, P19);
   - schedule in the future (`AI_WATCHDOG_NOW` before AT): nothing launched, no notification;
     with phase `implementing`, no last-error and a pauses.log line ending after now, two probes
     `STALL_CONFIRM_NS` apart raise no `stalled` incident;
@@ -220,7 +231,15 @@ scripts/lib/watchdog.py, tests/test_workflow.py, docs/workflow.md, vault agents-
     schedule claimed (`limit-claim` via the helper) and still no pauses.log, the two probes
     DO raise `stalled` as today (the suppression is tied to the schedule, not to the phase);
   - due but refused (checkout copy, or changed gate): one ⛔ naming `usage-limit relaunch could
-    not start`; a second probe sends nothing more;
+    not start`; a second probe sends nothing more; the P19 regression: the same refusal with
+    phase `implementing`, no last-error, no marker, no runner and no `pauses.log` entry, two
+    `--recover` probes more than `STALL_CONFIRM_NS` apart (`AI_WATCHDOG_NOW`) → exactly one
+    notification overall (the refusal ⛔), no `stalled` key and no `stall_seen_ns` in
+    `watchdog.json` after either probe; the same due schedule probed twice WITHOUT `--recover`
+    → no launch, no relaunch notification, and the second probe raises the ordinary `stalled`
+    ⛔ as today (the probe cannot handle it); after `run-manifest start` via the helper (a human
+    rerun drops the schedule) two further `--recover` probes on an unchanged checkout raise
+    `stalled` as today (the suppression is tied to the schedule);
   - absent schedule (P11), each as two `--recover` probes `STALL_CONFIRM_NS` apart with no
     runner and no marker: (a) no run manifest at all (fresh checkout under `AI_STATE_DIR`);
     (b) an approved run (`approve_run`) that never scheduled, phase `implementing`, no
@@ -732,14 +751,15 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
   ~499 (`if ! ai_helper tasks complete; then … ai-run`) runs ai-run also when `armed_resume`
   holds, whatever `tasks complete` says, so the arm is always consumed by ai-run and the
   review/publish path never meets the dirty tree.
-- ai-run consumes the arm exactly once, before any session and before `tasks next`, by the
-  task the arm names (T017; plan note "Preserved work is bound to the interrupted task (plan
-  review round 6 redesign, T017)", rule 3): when the armed exception admits the dirty tree,
-  `bound=$(ai_helper run-manifest limit-task)` (failure → `ai_die`), then `ai_helper
-  run-manifest limit-disarm` (failure → `ai_die`, nothing started), print `Resuming preserved
-  work of the usage-limit stop ($bound).`, `ai_helper run-manifest task-clear` (T017), then
-  the consistency check: `tasks newly-done HEAD` (T012) must print nothing or exactly `$bound`,
-  else `ai_die 'Preserved work marks another task DONE; inspect it before continuing.'`. The
+- ai-run consumes the arm exactly once, by the task the arm names (T017; plan note "Preserved
+  work is bound to the interrupted task (plan review round 6 redesign, T017)", rule 3), and
+  only as the last statement before it acts (plan review round 8 P16; plan note "The arm ends
+  at the act, not at the entry (round 8 redesign, T019)": every check below runs while the
+  manifest is still armed, so each of its stops is T018's terminal ⛔, with recovery on too):
+  when the armed exception admits the dirty tree, `bound=$(ai_helper run-manifest
+  limit-task)` (failure → `ai_die`), then the consistency check: `tasks newly-done HEAD`
+  (T012) must print nothing or exactly `$bound`, else `ai_die 'Preserved work marks another
+  task DONE; inspect it before continuing.'` (armed, terminal). The
   consumer sits where a first session's startup is complete (plan review round 7 P17; plan
   note "Recovery never acts on an armed tree; the armed checkpoint comes after the complete
   startup (round 7 redesign, T018)", rule 2): after `clean_or_armed` admitted the tree
@@ -751,12 +771,14 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
   checkpoint's `ai-check` would fail with stale dependencies (ordinary recovery instead of the
   promised checkpoint). `ai_deps` installs ignored files only (`tree-snapshot` unchanged, else it
   fails) and its failure is `ai_die "$AI_DEPS_ERROR"` (`Dependency setup …`, a hard rule for
-  recovery), so an installer failure commits nothing. The status decision below and
-  `checkpoint_done` come AFTER that block (order: arm consumption → dependency setup →
-  `checkpoint_done` or the loop). Then by `status=$(ai_helper tasks status "$bound")`:
+  recovery; armed, it is terminal as well), so an installer failure commits nothing. The route
+  decision below, the disarm and `checkpoint_done` come AFTER that block (order: `bound` read
+  and consistency check → dependency setup → route by status → loop-head checks → `limit-disarm`
+  → `checkpoint_done` or the loop). Then the ROUTE, decided while still armed, by
+  `status=$(ai_helper tasks status "$bound")`:
   - DONE, whether HEAD already has it DONE or only the working queue does (a session that
     committed its task DONE and edited further before the limit, plan review round 6 P3, takes
-    this path too) → *armed checkpoint* `checkpoint_done "$bound"` before any session: refactor
+    this path too) → route `checkpoint`: *armed checkpoint* `checkpoint_done "$bound"` before any session: refactor
     the loop's `DONE)` branch (ai-run ~669–703 plus the runner-bookkeeping commit and the
     post-commit `verify_checkpoint` ~713–720) into one function `checkpoint_done TASK` used by
     the loop and here, unchanged in substance: full `ai-check` (failure → task back to
@@ -768,16 +790,24 @@ under the unchanged validation and checkpoint safeguards, with no recovery decis
     task commit). `task_outcome done` only if it works without an attempt opened in this
     process (say which in the result). Then the loop starts as today (final validation and
     handoff when nothing is left, else the next task);
-  - IN_PROGRESS or TODO → the first iteration as today, which must work on `$bound`: `tasks
-    next` prints it (IN_PROGRESS first, workflow.py ~642–647; a TODO bound task is the first
-    eligible unless the session changed the queue); another ID → `ai_die "Preserved work
-    belongs to $bound, but the next task is <id>; inspect the queue."`. Its prompt already says
-    `Reconcile interrupted work first`;
+  - IN_PROGRESS or TODO → route `session`: the first iteration as today, which must work on
+    `$bound`: `tasks next` prints it (IN_PROGRESS first, workflow.py ~642–647; a TODO bound
+    task is the first eligible unless the session changed the queue), checked HERE, armed;
+    another ID → `ai_die "Preserved work belongs to $bound, but the next task is <id>; inspect
+    the queue."`. Its prompt already says `Reconcile interrupted work first`;
   - BLOCKED → `ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'`
     (today's rule, ~705–706); an ID not in the queue → `ai_die`.
-  `newly-done` is no longer the decision, only the consistency check. In every `ai_die` above
-  the arm is already gone, so the next recovery takes the normal rules. A clean tree never
-  consumes the arm (`clear-attempts` at finish drops it).
+  `newly-done` is no longer the decision, only the consistency check. Every `ai_die` above
+  fires with the arm kept, so the next recovery is T018's terminal ⛔ carrying that message
+  (T019 runs each with recovery on). Once the route is decided: repeat the loop head's checks
+  once (`ai_guard_verify`, `ai_branch`, `ai_helper tasks check`; still armed), then `ai_helper
+  run-manifest limit-disarm` (failure → `ai_die`, nothing started; the single call site, before
+  the `for` loop), print `Resuming preserved work of the usage-limit stop ($bound).`,
+  `ai_helper run-manifest task-clear` (T017), then the act: route `checkpoint` →
+  `checkpoint_done "$bound"`, then the loop as today; route `session` → the loop, whose first
+  iteration works on `$bound`. Nothing else stands between the disarm and the act (the loop
+  head's re-checks, `state implementing` and the prompt only; T019 asserts the span). A clean
+  tree never consumes the arm (`clear-attempts` at finish drops it).
 - After the session nothing is relaxed: DONE → `ai-check`, tier-1 commit with
   `checkpoint-guard`, `committed-matches-worktree` (~669–701; update the comment "The session
   started from a clean tree" to say an armed resume started from its own preserved task work);
@@ -830,9 +860,11 @@ scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/wor
     clean tree; a failing `.ai/validate` on that tree → `Validation failed; T001 returned to
     IN_PROGRESS.`, nothing committed by the runner (HEAD is the session's commit);
   - a tree whose bound task is DONE while a second task is also newly DONE → `Preserved work
-    marks another task DONE`, no session, nothing committed; a bound task left TODO while the
-    session marked another task IN_PROGRESS (mock variant) → `Preserved work belongs to T001,
-    but the next task is T002`, no session;
+    marks another task DONE`, no session, nothing committed, the manifest still armed; a bound
+    task left TODO while the session marked another task IN_PROGRESS (mock variant) →
+    `Preserved work belongs to T001, but the next task is T002`, no session, the manifest
+    still armed; both with the fixtures' `AI_AUTO_RECOVER=0` here (T019 runs them with
+    recovery on and `MOCK_RECOVER=commit_and_rerun`: terminal, nothing committed);
   - round 2 P9 end-to-end with preserved work: `limit-far-dirty` scheduled, then the test edits
     an unrelated tracked file and adds an untracked file (HEAD unchanged), AT into the past,
     relaunch → one ⛔ `changed while the usage-limit relaunch waited`, the session's edits and
@@ -870,7 +902,8 @@ scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, README.md, docs/wor
     commit)` commit contains `deps.lock`; `vendor-deps/` is not tracked; with `MOCK_DEPS`
     failing on the resumed run's install (`fail-later`) → exactly one ⛔ containing `Dependency
     setup`, `recovery_calls()` empty (hard rule), nothing committed by the runner (HEAD is the
-    scheduled HEAD or the session's own commit), the edits byte-identical, no session.
+    scheduled HEAD or the session's own commit), the edits byte-identical, no session, the
+    manifest still armed (the install runs before the disarm, T019).
 - `test_recovery_*`, `test_usage_limit_*`, the re-check/dispute tests and all pipeline tests pass
   unchanged.
 
@@ -1067,7 +1100,10 @@ checkpoint gets, dependency setup first (rule implemented by T011, audited here)
   the resume path and show that T011's consumer runs after every startup step a first session
   gets (`ai_guard_verify`, `ai_branch`, `tasks check`, `attempt-reconcile`, the session budget,
   the dependency setup block ~606–614 with T011's widened condition) and that `checkpoint_done`
-  is reached only after them; a step the armed checkpoint skips is a defect to fix here under
+  is reached only after them, and that `limit-disarm` is the last statement before
+  `checkpoint_done` / the `for` loop, after the consistency check, the dependency setup and the
+  route decision (plan review round 8 P16; T019 owns that rule and its span test); a step the
+  armed checkpoint skips, or a check placed after the disarm, is a defect to fix here under
   T011's rules (and say so in the result).
 - docs/workflow.md "Interruption, limits, and recovery" (the paragraph T011/T014/T015/T016/T017
   write): one sentence: a stop of the resumed run before the preserved work is continued is
@@ -1117,9 +1153,108 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 ### Result / notes
 
 
+## T019 — The arm ends at the act: every consumer check runs armed, the disarm is the last statement before the checkpoint or the session (MC-01 part 1, plan review round 8 P16 design task)
+Status: TODO
+Dependencies: T011, T018
+Model: opus
+
+### Goal
+Between the relaunch's `exec ai-pipeline` and the resumed ai-run's first act (the armed
+checkpoint or the bound task's session) the manifest stays armed through every check ai-run
+makes, its own consistency and routing checks included, so each of those stops is T018's
+terminal ⛔ (no recovery decision session, no recovery commit, the preserved work and the arm
+intact) with auto-recovery on; `limit-disarm` is the last statement before the act, and nothing
+that can stop for a plan state sits between the two.
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "Preserved-work resume", part "The arm ends at the act, not at
+  the entry (plan review round 8 redesign, T019)". Verified at the revision: T011's consumer as
+  planned before this round ran `limit-disarm` first and the `tasks newly-done HEAD` check and
+  the routing (`tasks next` must print the bound task; BLOCKED; unknown ID) afterwards, each an
+  `ai_die`; ai-run's `ai_die` writes `.ai/local/last-error` (scripts/lib/common.sh ~11–14),
+  ai-pipeline ~501 turns the non-zero exit into `stop implementation`, `stop()` (~147–163)
+  execs ai-recover when `AI_AUTO_RECOVER` is not 0 and the gate holds, T018's check sees no
+  `limit_resume` (already dropped), neither `Preserved work marks another task DONE` nor
+  `Preserved work belongs to` matches a hard rule (scripts/ai-recover ~137–141), the tree is
+  not bookkeeping-only (~166–171), and `commit_and_rerun` (~200–222) validates and commits the
+  inconsistent queue with the preserved source; with both tasks DONE the resumed pipeline then
+  skips implementation (`tasks complete`, ai-pipeline ~499). The fixtures' default
+  `AI_AUTO_RECOVER=0` (tests/test_workflow.py ~713) hid it.
+- T011 implements the order (its consumer bullet, revised this round): `bound` read →
+  `newly-done` consistency check → dependency setup → route by `tasks status "$bound"`
+  (session route: `tasks next` must print `$bound`) → one repetition of the loop head's checks
+  (`ai_guard_verify`, `ai_branch`, `ai_helper tasks check`) → `limit-disarm` → `Resuming
+  preserved work …` line, `task-clear` → `checkpoint_done "$bound"` or the `for` loop. This
+  task audits and pins it: if T011 ran first and left a check after the disarm, move it before
+  the disarm here under T011's rules and say so in the result. `limit-disarm` keeps its single
+  call site (T015 rule 3); it stays before the `for` loop, so the loop head's re-checks
+  (`ai_guard_verify`, `ai_branch`, `tasks check`, `tasks next`, the iteration-1 session limit,
+  which cannot fail: `--sessions` accepts 1 or more, scripts/ai-run ~78, and the default is at
+  least 16) are the only `ai_die`s between the disarm and the first `claude_session`; they
+  repeat state the consumer verified moments earlier in the same process under the lock with no
+  write or session in between, so a failure there needs a concurrent change to the checkout and
+  takes today's rules (recorded in the plan's Risks as a residual).
+- Span test, on the script text: in `scripts/ai-run` (and the fixture's installed copy) the
+  lines from the `limit-disarm` call to the first `claude_session` of the loop, and from the
+  `limit-disarm` call to the `checkpoint_done "$bound"` call, contain no `ai_die`, `exit`,
+  `git commit` or `claude_session` other than the loop head's four re-checks and the
+  iteration-1 session-limit line (match them by their exact text; a new statement in the span
+  fails the test with its line). Keep it narrow enough to survive unrelated edits (anchor on
+  the `limit-disarm` line and the two act lines, not on line numbers).
+- No change to `scripts/ai-recover` (T018's check is the rule that makes the armed stops
+  terminal) and none to the helpers; this task is ai-run order, tests and docs.
+- docs/workflow.md "Interruption, limits, and recovery" (the paragraph T011/T014/T015/T016/
+  T017/T018 write): one sentence: the resumed run checks the preserved work (another task
+  marked DONE, the next task not the interrupted one, a blocked task, dependency setup) before
+  it takes the work over, and each of those stops is final with nothing committed. README
+  "Recovery": half a sentence. Flow (vault): the relaunch branch's armed note gains "checks
+  first, then the arm ends" (written by T011 if it runs first, else here).
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py, docs/workflow.md, README.md, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `test_limit_relaunch_consume_*` in tests/test_workflow.py (fixtures as T011's
+  `test_limit_relaunch_preserved_*`; every case below runs with `AI_AUTO_RECOVER=1` and
+  `MOCK_RECOVER=commit_and_rerun`, and asserts: exactly one ⛔, containing `stopped on the
+  preserved work of T001` and the consumer's own message; `recovery_calls()` empty (no decision
+  session); no `recovery checkpoint` and no `checkpoint T001` commit, HEAD unchanged; the
+  session's edits and `.ai/tasks.md` byte-identical; the manifest still holds `limit_resume`;
+  no `Resuming preserved work` line; no `🔧 Recovered`; `.ai/local/pipeline.active` gone):
+  - another task newly DONE (T011's `Preserved work marks another task DONE` fixture);
+  - the next task is not the bound one (T011's `Preserved work belongs to T001, but the next
+    task is T002` fixture);
+  - the bound task BLOCKED in the preserved queue (mock variant: the session marks its task
+    BLOCKED, edits source, reports the far limit) → `Blocked task was not checkpointed`;
+  - the bound task's ID not in the preserved queue (the test rewrites the heading of the bound
+    task before the limit stop so the digest includes it, if the mock can; else arm at helper
+    level as T018's direct case does and start `ai-pipeline` as `resume` does);
+  - dependency setup failing on the resumed run (T011's `fail-later` case) → the ⛔ also
+    contains `Dependency setup`;
+  - the span test on `scripts/ai-run` and the fixture's installed copy (above);
+  - controls: T011's `limit-far-dirty` and `limit-far-done` happy paths with
+    `AI_AUTO_RECOVER=1` complete as before (one `Resuming preserved work of the usage-limit
+    stop (T001).`, no ⛔, `limit_resume` gone); T011's "armed tree reaching a session that does
+    NOT complete" with `AI_AUTO_RECOVER=1` → the following recovery runs the normal path
+    (`recovery_calls()` has one entry), and T011's failing-validate armed checkpoint with
+    `AI_AUTO_RECOVER=1` → `Validation failed; T001 returned to IN_PROGRESS.` followed by the
+    normal recovery rules (the arm is gone: the act had started), nothing committed by the
+    runner.
+- `test_limit_relaunch_*`, `test_recovery_*`, `test_usage_limit_*`, the re-check/dispute tests
+  and all pipeline tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_consume` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+
 ## T015 — Armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed (MC-01 part 1, plan review round 4 P3 design task)
 Status: TODO
-Dependencies: T016, T018
+Dependencies: T016, T018, T019
 Model: opus
 
 ### Goal
@@ -1161,9 +1296,13 @@ decision session.
   earlier stage, plan review or plan revision, runs on an armed tree) and T018's sixth and
   seventh (an armed manifest is terminal for recovery: every stop between the resume and the
   disarm is one ⛔ with nothing committed, whatever its reason and whatever `AI_AUTO_RECOVER`
-  says; the consumer runs after ai-run's complete startup, dependency setup included), and that
+  says; the consumer runs after ai-run's complete startup, dependency setup included) and
+  T019's eighth (the arm ends at the act: every check of the consumer runs armed and is
+  therefore terminal; `limit-disarm` is the last statement before the armed checkpoint or the
+  first session), and that
   a new cleanliness check, commit, review or session on this path must use `clean_or_armed` /
-  the fail-closed stop / the `! armed_resume` guard and extend the matrix. The audit's
+  the fail-closed stop / the `! armed_resume` guard and extend the matrix, and a new check of
+  the consumer goes before the disarm. The audit's
   "fail closed" claims for (b) are argued from rule 6 (T018's ai-recover check), never from a
   stop reason matching a hard rule (plan review round 7, P16: `recheck_fail`'s reason matches
   none).
@@ -1706,7 +1845,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 ## T010 — Docs, flow chart and handoff audit (all items)
 Status: TODO
-Dependencies: T011, T014, T017, T016, T018, T015, T004, T007, T009
+Dependencies: T011, T014, T017, T016, T018, T019, T015, T004, T007, T009
 Model: haiku
 
 ### Goal
