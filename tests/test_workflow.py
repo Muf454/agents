@@ -5462,6 +5462,206 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('observe', 'relaunch', 'later', 'note')  # warns, never fails the caller
         self.assertNotIn('relaunch_at', json.loads(observation.read_text()))
 
+    def manifest(self, **changes):
+        # The host run manifest; CHANGES (None drops a field) are written back first.
+        path = next((self.base / 'host-state').rglob('run.json'))
+        data = json.loads(path.read_text())
+        if changes:
+            data.update(changes)
+            data = {key: value for key, value in data.items() if value is not None}
+            path.write_text(json.dumps(data) + '\n')
+        return data
+
+    def watchdog_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('watchdog', ROOT / 'scripts/lib/watchdog.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def git_head(self):
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def limit_relaunch_scheduled(self, timer=True, expected=75, **env):
+        # A pipeline stopped at a usage limit beyond the wait budget, recovering timer installed.
+        self.ready()
+        self.mock_systemctl()
+        if timer:
+            self.watchdog('--install-timer', '--recover')
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                         AI_AUTO_RECOVER='1', MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60', **env)
+
+    def assert_relaunch_waiting(self, at):
+        local = self.project / '.ai/local'
+        for name in ('last-error', 'limit-stop', 'pipeline.active'):
+            self.assertFalse((local / name).exists(), name)
+        self.assertEqual(self.watchdog_module().paused_until(local), at * 1_000_000_000)
+        self.assertEqual(json.loads((local / 'observation.json').read_text())['relaunch_at'], at)
+        manifest = self.manifest()
+        self.assertEqual((manifest['limit_relaunches'], manifest['limit_relaunch_at'], manifest['attempts']),
+                         (1, at, 0))
+        self.assertEqual(self.recovery_calls(), [])
+
+    def relaunch(self, expected=0, **env):
+        # The watchdog's due launch, run directly: the schedule moved into the past first.
+        self.manifest(limit_relaunch_at=int(time.time()) - 1)
+        return self.tool('ai-recover', '--stage', 'usage limit relaunch', expected=expected,
+                         timeout=PIPELINE_TIMEOUT, **env)
+
+    def test_limit_relaunch_recover_schedules_then_resumes(self):
+        result = self.limit_relaunch_scheduled()
+        self.assertIn('Paused at a Claude usage limit; the watchdog relaunches the run after', result.stdout)
+        notes = self.notifications()
+        self.assertIn('⏸ PAUSED: feature/test stopped at a Claude usage limit during implementation; '
+                      'relaunches by itself after', notes)
+        self.assertIn('(relaunch 1/2)', notes)
+        self.assertNotIn('⛔', notes)
+        at = self.manifest()['limit_relaunch_at']
+        self.assertLess(abs(at - (time.time() + 7 * 86400 + 60)), 300)
+        self.assertEqual(self.manifest()['limit_head'], self.git_head())
+        self.assert_relaunch_waiting(at)
+        scheduled = self.git_head()
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2): feature/test.', notes)
+        self.assertNotIn('🔧', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.helper('tasks', 'complete')
+        manifest = self.manifest()
+        self.assertEqual(manifest['attempts'], 0)
+        self.assertNotIn('limit_relaunch_at', manifest)
+        # The stop's bookkeeping was committed after the verification, on the scheduled HEAD.
+        log = self.run_cmd(['git', 'log', '--format=%H %P %s']).stdout.splitlines()
+        record = next(line for line in log if 'record stop during usage limit relaunch' in line)
+        self.assertEqual(record.split()[1], scheduled)
+
+    def test_limit_relaunch_recover_moved_head_escalates_untouched(self):
+        self.limit_relaunch_scheduled()
+        (self.project / 'moved.txt').write_text('a human commit during the wait\n')
+        self.commit('human commit')
+        moved = self.git_head()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the branch moved to another commit while the usage-limit relaunch waited', stop)
+        self.assertIn('nothing was committed', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        self.assertEqual(self.git_head(), moved)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: this stop is terminal
+
+    def test_limit_relaunch_recover_cap_reached_escalates(self):
+        self.limit_relaunch_scheduled(AI_LIMIT_RELAUNCH_MAX='1')
+        self.assertIn('(relaunch 1/1)', self.notifications())
+        self.relaunch(expected=1, MOCK_CLAUDE='limit-far')
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/1)', notes)
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('usage limit again after 1 relaunch(es) in this run.', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        self.assertNotIn('limit_relaunch_at', self.manifest())
+
+    def test_limit_relaunch_recover_off_escalates_as_before(self):
+        self.limit_relaunch_scheduled(expected=1, AI_LIMIT_RELAUNCH_MAX='0')
+        notes = self.notifications()
+        self.assertIn('this kind of stop always needs a human', notes)
+        self.assertNotIn('⏸', notes)
+        self.assertNotIn('limit_relaunches', self.manifest())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_recover_needs_a_recovering_timer_and_a_limit_only_stop(self):
+        self.limit_relaunch_scheduled(timer=False, expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('the usage limit resets around ', notes)
+        self.assertIn('ai-watchdog --install-timer --recover', notes)
+        self.assertNotIn('limit_relaunches', self.manifest())
+        # The limit message plus another line: not a limit-only stop, the hard rule as today.
+        self.watchdog('--install-timer', '--recover')
+        error = self.project / '.ai/local/last-error'
+        error.write_text(self.LIMIT_MESSAGE + '\nCodex failed as well.\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1)
+        self.assertIn('this kind of stop always needs a human', self.notifications().splitlines()[-1])
+        self.assertNotIn('limit_relaunches', self.manifest())
+        # The exact message with the timer installed schedules (the positive control).
+        error.write_text(self.LIMIT_MESSAGE + '\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=75)
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_recover_claimed_relaunch_stops_once(self):
+        # P1: the claim consumes the schedule, so a refused relaunch is terminal, never relaunched.
+        self.limit_relaunch_scheduled()
+        self.mock_systemd_run()
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/other'])
+        self.manifest(limit_relaunch_at=int(time.time()) - 1)
+        self.host_watchdog('--recover', expected=None)
+        self.assertIn('ai-recover --stage usage limit relaunch', self.launches())
+        self.tool('ai-recover', '--stage', 'usage limit relaunch', expected=1)  # what systemd-run starts
+        self.host_watchdog('--recover', expected=None)
+        self.assertEqual(len(self.launches().splitlines()), 1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn("not the approved run's branch", notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('limit_relaunch_at', self.manifest())
+
+    def test_limit_relaunch_recover_interrupted_scheduling_keeps_waiting(self):
+        # P2: a kill between limit-schedule and the cleanup (or before the pauses.log line) must
+        # neither schedule twice nor retry before the reset.
+        self.limit_relaunch_scheduled()
+        self.mock_systemd_run()
+        local = self.project / '.ai/local'
+        at = self.manifest()['limit_relaunch_at']
+        crash = 'crash (pipeline killed or restarted)'
+
+        def killed_after_schedule():
+            (local / 'last-error').write_text(self.LIMIT_MESSAGE + '\n')
+            (local / 'limit-stop').write_text(f'Claude {at - 60}\n')
+            self.crashed_marker()
+
+        def killed_during_cleanup():
+            (local / 'last-error').write_text('ai-pipeline was killed, crashed or the machine restarted\n')
+            self.crashed_marker()
+
+        def watchdog_launch():
+            killed_during_cleanup()
+            (local / 'last-error').unlink()
+            self.host_watchdog('--recover', expected=None)
+            self.assertIn('ai-recover --stage crash', self.launches().splitlines()[-1])
+
+        def before_pause_line():
+            killed_after_schedule()
+            (local / 'pauses.log').unlink()
+
+        for variant in (killed_after_schedule, killed_during_cleanup, watchdog_launch, before_pause_line):
+            with self.subTest(variant=variant.__name__):
+                variant()
+                result = self.tool('ai-recover', '--stage', crash, expected=75)
+                self.assertIn('Still waiting for the usage-limit relaunch after', result.stdout)
+                self.assert_relaunch_waiting(at)
+                self.assertNotIn('🔧', self.notifications())
+                self.assertNotIn('⛔', self.notifications())
+        launched = self.launches()
+        start = int(time.time())
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start + 360))
+        self.assertEqual(self.launches(), launched)
+        self.assertNotIn('⛔', self.notifications())
+        self.relaunch()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2)', self.notifications())
+        self.assertIn('🏁 FINISHED', self.notifications())
+        self.assertEqual(self.recovery_calls(), [])
+
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
         self.tool('ai-run', '--approved')

@@ -246,7 +246,9 @@ passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `l
 `limit-due`, `limit-at`, `limit-hold`, `limit-claim`, `limit-verify`, `limit-arm`,
 `limit-armed`, `limit-disarm`, `limit-count`; schedule, hold and claim give back the attempt
 `ai-recover` reserved; a human start and `clear-attempts` drop them; cap
-`AI_LIMIT_RELAUNCH_MAX`). No infinite loop, boot startup, or monetary spending guarantee is added.
+`AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
+and the watchdog timer (`--recover`) starts it after the reset. No infinite loop, boot startup, or monetary spending guarantee is added.
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
@@ -682,7 +684,36 @@ start if the gate digest differs from the approved one. Escalation sends one
 the marker. The manifest also stores the run's effective `AI_*` settings (notify command, models,
 budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn't have are
 cleared to their defaults, and the resumed pipeline skips the user config file
-(`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
+(`AI_SETTINGS_FROM_MANIFEST`).
+
+**Usage-limit relaunch.** Right after reserving the attempt and restoring the settings,
+before any escalation, `ai-recover` decides on the manifest's relaunch schedule: *pending*
+(`limit-hold`: the run is still waiting, e.g. a watchdog crash recovery after a kill between
+scheduling and its cleanup) → it gives the attempt back, restores the wait (removes
+`last-error`, `limit-stop` and `pipeline.active`, appends the `pauses.log` line, `observe
+relaunch`, ⏸ again), prints `Still waiting for the usage-limit relaunch after <time>.` and
+exits 75; *due* (`limit-claim`) → the schedule is consumed, so whatever this relaunch hits next
+is its one terminal ⛔ and no probe starts it again. A claimed relaunch checks the checkout once,
+right after the gate and branch checks and before anything reads it to decide
+(`relaunch_verify`: `limit-verify` against the scheduled HEAD); a mismatch escalates `the branch
+moved to another commit while the usage-limit relaunch waited; nothing was committed.` and
+touches nothing. After the plan-revision decision block it then notifies `▶ RESUMED after the
+usage limit (relaunch k/cap): <branch>.` and resumes without a Claude session or an attempt: an
+open stage resumes as above, bookkeeping-only leftovers are committed (`record stop during usage
+limit relaunch`), other uncommitted work is armed (`limit-arm`) and kept, a clean tree resumes.
+A stop whose `last-error` is exactly the limit-beyond-budget message with a matching
+`limit-stop` (`workflow.py limit-stop`) is scheduled before the hard rules: with
+`AI_LIMIT_RELAUNCH_MAX` (0–9, default 2) at 0 the hard rule escalates it as before; without a
+watchdog timer installed with `--recover` (`ai-watchdog --timer-recovers`) it escalates `the
+usage limit resets around <time>, but no watchdog timer with --recover is installed …`; past the
+cap (`limit-schedule` fails) it escalates `usage limit again after N relaunch(es) in this run.`;
+otherwise it records `limit-schedule AT CAP HEAD` (relaunch at reset + 60 s), appends `<UTC>
+paused <AT-now>s: <Agent> usage limit relaunch (resume ~<time>)` to `pauses.log`, observes
+`relaunch AT`, notifies `⏸ PAUSED: <branch> stopped at a <Agent> usage limit during <stage>;
+relaunches by itself after <time> (relaunch k/cap).`, removes `last-error`, `limit-stop` and the
+marker, and exits 75 with no ⛔.
+
+The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
 default unless you changed it). `--install-timer` checks this for the TARGET checkout (the
 `project` argument, not the caller's directory) before writing anything: it refuses (exit 2)

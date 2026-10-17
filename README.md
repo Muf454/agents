@@ -432,9 +432,14 @@ Codex never steers: it diagnoses (`--diagnose`) and reviews. Disable with
 A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
 the reset time from the error (or wait `AI_LIMIT_RETRY`, default 1800 s), notify,
 sleep, and retry the same step. Total waiting per command is capped by
-`AI_LIMIT_MAX_WAIT` (default 28800 s); a weekly limit beyond that stops with a
-notification so you can rerun after the reset (it records the agent and reset time in
-`.ai/local/limit-stop`). Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+`AI_LIMIT_MAX_WAIT` (default 28800 s). A weekly limit beyond that, inside
+`ai-pipeline` with auto-recovery on, pauses instead of stopping: `ai-recover` schedules a
+relaunch for just after the reset (⏸, exit 75) and the watchdog timer installed with
+`--recover` starts it then (▶ RESUMED, no Claude decision, no recovery attempt), at most
+`AI_LIMIT_RELAUNCH_MAX` (default 2) times per run. Past that cap, without such a timer, with
+`AI_LIMIT_RELAUNCH_MAX=0` or outside the pipeline it stops with a notification so you can rerun
+after the reset (it records the agent and reset time in `.ai/local/limit-stop`). A relaunch
+whose branch moved to another commit during the wait stops without touching anything. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
 
 ### Claude fallback reviewer

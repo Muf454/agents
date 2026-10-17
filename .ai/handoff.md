@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T003: `-k limit_relaunch` 22 OK, `-k recovery` 65 OK, `-k Docs` 3 OK; full gate see the task
+result. Mutation: skipping the `relaunch_verify` call fails the moved-HEAD test.
 T002: `.ai/bin/ai-check` PASS, 832 tests in 460.9 s; `-k limit_relaunch_watchdog` 8 OK;
 `-k watchdog` 61 OK. Mutation: dropping the "due and `--recover`" clause of `relaunch_quiet`
 fails 4 of the 8 tests.
@@ -67,9 +69,10 @@ fails 4 of the 8 tests.
   is not detected (documented limitation).
 
 ## Flow chart
-Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path,
-watchdog start after the reset, cap, ⛔ otherwise; the ai-recover side lands with T003). Still to
-be updated by T003/T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path;
+T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recovering timer, cap),
+the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording). Still to
+be updated by T014/T017/T011/T016/T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -117,6 +120,8 @@ the task named).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
 
 ## Next action
-T001–T002 done (limit-stop record and manifest schedule helpers; watchdog starts a due
-relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`); next is
-T003 (ai-recover schedules and resumes).
+T001–T003 done (limit-stop record and manifest schedule helpers; watchdog starts a due
+relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`; ai-recover
+schedules a limit-only stop, restores a pending wait, and resumes a claimed relaunch after
+verifying HEAD). Known gap until T011/T015: a relaunch that arms uncommitted task work resumes
+into ai-pipeline's "Start from a clean checkpoint" stop. Next: the queue's next task.

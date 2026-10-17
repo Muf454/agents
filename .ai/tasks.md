@@ -309,7 +309,7 @@ for both sides (ai-recover's scheduling/cap/resume is T003; written now on purpo
 
 
 ## T003 — ai-recover schedules a relaunch for a limit-only stop and resumes it when due (MC-01 part 1, recovery)
-Status: TODO
+Status: DONE
 Dependencies: T001, T002
 Model: opus
 
@@ -451,6 +451,33 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-17. `scripts/ai-recover`: `cap` (`AI_LIMIT_RELAUNCH_MAX`, `^[0-9]$`, default 2) is
+validated right after the settings restore, because the hold path needs it before `max`. One
+function, `relaunch_wait AT LIMIT WHAT COUNT`, serves the hold and schedule paths: the pauses.log
+line (stamp and length share one clock, so `paused_until` == AT), `observe relaunch`, the ⏸
+line, and removal of last-error/limit-stop/pipeline.active. `limit-hold` → `Still waiting …`,
+exit 75 (no trap yet). `limit-claim` → `relaunch=yes`; with no last-error the reason becomes
+`stopped at a usage limit; relaunched after the reset`. `relaunch_verify` is called once, after
+the branch check and before `args`; its reason comes from the helper (`relaunch_moved`).
+`resume WHY [NOTE]` (an empty NOTE notifies nothing). The open-stage and leftovers blocks were
+factored into `resume_open_stage [quiet]` and `record_stop_leftovers`, used by both paths. After
+the decision block, a claimed relaunch sends ▶ RESUMED, then runs the open stage / leftovers
+commit / `limit-arm` (refusal → same wording) and resumes. A limit-only stop then checks
+`--timer-recovers` and `limit-schedule`, runs `relaunch_wait`, sets `AI_STOP_NOTIFIED`, runs
+`trap - EXIT` and exits 75. Usage text updated.
+The relaunch's leftovers commit is `record stop during usage limit relaunch` (its `--stage`).
+Tests: 7 `test_limit_relaunch_recover_*` (schedule then resume, with the parent of the record
+commit == the scheduled HEAD; moved HEAD; cap 1; off; no timer + limit message with an extra
+line + positive control; claimed relaunch on another branch stops once and the second probe
+launches nothing; interrupted scheduling variants i–iv, then quiet probes, then resume 1/2).
+Evidence: `-k limit_relaunch` 22 OK, `-k recovery` 65 OK, `-k Docs` 3 OK, `ai-check` PASS (839
+tests, 490.9 s). Mutation: dropping the `relaunch_verify` call fails the moved-HEAD test.
+Docs: README "Usage limits", docs/workflow.md "Interruption, limits, and recovery" and the new
+"Usage-limit relaunch" paragraph in "Recovery contract". Vault: the flow chart's "When something
+goes wrong" (limit-only decision, fallbacks, relaunch check) and its notifications table were
+updated, and a hub Log line was added.
+Limitation until T011/T015: an armed relaunch (with uncommitted task work) resumes into
+ai-pipeline's clean-checkpoint stop.
 
 
 ## T012 — Preserved-work binding: the relaunch exception admits the exact preserved tree (MC-01 part 1, plan review round 2 P3/P9 design task)
