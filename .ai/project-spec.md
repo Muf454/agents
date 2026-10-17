@@ -104,7 +104,11 @@ standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate fil
   and ai-run's first session, a settled re-check or recorded disputes included, commits
   nothing while the tree is armed, and stops fail closed (nothing committed, arm kept) in the
   only states where it would have to commit first (uncommitted review records, a pending
-  re-check), which a limit stop in an implementation session cannot produce (round 4, P3). The
+  re-check), which a limit stop in an implementation session cannot produce (round 4, P3); that
+  stop, like every stop while the tree is armed, is terminal for recovery too: ai-recover
+  escalates an armed manifest before any rule, commit or decision session, whatever the
+  recovery settings (round 7, P16). The armed checkpoint runs after ai-run's complete startup,
+  dependency setup included, also when no runnable task remains (round 7, P17). The
   watchdog's stall alarm stays silent while a relaunch is pending in the manifest, whether or
   not the local pause log still carries the wait (round 3, P2); a checkout without a schedule
   (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11). The arm

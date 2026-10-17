@@ -23,7 +23,7 @@ flowchart TD
   probe --> launch["start_recovery(stage 'usage limit relaunch')"]
   launch --> claim["ai-recover, right after reserve-attempt:<br/>limit-hold (still waiting → restore wait, exit 75)<br/>or limit-claim (schedule consumed: later stops are terminal)"]
   claim --> verify["gate/branch checks, then limit-verify (T014):<br/>HEAD and tree digest equal the scheduled ones, else ⛔ (nothing committed)"]
-  verify --> due["open stage → resume; bookkeeping-only leftovers → commit;<br/>dirty task work of an implementation stop → limit-arm, bound to the recorded task (T012, T016, T017); ▶ RESUMED, exec ai-pipeline<br/>(armed: no plan review loop, straight to ai-run: bound task DONE → validated checkpoint, else its session)"]
+  verify --> due["open stage → resume; bookkeeping-only leftovers → commit;<br/>dirty task work of an implementation stop → limit-arm, bound to the recorded task (T012, T016, T017); ▶ RESUMED, exec ai-pipeline<br/>(armed: no plan review loop, straight to ai-run: dependency setup, then bound task DONE → validated checkpoint, else its session;<br/>any stop while armed → ⛔ terminal, nothing committed (T018))"]
   due -. "limit again" .-> only
 ```
 - **Record (T001).** `ai_limit_pause` writes `.ai/local/limit-stop` (`<Agent> <reset epoch or 0>`,
@@ -248,6 +248,43 @@ flowchart TD
        takes the normal rules. A checkpoint of a task already DONE in HEAD is a second, validated
        commit of that task's own after-commit edits; the implementation review covers the
        committed range like any task commit.
+  - *Recovery never acts on an armed tree; the armed checkpoint comes after the complete startup
+    (plan review round 7 redesign, T018).* Round 7 (P16, P17) found the two paths of the armed
+    resume that are NOT its happy path unspecified: its stops and its startup. Six redesigns said
+    what the resumed run accepts and where it re-enters; none said what happens when it STOPS
+    while armed. `recheck_fail` (ai-pipeline ~314–317) calls `stop 're-check'`, and `stop()`
+    (~147–163) hands over to ai-recover whenever auto-recovery is on and the gate holds;
+    ai-recover's rules (hard rules ~137–141, bookkeeping-only commit ~166–171, Claude decision
+    ~188, `commit_and_rerun` ~200–222) know nothing about the arm, so the promised "fail closed,
+    nothing committed, arm kept" held only with `AI_AUTO_RECOVER=0`: with it on, a
+    `commit_and_rerun` decision validates and commits the armed tree, review records included.
+    And the armed checkpoint was "the existing post-task DONE path", which assumes the startup a
+    first session gets: dependency setup (ai-run ~606–614) runs only when `tasks next` is not
+    `none`, so a preserved tree with a changed lockfile and its last task DONE was validated
+    with stale dependencies, failed, and went to recovery. Two rules close the area as a whole:
+    1. *An armed manifest is terminal for recovery.* ai-recover, right after `reserve-attempt`,
+       the settings restore and `limit-hold`/`limit-claim`, and before every other rule,
+       escalates when `run-manifest limit-task` succeeds (`limit_resume` present, matching the
+       tree or not): `the resumed run stopped on the preserved work of <task> before continuing
+       it; nothing was committed.`, with the stop's own reason in the ⛔ as every escalation has,
+       the checkout and the manifest as found. Only ai-run's `limit-disarm` (rule 3 of the
+       acceptance contract) or a human `run-manifest start` removes `limit_resume`, so every stop
+       between the relaunch's `exec ai-pipeline` and the disarm, whatever its reason and whatever
+       the recovery settings, is one ⛔ with the preserved work intact; rule 2's "fail closed" no
+       longer depends on a stop reason matching a hard rule. The relaunch itself is unaffected:
+       when ai-recover runs `--stage 'usage limit relaunch'` the arm does not exist yet
+       (transition (c) creates it later in the same process). After the disarm the normal rules
+       apply unchanged. Residual: a resumed pipeline killed between the resume and the disarm
+       gets this ⛔ from the watchdog's crash recovery instead of a second resume; the work is
+       intact and the human reruns.
+    2. *The consumer runs after the complete startup.* ai-run consumes the arm after every
+       startup step a first session gets and before the loop; the dependency setup block runs
+       when `tasks next` is not `none` OR the arm was just consumed, and `checkpoint_done bound`
+       follows it. `ai_deps` installs ignored files only (`tree-snapshot` must be unchanged) and
+       a failure is `Dependency setup …`, a hard rule, so an installer failure commits nothing
+       and the armed checkpoint's gate sees the dependencies the preserved tree asks for.
+    T018 owns rule 1 and audits rule 2 (T011 implements it with the consumer); T015's contract
+    gains both as rules 6 and 7 and its fail-closed matrix rows run with recovery on as well.
 - **R15 revocation (plan review round 2, P4).** Pipeline ownership is revoked durably or the run
   stops: records live in their own host directory `binding_dir()/pr-draft/`; `pr-draft clear`
   unlinks, fsyncs the directory and confirms the file is gone (any other `OSError` → exit 1
@@ -282,7 +319,9 @@ flowchart TD
   `--timer-recovers`: exit 0 when `timer_status(root)` is installed and the service's ExecStart
   contains `"--recover"`, else 1 (one line on stdout).
 - **ai-recover (T003).** Right after `reserve-attempt` and the settings: `limit-hold` /
-  `limit-claim` (lifecycle above). A claimed relaunch runs `relaunch_verify` right after the
+  `limit-claim` (lifecycle above), then T018's terminal check (an armed manifest, `limit-task`
+  exit 0 → ⛔, nothing touched; never true on the relaunch itself, whose arm is created later in
+  this process). A claimed relaunch runs `relaunch_verify` right after the
   gate and branch checks ("Verification point" above): mismatch → ⛔, nothing touched. After
   the plan-revision decision block and BEFORE the hard rules: (1) claimed relaunch → notify
   `▶ RESUMED after the usage limit (relaunch k/cap): <branch>`, then the transitions of the
@@ -364,6 +403,7 @@ flowchart TD
 | T017 | MC-01 | preserved work bound to the interrupted task: manifest `task` written by ai-run, `limit_task`, arm requires it, `limit-task` | opus |
 | T011 | MC-01 | relaunch continues preserved task work once (armed resume; bound task DONE, in HEAD or in the tree → armed checkpoint, else its session) | opus |
 | T016 | MC-01 | armed resume re-enters at implementation: stage-bound arm (`limit_stage`), plan review loop not entered while armed, partial-checkpoint regression | opus |
+| T018 | MC-01 | an armed manifest is terminal for recovery (no decision session, no commit while armed); audit that the armed checkpoint follows ai-run's complete startup | opus |
 | T015 | MC-01 | armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed, state matrix incl. a settled re-check | opus |
 | T004 | MC-01, DB-04 | dashboard: waiting relaunch is paused, killed planning is a stop | sonnet |
 | T005 | DB-04 | `ai-run --plan --read-dir` (permission boundary) | opus |
@@ -407,7 +447,12 @@ flowchart TD
   full validation before any session or the final handoff, and the next session never starts
   on a finished task's leftovers. Residual: the `task` record is best effort in a standalone
   `ai-run` (no manifest, no relaunch); inside a pipeline a lost record refuses the arm (⛔,
-  nothing committed), never arms the wrong task.
+  nothing committed), never arms the wrong task. A stop of the resumed run while the tree is
+  still armed is terminal for recovery (T018): ai-recover escalates on the armed manifest before
+  any rule, commit or decision session, so "fail closed" holds with auto-recovery on too, and
+  the armed checkpoint runs after ai-run's complete startup, dependency setup included (a
+  preserved lockfile change is installed before the gate). Residual: a resumed pipeline killed
+  between the resume and the disarm ends in that ⛔ (work intact) rather than a second resume.
 - Watchdog probe on an unscheduled checkout: `limit-at` exit 1 is "absent", not "due at 0"
   (round 4, P11); T002 tests the no-manifest, approved-unscheduled and finished-run probes for
   "no launch, no notification".
@@ -429,7 +474,7 @@ flowchart TD
 Targeted `python3 -m unittest discover -s tests -k <prefix>` per task, then `.ai/bin/ai-check`
 (about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*` (incl. `test_limit_relaunch_preserved_*`,
 `test_limit_relaunch_binding_*`, `test_limit_relaunch_verify_*`, `test_limit_relaunch_bound_*`,
-`test_limit_relaunch_reenter_*`, `test_limit_relaunch_accept_*`), `test_exec_logged_*`,
+`test_limit_relaunch_reenter_*`, `test_limit_relaunch_terminal_*`, `test_limit_relaunch_accept_*`), `test_exec_logged_*`,
 `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*`, `test_plan_read_dir_*`,
 `test_ai_plan_*`, `test_plan_outcome_*`, `test_pr_undraft_*`.
 
