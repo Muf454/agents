@@ -343,3 +343,4 @@
 | 2026-10-17 | claude (sonnet) | T016 | DONE: disposition row regexes use `[ \t]*`; writers escape `\` then `\|`; `table_cell()` decodes `\\`/`\|` in one pass; 3 new `test_disposition_pipes_*` tests; docs/workflow.md | PASS (ai-check, 744 tests; -k disposition_pipes 9 OK, -k triage_severity_suffix 3 OK) | parent 29c653e | flow unchanged |
 | 2026-10-17T00:54:26Z | runner | T016 | completed | PASS | 85c4cb2 | Claude checkpointed; continuing queue |
 | 2026-10-17T01:00:52Z | runner | none | queue complete; ready for independent review | PASS | b92fd0b | Human acceptance remains |
+| 2026-10-17T01:04:41Z | runner | triage | review triaged into dispositions/tasks | n/a | e8553d4 | Fix tasks run next |
