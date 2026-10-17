@@ -360,3 +360,4 @@
 | 2026-10-17T02:30:14Z | runner | plan-revision | plan revised (round 6): accepted 2, rejected 0, needs-human 0 | n/a | 0944546 | Plan review runs again |
 | 2026-10-17T02:46:44Z | runner | T001 | completed | PASS | baa001b | Claude checkpointed; continuing queue |
 | 2026-10-17T03:03:34Z | claude (haiku) | T002 | DONE: triage and plan-revision prompts, both host contracts (ai-run) and the host-written comments show the ID-alone row; `test_finding_cell_prompts_show_the_row` added; mock triage matches a row line (`^\| M1 \|`) instead of the substring, since the example in a fresh file made it skip the M1 row | PASS (ai-check, 753 tests, 387.3 s; -k finding_cell 7 OK; -k tool_contract 3 OK) | parent 42a838f | flow unchanged; installed .ai/prompts unchanged (upgrade needed) |
+| 2026-10-17T03:10:27Z | runner | T002 | completed | PASS | 2f568b7 | Claude checkpointed; continuing queue |
