@@ -872,7 +872,7 @@ exception fails 2. Validation: `-k outcome_attempt` Ran 37 OK; `-k outcome` Ran 
 `.ai/bin/ai-check` PASS (808 tests, 428.8 s). No `ai-run` or docs change (T004). Flow unchanged.
 
 ## T004 — `ai-run` opens, closes and reconciles task attempts; a SIGKILLed runner's attempt is logged at the next start (CU-5, part 2)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T003
 Model: opus
 
