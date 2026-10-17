@@ -35,13 +35,13 @@ sequenceDiagram
   R->>H: attempt-reconcile (start, under the lock)
   H->>S: leftover attempt.json? runner dead -> append crashed (once), unlink
   R->>H: attempt-open TASK MODEL $$
-  H->>S: attempt.json (tmp, fsync, rename, dir fsync), prints id
-  Note over R: session ... SIGKILL here leaves attempt.json
+  H->>S: reconcile leftovers (own pid too), then attempts/ID.json (tmp, fsync, link, dir fsync), prints id
+  Note over R: session ... SIGKILL here leaves attempts/ID.json
   R->>H: outcome task ... --attempt ID
-  H->>S: append line (one write, fsync), then unlink attempt.json if id matches
+  H->>S: flock, append line (one write, fsync file + dir), then remove attempts/ID.json
 ```
-- Marker: `binding_dir() / 'attempt.json'` (per checkout, host state, outside agent-write roots).
-  One marker per checkout is enough: attempts in one checkout are sequential under the lock.
+- Markers: one file per attempt, `binding_dir() / 'attempts' / '<id>.json'` (per checkout,
+  host state, outside agent-write roots), never overwritten (see the round 2 redesign below).
 - Idempotence: every task outcome written with `--attempt` carries `attempt_id`; reconcile
   appends `crashed` only when no task record with that id exists, and removes the marker in
   every terminal case. A crash between append and unlink is therefore harmless.
@@ -54,13 +54,39 @@ sequenceDiagram
   a return count below the encoded length is a failure (no fsync, no retry, marker kept, the
   next append's guard isolates the fragment). `read_outcomes` splits bytes on `\n` and decodes
   each line on its own, so a tail cut inside a multibyte character skips only that line.
-  Concurrent writers from other checkouts can at worst produce an empty line (skipped).
+  (The round 1 claim that concurrent writers can at worst produce an empty line was wrong
+  without a lock: plan review round 2, P7; fixed below.)
   Known limit: a short write of a normal task line keeps the marker, so that attempt is later
   logged `crashed` (storage full; the conservative record).
+
+### CU-5 write protocol (round 2 redesign, T008)
+Rounds 1 and 2 both found BLOCKER/MAJOR gaps in the same area (how an outcome line and its
+marker reach disk and when the marker may go), so the area is specified once, as a whole,
+instead of per symptom:
+1. **Append** (`append_outcome`, the only writer): open `O_RDWR|O_APPEND|O_CREAT` → `flock
+   LOCK_EX` on that descriptor (every helper writer on the host, across checkouts) → tail
+   check → one `write` (short = failure) → fsync file → fsync the log's directory and the
+   parent of every directory just created → success. Any failure: no success, marker kept.
+   The lock makes tail check + write atomic for helper writers (P7). Directory syncs make a
+   new log durable before a marker can go (P8). Always prefixing `\n` was considered and
+   dropped: existing tests and readers parse `splitlines()` of the log strictly (e.g.
+   tests/test_workflow.py:2979, 5486, 5727), and blank lines would break them.
+2. **Markers**: one file per attempt, created by tmp + fsync + `link` (fails on an existing
+   name, so never overwritten) + dir fsync; removed (+ dir fsync) only after a successful
+   append of a record carrying its id, or by reconcile once such a record exists.
+3. **Reconcile** handles every marker on its own: unreadable → discard; live foreign runner →
+   keep; dead runner, or the calling runner's own earlier attempt (same pid and start time;
+   attempts are sequential under the checkout lock) → `crashed` unless its id is already in
+   the log, then remove. `attempt-open` runs it with its own pid, so a retained marker is
+   recorded at the next attempt, or at the next start at the latest, exactly once (P6).
+Invariant: a marker is removed only when the log durably holds a record with its id; no
+operation overwrites a marker. Residual: an older installed copy without the lock in another
+checkout can interleave until upgraded; its buffered append only tears on a crash or full disk.
 - `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
   branch/task/model from the marker, `attempt` numbered as today.
-- Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker path once at
-  start (`outcome attempt-path`) and removes that file with `rm -f --` in that case.
+- Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker directory once
+  at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
+  that case.
 
 ### R13 — boundary cut + full text (T005)
 - `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
@@ -81,10 +107,11 @@ sequenceDiagram
 | T001 | FL-16 finding cell pattern + hint | sonnet | none |
 | T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
 | T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
-| T003 | CU-5 helper: marker, reconcile (uses T007's append) | opus | T007 |
+| T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
+| T003 | CU-5 helper: marker, reconcile (uses T007/T008) | opus | T008 |
 | T004 | CU-5 ai-run wiring, SIGKILL end-to-end, docs, flow chart | opus | T003 |
 | T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007 |
+| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008 |
 
 ## Risks
 - FL-16 loosening could let a row meant for two findings count for one: it only ever counts
@@ -93,8 +120,9 @@ sequenceDiagram
   (`M1 (MAJOR) x` now matches); its other cases stay.
 - CU-5 durability: plan reviews of `fix/catchup-review` (rounds 5–7) found edge cases in a
   larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
-  only: unique random ids, one write per line with a newline guard, fsync of the new line and
-  of the marker, reconcile idempotent by id. Durability of earlier rows is a non-goal
+  only: unique random ids, one locked write per line with a newline guard, fsync of the new
+  line, the marker and the directories they live in, one never-overwritten marker per attempt,
+  reconcile idempotent by id (design: "CU-5 write protocol"). Durability of earlier rows is a non-goal
   (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
   be deferred, not grown into a redesign tonight.
 - CU-5 end-to-end test kills `ai-run` with SIGKILL: its `timeout`/mock children are orphaned;

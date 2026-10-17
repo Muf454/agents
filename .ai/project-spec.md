@@ -65,15 +65,19 @@ Hub decisions respected: AD-4 (small files in host state / `.ai/local/`, no daem
   host contracts show the exact row form for both tables.
 - **CU-5 crash-durable task outcomes.** When an implementation attempt opens, the host writes
   an attempt marker (unique id, task, model, branch, start time, runner pid and its `/proc`
-  start time) atomically and durably (temp file, fsync, rename, directory fsync) into the
-  checkout's host state directory. The normal outcome line carries the attempt id and is written
-  in one `write` on a readable append descriptor and fsynced, with a newline first when the
-  log's last byte is not one (a torn line never swallows the next record); a write that returns
-  fewer bytes than the line is a failure; the marker is removed only after a complete append.
+  start time) atomically and durably (temp file, fsync, link, directory fsync) as its own file
+  in the checkout's host state directory; no marker is ever overwritten. The normal outcome
+  line carries the attempt id and is written in one `write` on a readable append descriptor
+  under an exclusive `flock` (so the tail check and the write are one step for every writer
+  using the helper), with a newline first when the log's last byte is not one (a torn line
+  never swallows the next record); the file and its directory (and any directory just created)
+  are fsynced; a write that returns fewer bytes than the line, or a failed sync, is a failure;
+  a marker is removed only after a complete, synced append of a record with its id.
   The reader decodes each line on its own, so a torn tail (also inside a multibyte UTF-8
   character) skips only that line.
-  At the next `ai-run --approved` start (under the checkout lock) a leftover marker whose runner
-  is not alive (pid gone or start time different) is reconciled: exactly one `crashed` outcome
+  At the next attempt open or `ai-run --approved` start (under the checkout lock) every leftover
+  marker whose runner is not alive (pid gone or start time different), or which belongs to an
+  earlier attempt of the calling runner itself, is reconciled: exactly one `crashed` outcome
   for that attempt (seconds unknown), never a second one when the log already has its id, then
   the marker is removed. A stop that deliberately logs nothing (approved gate changed) removes
   the marker without running a helper. Advisory telemetry only: never fatal, never a stop.

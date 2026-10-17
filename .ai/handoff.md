@@ -9,9 +9,12 @@ PR #29 open, not merged) plans flow batch 5 (2026-10-17, Claude planning session
   that did not match and show the form to write.
 - T002 FL-16 (haiku): the triage and plan-revision prompts, both host contracts and the
   host-written table comments show an example row with the ID alone.
-- T003 CU-5 (opus): `workflow.py outcome attempt-open / attempt-reconcile / attempt-path`, a
-  durable per-checkout attempt marker in host state, `attempt_id` on task outcomes, and a
-  newline-guarded, fsynced single-write append.
+- T007/T008 CU-5 (opus): one outcome append path (readable descriptor, `flock` across
+  checkouts, newline guard, complete-write check, file and directory fsync), a per-line UTF-8
+  reader, and a store of one never-overwritten marker file per attempt (`outcome attempt-dir`).
+- T003 CU-5 (opus): `workflow.py outcome attempt-open / attempt-reconcile`, durable attempt
+  markers in host state, `attempt_id` on task outcomes; a marker whose outcome could not be
+  appended survives later attempts and is recorded once.
 - T004 CU-5 (opus): `ai-run` reconciles a leftover marker at start, opens one per attempt and
   removes it on a gate-broken stop; a SIGKILLed runner's attempt is logged as `crashed` once at
   the next start.
@@ -28,8 +31,8 @@ None yet in this batch. PR #29's last gate: `.ai/bin/ai-check` PASS (746 tests, 
 
 ## Assumptions
 - FL-16: tolerating title text after the ID is fine; a row counts only for its first ID.
-- CU-5: limited design (one marker per checkout, idempotent by attempt id, newline guard,
-  fsync of new data only); durability of earlier outcome rows is a non-goal; only
+- CU-5: limited design (one marker file per attempt, idempotent by attempt id, locked
+  newline-guarded append, fsync of new data and its directories only); durability of earlier outcome rows is a non-goal; only
   implementation attempts are tracked.
 - R13: the 300-character caps stay; only the cut position and the full-text file are new.
 - R15 (un-draft PRs) is not planned: it changes what the pipeline publishes (human decision).
@@ -58,8 +61,12 @@ tests (the groups are added by the tasks named).
   still rejected with a hint; T002: `test_finding_cell_prompts_show_the_row`).
 - `test_outcome_log_io_*` (T007: append to a non-empty log, newline guard, torn multibyte tail
   skipped, short write reported as failure).
+- `test_outcome_write_protocol_*` (T008: append waits for the log lock so a concurrent partial
+  line cannot swallow it, file/directory fsync order, directory-sync failure, marker store
+  never overwrites).
 - `test_outcome_attempt_*` (T003: marker, reconcile once, crash between append and unlink, live
-  runner kept, garbage marker, torn last line, short write keeps the marker).
+  runner kept, garbage marker, torn last line, short write keeps the marker, a failed first
+  outcome survives the second attempt and is recorded once).
 - `test_outcome_crash_*` (T004: SIGKILLed runner logged as `crashed` at the next start, normal
   paths unchanged, gate-broken stop leaves no marker).
 - `test_recovery_reason_shorten_*` (T005: boundary cuts, full-text file, ⛔ notification names it).
