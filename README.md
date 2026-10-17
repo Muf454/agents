@@ -492,7 +492,11 @@ only a re-check, never a full review) exists, or you record a catch-up done on a
 `~/.local/state/ai-toolkit`; outside every checkout, shared by all projects): project,
 branch, task, title, category (security, concurrency, migration, tests, docs, ui,
 feature; from the title), model, result (done, blocked, validation_failed,
-no_checkpoint, or timeout, interrupted, error for a stopped attempt), attempt, first-time pass, duration,
+no_checkpoint, or timeout, interrupted, error for a stopped attempt, or crashed for a runner
+that was killed: logged, with unknown duration, at the next `ai-run --approved` start, before
+its clean-checkpoint check, so that start still stops with `Start from a clean checkpoint`
+until the interrupted bookkeeping (`.ai/state.md` at least) is committed or reset; only
+implementation attempts, and a checkout never started again keeps its record pending), attempt, first-time pass, duration,
 `seq` (host-wide order key, allocated when the attempt opens; gaps are normal) and `started`
 (epoch seconds, informational); for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check

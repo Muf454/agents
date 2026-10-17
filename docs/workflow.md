@@ -960,6 +960,20 @@ nothing, and so does a stop because the approved gate changed (the handler never
 project helper after that, nor the plan-revision outcome line). When `.ai/tasks.md` no longer parses, the line still gets written; its title comes
 from the task's heading, or is empty.
 
+The runner backs every attempt with a marker (`outcome attempt-open TASK MODEL $$`, before the
+session; the line passes `--attempt ID`, which removes the marker once appended). It keeps any
+valid printed id whatever the helper's exit status (P13). A gate-change stop logs nothing, so
+its EXIT handler removes only this attempt's marker with a plain `rm` (no helper). A runner
+killed without its EXIT handler (SIGKILL, OOM) leaves the marker: every non-`--plan` start runs
+`outcome attempt-reconcile $$` right after the branch check and before the clean-checkpoint
+check, which logs it as `crashed` (attempt counted as usual, `seconds` null) once. The killed
+runner had already written `.ai/state.md`, so that start still stops with `Start from a clean
+checkpoint` until the interrupted bookkeeping is committed or reset; the crash is logged
+either way. The reconcile is best effort, writes host state only, and runs the same checkout
+helper `state-root-check` already ran before the gate baseline. Limits: only implementation
+attempts have markers; a checkout never started again keeps its marker; a sync the kernel
+already failed cannot be redone (T009).
+
 Signals are delivered late: bash runs a trapped INT/TERM only after the foreground command
 returns, and GNU `timeout` runs the session in its own process group, so neither a signal to
 the runner nor Ctrl-C reaches the session. The runner exits 130/143 only when the session

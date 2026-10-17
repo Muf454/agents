@@ -123,6 +123,18 @@ plan_scope() {
     ai_die "$error"
   }
 }
+# A task attempt whose runner was killed (SIGKILL, no exit handler) left its marker; log it as
+# `crashed` once, before the clean-checkpoint refusal below: `ai_helper state implementing`
+# dirties tracked .ai/state.md before every session, so a killed runner always leaves a dirty
+# checkout and the restart refuses before anything later could run. Best effort, host state
+# only, and the same checkout helper state-root-check already ran before the baseline, so it
+# adds no new trust class. Triage and plan revision never open attempts but may reconcile.
+attempt_dir=
+attempt_id=
+if [[ -z "$plan_file" ]]; then
+  attempt_dir=$(ai_helper outcome attempt-dir 2>/dev/null) || attempt_dir=
+  ai_helper outcome attempt-reconcile "$$" || true
+fi
 if [[ -n "$plan_file" ]]; then
   # A first plan starts from the template queue, so the queue is checked after the session;
   # the START and working-tree queues are parsed here so a malformed heading stops before a
@@ -177,6 +189,10 @@ on_exit() {
     elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
     else task_outcome error
     fi
+  elif [[ "$attempt_open" == yes ]]; then
+    # A deliberate no-log stop must not be reported as a crash at the next start: remove only
+    # this attempt's marker (no helper may run); other retained markers stay for that start.
+    [[ -z "$attempt_dir" || -z "$attempt_id" ]] || rm -f -- "$attempt_dir/$attempt_id.json"
   fi
   if [[ "$finished" != yes ]]; then
     if [[ "$active_task" == planning && "$gate_ok" == yes ]]; then
@@ -206,9 +222,12 @@ dirty_beyond_records() {
 
 # Host-side outcome log for tuning the model rules (ai-status --outcomes); never fatal.
 task_outcome() {
+  local attempt_args=()
+  if [[ -n "$attempt_id" ]]; then attempt_args=(--attempt "$attempt_id"); fi
   attempt_open=no
-  ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" 2>/dev/null || \
-    printf '%s\n' 'Note: could not append to the outcome log.' >&2
+  ai_helper outcome task "$active_task" "$1" "${task_model:-$model}" "$(( SECONDS - task_started ))" \
+    "${attempt_args[@]}" 2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+  attempt_id=
 }
 
 # Sessions keep throwaway files in .ai/local/scratch; emptied before and after each session
@@ -263,6 +282,12 @@ claude_session() {
       # After the preflight checks; a limit pause and retry stays inside this attempt.
       task_started=$SECONDS
       session_code=
+      # The helper prints the id before it publishes the marker, so a marker can only exist
+      # once this shell holds its id. Never clear a valid printed id because of the exit
+      # status: a published marker would be left behind and the next start would log a
+      # finished task as `crashed`.
+      attempt_id=$(ai_helper outcome attempt-open "$active_task" "${task_model:-$model}" "$$" 2>/dev/null) || true
+      [[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=
       attempt_open=yes
     fi
     clear_scratch

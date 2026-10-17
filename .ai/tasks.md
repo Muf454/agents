@@ -872,7 +872,7 @@ exception fails 2. Validation: `-k outcome_attempt` Ran 37 OK; `-k outcome` Ran 
 `.ai/bin/ai-check` PASS (808 tests, 428.8 s). No `ai-run` or docs change (T004). Flow unchanged.
 
 ## T004 — `ai-run` opens, closes and reconciles task attempts; a SIGKILLed runner's attempt is logged at the next start (CU-5, part 2)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: opus
 
@@ -959,7 +959,18 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+2026-10-17 (claude opus): DONE. `scripts/ai-run`: after `ai_branch`, every non-`--plan` start
+reads `outcome attempt-dir` and runs `outcome attempt-reconcile "$$" || true` before the
+clean-checkpoint refusal (gate baseline unmoved); `claude_session` opens the attempt with
+`attempt-open … "$$"`, keeping any printed 16-hex id whatever the exit status; `task_outcome`
+passes `--attempt` and clears the id; `on_exit` with the gate broken removes only this
+attempt's marker with `rm -f`. Mock mode `sigkill-runner` (ppid walk to the `bash … ai-run`,
+pids recorded for cleanup). Tests: `test_outcome_crash_killed_runner_logged_once_at_next_start`,
+`…_normal_stops_carry_attempt_id_and_leave_no_marker` (timeout/error/done),
+`…_failed_attempt_open_keeps_the_printed_id` (read-only attempts dir),
+`…_gate_change_leaves_no_marker`. README "Outcome log", docs/workflow.md outcome section, vault
+flow bullet and hub Log updated. Validation: `-k outcome_crash` 4 OK, `-k outcome` 82 OK,
+`.ai/bin/ai-check` PASS (812 tests).
 
 ## T005 — Recovery reasons and plan questions are cut at a sentence or word boundary; the full text is kept (R13)
 Status: TODO

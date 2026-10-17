@@ -387,6 +387,22 @@ if mode == 'timeout':
     time.sleep(30)
 if mode == 'self-kill':
     os.kill(os.getpid(), signal.SIGKILL)
+if mode == 'sigkill-runner':
+    # The runner dies without its exit handler (claude <- timeout <- ai-run): walk the ppids up to
+    # the first bash running ai-run, record it and every pid on the way for the test's cleanup.
+    pid, seen = os.getppid(), []
+    while pid > 1:
+        seen.append(pid)
+        argv = pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        if pathlib.Path(argv[0].decode()).name == 'bash' and any(b'ai-run' in part for part in argv):
+            break
+        pid = int(pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+    else:
+        sys.exit('mock: no ai-run ancestor')
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'sigkill-runner.pids', 'a') as f:
+        f.write(''.join(f'{p}\n' for p in seen))
+    os.kill(pid, signal.SIGKILL)
+    sys.exit(0)
 if mode == 'hold':
     # Bounded wait for the test to signal the runner, then release and fail.
     pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
@@ -6848,6 +6864,105 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse(lines[0]['first_pass'])
         empty = self.tool('ai-status', '--outcomes', str(self.base / 'missing.jsonl')).stdout
         self.assertIn('No outcomes recorded yet', empty)
+
+    # ---------------------------------------------------------------- killed runner (CU-5, T004)
+    def crash_attempts_dir(self):
+        return Path(self.helper('outcome', 'attempt-dir').stdout.strip())
+
+    def crash_markers(self):
+        directory = self.crash_attempts_dir()
+        return sorted(directory.glob('*.json')) if directory.exists() else []
+
+    def crash_reap_killed(self):
+        """SIGKILL every process the sigkill-runner mock recorded (still the same program), and
+        wait until they are gone: the session's `timeout` inherits the checkout lock."""
+        pids = self.base / 'sigkill-runner.pids'
+        if not pids.exists():
+            return
+        for pid in {int(x) for x in pids.read_text().split()}:
+            with contextlib.suppress(OSError):
+                if any(name in Path(f'/proc/{pid}/cmdline').read_bytes() for name in (b'ai-run', b'timeout')):
+                    os.kill(pid, signal.SIGKILL)
+            for _ in range(200):
+                if not Path(f'/proc/{pid}').exists() or \
+                        Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                    break
+                time.sleep(0.05)
+
+    def test_outcome_crash_killed_runner_logged_once_at_next_start(self):
+        self.ready()
+        self.addCleanup(self.crash_reap_killed)
+        killed = self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='sigkill-runner')
+        self.assertIn(killed.returncode, (-9, 137), killed.stdout + killed.stderr)
+        self.crash_reap_killed()
+        self.assertEqual(self.task_rows(), [])
+        [marker] = self.crash_markers()
+        attempt_id = json.loads(marker.read_text())['id']
+        self.assertIn('.ai/state.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        refused = self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Start from a clean checkpoint', refused.stderr)
+        self.assertIn('logged a crashed attempt of T001', refused.stderr)
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        [crashed] = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual((crashed['result'], crashed['attempt'], crashed['attempt_id'], crashed['seconds']),
+                         ('crashed', 1, attempt_id, None))
+        self.assertEqual(self.crash_markers(), [])
+        self.commit('checkpoint the killed run')
+        self.tool('ai-run', '--approved')
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([(r['result'], r['attempt']) for r in rows], [('crashed', 1), ('done', 2)])
+        self.assertRegex(rows[1]['attempt_id'], r'^[0-9a-f]{16}$')
+        self.assertNotEqual(rows[1]['attempt_id'], attempt_id)
+        self.assertEqual(self.crash_markers(), [])
+        self.tool('ai-run', '--approved', expected=None)
+        self.assertEqual(self.outcome_rows(), rows)
+
+    def test_outcome_crash_normal_stops_carry_attempt_id_and_leave_no_marker(self):
+        self.ready()
+        self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1, MOCK_CLAUDE='timeout')
+        self.assertEqual(self.crash_markers(), [])
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.commit('reconcile timeout')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertEqual(self.crash_markers(), [])
+        self.commit('reconcile error')
+        self.tool('ai-run', '--approved')
+        rows = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([r['result'] for r in rows], ['timeout', 'error', 'done'])
+        ids = [r['attempt_id'] for r in rows]
+        self.assertTrue(all(re.match(r'^[0-9a-f]{16}$', i) for i in ids), ids)
+        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(self.crash_markers(), [])
+
+    def test_outcome_crash_failed_attempt_open_keeps_the_printed_id(self):
+        if os.geteuid() == 0:
+            self.skipTest('root ignores directory permissions')
+        self.ready()
+        directory = self.crash_attempts_dir()
+        directory.mkdir(parents=True)
+        directory.chmod(0o500)
+        self.addCleanup(directory.chmod, 0o700)
+        result = self.tool('ai-run', '--approved')
+        [row] = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual(row['result'], 'done')
+        self.assertRegex(row['attempt_id'], r'^[0-9a-f]{16}$')
+        self.assertNotIn('crashed', result.stdout + result.stderr)
+        self.tool('ai-run', '--approved', expected=None)
+        self.assertEqual([r for r in self.outcome_rows() if r['kind'] == 'task'], [row])
+
+    def test_outcome_crash_gate_change_leaves_no_marker(self):
+        self.ready()
+        result = self.tool('ai-run', '--approved', expected=1,
+                           MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/prompts/implement.md')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertEqual(self.outcome_rows(), [])
+        self.assertEqual(self.crash_markers(), [])
+        self.run_cmd(['git', 'checkout', 'HEAD~1', '--', '.ai/prompts/implement.md'])
+        (self.project / '.ai/tasks.md').write_text(task('T001'))
+        self.commit('human restores the inspected gate')
+        restart = self.tool('ai-run', '--approved')
+        self.assertNotIn('crashed', restart.stderr)
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
 
     def test_watchdog_auto_diagnosis_falls_back_to_claude_sonnet(self):
         self.setup_project()
