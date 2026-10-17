@@ -147,3 +147,10 @@ Plan review HEAD: a5afce6e6804448ee32ec36f8d046f58a4f0bc13
 | P11 | accepted | Verified: `scripts/ai-run:626` runs `ai_helper state implementing …` (`update_state`, workflow.py:763–785, `atomic` write of tracked `.ai/state.md`, `Last updated` changes every call) before `claude_session`, and `:136–137` dies with `Start from a clean checkpoint` for any non-triage/non-revision mode before the gate baseline at `:148`, so after a SIGKILL the second `ai-run --approved` of T004's test could never reach a reconcile placed "once the approved gate is verified". Chosen the reviewer's first option: T004 now runs `attempt-dir` + `attempt-reconcile "$$"` right after `ai_branch` (:114), before the mode branch at :126, in every non-`--plan` mode; it is best effort, writes host state only and runs the same checkout helper that `state-root-check` (:109) already runs before the baseline, so no new trust class (plan note "CU-5 start order in ai-run"; the baseline stays at :148). T004's test now asserts the dirty `.ai/state.md`, the refusal with exactly one `crashed` line and the marker gone, checkpoints the fixture's leftovers, then the implementing restart logs `done` attempt 2 with no second `crashed`; docs, spec and the handoff's manual step state the order (crash logged, then refusal until the leftovers are committed). | T004 |
 
 Convergence: the CU-5 marker area repeats for the third round (round 1 P1–P3 append, round 2 P6–P8 write protocol, now P9–P10 on reconcile's decision inputs), so no per-path patch: the design task T009 ("CU-5 marker-removal gate", strict read + `confirm_recorded` + one removal rule) redesigns how reconcile decides and when a marker may go, and T003 only consumes it; P11 is the first finding in the ai-run start-order area and is fixed inside T004 with a plan note.
+
+## Plan review round 4 (report d35ddeb31f5f3885cd24c3b4a48a953296b551e2143f10033943ab89a96de351)
+
+Plan review HEAD: d2725179cc03d43297e9a4a09e9712075be9bf4c
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
