@@ -1,347 +1,167 @@
-# Plan: Flow batch 5: FL-16, CU-5, R13
+# Plan: Limits and plan stage: MC-01 part 1, DB-04, R15
 
-## Assessment (verified at df0d3c2, 2026-10-17)
-Branch `fix/flow-batch-5` builds on PR #29 (`fix/flow-batch-4`, not merged). PR #29's T005/T016
-gave both disposition tables one cell pattern (`TABLE_CELL`, `table_cell`) and line-bound rows
-(`[ \t]*`); FL-16 builds on that. Details, line references and the list of backlog items
-found already done are in `.ai/project-spec.md` ("Verified against the code").
+## Assessment (verified at edc3dc6, 2026-10-17)
+See `.ai/project-spec.md` "Verified against the code". In short: limit stops beyond the wait
+budget escalate as a hard rule and nothing relaunches them; `ai-run --plan` and the nine-box
+dashboard exist, but there is no `ai-plan` command, no read-only reference directories, no
+detached start, no outcome/run-log record and a killed planning session looks idle; the PR step
+can draft but never un-drafts and does not remember that it drafted.
 
 ## Architecture
-### FL-16 — one finding-cell pattern for both tables (T001, T002)
-- `scripts/lib/workflow.py`: a module constant `FINDING_CELL` (string, like `TABLE_CELL`) with
-  exactly ONE capturing group (the ID); severity suffix and title text are non-capturing. Both
-  `DISPOSITION_ROW` and `PLAN_DISPOSITION_ROW` start with `^\|[ \t]*` + `FINDING_CELL` +
-  `[ \t]*\|`, so groups 1–4 (ID, disposition, evidence, task) stay as every reader uses them.
-- Title text: after the ID (and suffix), a separator of whitespace, or `:` directly after the
-  ID/suffix, optionally followed by `—`, `–` or `-` and whitespace (a dash needs whitespace or
-  the suffix before it, so an ID like `SEC-1` or text `M1-2` is never split), then text that
-  does not start with `(` and contains no unescaped `|` and no newline (reuse the `TABLE_CELL`
-  alternation `(?:\\.|[^\\|\n])`). The text is ignored.
-- Diagnostics: a helper `unmatched_cell_hint(text, finding)` returns ` (the row starting
-  "| <first cell> |" does not match; write "| M1 | accepted | … | T012 |")` when a `|` line's
-  first cell contains the ID (not preceded by a letter, digit or `-`, not followed by a digit,
-  so glued forms like `M1x` get the hint too) but no row matched it. Appended to "MAJOR finding M1 has
-  no disposition." and "Finding P1 has no row in the round N section." (prefixes unchanged, so
-  existing `assertIn` checks hold).
-- Prompts/contracts (T002): show `| M1 | accepted | <evidence> | T012 |` and
-  `| P1 | accepted | <evidence> | T012 |`, ID alone (a severity suffix or title is tolerated).
 
-### CU-5 — attempt marker + reconcile (T003 helper, T004 wiring)
+### MC-01 part 1 — limit-only stop → scheduled relaunch (T001 helpers, T002 watchdog, T003 ai-recover, T004 dashboard)
 ```mermaid
-sequenceDiagram
-  participant R as ai-run
-  participant H as workflow.py outcome
-  participant S as host state (binding_dir)
-  R->>H: attempt-reconcile $$ (start, under the lock, before the clean-checkpoint check)
-  H->>S: each leftover attempts/*.json: runner dead -> confirm_recorded (strict read + sync) else append crashed (once), remove
-  R->>H: attempt-open TASK MODEL $$
-  H->>S: reconcile leftovers (own pid too), then attempts/ID.json (tmp, fsync, link, dir fsync), prints id
-  Note over R: session ... SIGKILL here leaves attempts/ID.json
-  R->>H: outcome task ... --attempt ID
-  H->>S: flock, append line (one write, fsync file + dir), then remove attempts/ID.json
+flowchart TD
+  pause["ai_limit_pause: wait > budget"] --> rec["writes .ai/local/limit-stop (agent, reset epoch)<br/>then ai_die (message unchanged)"]
+  rec --> stop["ai-pipeline stop → exec ai-recover"]
+  stop --> only{"last-error is exactly the limit message<br/>and limit-stop valid? (workflow.py limit-stop)"}
+  only -- no --> rules["hard rules / Claude decision as today"]
+  only -- yes --> cap{"AI_LIMIT_RELAUNCH_MAX > 0,<br/>timer installed with --recover,<br/>relaunches < cap?"}
+  cap -- no --> esc["⛔ escalate (names the reset time)"]
+  cap -- yes --> sched["run-manifest limit-schedule AT CAP<br/>(gives the reserved attempt back)<br/>pauses.log line, observe pause, ⏸ notify,<br/>drop last-error, limit-stop, pipeline.active; exit 75"]
+  sched --> probe["watchdog probe (every 10 min, --recover):<br/>no runner, no marker, run-manifest limit-due"]
+  probe --> launch["start_recovery(stage 'usage limit relaunch')"]
+  launch --> due["ai-recover: gate/branch checks, limit-due →<br/>limit-resume (attempt given back), record stop leftovers,<br/>clean checkout → ▶ RESUMED, exec ai-pipeline"]
+  due -. "limit again" .-> only
 ```
-- Markers: one file per attempt, `binding_dir() / 'attempts' / '<id>.json'` (per checkout,
-  host state, outside agent-write roots), never overwritten (see the round 2 redesign below).
-- Idempotence: every task outcome written with `--attempt` carries `attempt_id`; reconcile
-  appends `crashed` only when no task record with that id exists, and removes the marker only
-  through the removal gate below (round 3 redesign). A crash between append and unlink is
-  therefore harmless.
-- Liveness: pid alive AND `/proc/<pid>/stat` start time equal to the recorded one → a live
-  runner owns it: leave it (should not happen under the lock; comment). Unknown start time
-  recorded (no `/proc`) → treat a live pid as alive.
-- Log I/O (T007, plan review round 1 P1–P3): one `append_outcome` for every kind opens the log
-  `O_RDWR|O_APPEND|O_CREAT` (the newline guard `pread`s the last byte; a write-only fd cannot);
-  if the log is non-empty and its last byte is not `\n`, the one `os.write` starts with `\n`;
-  a return count below the encoded length is a failure (no fsync, no retry, marker kept, the
-  next append's guard isolates the fragment). `read_outcomes` splits bytes on `\n` and decodes
-  each line on its own, so a tail cut inside a multibyte character skips only that line.
-  (The round 1 claim that concurrent writers can at worst produce an empty line was wrong
-  without a lock: plan review round 2, P7; fixed below.)
-  Known limit: a short write of a normal task line keeps the marker, so that attempt is later
-  logged `crashed` (storage full; the conservative record).
+- **Record (T001).** `ai_limit_pause` writes `.ai/local/limit-stop` (`<Agent> <reset epoch or 0>`,
+  via a temp file and `mv`) just before its `ai_die`; the die message stays byte-identical (the
+  existing hard-rule pattern and docs keep working). `workflow.py limit-stop` prints
+  `<Agent> <relaunch epoch>` and exits 0 only when `.ai/local/last-error` holds exactly one line
+  matching `^(Claude|Codex) usage limit: the reset is beyond the \d+s wait budget\. Rerun after
+  it resets\.$`, `limit-stop` parses, names the same agent, and is not older than last-error by
+  more than 120 s (a stale file from an earlier stop never qualifies). Relaunch epoch:
+  `reset + 60` when the reset is in the future, `now + AI_LIMIT_RETRY` (default 1800) when it is
+  0, `now` when it has passed. "Only reason" = the whole last-error is the limit message.
+- **Schedule (T001).** New run-manifest actions, all atomic on `run.json` (fields optional, so
+  existing manifests stay valid; a human `start` drops them; `clear-attempts`, called by
+  `finish`, resets them): `limit-schedule AT CAP` (fails `usage limit: already relaunched N
+  time(s) in this run` when `limit_relaunches >= CAP`; else `limit_relaunches += 1`,
+  `limit_relaunch_at = AT`, `attempts = max(0, attempts - 1)`; prints the new count);
+  `limit-due [NOW]` (prints AT and exits 0 when set and `AT <= NOW`, default `time.time()`; exit 1
+  otherwise); `limit-resume` (drops `limit_relaunch_at`, `attempts = max(0, attempts - 1)`; prints
+  the relaunch count); `limit-count`. New setting `AI_LIMIT_RELAUNCH_MAX` (0–9, default 2) in
+  `RUN_SETTINGS`, `ai_config`'s key list and both lists in `ai-recover`.
+- **Watchdog (T002).** Under its lock, before the incident logic: with `--recover`, no runner
+  alive and no `pipeline.active` marker, it asks THIS host copy's `workflow.py run-manifest
+  limit-due` (same trust path as the gate check in `start_recovery`); when due it calls
+  `start_recovery(root, local, marker, stage='usage limit relaunch')` (generalised: the default
+  crash last-error is written only for the crash stage). Refused → one `⛔ STOPPED, needs you: the
+  usage-limit relaunch could not start: <reason>.` per AT (dedupe key `relaunch:<AT>` in
+  `watchdog.json` `active`). Not due → nothing. The stall incident is skipped while
+  `now < paused_until(local)` (ai-recover's pauses.log line carries the wait until AT). New flag
+  `--timer-recovers`: exit 0 when `timer_status(root)` is installed and the service's ExecStart
+  contains `"--recover"`, else 1 (one line on stdout).
+- **ai-recover (T003).** After the plan-revision decision block and BEFORE the hard rules:
+  (1) due relaunch: `run-manifest limit-due` exits 0 → `limit-resume`, notify
+  `▶ RESUMED after the usage limit (relaunch k/cap): <branch>`, then the existing open-stage
+  branch (resume) or record-stop-leftovers + clean-checkout check + `resume` (no Claude, no
+  `AI_RECOVER_MAX` count). (2) limit-only stop: `limit-stop` exits 0 → when
+  `AI_LIMIT_RELAUNCH_MAX` is 0 fall through to the hard rules (today); when
+  `"$AI_BIN/ai-watchdog" "$AI_ROOT" --timer-recovers` fails → escalate `the usage limit resets
+  around <time>, but no watchdog timer with --recover is installed to relaunch the run.` /
+  `install it (ai-watchdog --install-timer --recover) or rerun ai-pipeline after the reset.`;
+  `limit-schedule` fails (cap) → escalate `usage limit again after N relaunch(es) in this run.`;
+  else schedule: append `pauses.log` line `<UTC> paused <AT-now>s: <Agent> usage limit relaunch
+  (resume ~<a H:M>)`, `ai_observe pause "<Agent> limit · relaunch after <a H:M>"`, notify
+  `⏸ PAUSED: <branch> stopped at a <Agent> usage limit during <stage>; relaunches by itself after
+  <a H:M> (relaunch k/cap).`, remove last-error, `limit-stop` and `pipeline.active`, mark the stop
+  announced (no ⛔ from `on_exit`), print one line and exit 75.
+- **Dashboard (T004).** No live runner, no marker, observation `state: paused` → status
+  `paused` (waiting for a relaunch), marker text keeps the note; ranks with the live paused runs.
 
-### CU-5 write protocol (round 2 redesign, T008)
-Rounds 1 and 2 both found BLOCKER/MAJOR gaps in the same area (how an outcome line and its
-marker reach disk and when the marker may go), so the area is specified once, as a whole,
-instead of per symptom:
-1. **Append** (`append_outcome`, the only writer): open `O_RDWR|O_APPEND|O_CREAT` → `flock
-   LOCK_EX` on that descriptor (every helper writer on the host, across checkouts) → tail
-   check → one `write` (short = failure) → fsync file → fsync the log's directory and the
-   parent of every directory just created → success. Any failure: no success, marker kept.
-   The lock makes tail check + write atomic for helper writers (P7). Directory syncs make a
-   new log durable before a marker can go (P8). Always prefixing `\n` was considered and
-   dropped: existing tests and readers parse `splitlines()` of the log strictly (e.g.
-   tests/test_workflow.py:2979, 5486, 5727), and blank lines would break them.
-2. **Markers**: one file per attempt, created by tmp + fsync + `link` (fails on an existing
-   name, so never overwritten) + dir fsync; removed (+ dir fsync) only after a successful
-   append of a record carrying its id, or by reconcile once such a record exists.
-3. **Reconcile** handles every marker on its own: unreadable → discard; live foreign runner →
-   keep; dead runner, or the calling runner's own earlier attempt (same pid and start time;
-   attempts are sequential under the checkout lock) → `crashed` unless its id is already in
-   the log, then remove. `attempt-open` runs it with its own pid, so a retained marker is
-   recorded at the next attempt, or at the next start at the latest, exactly once (P6).
-Invariant: a marker is removed only when the log durably holds a record with its id; no
-operation overwrites a marker. Residual: an older installed copy without the lock in another
-checkout can interleave until upgraded; its buffered append only tears on a crash or full disk.
-- `crashed` records: `seconds: null` (unknown; the report already uses `r.get('seconds') or 0`),
-  branch/task/model, `started` and `seq` from the marker (the report orders by `seq`, round 6
-  redesign), `attempt` numbered as today (count at append time, informational).
-- Gate-broken stop: `on_exit` must not run a helper; ai-run asks for the marker directory once
-  at start (`outcome attempt-dir`) and removes `<dir>/<attempt_id>.json` with `rm -f --` in
-  that case.
+### DB-04 — `ai-plan` (T005 read dirs, T006 command, T007 logging, T004 killed planning)
+- **Read dirs (T005).** `ai-run --plan … --read-dir DIR` (repeatable, plan mode only; existing
+  directory, resolved with `pwd -P`, refused when it contains `*`, `?`, `[`, `(`, `)`, a newline
+  or a comma): each adds `--add-dir DIR` and the allow entry `Read(/DIR/**)` (an absolute DIR
+  gives `Read(//abs/**)`, Claude Code's absolute-path form, as in `launch-plan.sh`). No Edit or
+  Write outside `plan-allowlist`. The contract names them as read-only reference directories.
+- **Command (T006).** `scripts/ai-plan PROMPT_FILE [--revision] [--model NAME]
+  [--session-timeout S] [--knowledge-dir DIR] [--read-dir DIR]... [--detach]`: without
+  `--detach` it execs `ai-run --plan …` (same process, so the dashboard and watchdog see an
+  `ai-run` runner and nothing else changes). With `--detach`: prompt path made absolute, log
+  `.ai/local/plan-<UTC stamp>.log`, `setsid "$AI_BIN/ai-run" --plan … </dev/null >log 2>&1 &`
+  (a non-interactive shell's background job is not a group leader, so `setsid` execs without
+  forking and `$!` is the runner's PID), then wait up to `AI_PLAN_ACK_SECONDS` (default 20) for
+  `.ai/local/observation.json` to show `stage: planning` with `pid` equal to that PID (success:
+  `Planning session started: pid N, log PATH`, exit 0), or for the child to exit (print the log's
+  last lines, exit with its status), else `could not confirm …` exit 1 (the child keeps running).
+  Installed by `setup-project` (list at workflow.py:306).
+- **Logging (T007).** Outcome kind `plan` (`outcome plan RESULT MODEL SECONDS [TASKS]`, not in
+  `outcomes_report`), written on success (`done`, task count) and from `on_exit` for a planning
+  stop (`interrupted` 130/143, `timeout` 124/137 session code, else `stopped`), only with the
+  gate intact. On success one run-log line (`ai_log planning "plan written: N tasks (<model>,
+  <kind>)" PASS 'Plan left uncommitted for review'`); `.ai/run-log.md` is already in plan scope.
+- **Killed planning (T004).** No runner, no marker, observation `stage: planning`,
+  `state: active` → status `needs_you`, note `planning session ended without a plan (killed?)`,
+  so the Plan box shows ✗ like a recorded `stop plan`.
 
-### CU-5 marker-removal gate (round 3 redesign, T009)
-Round 3 (P9, P10) found the round 2 invariant ("a marker is removed only when the log durably
-holds a record with its id") broken on reconcile's decision inputs: the existing-record path
-removed without any sync, and the reader it decided on returns `[]` for an unreadable log
-(`read_outcomes`, workflow.py:2988–2991) as well as for an empty one. Third round in the
-CU-5 marker area, so the decision inputs are redesigned once instead of patched per path:
-1. **Strict read.** `read_outcomes(paths, strict=False)` keeps today's lenient mode for
-   reports (`OSError` → skip the file). `strict=True` treats only a missing file as an empty
-   log and lets every other `OSError` propagate. Reconcile and attempt numbering inside it use
-   the strict mode; a read failure keeps the marker, prints a note and appends nothing.
-2. **Confirmation.** `confirm_recorded(path, attempt_id) -> bool` is the ONLY way reconcile
-   may conclude "already recorded": open the log `O_RDWR` (missing → False, nothing created),
-   `flock LOCK_EX`, read the descriptor to EOF with the per-line decoder of T007, look for a
-   task record with that `attempt_id`; absent → False; present → `fsync` the descriptor, then
-   `fsync_dir` of the log's directory → True. Any `OSError` propagates (caller keeps the
-   marker). Rationale: a complete write whose file or directory sync failed leaves a readable
-   line and a retained marker; the retry at reconcile must finish the sync before the marker
-   may go (P9).
-3. **One removal rule.** A marker is removed after `append_outcome` returned True for a record
-   carrying its id (`outcome task --attempt`, and reconcile's `crashed` append: the append
-   already synced under the lock), or after `confirm_recorded` returned True. No other path
-   removes a readable marker. `confirm_recorded` and a following `append_outcome` take the lock
-   separately; no duplicate can slip in between because attempts of a checkout are sequential
-   under its lock, so no other writer appends that id.
-Residual (comment + Risks): after a failed `fsync` Linux may already have marked the dirty
-pages clean, so the retried sync can only persist what is still dirty; the gate guarantees a
-successful sync attempt before removal, not recovery from a kernel that dropped the data. Still
-advisory telemetry: never fatal, never a stop.
-
-### CU-5 start order in ai-run (round 3, P11)
-`ai-run:626` writes tracked `.ai/state.md` (`update_state`, workflow.py:763–785) before every
-task session, so a runner killed during a session always leaves a dirty checkout, and
-`ai-run:136–137` refuses a dirty checkout before the gate baseline at :148. The reconcile
-therefore runs right after `ai_branch` (:114), before the clean-checkpoint refusal, in every
-non-`--plan` mode: best effort, host state only, through the same checkout helper that
-`state-root-check` (:109) already runs there (no new trust class; the gate baseline stays at
-:148). The first restart after a kill logs the `crashed` attempt and then refuses with
-`Start from a clean checkpoint`; the human (or the recovery session) commits the leftovers,
-and the next start runs the task. T004's end-to-end test follows exactly this order.
-
-### CU-5 marker failure contract (round 4 redesign, T010)
-Round 4 (P12, P13) found two more marker paths whose failure outcome was unspecified: a
-transient error while READING a marker was treated like invalid content and discarded, and a
-failure of `attempt-open` AFTER the marker was linked left a marker whose id the runner had
-cleared (`|| attempt_id=`), so a finished task was later logged `crashed` and the report
-(`outcomes_report`, workflow.py:3093, last line per task wins) showed it as not done. Fourth
-round in the CU-5 marker area, so the failure semantics of every marker operation are stated
-once, as a contract, instead of per path:
-1. **Publish** (`open_attempt`, used by `outcome attempt-open` after its reconcile): choose the
-   id, PRINT it to stdout and flush, THEN publish the marker (dir, tmp, fsync, link, unlink
-   tmp, dir fsync). Any failure after the print: stderr note, exit 1, marker possibly present.
-   The runner keeps every valid id the command printed, whatever its exit status:
-   `attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true`, then
-   `[[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=`. Asymmetry that makes this safe: an
-   id WITHOUT a marker is harmless (the outcome line carries it, `remove_marker` of a missing
-   file is a no-op, nothing reconciles it), while a marker without an id in the runner
-   produces a false `crashed` line; printing first means a marker can only exist once the
-   runner has its id (a write to the closed pipe fails before the link).
-2. **Read** (`list_markers`): every `*.json` entry is classified three ways, never raising
-   for one file: a valid record; invalid content (`None`: read completely, but not JSON, missing
-   fields, or `id` different from the file name), which reconcile discards with its note (our
-   writer links only complete, fsynced files, so invalid content under the final name is
-   foreign or corrupt, never a torn marker of ours); a read error (the `OSError` instance:
-   open/read failed), which reconcile keeps, notes and skips, going on with the next marker.
-   A listing failure (`scandir` raising) is a note, exit 0, nothing touched.
-3. **Remove**: unchanged, T009's one removal rule.
-Invariant: no marker is discarded because of a transient failure, and every marker that
-exists is either held by a runner that knows its id or reconcilable as a dead runner's.
-Residual: a marker whose directory sync failed after the link may not survive a power loss;
-that loses at most a `crashed` record, never produces a false one.
-
-### CU-5 attempt ordering (round 5 redesign, T011)
-Round 5 (P15) found that the report's model of the log ("a task's last line is its result",
-`outcomes_report`, workflow.py:3093–3095; `first_row` = first line in file order, :3116) assumes
-append order = attempt order. Reconcile breaks that assumption by design: a marker kept through
-a read error (P12) or an unreadable log (P10) is recorded only at a LATER start or open, so a
-real `crashed` record of attempt A can be appended after a later attempt B's `done` of the same
-task, and the report then shows the task as not done; `outcome task`'s count-based `attempt`
-number also gives A the higher number. Fifth round in the CU-5 area, so the log's ordering
-model is redesigned once instead of patching the reconcile paths:
-1. **Every new task record carries `started`** (epoch seconds, int): `outcome task` writes
-   `int(time.time()) - seconds`; with `--attempt ID` naming a readable marker it uses the
-   marker's `started` instead (the attempt-open time, so the row and its marker agree; a
-   missing marker, P13, keeps the derived value); reconcile's `crashed` record carries the
-   marker's `started`. The marker's `started` stays `int(time.time())` at open (T003).
-2. **Logical order** (`attempt_start(record)`, `ordered_attempts(task_rows)`): a row's start
-   is its `started` when numeric, else `time` parsed as `%Y-%m-%dT%H:%M:%SZ` minus `seconds`
-   when both are present (every row the helper ever wrote has them), else unknown. Per task
-   key (project, branch, task): when every row has a start, the rows are sorted by
-   `(start, _at)`, `_at` = (file index, line index) being the tie-breaker; when any row's start
-   is unknown, that task keeps file order (compatibility: existing rows and hand-written test
-   logs without `time` behave exactly as today). Attempts of one checkout are sequential under
-   its lock, so start order is attempt order.
-3. **The report derives, never trusts**: per task, the final result is the LAST row in logical
-   order, the attempt count is the number of rows, attempt n is position n, and first-time
-   pass is "the FIRST row in logical order has `result == 'done'`". The stored `attempt` and
-   `first_pass` fields stay as written (count at append time; existing tests read them) and
-   are documented as such; the report no longer reads them. For a log with one writer and no
-   reconciled rows this gives today's numbers (file order = start order, stored fields agree).
-Invariant: a record appended late never changes which attempt counts as a task's result or
-its first attempt; reconcile stays best effort and never consults the task's later outcomes.
-Documented change: a log whose earlier attempts are missing counts its first visible attempt
-as attempt 1 (the report already did that for `attempt`; now also for first-time pass).
-Superseded in part by round 6 (below): the ORDER KEY is no longer the start time. Round 5's
-residual ("equal starts within one second are impossible for a delayed reconcile") was wrong:
-nothing enforces an interval between two opens, and B's duration does not move B's start
-(plan review round 6, P15). `started` stays on every new row and marker as information; the
-order comes from a persisted sequence. The start-time derivation (`attempt_start`, `time`
-minus `seconds`) is dropped.
-
-### CU-5 attempt sequence (round 6 redesign, T012)
-Round 6 (P15 again, P16) showed that a wall-clock key cannot order attempts: markers hold
-whole seconds, a restart or `attempt-open` can follow a crashed open within the same second,
-and the planned tie-breaker was the append position, i.e. exactly the order the design set out
-not to trust; the legacy acceptance case (P16) also contradicted the start-time rule. Sixth
-round in the CU-5 area, so the order key is redesigned once, as a whole:
-1. **One persisted sequence beside the log**: `state_root() / 'attempt-seq'` (the log is
-   `state_root() / 'outcomes.jsonl'`, workflow.py:2958–2959; both live and die together).
-   `next_attempt_seq() -> int`: open the log `O_RDWR|O_APPEND|O_CREAT` (directories created
-   as `append_outcome` does) and take its `flock LOCK_EX`, the lock every writer on the host
-   already uses, so allocators and appenders of every checkout are serialised and the lock
-   lives on a file that is never replaced (locking the counter file itself would break as soon
-   as it is replaced atomically); `n = max(counter value, highest seq of any task record in the
-   log read strictly) + 1` (counter missing or not an int → 0); persist `n` atomically (tmp in
-   the same directory, fsync, `os.replace`, `fsync_dir`); release; return `n`. Any `OSError`
-   propagates. The log scan is the self-heal for a lost or deleted counter and costs what
-   `outcome task` already pays for its `attempt` count (workflow.py:3045).
-2. **Allocation = the moment the host first records the attempt**, under the checkout lock
-   that makes a checkout's attempts sequential:
-   - `open_attempt` (T010) allocates BEFORE it prints the id; the marker carries `seq`.
-     A failed allocation prints nothing and publishes nothing (exit 1, note): the attempt runs
-     untracked, as it does today when the helper fails.
-   - `outcome task … --attempt ID` with a readable, valid marker takes the marker's `seq`
-     (and `started`); every other `outcome task` (no `--attempt`, or no readable marker)
-     allocates a fresh `seq` at append time. The attempt's open (or, without an open, its
-     append) comes after every earlier attempt's open, so the allocation order is the attempt
-     order. A failed allocation fails the command (exit 1, nothing appended): with a marker the
-     attempt is later reconciled as `crashed` with the marker's `seq` (the conservative record,
-     like the short-write limit); without one the untracked row is lost, as any `OSError` loses
-     it today. A row is never written without `seq`.
-   - reconcile's `crashed` record carries the marker's `seq` (and `started`), however late it
-     is appended.
-3. **Logical order** (`attempt_seq(record)`, `ordered_attempts(task_rows)`): `seq` when it is
-   an int (not bool), else none. Per task key (project, branch, task): rows WITHOUT `seq`
-   first, in file order (`_at`), then rows WITH `seq` by `(seq, _at)`. Why this is total and
-   right: every task row the new helper writes has a `seq` (rule 2), so rows without one are
-   pre-upgrade rows; all of them were appended before any new row, by one writer per checkout
-   in attempt order (no reconcile existed), so file order is their attempt order and "old
-   before new" is exact. Hand-written test logs have no `seq` and keep today's order.
-4. **The report derives, never trusts** (unchanged from round 5): final result = last row in
-   logical order, attempt count = rows, first-time pass = first row is `done`; the stored
-   `attempt` and `first_pass` fields stay as written and are documented as informational.
-Invariant: two attempts of one task never share an order key (one host-wide counter under one
-lock), and a record appended late never changes which attempt is a task's result or its
-first; `_at` only ever orders pre-upgrade rows. The sequence is host-wide, so one task's
-numbers have gaps: it is an order key, not a count (`attempt` is the count).
-Residuals (comment + Risks): a counter lost after a power loss continues after the highest
-RECORDED seq, so markers allocated but not yet recorded may duplicate a seq; `_at` breaks that
-tie. A `done` whose append failed only because the counter could not be written is recorded
-`crashed` by the next reconcile (documented limit, same class as the short write).
-Regression that pins P15: B `done` (`seq` 2) appended before A `crashed` (`seq` 1), both
-`started` 1000 → done 1, not done 0, 2 attempts, first-time pass 0/1, identical in both file
-orders (T012 in memory, T003 end to end with A unreadable through B's completion and A's
-`started` set to the current second right before B's open).
-
-### R13 — boundary cut + full text (T005)
-- `shorten(text, cap)` in workflow.py: whitespace collapsed; ≤ cap → unchanged; else the longest
-  prefix ending at a sentence end (`.`, `!`, `?` followed by a space) within `cap - 1` characters
-  when it keeps at least half the cap, else at the last space, else hard cut; then `…`.
-- `recover_decision`: `clean` uses it; when the reason or human action was cut, it writes both in
-  full (collapsed, at most 4000 characters each) to `.ai/local/recovery-decision.txt`
-  (`atomic`); it removes a stale file at the start of every call. Output stays three TSV fields.
-- `ai-recover` `escalate`: when the file exists, the ⛔ notification ends with
-  `Full text: .ai/local/recovery-decision.txt`. `ai-recover` removes the file right after its
-  lock, so an early escalation never names a previous invocation's text (plan review P4).
-- `bounded_questions` uses `shorten(…, QUESTION_CAP)` (no file: the questions' full text is in
-  `plan-dispositions.md`, which the existing pointer line names).
+### R15 — un-draft only pipeline-drafted PRs (T008 record, T009 pipeline)
+- **Record (T008).** Host state per branch, beside the stage records: `binding_dir() /
+  pr-draft-<sha256(branch)[:16]>.json` = `{"branch", "url", "how": "created"|"converted",
+  "at"}` written atomically. Helper `pr-draft record URL HOW`, `pr-draft get` (prints the URL,
+  exit 1 when none or unreadable/foreign: fails closed = "not ours"), `pr-draft clear`.
+- **Pipeline (T009).** Draft reasons: `--draft` (the human's request: never recorded) versus
+  the pipeline's policy (`unresolved` or disputes). Recorded when the pipeline creates the PR
+  with `--draft` for policy, or converts an existing ready PR with `gh pr ready --undo` for policy
+  (after the isDraft check confirms). When `make_draft=no` and the existing PR is a draft: if
+  `pr-draft get` equals this PR's URL → `gh pr ready "$branch"`, confirm `isDraft == false`, clear
+  the record, log it; a failure warns and keeps the record (the run still finishes; the summary
+  says the PR is still a draft). No record or another URL → leave it draft and print
+  `PR is a draft set outside the pipeline; left as draft.` An existing ready PR clears a stale
+  record (a human un-drafted it).
 
 ## Phases / tasks
-| Task | Item | Model | Depends |
+| Task | Item | What | Model |
 | --- | --- | --- | --- |
-| T001 | FL-16 finding cell pattern + hint | sonnet | none |
-| T002 | FL-16 prompts and contracts show the row form | haiku | T001 |
-| T007 | CU-5 log I/O: readable append fd, complete-write check, per-line UTF-8 reader | opus | none |
-| T008 | CU-5 write protocol: locked append + dir sync, per-attempt marker store | opus | T007 |
-| T009 | CU-5 marker-removal gate: strict read, `confirm_recorded` (round 3 redesign) | opus | T008 |
-| T010 | CU-5 marker failure contract: three-way marker read, id printed before publish (round 4 redesign) | opus | T009 |
-| T012 | CU-5 attempt sequence: persisted `seq` allocated at open or append under the log lock, `ordered_attempts` by seq (round 6 redesign) | opus | T010 |
-| T011 | CU-5 report derives result/attempts/first pass from T012's order; `started` on task records; docs | opus | T012 |
-| T003 | CU-5 helper: marker, reconcile (uses T007/T008/T009/T010/T012/T011) | opus | T010, T011 |
-| T004 | CU-5 ai-run wiring (reconcile before the clean-checkpoint check, id kept on a failed open), SIGKILL end-to-end, docs, flow chart | opus | T003 |
-| T005 | R13 boundary cut and full recovery text | sonnet | none |
-| T006 | Docs, handoff and final audit | haiku | T001–T005, T007, T008, T009, T010, T011, T012 |
+| T001 | MC-01 | limit-stop record, run-manifest relaunch schedule, setting | opus |
+| T002 | MC-01 | watchdog starts the due relaunch, `--timer-recovers`, stall skip | opus |
+| T003 | MC-01 | ai-recover schedules instead of escalating; due path resumes | opus |
+| T004 | MC-01, DB-04 | dashboard: waiting relaunch is paused, killed planning is a stop | sonnet |
+| T005 | DB-04 | `ai-run --plan --read-dir` | sonnet |
+| T006 | DB-04 | `scripts/ai-plan` with `--detach` | opus |
+| T007 | DB-04 | planning sessions in the outcome log and run log | sonnet |
+| T008 | R15 | host record of a pipeline-drafted PR | sonnet |
+| T009 | R15 | PR step un-drafts only a recorded pipeline draft | sonnet |
+| T010 | all | docs, flow chart and handoff audit | haiku |
 
 ## Risks
-- FL-16 loosening could let a row meant for two findings count for one: it only ever counts
-  for its FIRST ID, and every BLOCKER/MAJOR still needs its own row, so a missing one still
-  fails. `test_triage_severity_suffix_other_decorations_stay_unmatched` changes on purpose
-  (`M1 (MAJOR) x` now matches); its other cases stay.
-- CU-5 durability: plan reviews of `fix/catchup-review` (rounds 5–7) found edge cases in a
-  larger design (incomplete appends, durability of existing rows, unique ids). This plan keeps
-  only: unique random ids, one locked write per line with a newline guard, fsync of the new
-  line, the marker and the directories they live in, one never-overwritten marker per attempt,
-  reconcile idempotent by id, marker removal only after a strict read and a successful sync,
-  markers kept on read errors and ids kept by the runner on a failed open, and a report that
-  orders attempts by a persisted sequence instead of append position
-  (designs: "CU-5 write protocol", "CU-5 marker-removal gate", "CU-5 marker failure
-  contract", "CU-5 attempt ordering", "CU-5 attempt sequence"). Durability of earlier rows is a non-goal
-  (advisory telemetry; nothing automatic reads it). A reviewer finding beyond that scope should
-  be deferred, not grown into a redesign tonight.
-- CU-5 sync retry limit: after a failed `fsync` the kernel may have dropped the dirty pages, so
-  `confirm_recorded`'s retried sync cannot restore them; the gate only guarantees that no
-  marker is removed without a successful sync attempt (T009 comment and docs).
-- CU-5 false crash: a `crashed` line for an attempt that actually finished would hide its
-  `done`. The marker failure contract (T010) rules that out for a failed `attempt-open` (the
-  runner keeps the printed id) and for a transient marker read error (the marker is kept, not
-  discarded); the only remaining source is the documented short-write case.
-- CU-5 late crash record: a REAL `crashed` line of an earlier attempt can be appended after a
-  later attempt's `done` of the same task (marker kept through a read error or an unreadable
-  log, recorded at a later start; plan review round 5, P15). Today's report reads a task's
-  last line (workflow.py:3093) and would show the task as not done. The attempt sequence
-  design (T012, consumed by T011) makes the report derive result, attempt count and first-time
-  pass from a persisted per-host sequence allocated when the attempt opens (or, without an
-  open, when its row is appended), old rows without `seq` first in file order, so the order of
-  appends no longer matters; stored `attempt`/`first_pass` stay informational. Round 5's
-  start-time key was dropped (round 6, P15): whole-second starts collide and nothing enforces
-  an interval between opens.
-- CU-5 sequence counter: `attempt-seq` lives beside the log and is updated under the log's
-  `flock`; a lost counter continues after the highest recorded `seq` (unrecorded markers may
-  then duplicate one, `_at` decides); an allocation failure fails the `outcome task` call, so
-  a finished attempt with a marker is recorded `crashed` at the next reconcile (same class as
-  the short-write limit; T012 comment and docs).
-- CU-5 restart: a killed runner always leaves `.ai/state.md` dirty (ai-run:626), so the
-  reconcile runs before the clean-checkpoint refusal (ai-run:136) and the restart still stops
-  there until the leftovers are committed; T004's test and the handoff state this order.
-- CU-5 end-to-end test kills `ai-run` with SIGKILL: its `timeout`/mock children are orphaned;
-  the test must kill them in `addCleanup` (the self-check's subreaper from PR #29 also cleans
-  up on failure).
-- Time: about 5 h until 09:00 with ~7 min per gate run; T003/T004 are the long ones.
+- A schedule left behind by a crash between `limit-schedule` and the exit: harmless (the watchdog
+  relaunches at AT; the cap bounds it; a human start drops it).
+- Watchdog not installed or installed without `--recover`: detected by `--timer-recovers`; the
+  stop escalates as today. A timer removed after scheduling: nobody relaunches; the ⏸
+  notification states the time, so the human can rerun. Accepted (no daemon, AD-4).
+- Weekly limits: the relaunch may be days away; the run waits without a process (no lock held).
+  A human start in between drops the schedule (`run-manifest start` rewrites the manifest).
+- `limit-stop` lives in `.ai/local/` (agent-writable). It only selects between "schedule a
+  relaunch of the approved run" and "escalate"; the relaunch runs under the same gate, branch and
+  manifest checks as any recovery, and the cap bounds it. AD-5 holds: it authorizes nothing new.
+- The un-draft rule cannot see a human who un-drafted and re-drafted between two pipeline runs
+  (the record still says "ours"). Only a pipeline run that observes the PR ready clears it.
+  Accepted limitation, documented.
+- `setsid` behaviour: `--detach` relies on the background job not being a process-group leader;
+  the test asserts the printed PID is the runner's (`/proc/PID/cmdline` names `ai-run`).
 
 ## Validation strategy
-Per task: the targeted `-k` groups in `.ai/tasks.md`, then `.ai/bin/ai-check` in the
-foreground (600000 ms tool timeout). Tests with time bounds use `tests/timeouts.py` scaling.
+Targeted `python3 -m unittest discover -s tests -k <prefix>` per task, then `.ai/bin/ai-check`
+(about 7 min; see the gate note in `.ai/tasks.md`). New test prefixes: `test_limit_relaunch_*`,
+`test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*`, `test_plan_read_dir_*`,
+`test_ai_plan_*`, `test_plan_outcome_*`, `test_pr_undraft_*`.
 
 ## Assumptions (unattended run; recorded instead of asked)
-- FL-16: tolerating title text after the ID is acceptable (the backlog offers "accept" or
-  "show the form"; both are done). Text before the ID or unknown parenthesised words stay
-  unmatched.
-- CU-5: worth doing now in the limited form above although its backlog note says "do when
-  outcome data drives automatic decisions"; the planner judged the limited form small and safe.
-  Only implementation attempts are tracked (as today).
-- R13: the 300-character caps stay; only where the cut falls and where the full text goes change.
-- R15 is a publishing-policy decision for Zack, so it is listed as a human todo, not planned.
-- The batch builds on PR #29; if #29 changes before merging, this branch is rebased or merged
-  by the human.
+- The relaunch covers both agents' limit stops (the message and mechanism are shared); Zack's
+  decision names Claude, and a Codex-only limit stop is the same "not a human problem".
+- `AI_LIMIT_RELAUNCH_MAX` default 2 per human-started run; 0 restores today's escalation.
+- A due relaunch needs auto-recovery on (`AI_AUTO_RECOVER=0` still escalates) and does not count
+  against `AI_RECOVER_MAX`.
+- A scheduled pause exits 75 (EX_TEMPFAIL) so callers never read it as success.
+- "⛔ if the relaunch stops again": a later limit stop schedules again up to the cap, then ⛔; any
+  other stop after a relaunch follows the normal recovery rules (which end in ⛔ when they give up).
+- DB-04 "same allowlist": `ai-plan` uses `plan-allowlist` unchanged (it also allows
+  `.ai/reviews/dispositions.md`, which the hand launcher lacked; it is a plan record).
+- The Plan box already exists (nine boxes, goldens at 120/119/60 columns pass); DB-04 only adds
+  the killed-session stop. A finished plan keeps today's view (Plan ✓, 📝 under Plan check) until
+  the pipeline starts.
+- R15: a PR drafted because the human passed `--draft` is never recorded, so never un-drafted.
+- An un-draft failure does not stop the run (the PR is published; the record is kept for the next
+  run); a draft conversion failure still stops as today.
