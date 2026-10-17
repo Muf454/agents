@@ -123,3 +123,10 @@ Plan review HEAD: 87d44f02ea67ce0f23d40250646200c5d5f5bff8
 | P3 | accepted | Verified: T003 specified one `os.write` then fsync and marker removal with no byte-count check. Fix: T007's `append_outcome` returns False when `os.write` returns fewer bytes than the encoded line (no fsync, no retry, since another checkout may have appended in between; the next append's newline guard isolates the fragment) and `outcome` exits 1; T003 unlinks the marker only after a complete append, in both `outcome task --attempt` and reconcile (which keeps the marker and prints a note). Fault-injection tests (patched `os.write` writes half): T007 at helper level; T003 shows a later reconcile writes one complete `crashed` record after the fragment and then removes the marker. Known limit recorded in the plan: a short write of a normal task line leads to a later `crashed` record. | T007, T003 |
 | P4 | accepted | Verified: `ai-recover` escalates at :61, :65, :69, :101–106 and on to :171 before `recover-decision` runs at :192, so T005's stale-file removal inside `recover_decision` would come too late. Fix in T005: `rm -f -- .ai/local/recovery-decision.txt` right after `ai_lock` (:31; plain shell, safe before the gate check), plus a test where a long-decision escalation is followed by an early (`AI_AUTO_RECOVER=0`) escalation without `Full text:`. | T005 |
 | P5 | accepted | Verified: with `\bM1\b` there is no boundary between `1` and `x`, so `M1x` gets no hint while T001's acceptance requires one. Fix in T001: diagnostic-only search `(?<![A-Za-z0-9-])M1(?!\d)` (finds `M1x` and `**M1**`, not `M10`/`XM1`); the rows stay rejected and the `M1x` case stays in the acceptance. | T001 |
+
+## Plan review round 2 (report 16553d8586d2cc326736b663269ddcc0f6fdd8493fd3775d13531847a6c9e1d8)
+
+Plan review HEAD: 10e6e3c5bc848a50a45aea6cec788b3beaa8334b
+
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
