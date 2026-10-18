@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T019: `-k limit_relaunch_consume` 10 OK; others see the task result. Mutation: moving
+`limit-disarm` to the top of the consumer fails the five terminal cases and the span test.
 T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k plan_review` 20 OK,
 `-k recovery` 65 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (887 tests, 531.5 s). Without the new `! armed_resume` guard the partial
 checkpoint test fails as round 5 P3 describes (`Commit the plan before reviewing it.` →
@@ -85,7 +87,7 @@ the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notificat
 relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
 continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
-stop while armed is terminal). Still to be updated by T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+stop while armed is terminal; T019: "checks first, then the arm ends"). Still to be updated by T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -144,5 +146,7 @@ table). T017 binds the arm to the task; T011: the resumed run admits the armed t
 `checkpoint_done` when it is already DONE), no recovery decision. T016: `limit-schedule AT CAP
 STAGE` records `limit_stage`; `limit-arm` arms only an `implementation` stop; ai-pipeline skips
 the plan review loop while armed. T018: ai-recover is terminal while `limit_resume` exists (one
-⛔ with the stop's reason, no decision session, nothing committed, arm kept). Next: the queue's
+⛔ with the stop's reason, no decision session, nothing committed, arm kept). T019: audited
+ai-run's consumer (every check armed, `limit-disarm` last before the act; no code change) and
+pinned it with `test_limit_relaunch_consume_*`. Next: the queue's
 next task.

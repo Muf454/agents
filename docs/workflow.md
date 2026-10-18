@@ -808,6 +808,10 @@ the checkout or not) it never decides or commits, whatever `AI_AUTO_RECOVER` say
 ⛔ with the stop's reason and `the resumed run stopped on the preserved work of T… before
 continuing it; nothing was committed.`, keeping the checkout and the arm. After the disarm the
 normal rules apply unchanged, so a later stop gets ordinary recovery, not the exception.
+So the resumed run checks the preserved work (another task marked DONE, the next task not the
+interrupted one, a blocked or missing task, dependency setup) before it takes the work over,
+and each of those stops is final with nothing committed; only the loop head's re-checks, which
+repeat what the consumer just verified under the lock, stand between the disarm and the act.
 
 The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
