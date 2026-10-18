@@ -13757,6 +13757,63 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
         self.assertTrue(self.sleeper_gone(pid), f'sleeper {pid} survived the SIGTERM')
 
+    # FL-31: progress lines, a stop summary and the tests over the per-test budget.
+    def test_parallel_runner_progress_lines_precede_the_final_report(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n'
+                   '    def test_c(self): pass\n')
+        result = self.runner('--start-dir', str(self.suite))
+        lines = re.findall(r'^Progress: .*$', result.stdout, re.M)
+        self.assertEqual(len(lines), 3, result.stdout)
+        self.assertRegex(lines[-1], r'^Progress: 3/3 batches, 3 tests, 0 failing, \d+ s$')
+        self.assertLess(result.stdout.rindex('Progress:'), result.stdout.index('Ran 3 tests'))
+        self.assertNotIn('run_parallel: stopped', result.stdout)
+
+    def test_parallel_runner_progress_counts_failing_batches(self):
+        self.write('test_one.py', '    def test_a(self): pass\n'
+                   '    def test_b(self): self.assertEqual(1, 2)\n')
+        result = self.runner('--start-dir', str(self.suite), expected=1)
+        self.assertRegex(result.stdout, r'Progress: 2/2 batches, 2 tests, 1 failing')
+
+    def test_parallel_runner_progress_sigterm_prints_stop_summary(self):
+        self.write_sleeper()
+        process = subprocess.Popen([sys.executable, str(self.RUNNER), '--start-dir', str(self.suite)],
+                                   cwd=ROOT, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(process.kill)
+        self.sleeper_pid()
+        # Let the fast batch finish and be counted before the stop.
+        time.sleep(2)
+        process.terminate()
+        output, _ = process.communicate(timeout=self.STOP_BOUND)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
+        self.assertIn('run_parallel: stopped after', output)
+        self.assertIn('1/2 batches finished', output)
+        self.assertRegex(output, r'running: \d+;')
+        self.assertIn('failing: none', output)
+        self.assertNotIn('Ran ', output)
+
+    def test_parallel_runner_progress_budget_lists_slow_tests(self):
+        self.write('test_one.py', '    def test_slow(self): __import__("time").sleep(1)\n'
+                   '    def test_fast(self): pass\n')
+        self.env['AI_TEST_BUDGET'] = '0.5'
+        result = self.runner('--start-dir', str(self.suite))
+        if sys.version_info >= (3, 12):
+            self.assertIn('Over the per-test budget of 0.5 s: 1 tests', result.stdout)
+            over = result.stdout.split('Over the per-test budget')[1]
+            self.assertIn('test_one.Sample.test_slow', over)
+            self.assertNotIn('test_fast', over)
+        self.assertIn('OK', result.stdout)
+
+    def test_parallel_runner_progress_budget_quiet_by_default_and_validated(self):
+        self.write('test_one.py', '    def test_a(self): pass\n')
+        env = {k: v for k, v in self.env.items() if k != 'AI_TEST_BUDGET'}
+        self.env = env
+        self.assertNotIn('Over the per-test budget', self.runner('--start-dir', str(self.suite)).stdout)
+        self.env['AI_TEST_BUDGET'] = 'x'
+        result = self.runner('--start-dir', str(self.suite), expected=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('AI_TEST_BUDGET', result.stdout + result.stderr)
+
     # FL-27: as a child subreaper the runner adopts what the batches orphan and reaps it.
     def write_orphan(self):
         """A test whose `sh` backgrounds a 1 s sleep and exits at once, orphaning it; it records

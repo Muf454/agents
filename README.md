@@ -941,7 +941,15 @@ Every run ends with a timing report before the `Ran N tests …` line: on Python
 batches run with `--durations 0` and the runner lists the 15 slowest tests with their
 seconds, then `Test time: <sum> s across <workers> workers; worker busy: <min>–<max> s`
 (the busy range shows how evenly the batches spread). Older Pythons get the busy range
-only. Duration lines that do not parse are ignored.
+only. Duration lines that do not parse are ignored. After each finished batch the runner prints
+`Progress: d/N batches, t tests, f failing, E s`. When a SIGTERM or interrupt stops the run it
+first prints `run_parallel: stopped after E s: d/N batches finished (t tests); running: <batch
+numbers or none>; failing: <batch numbers or none>` and the slowest finished tests, then exits
+as before. The report also lists, after the slowest 15, the tests over the per-test budget
+(`Over the per-test budget of B s: n tests`, slowest first): `AI_TEST_BUDGET` (a number greater
+than 0, otherwise the runner stops with an error), else 30 s times the timeout scale below. The
+list never changes the exit code. A new or changed test over the budget is made cheaper, or its
+task result says why.
 
 Fixture I/O is kept cheap: test fixture repositories run git with `core.fsync=none` and
 `gc.auto=0` (test harness only; the toolkit scripts never set them), and when the caller sets

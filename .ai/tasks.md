@@ -2916,7 +2916,7 @@ Added the three tests in tests/test_workflow.py and the table header plus three 
 
 
 ## T030 — Self-check prints progress, a stop summary and the tests over the per-test budget (FL-31, runner output)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -2968,6 +2968,15 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Implemented: `Dispatcher(on_result=)` and `Progress:` lines, `run_parallel: stopped after …` summary
+(state captured at the start of `stop()`, so batches killed by the stop are not counted as finished),
+`AI_TEST_BUDGET` / `SLOW_BUDGET` default `30 * TIMEOUT_SCALE` and the `Over the per-test budget` list,
+README paragraph. `run_parallel.py` now puts its own directory on `sys.path` before importing
+`timeouts` (the runpy wrapper in the sigint test does not). Five `test_parallel_runner_progress_*`
+tests added. Flow unchanged.
+Evidence: `python3 -m unittest discover -s tests -k parallel_runner` → `Ran 39 tests`, OK.
+BLOCKED: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s
+(moved to background), so the gate result is unknown, same as the earlier tasks blocked on the gate timeout.
 
 
 ## T031 — Shared fixture template for `ready()` (FL-31, fixtures)

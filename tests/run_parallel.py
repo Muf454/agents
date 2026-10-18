@@ -30,6 +30,12 @@ import threading
 import time
 import unittest
 
+HERE = Path(__file__).resolve().parent
+# runpy.run_path and similar launchers do not put the script's directory on the path.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from timeouts import TIMEOUT_SCALE  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 # Several batches per worker, so a worker that drew slow tests does not hold up the end of
 # the run while the others sit idle.
@@ -59,6 +65,21 @@ def worker_count():
         value = 0
     if value < 1:
         sys.exit(f'run_parallel: AI_TEST_WORKERS must be a positive integer, got {raw!r}')
+    return value
+
+
+def slow_budget():
+    """Seconds a single test may take before the report lists it: AI_TEST_BUDGET (a float > 0),
+    else 30 scaled like the test timeouts."""
+    raw = os.environ.get('AI_TEST_BUDGET', '').strip()
+    if not raw:
+        return 30 * TIMEOUT_SCALE
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if not value > 0 or value == float('inf'):
+        sys.exit(f'run_parallel: AI_TEST_BUDGET must be a number greater than 0, got {raw!r}')
     return value
 
 
@@ -167,6 +188,11 @@ def durations(output):
     return found
 
 
+def batch_ok(result):
+    returncode, ran, status = result[:3]
+    return returncode == 0 and ran is not None and status == 'OK'
+
+
 def signal_group(process, signum):
     """Signal the process group a batch leads (pgid == its pid: start_new_session); a group
     that is already gone is fine."""
@@ -270,9 +296,12 @@ class Dispatcher:
     With `reap` (the runner is a subreaper) run() also reaps the orphans it adopts, and stop()
     terminates every descendant of this process."""
 
-    def __init__(self, batches, workers, start_dir, tmpdir=None, reap=False):
+    def __init__(self, batches, workers, start_dir, tmpdir=None, reap=False, on_result=None):
         self.batches = batches
         self.reap = reap
+        self.on_result = on_result
+        self.active = set()
+        self.at_stop = (set(), {})
         self.tmpdir = tmpdir
         self.workers = min(workers, len(batches))
         self.start_dir = start_dir
@@ -348,6 +377,8 @@ class Dispatcher:
             except queue.Empty:
                 return
             started = time.monotonic()
+            with self.lock:
+                self.active.add(number)
             try:
                 result = self.run_batch(ids)
             except BaseException as error:
@@ -355,11 +386,15 @@ class Dispatcher:
                     self.errors.append(error)
                 self.stop()
                 return
+            with self.lock:
+                self.active.discard(number)
             if result is None:
                 return
             with self.lock:
                 self.busy[index] += time.monotonic() - started
                 self.results[number] = result
+                if self.on_result:
+                    self.on_result(self)
 
     def stop(self):
         """Terminate the running batches (and, as subreaper, every descendant). Idempotent:
@@ -368,6 +403,8 @@ class Dispatcher:
             self.stopping.set()
             if self.stopped_at is None:
                 self.stopped_at = time.monotonic()
+                # The state the stop found, before the terminated batches report in.
+                self.at_stop = (set(self.active), dict(self.results))
             owner = not self.terminating
             self.terminating = True
             children = list(self.running)
@@ -504,11 +541,20 @@ class Dispatcher:
         return [self.results[number] for number in range(1, len(self.batches) + 1)]
 
 
-def timing_report(timings, busy, workers):
+def slowest_lines(timings):
+    print(f'Slowest {min(SLOWEST_SHOWN, len(timings))} tests:')
+    for seconds, name in sorted(timings, key=lambda item: item[0], reverse=True)[:SLOWEST_SHOWN]:
+        print(f'  {seconds:8.3f}s  {name}')
+
+
+def timing_report(timings, busy, workers, budget=None):
     if TIMINGS:
-        print(f'Slowest {min(SLOWEST_SHOWN, len(timings))} tests:')
-        for seconds, name in sorted(timings, key=lambda item: item[0], reverse=True)[:SLOWEST_SHOWN]:
-            print(f'  {seconds:8.3f}s  {name}')
+        slowest_lines(timings)
+        over = sorted((item for item in timings if item[0] > budget), reverse=True) if budget else []
+        if over:
+            print(f'Over the per-test budget of {budget:g} s: {len(over)} tests')
+            for seconds, name in over:
+                print(f'  {seconds:8.3f}s  {name}')
         total = f'{sum(seconds for seconds, _ in timings):.1f} s'
     else:
         total = 'not measured (Python < 3.12)'
@@ -518,6 +564,18 @@ def timing_report(timings, busy, workers):
 
 def terminated(signum, frame):
     raise SystemExit(128 + signum)
+
+
+def snapshot(results):
+    """(batches finished, tests run, failing batch numbers, finished timings) of a results dict."""
+    ran = sum(result[1] or 0 for result in results.values())
+    failing = sorted(number for number, result in results.items() if not batch_ok(result))
+    timings = [item for result in results.values() for item in result[4]]
+    return len(results), ran, failing, timings
+
+
+def numbers(values):
+    return ', '.join(map(str, sorted(values))) or 'none'
 
 
 def main():
@@ -548,11 +606,28 @@ def main():
     # The batches are outside this process group, so a group-wide SIGTERM (ai-check's
     # `timeout`) misses them: turn it into an exception that makes run() stop them.
     signal.signal(signal.SIGTERM, terminated)
+    budget = slow_budget()
+    started = time.monotonic()
+
+    def progress(dispatcher):
+        done, ran, failing, _ = snapshot(dispatcher.results)
+        print(f'Progress: {done}/{len(batches)} batches, {ran} tests, {len(failing)} failing, '
+              f'{time.monotonic() - started:.0f} s', flush=True)
     try:
         # Here only, never at import: tests import this module and must not become subreapers.
-        dispatcher = Dispatcher(batches, workers, start_dir, tmpdir, reap=enable_subreaper())
-        started = time.monotonic()
-        results = dispatcher.run()
+        dispatcher = Dispatcher(batches, workers, start_dir, tmpdir, reap=enable_subreaper(),
+                                on_result=progress)
+        try:
+            results = dispatcher.run()
+        except (SystemExit, KeyboardInterrupt):
+            running, finished = dispatcher.at_stop
+            done, ran, failing, timings = snapshot(finished)
+            print(f'run_parallel: stopped after {time.monotonic() - started:.0f} s: '
+                  f'{done}/{len(batches)} batches finished ({ran} tests); '
+                  f'running: {numbers(running)}; failing: {numbers(failing)}', flush=True)
+            if TIMINGS and timings:
+                slowest_lines(timings)
+            raise
         elapsed = time.monotonic() - started
     finally:
         if tmpdir:
@@ -562,7 +637,7 @@ def main():
     for number, (returncode, ran, status, output, found) in enumerate(results, 1):
         total += ran or 0
         timings.extend(found)
-        if returncode == 0 and ran is not None and status == 'OK':
+        if batch_ok((returncode, ran, status)):
             continue
         if ran is None or status is None:
             reason = f'crashed (exit code {returncode}) without a unittest summary'
@@ -575,7 +650,7 @@ def main():
             print(f'  {test_id}')
         print(output.rstrip())
         print()
-    timing_report(timings, dispatcher.busy, dispatcher.workers)
+    timing_report(timings, dispatcher.busy, dispatcher.workers, budget)
     problems = []
     if failed:
         problems.append('failing batches: ' + ', '.join(map(str, failed)))
