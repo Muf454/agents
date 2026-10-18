@@ -2057,7 +2057,7 @@ agents-flow.md bullet. Tests `test_plan_outcome_*` (3; mock gained `plan-timeout
 
 
 ## T008 — Host record of a PR the pipeline drafted (R15, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -2105,6 +2105,12 @@ Targeted: `python3 -m unittest discover -s tests -k pr_undraft_record` (must say
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Added `pr-draft` (`record URL HOW`, `get`, `clear`, `take URL`) to `scripts/lib/workflow.py` beside
+`stage_path`, registered in `main()`. Record under `binding_dir()/pr-draft/` (0o700), unreadable or
+foreign data reads as "not ours". `clear`/`take` unlink, fsync the directory and lstat-confirm.
+Six `test_pr_undraft_record_*` tests (round trip and location, per branch, garbage/invalid, bad
+arguments incl. detached HEAD, take, 0o500 fault) pass: `Ran 6 tests`. Gate `.ai/bin/ai-check`: 954
+tests OK. No pipeline change (T009).
 
 
 ## T009 — PR step un-drafts only a PR the pipeline drafted (R15, pipeline)

@@ -4101,6 +4101,82 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
                       '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1'))
 
+    PR_URL = 'https://github.com/o/r/pull/7'
+
+    def pr_undraft_fixture(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'feature/draft'])
+
+    def pr_undraft_record_file(self):
+        files = list((self.base / 'host-state').rglob('pr-draft/*.json'))
+        self.assertEqual(len(files), 1)
+        return files[0]
+
+    def test_pr_undraft_record_round_trip_and_location(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+        record = self.pr_undraft_record_file()
+        self.assertEqual(record.parent.name, 'pr-draft')
+        self.assertFalse(str(record).startswith(str(self.project) + os.sep))
+        self.assertEqual(json.loads(record.read_text())['how'], 'created')
+        self.helper('pr-draft', 'clear')
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'clear')  # nothing to remove is fine
+
+    def test_pr_undraft_record_is_per_branch(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'converted')
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'feature/other'])
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+        self.run_cmd(['git', 'checkout', '-q', 'feature/draft'])
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+
+    def test_pr_undraft_record_unreadable_is_not_ours(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        record = self.pr_undraft_record_file()
+        good = json.loads(record.read_text())
+        for content in ('garbage', '[1]', json.dumps(dict(good, url='https://x/issues/3')),
+                        json.dumps(dict(good, how='other'))):
+            with self.subTest(content=content):
+                record.write_text(content)
+                self.helper('pr-draft', 'get', expected=1)
+                self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+
+    def test_pr_undraft_record_rejects_bad_arguments(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'other', expected=1)
+        self.helper('pr-draft', 'record', 'https://github.com/o/r/issues/7', 'created', expected=1)
+        self.helper('pr-draft', 'record', 'http://github.com/o/r/pull/7', 'created', expected=1)
+        self.helper('pr-draft', 'get', expected=1)
+        self.run_cmd(['git', 'checkout', '-q', '--detach'])
+        self.helper('pr-draft', 'record', self.PR_URL, 'created', expected=1)
+
+    def test_pr_undraft_record_take_consumes_a_matching_record(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'converted')
+        self.helper('pr-draft', 'take', 'https://github.com/o/r/pull/8', expected=1)
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+        self.assertEqual(self.helper('pr-draft', 'take', self.PR_URL).stdout.strip(), 'converted')
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory modes')
+    def test_pr_undraft_record_fault_keeps_the_record_and_fails(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        record = self.pr_undraft_record_file()
+        record.parent.chmod(0o500)
+        self.addCleanup(record.parent.chmod, 0o700)
+        cleared = self.helper('pr-draft', 'clear', expected=1)
+        self.assertIn(str(record), cleared.stderr)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+
     def test_plan_revision_stage_set_and_verify(self):
         start = self.plan_stage_ready()
         digest = self.plan_current()[1]

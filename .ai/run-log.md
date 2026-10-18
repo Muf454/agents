@@ -436,3 +436,4 @@
 | 2026-10-18T04:46:13Z | runner | T006 | completed | PASS | 8c38baf | Claude checkpointed; continuing queue |
 | 2026-10-18T05:00:00Z | claude (sonnet) | T007 | DONE: `outcome plan` kind, ai-run records done/stopped/interrupted/timeout and a `plan written:` run-log row; docs and vault flow note updated | PASS (ai-check 948 tests, 569.5 s; -k plan_outcome 3 OK; -k outcome 85 OK; -k Docs 3 OK) | parent 3cbdac6 | Mock gained plan-timeout |
 | 2026-10-18T05:08:21Z | runner | T007 | completed | PASS | 48ed1b8 | Claude checkpointed; continuing queue |
+| 2026-10-18T05:35:00Z | claude (sonnet) | T008 | DONE: `workflow.py pr-draft record/get/clear/take`, host record under `binding_dir()/pr-draft/`, fails closed, durable removal (unlink, dir fsync, lstat) | PASS (ai-check 954 tests, 593 s; -k pr_undraft_record 6 OK) | parent 48f1e7a | no pipeline change (T009); flow unchanged |

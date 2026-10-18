@@ -1615,6 +1615,93 @@ def stage_path(branch):
     return binding_dir() / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
 
 
+PR_DRAFT_URL = re.compile(r'https://\S+/pull/\d+')
+PR_DRAFT_HOW = ('created', 'converted')
+
+
+def pr_draft_path(branch):
+    """Host-side record that the pipeline made BRANCH's pull request a draft. It lives outside
+    every checkout so an agent session cannot forge "the pipeline drafted this", in its own
+    subdirectory so a fault there is confined to it."""
+    return binding_dir() / 'pr-draft' / f'{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def pr_draft_read(branch):
+    """The record for BRANCH as a dict, or None. Anything unreadable or foreign is "not ours":
+    the pipeline never un-drafts a pull request on doubt."""
+    if not branch:
+        return None
+    try:
+        data = json.loads(pr_draft_path(branch).read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(data, dict) or data.get('branch') != branch
+            or not isinstance(data.get('url'), str) or not PR_DRAFT_URL.fullmatch(data['url'])
+            or data.get('how') not in PR_DRAFT_HOW):
+        return None
+    return data
+
+
+def pr_draft_remove(path):
+    """Durably remove the record: unlink, fsync the directory, confirm the path is gone."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    try:
+        fd = os.open(path.parent, os.O_RDONLY)
+    except FileNotFoundError:
+        fd = None
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    if fd is not None:
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            fail(f'cannot remove the draft record {path}: {error.strerror}')
+        finally:
+            os.close(fd)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    fail(f'cannot remove the draft record {path}: still present')
+
+
+def pr_draft(arguments):
+    action, *rest = arguments or ['']
+    branch = current_branch()
+    if action == 'record' and len(rest) == 2:
+        url, how = rest
+        if not PR_DRAFT_URL.fullmatch(url) or how not in PR_DRAFT_HOW:
+            fail('pr-draft record needs a pull request URL and created or converted.')
+        if not branch:
+            fail('pr-draft record needs a branch (HEAD is detached).')
+        path = pr_draft_path(branch)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic(path, json.dumps({'branch': branch, 'url': url, 'how': how, 'at': now()}) + '\n')
+    elif action == 'get' and not rest:
+        record = pr_draft_read(branch)
+        if record is None:
+            sys.exit(1)
+        print(record['url'])
+    elif action == 'clear' and not rest:
+        if branch:
+            pr_draft_remove(pr_draft_path(branch))
+    elif action == 'take' and len(rest) == 1:
+        record = pr_draft_read(branch)
+        if record is None or record['url'] != rest[0]:
+            sys.exit(1)
+        pr_draft_remove(pr_draft_path(branch))
+        print(record['how'])
+    else:
+        fail('Usage: pr-draft record URL created|converted | get | clear | take URL')
+
+
 def load_stage(branch):
     """BRANCH's open stage record, or None. Unreadable or foreign data fails closed."""
     if not branch:
@@ -4831,6 +4918,8 @@ def main():
         outcome(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
+    elif command == 'pr-draft':
+        pr_draft(arguments)
     elif command == 'pr-title':
         pr_title(arguments)
     elif command == 'pr-body':
