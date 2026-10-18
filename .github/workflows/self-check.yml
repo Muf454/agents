@@ -10,11 +10,14 @@ on:
 jobs:
   self-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - name: Configure Git identity
         run: |
           git config --global user.name "Toolkit CI"
           git config --global user.email "toolkit-ci@example.com"
+      # The suite takes over 30 minutes on the 4-CPU runner; ai-check's own cap defaults to 1800 s.
       - run: ./scripts/ai-check
+        env:
+          AI_CHECK_TIMEOUT: "3000"
