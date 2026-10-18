@@ -414,3 +414,4 @@
 | 2026-10-17T23:02:12Z | runner | T011 | completed | PASS | 4fea49b | Claude checkpointed; continuing queue |
 | 2026-10-17T23:32:13Z | runner | T016 | stopped (exit 1); inspect state/diff before resuming | see local logs | 39801a8 | No merge or deployment performed |
 | 2026-10-17T23:58:43Z | claude (opus) | T016 | DONE: reconciled WIP 7088074 (no code change needed): `limit_stage` recorded by `limit-schedule AT CAP STAGE`, `limit-arm` only for an `implementation` stop, ai-recover (c) escalates other stages, ai-pipeline skips the plan review loop while armed; 8 `test_limit_relaunch_reenter_*` tests; docs/workflow.md, README, vault flow chart | PASS (ai-check 887 tests, 531.5 s; -k limit_relaunch 70 OK; -k plan_review 20 OK; -k recovery 65 OK; -k Docs 3 OK) | parent 7088074 | First session hit the 1800 s limit during its gate |
+| 2026-10-18T00:07:56Z | runner | T016 | completed | PASS | acd30a9 | Claude checkpointed; continuing queue |
