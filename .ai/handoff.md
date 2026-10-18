@@ -84,8 +84,8 @@ T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recov
 the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording; T014: the
 relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
 continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
-is for implementation stops only and the armed resume re-enters at implementation). Still to
-be updated by T018/T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+is for implementation stops only and the armed resume re-enters at implementation; T018: a
+stop while armed is terminal). Still to be updated by T019/T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -143,4 +143,6 @@ table). T017 binds the arm to the task; T011: the resumed run admits the armed t
 (`clean_or_armed`) and ai-run continues it once (the bound task's session, or the validated
 `checkpoint_done` when it is already DONE), no recovery decision. T016: `limit-schedule AT CAP
 STAGE` records `limit_stage`; `limit-arm` arms only an `implementation` stop; ai-pipeline skips
-the plan review loop while armed. Next: the queue's next task.
+the plan review loop while armed. T018: ai-recover is terminal while `limit_resume` exists (one
+⛔ with the stop's reason, no decision session, nothing committed, arm kept). Next: the queue's
+next task.

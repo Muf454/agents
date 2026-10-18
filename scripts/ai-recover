@@ -139,6 +139,14 @@ max=${AI_RECOVER_MAX:-2}
 # Shell variable only: resume execs ai-pipeline with explicit variables, so it never reaches it.
 AI_OBSERVE_RECOVERY="$attempt/$max"
 ai_observe recovering "$AI_OBSERVE_RECOVERY"
+# The resumed run stopped while the preserved task work was still armed (before ai-run
+# consumed the arm): terminal whatever the reason and the settings. No decision session, no commit,
+# the checkout and the arm as found. Presence decides, not the match: only ai-run's disarm or a
+# human start removes the arm. A relaunch is never caught here (scheduled, not armed yet).
+if bound=$(ai_helper run-manifest limit-task 2>/dev/null); then
+  escalate "the resumed run stopped on the preserved work of $bound before continuing it; nothing was committed." \
+    'inspect the checkout and .ai/local/last-error, commit or discard the preserved work, then rerun ai-pipeline.'
+fi
 [[ "${AI_AUTO_RECOVER:-1}" != 0 ]] || escalate 'auto-recovery is off (AI_AUTO_RECOVER=0).' 'fix the cause, then rerun ai-pipeline.'
 ai_guard_digest >/dev/null || { AI_GATE_BROKEN=1
   escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'; }
@@ -226,6 +234,8 @@ if [[ "$relaunch" == yes ]]; then
   #       implementation session or no task recorded at the stop → ⛔ with that reason,
   #       nothing committed);
   #   (d) clean → resume.
+  # And before this table, for any recovery: `limit_resume` present at entry → terminal,
+  # nothing touched (the armed rule above).
   # Nothing else is permitted: a new branch here needs this table (and docs/workflow.md) changed.
   resume_open_stage quiet
   record_stop_leftovers

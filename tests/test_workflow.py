@@ -6582,6 +6582,102 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assert_armed_stop('preserved task work carries uncommitted review records', head, contents, sessions=2)
         self.assertEqual(self.recovery_calls(), [])
 
+    # ------------------------------- a stop while armed is terminal for recovery (T018)
+    def assert_terminal_armed(self, reason, head, contents, task_id='T001'):
+        # One ⛔ with the stop's REASON and the armed rule's wording; no decision session, no
+        # commit, CONTENTS byte-identical, the arm kept, the marker gone.
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn(reason, stop)
+        self.assertIn(f'the resumed run stopped on the preserved work of {task_id} before continuing it; '
+                      'nothing was committed.', stop)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual(self.git_head(), head)
+        self.assertEqual({path: path.read_bytes() for path in contents}, contents)
+        self.assertIn('limit_resume', self.manifest())
+        self.assertNotIn('🔧', notes)
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_limit_relaunch_terminal_uncommitted_review_records_with_recovery_on(self):
+        # Round 7 P16: the re-check stop of the armed tree hands over to ai-recover with
+        # auto-recovery on; it must neither decide nor commit. (T015's host-only `pending`
+        # re-check state has no fixture yet: T015 adds that variant.)
+        disputes = '.ai/reviews/disputes.md'
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled,
+                                      MOCK_LIMIT_APPEND=disputes)
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes() for name in ('preserved.txt', disputes)}
+        self.relaunch(expected=1, MOCK_RECOVER='commit_and_rerun')
+        self.assert_terminal_armed('preserved task work carries uncommitted review records', head, contents,
+                                   task_id='T002')
+        self.assertNotIn('▶', self.notifications().split('⛔')[1])  # nothing resumed after the stop
+        self.assertEqual(self.sessions_run(), 2)
+
+    def armed_by_hand(self):
+        # An approved run with auto-recovery on, then a dirty tree armed at helper level for T001.
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        self.helper('run-manifest', 'clear-attempts')
+        edits = self.project / 'CLAUDE.md'
+        edits.write_bytes(edits.read_bytes() + b'preserved edit\n')
+        (self.project / 'preserved.txt').write_text('preserved\n')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.helper('run-manifest', 'limit-arm')
+        self.manifest(limit_relaunch_at=None)  # claimed, as the relaunch does before it arms
+        return {path: path.read_bytes() for path in (edits, self.project / 'preserved.txt')}
+
+    def test_limit_relaunch_terminal_any_reason_at_helper_level(self):
+        contents = self.armed_by_hand()
+        calls = self.recovery_calls()  # the setup run's own decision
+        for moved in (False, True):
+            with self.subTest(moved=moved):
+                if moved:  # presence decides, not the match
+                    self.manifest(limit_resume=dict(self.manifest()['limit_resume'], head='a' * 40))
+                self.manifest(attempts=0)
+                (self.project / '.ai/local/last-error').write_text('a plain stop with no usage limit\n')
+                head, before = self.git_head(), self.notifications().count('⛔')
+                self.tool('ai-recover', '--stage', 'implementation', expected=1,
+                          AI_AUTO_RECOVER='1', MOCK_RECOVER='commit_and_rerun')
+                notes = self.notifications()
+                self.assertEqual(notes.count('⛔'), before + 1)
+                stop = notes.splitlines()[-1]
+                self.assertIn('a plain stop with no usage limit', stop)
+                self.assertIn('stopped on the preserved work of T001', stop)
+                self.assertIn('nothing was committed', stop)
+                self.assertEqual(self.recovery_calls(), calls)
+                self.assertEqual(self.git_head(), head)
+                self.assertEqual({path: path.read_bytes() for path in contents}, contents)
+                self.assertIn('limit_resume', self.manifest())
+                self.assertEqual(self.manifest()['attempts'], 1)  # reserve-attempt ran
+                self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_limit_relaunch_terminal_control_relaunch_with_recovery_on_resumes(self):
+        # The relaunch stage is scheduled, not armed: the rule never catches it.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        result = self.relaunch(MOCK_RECOVER='commit_and_rerun')
+        self.assert_preserved_completed(result)
+
+    def test_limit_relaunch_terminal_control_after_the_disarm_recovery_is_normal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        self.relaunch(expected=1, MOCK_CLAUDE='no-progress')
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', self.notifications())
+
+    def test_limit_relaunch_terminal_disarm_has_one_call_site(self):
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            with self.subTest(root=str(root)):
+                self.assertEqual((root / 'ai-run').read_text().count('limit-disarm'), 1)
+                self.assertNotIn('limit-disarm', (root / 'ai-recover').read_text())
+
     def deps_preserved(self):
         # deps_recovery_run's fixture: the gate passes only when vendor-deps/ matches deps.lock.
         (self.project / '.ai/ci-setup').write_text(DEPS_SETUP)

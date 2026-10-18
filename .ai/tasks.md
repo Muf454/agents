@@ -1258,7 +1258,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T018 — Recovery is terminal while the tree is armed; the armed checkpoint comes after ai-run's complete startup (MC-01 part 1, plan review round 7 P16/P17 design task)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T011, T017
 Model: opus
 

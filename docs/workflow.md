@@ -801,8 +801,13 @@ and acts: the armed checkpoint is `checkpoint_done`, the same function the loop 
 DONE session (full `ai-check`, failure → task back to IN_PROGRESS and stop; the tier-1 commit
 `chore(ai): checkpoint T… (validated; the session did not commit)` with `checkpoint-guard`,
 stamp and `committed-matches-worktree`; the outcome log's `done` line without an attempt; the
-bookkeeping commit; `verify_checkpoint`), then the queue continues. After the disarm the normal
-rules apply unchanged, so a later stop gets ordinary recovery, not the exception.
+bookkeeping commit; `verify_checkpoint`), then the queue continues. A stop of the resumed run
+before the preserved work is continued is final: `ai-recover` checks `limit-task` right after
+the relaunch schedule and before every other rule, and while `limit_resume` exists (matching
+the checkout or not) it never decides or commits, whatever `AI_AUTO_RECOVER` says; it sends one
+⛔ with the stop's reason and `the resumed run stopped on the preserved work of T… before
+continuing it; nothing was committed.`, keeping the checkout and the arm. After the disarm the
+normal rules apply unchanged, so a later stop gets ordinary recovery, not the exception.
 
 The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
