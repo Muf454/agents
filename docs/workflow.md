@@ -1031,7 +1031,8 @@ Incidents:
   `.ai/local/`, or `.ai/`'s mtime, and never earlier than the oldest live runner's
   start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
   its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
-  `--session-timeout` (default 30 minutes), which stays below the default.
+  `--session-timeout` (default 30 minutes), which stays below the default; an implementation
+  session's gate allowance can lengthen it up to double (see `gate-seconds`).
 - **stop**: a `last-error` newer than the watchdog's last notification. The
   acknowledged stop remains an incident until removed or replaced.
 
@@ -1230,6 +1231,18 @@ branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` pr
 project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
+
+`ai-run` times every host `ai-check` (after a task's session in `checkpoint_done`, and the final
+check) and, only after `ai_guard_verify` passed, appends `outcome gate pass|fail|timeout`
+(exit 124 or 137 is `timeout`); a failed append is only a note. An implementation session (one
+that opens a task attempt; never triage, plan revision or `--plan`) then gets
+`session_timeout + min(2 × gate-seconds, session_timeout)`, capped by the remaining run time,
+computed once per session (a limit-pause retry keeps it). The allowance is room for the two gate
+runs a task session usually makes (its own `.ai/bin/ai-check`, plus a rerun after a fix), so a slow
+gate no longer uses up the session. It is bounded at double the base so a corrupt or hostile log
+can at most double a session; a helper output outside `^[0-9]{1,7}$` counts as 0. With no
+allowance the `Session:` line is unchanged; otherwise it reads `(limit 1600s: 1000s + 600s for two
+gate runs of 300s; log …)`.
 
 ## Observation records and the dashboard
 

@@ -227,6 +227,13 @@ Without `--sessions` the session budget is `max(16, unfinished tasks + 2)`, reco
 `ai-run` call (so fix-round tasks added by triage are covered); `Session budget: N` is printed
 first. `--sessions N` sets it explicitly.
 
+An implementation session also gets room for two runs of this project's measured gate: its limit
+is `--session-timeout` plus twice the gate time, at most double the session timeout, and never
+beyond the remaining run time. The gate time is the slowest of the last 3 passing host `ai-check`
+runs, which `ai-run` records as `gate` lines in the host outcome log (where agents cannot write).
+The cap keeps a corrupt log from more than doubling a session. Triage, plan revision and `--plan`
+sessions keep the plain limit.
+
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
 operations. There are no approval prompts between normal tasks. Claude's `dontAsk`

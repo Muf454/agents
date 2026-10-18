@@ -8025,7 +8025,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.ready(task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: sonnet') +
                    task('T002', dependencies='T001').replace('Verify T002', 'Docs for T002'))
         self.tool('ai-run', '--approved')
-        lines = [json.loads(x) for x in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        lines = [r for r in self.outcome_rows() if r['kind'] != 'gate']  # gate runs: test_session_gate_allowance_*
         self.assertEqual([(r['task'], r['model'], r['result'], r['attempt'], r['first_pass']) for r in lines],
                          [('T001', 'sonnet', 'done', 1, True), ('T002', 'default', 'done', 1, True)])
         self.assertEqual(lines[1]['category'], 'docs')
@@ -9440,11 +9440,70 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_runner_logs_blocked_and_failed_validation_attempts(self):
         self.ready(task('T001') + task('T002'))
         self.tool('ai-run', '--approved', expected=None, MOCK_CLAUDE='blocked-first')
-        lines = [json.loads(x) for x in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        lines = [r for r in self.outcome_rows() if r['kind'] != 'gate']
         self.assertEqual([(r['task'], r['result']) for r in lines], [('T001', 'blocked'), ('T002', 'done')])
         self.assertFalse(lines[0]['first_pass'])
         empty = self.tool('ai-status', '--outcomes', str(self.base / 'missing.jsonl')).stdout
         self.assertIn('No outcomes recorded yet', empty)
+
+    # ---------------------------------------------------------------- gate allowance (FL-28, T023)
+    def gate_rows(self):
+        return [r for r in self.outcome_rows() if r['kind'] == 'gate']
+
+    def session_lines(self, result):
+        return [x for x in result.stdout.splitlines() if x.startswith('Session: ')]
+
+    def test_session_gate_allowance_limit_grows_with_the_measured_gate(self):
+        self.ready()
+        plain = self.tool('ai-run', '--approved', '--session-timeout', '1000')
+        self.assertRegex(self.session_lines(plain)[0], r'^Session: T001 \(limit 1000s; log \.ai/local/claude-')
+        for seeded, limit, breakdown in (('300', '1600', '1000s + 600s for two gate runs of 300s'),
+                                         ('900', '2000', '1000s + 1000s for two gate runs of 900s')):
+            with self.subTest(seeded=seeded):
+                self.helper('tasks', 'set', 'T001', 'TODO')
+                self.commit('reopen T001')
+                for _ in range(3):  # the last 3 passes decide
+                    self.helper('outcome', 'gate', 'pass', seeded)
+                line = self.session_lines(self.tool('ai-run', '--approved', '--session-timeout', '1000'))[0]
+                self.assertIn(f'(limit {limit}s: {breakdown}; log .ai/local/claude-', line)
+
+    def test_session_gate_allowance_capped_by_the_remaining_run_time(self):
+        self.ready()
+        self.helper('outcome', 'gate', 'pass', '300')
+        result = self.tool('ai-run', '--approved', '--session-timeout', '1000', '--run-timeout', '1200')
+        limit = int(re.search(r'\(limit (\d+)s', self.session_lines(result)[0]).group(1))
+        self.assertLessEqual(limit, 1200)
+        self.assertGreater(limit, 1000)
+
+    def test_session_gate_allowance_not_for_triage(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-always')
+        self.commit('record review')
+        self.helper('outcome', 'gate', 'pass', '300')
+        result = self.tool('ai-run', '--approved', '--triage')
+        lines = self.session_lines(result)
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r'^Session: triage( \[model [^]]+\])? \(limit 1800s; log ')
+
+    def test_session_gate_allowance_records_each_host_gate_run(self):
+        self.ready(task('T001') + task('T002'))
+        self.tool('ai-run', '--approved', '--sessions', '1', expected=1)  # T001's checkpoint gate only
+        rows = self.gate_rows()
+        self.assertEqual([r['result'] for r in rows], ['pass'])
+        self.assertIs(type(rows[0]['seconds']), int)
+        self.assertGreaterEqual(rows[0]['seconds'], 0)
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.run_cmd(['git', 'checkout', '--', '.'])
+        self.tool('ai-run', '--approved')  # T002's checkpoint gate and the final check
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'] * 3)
+
+    def test_session_gate_allowance_failed_gate_records_fail(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 1\n')
+        self.commit('failing gate')
+        self.tool('ai-run', '--approved', expected=1)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['fail'])
 
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):
@@ -9496,7 +9555,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotEqual(rows[1]['attempt_id'], attempt_id)
         self.assertEqual(self.crash_markers(), [])
         self.tool('ai-run', '--approved', expected=None)
-        self.assertEqual(self.outcome_rows(), rows)
+        self.assertEqual([r for r in self.outcome_rows() if r['kind'] == 'task'], rows)
 
     def test_outcome_crash_normal_stops_carry_attempt_id_and_leave_no_marker(self):
         self.ready()

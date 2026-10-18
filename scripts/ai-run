@@ -9,7 +9,8 @@ Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeo
               [--knowledge-dir DIRECTORY] [--read-dir DIRECTORY]...
 Run Claude on the approved plan, one recoverable task per fresh session.
 Defaults: sessions = unfinished tasks + 2 (at least 16; recomputed on every call, so fix-round
-tasks are covered), 1800 seconds/session, 14400 seconds/run. Rerun to resume.
+tasks are covered), 1800 seconds/session (an implementation session also gets twice the
+measured gate time, at most another session_timeout), 14400 seconds/run. Rerun to resume.
 --model sets the Claude model (default: AI_MODEL or the CLI default); a task's
 optional "Model:" line overrides it. --triage runs one session that evaluates the
 current Codex review and turns accepted findings into new tasks (no implementation),
@@ -254,6 +255,15 @@ task_outcome() {
   attempt_id=
 }
 
+# Host gate run timing for the implementation session allowance (gate-seconds); never fatal.
+# Call only after ai_guard_verify: the gate may have changed. Usage: record_gate CODE STARTED.
+record_gate() {
+  local result=fail
+  if (( $1 == 0 )); then result=pass; elif (( $1 == 124 || $1 == 137 )); then result=timeout; fi
+  ai_helper outcome gate "$result" "$(( SECONDS - $2 ))" 2>/dev/null || \
+    printf '%s\n' 'Note: could not record the gate time.' >&2
+}
+
 # Sessions keep throwaway files in .ai/local/scratch; emptied before and after each session
 # through pinned descriptors (never follows a symlink there). A failure only warns.
 clear_scratch() { ai_helper clear-scratch || true; }
@@ -290,18 +300,27 @@ knowledge_prompt() {
 # Usage: claude_session PROMPT MODEL TOOLS ALLOWED... (the --tools list and --allowedTools entries).
 claude_session() {
   local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before
-  local session_allowed=("${@:4}") model_args=()
+  local session_allowed=("${@:4}") model_args=() gate=0 allowance=0 breakdown=''
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
+  # An implementation session runs the gate itself: room for two measured gate runs, at most
+  # another session_timeout (a corrupt log can at most double the limit). Kept across a limit retry.
+  if [[ "$track_attempt" == yes ]]; then
+    gate=$(ai_helper gate-seconds 2>/dev/null) || gate=0
+    [[ "$gate" =~ ^[0-9]{1,7}$ ]] || gate=0
+    allowance=$(( 2 * gate ))
+    (( allowance <= session_timeout )) || allowance=$session_timeout
+    (( allowance == 0 )) || breakdown=": ${session_timeout}s + ${allowance}s for two gate runs of ${gate}s"
+  fi
   while true; do
     remaining=$(remaining_time)
     (( remaining > 0 )) || ai_die 'Run time limit reached; checkpoint and resume later.'
-    limit=$session_timeout
+    limit=$(( session_timeout + allowance ))
     (( limit <= remaining )) || limit=$remaining
     log=$(mktemp .ai/local/claude-XXXXXXXX.json)
     errors="${log%.json}.stderr.log"
     review_before=$(review_digest)
-    printf 'Session: %s%s (limit %ss; log %s)\n' "$active_task" \
-      "${session_model:+ [model $session_model]}" "$limit" "$log"
+    printf 'Session: %s%s (limit %ss%s; log %s)\n' "$active_task" \
+      "${session_model:+ [model $session_model]}" "$limit" "$breakdown" "$log"
     if [[ "$track_attempt" == yes && "$attempt_open" == no ]]; then
       # After the preflight checks; a limit pause and retry stays inside this attempt.
       task_started=$SECONDS
@@ -666,14 +685,17 @@ checkpoint_done() {
   remaining=$(remaining_time)
   (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
   ai_observe step checks "$task"
-  if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
-    ai_guard_verify
+  gate_started=$SECONDS
+  gate_code=0
+  AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+  ai_guard_verify
+  record_gate "$gate_code" "$gate_started"
+  if (( gate_code != 0 )); then
     task_outcome validation_failed
     ai_helper tasks set "$task" IN_PROGRESS
     ai_helper state blocked "Validation failed after $task; inspect validation log"
     ai_die "Validation failed; $task returned to IN_PROGRESS."
   fi
-  ai_guard_verify
   if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
     ai_observe step build "$task · checkpointed · $counts_done/$counts_total"
   fi
@@ -774,12 +796,15 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     remaining=$(remaining_time)
     (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
     ai_observe step checks final
-    if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
-      ai_guard_verify
+    gate_started=$SECONDS
+    gate_code=0
+    AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+    ai_guard_verify
+    record_gate "$gate_code" "$gate_started"
+    if (( gate_code != 0 )); then
       ai_helper state blocked 'Final validation failed; inspect validation log'
       ai_die 'Final validation failed; readiness is not established.'
     fi
-    ai_guard_verify
     ai_observe detail checks 'final · passed'
     ai_helper state ready_for_review 'Run independent Codex review, then human testing'
     ai_log none 'queue complete; ready for independent review' PASS 'Human acceptance remains'

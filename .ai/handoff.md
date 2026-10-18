@@ -5,6 +5,10 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
 - T022: `workflow.py outcome gate pass|fail|timeout SECONDS` records a host gate run;
   `gate-seconds` prints the largest seconds of this project's last 3 passes (or 0);
   `ai-status --outcomes` skips gate lines (it did not before, for a log of only gate lines).
+- T023: `ai-run` times and records every host `ai-check` (`gate pass|fail|timeout`, after
+  `ai_guard_verify`); an implementation session's limit is base + min(2 × gate-seconds, base),
+  capped by the remaining run time; the `Session:` line shows the breakdown. Triage, plan
+  revision and `--plan` keep the plain limit.
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
@@ -28,8 +32,8 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-After T022: `.ai/bin/ai-check` PASS (969 tests, 618.5 s); `-k gate_time` 4 OK, `-k outcome`
-86 OK. `.ai/validate` is unchanged: shell syntax checks, then
+After T023: `.ai/bin/ai-check` PASS (974 tests, 610.2 s); `-k session_gate_allowance` 5 OK,
+`-k timeout` 12 OK, `-k outcome` 86 OK, `-k Docs` 3 OK. `.ai/validate` is unchanged: shell syntax checks, then
 `tests/run_parallel.py`. Batch 6's last full gate: 965 tests, about 600 s on this machine.
 
 ## Assumptions
@@ -44,8 +48,8 @@ After T022: `.ai/bin/ai-check` PASS (969 tests, 618.5 s); `-k gate_time` 4 OK, `
   from the fixture template.
 
 ## Flow chart
-Flow unchanged so far (planning only). T023 (session limit) and T026 (timeout rerun) change the
-flow and update the vault `agents-flow.md`. T026 sets this line to "Flow chart updated (…)".
+T023 updated the vault `agents-flow.md` "Inside one task" (session limit with the gate allowance,
+timed host gate). T026 (timeout rerun) changes the flow next. T026 sets this line to "Flow chart updated (…)".
 
 ## Manual testing for the human
 

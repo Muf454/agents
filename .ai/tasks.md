@@ -2448,7 +2448,7 @@ Evidence: `-k gate_time` Ran 4 OK; `-k outcome` Ran 86 OK; `.ai/bin/ai-check` PA
 
 
 ## T023 — ai-run records its gate runs and gives implementation sessions room for the gate (FL-28 part 1, runner)
-Status: TODO
+Status: DONE
 Dependencies: T022
 Model: opus
 
@@ -2511,6 +2511,25 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-18. `scripts/ai-run`: `record_gate CODE STARTED` (pass for 0, timeout for 124/137,
+else fail; a failed append is only a note) runs after `ai_guard_verify` at both host gate sites
+(`checkpoint_done`, final check), which now capture the exit code (`|| gate_code=$?`) and keep
+their failure handling. `claude_session` computes the allowance once, before its loop, only when
+`track_attempt == yes`: `gate-seconds` checked against `^[0-9]{1,7}$` (else 0), `min(2 × G,
+session_timeout)`, limit = base + allowance, then the remaining-time cap. `Session:` line is
+byte-identical with allowance 0, else `(limit 1600s: 1000s + 600s for two gate runs of 300s; log …)`.
+Usage text, README (after the session budget), docs/workflow.md (after `gate-seconds`; the
+watchdog "hung" note), vault flow "Inside one task".
+Tests `test_session_gate_allowance_*` (5): plain/1600/2000 limits, run-timeout cap, triage plain,
+one `pass` gate line per checkpoint gate (three after the second run: checkpoint + final), failing
+`.ai/validate` records `fail`. Mutation: `if true` instead of the `track_attempt` check fails the
+triage test (`limit 2400s: 1800s + 600s …`).
+Three existing tests read every outcome line and now see the runner's gate lines, so they filter
+them (`test_runner_logs_task_outcomes_and_report`, `test_runner_logs_blocked_and_failed_validation_attempts`,
+`test_outcome_crash_killed_runner_logged_once_at_next_start`); their assertions are otherwise unchanged.
+Evidence: `-k session_gate_allowance` Ran 5 OK; `-k timeout` Ran 12 OK; `-k Docs` Ran 3 OK;
+`-k outcome` Ran 86 OK after the filter; `.ai/bin/ai-check` PASS (974 tests, 610.2 s, finished in the
+background past the 600 s tool timeout).
 
 
 ## T024 — Run manifest: read the session's task, record a timeout rerun once per task (FL-28 part 2, helper)
