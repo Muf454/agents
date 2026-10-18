@@ -298,7 +298,9 @@ launched, then `.ai/local` is created: `setup-project` does not create it).
   exclusively in the pinned `.ai/local` (no symlink or FIFO followed) and execs the runner on
   it: `$!` is the runner. Then every 0.2 s for at most `AI_PLAN_ACK_SECONDS` (default 20):
   `.ai/local/observation.json` with `stage: planning`, `state: active` and `pid` equal to the
-  runner's → `Planning session started: pid N, log PATH`, exit 0; the runner exited →
+  runner's → `Planning session started: pid N, log PATH`, exit 0; the runner exited with 0 and
+  the observation is its own `stage: planning`, `state: done` (the plan finished between two
+  polls) → the same `Planning session started` line, exit 0; the runner exited otherwise →
   `ai-plan: the planning session ended early (exit N); last lines of PATH:` plus the log's last
   10 lines (or `(no log was created)`), exit N (at least 1); neither → `ai-plan: could not
   confirm the planning session started within N s (pid N, log PATH).`, exit 1. The runner is

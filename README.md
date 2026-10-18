@@ -136,9 +136,10 @@ objective in a file (a regular file of at most 200 KB) and run:
 `--detach` it starts the session in the background, its output in
 `.ai/local/plan-<UTC stamp>-<8 hex>.log` (created exclusively, never through a symlink), and
 returns only once `ai-dashboard`'s record shows that session planning:
-`Planning session started: pid N, log PATH` (exit 0). If the session ends first (for example
-another runner holds the checkout) it prints `ended early` with the last lines of the log and
-exits with the session's status; if the start cannot be confirmed within `AI_PLAN_ACK_SECONDS`
+`Planning session started: pid N, log PATH` (exit 0; also when the plan already finished
+successfully before the first check). If the session ends first otherwise (for example another
+runner holds the checkout) it prints `ended early` with the last lines of the log and exits with
+the session's status (at least 1); if the start cannot be confirmed within `AI_PLAN_ACK_SECONDS`
 (default 20) it exits 1 with `could not confirm …` and leaves the session running. Mission
 control's equivalent of a hand-run launcher is:
 

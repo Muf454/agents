@@ -2337,7 +2337,7 @@ alone) fails the new test (`0 != 1` on `pr-draft get`); `.ai/bin/ai-check` PASS 
 609.4 s; past the 600 s tool limit, finished in the background, exit 0).
 
 ## T021 — `ai-plan --detach` reports a plan that finished before acknowledgement as success (DB-04, review round 1 N1)
-Status: TODO
+Status: DONE
 Dependencies: T006
 Model: opus
 
@@ -2369,4 +2369,14 @@ Targeted: `python3 -m unittest discover -s tests -k ai_plan` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-18. `scripts/ai-plan`: the predicate is `observed STATE`; after the child exits,
+`wait` 0 plus this PID's `planning/done` prints `Planning session started: pid N, log PATH` and
+exits 0; anything else stays `ended early` (status unchanged). Usage text, README Plan section
+and docs/workflow.md updated. Tests replace the fixture's `ai-run` with a script that never writes
+`planning/active`, so the exit branch is always the one exercised:
+`test_ai_plan_detach_finished_before_ack_is_success`,
+`test_ai_plan_detach_exit_zero_without_done_is_failure` (no observation, another PID, non-zero
+exit with its own `done` → exit 3). `-k ai_plan`: Ran 14 tests OK. `.ai/bin/ai-check`: Ran 965
+tests OK (600.1 s; finished in the background past the 600 s tool timeout, exit 0). Flow chart
+unchanged (the detached launch already ends in "started").
 

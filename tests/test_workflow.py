@@ -3706,6 +3706,41 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('Another runner/reviewer owns this checkout', output)
         self.assertEqual(self.plan_args(), [])
 
+    def ai_plan_fake_runner(self, body):
+        """Replace the fixture's ai-run with a script that never reports planning/active, so the
+        parent's poll always sees the child exit first."""
+        runner = self.project / '.ai/bin/ai-run'
+        runner.unlink()
+        runner.write_text('#!/usr/bin/env bash\n' + body)
+        runner.chmod(0o755)
+
+    def test_ai_plan_detach_finished_before_ack_is_success(self):
+        objective = self.plan_ready()
+        self.ai_plan_fake_runner(
+            'printf \'{"stage": "planning", "state": "done", "pid": %s, "note": "2 tasks"}\' "$$" '
+            '> .ai/local/observation.json\necho "Plan ready on feature/test: 2 tasks"\n')
+        result = self.ai_plan(str(objective), '--detach')
+        pid, log = self.ai_plan_started(result)
+        self.assertNotIn('ended early', result.stderr)
+        self.assertTrue(log.is_file())
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+        self.assertEqual(self.observation()['pid'], pid)
+
+    def test_ai_plan_detach_exit_zero_without_done_is_failure(self):
+        objective = self.plan_ready()
+        cases = {'no observation': 'echo planned nothing\n',
+                 'another pid': 'printf \'{"stage": "planning", "state": "done", "pid": 1}\' '
+                                '> .ai/local/observation.json\n',
+                 'non-zero exit': 'printf \'{"stage": "planning", "state": "done", "pid": %s}\' "$$" '
+                                  '> .ai/local/observation.json\nexit 3\n'}
+        for name, body in cases.items():
+            with self.subTest(name):
+                (self.project / '.ai/local/observation.json').unlink(missing_ok=True)
+                self.ai_plan_fake_runner(body)
+                result = self.ai_plan(str(objective), '--detach', expected=3 if name == 'non-zero exit' else 1)
+                self.assertIn('ended early', result.stderr)
+                self.assertNotIn('Planning session started', result.stdout)
+
     def test_ai_plan_detach_unconfirmed_leaves_the_session_running(self):
         objective = self.plan_ready()
         (self.project / '.ai/local').mkdir(exist_ok=True)

@@ -147,8 +147,11 @@ the task named).
 - `test_pr_undraft_unknown_state_never_records_ownership` (T020, review round 1 M1: a human
   draft whose first `isDraft` lookup fails is still converted under policy but gets no `pr-draft`
   record, and a later clean run leaves it draft without `gh pr ready`).
-- Review round 1 fix (TODO): `test_ai_plan_detach_finished_before_ack_is_success` and
-  `test_ai_plan_detach_exit_zero_without_done_is_failure` (T021).
+- `test_ai_plan_detach_finished_before_ack_is_success` (T021, review round 1 N1: a runner that
+  writes its own `planning/done` and exits 0 before any `planning/active` poll gives `Planning
+  session started: pid N, log PATH`, exit 0) and `test_ai_plan_detach_exit_zero_without_done_is_failure`
+  (exit 0 with no observation or another PID's, and a non-zero exit with its own `planning/done`,
+  stay `ended early`, exit 1 or the session's status).
 
 ## Human todos
 - Merge order: PR #29, PR #30, then this branch (it builds on both).
@@ -183,5 +186,8 @@ vault chart; wording fixed ("weekly limit" → the "beyond the wait budget" esca
 AI_PLAN_ACK_SECONDS as environment only).
 Recorded mismatch (not fixed, a behaviour change): `ai-recover` (line 87) silently uses 2 for an
 `AI_LIMIT_RELAUNCH_MAX` outside `^[0-9]$`, while the T001 spec asked for validation next to `max`
-(`AI_RECOVER_MAX` is validated). The README now says so. Next: all tasks are DONE; the full gate
+(`AI_RECOVER_MAX` is validated). The README now says so. Review round 1 fixes: T020 (M1, draft
+ownership only from a confirmed ready PR) and T021 (N1, `ai-plan --detach` reports a plan that
+finished with exit 0 and its own `planning/done` before acknowledgement as started). Next: all
+tasks are DONE; the full gate
 result (see Validation run) decides `ready_for_review`. Human acceptance is still open.

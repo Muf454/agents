@@ -9,8 +9,9 @@ are ai-run --plan's (see ai-run --help); paths are resolved against your working
 Without --detach it runs in the foreground (it becomes the ai-run --plan process).
 --detach starts it in the background with its output in .ai/local/plan-<UTC stamp>-<hex>.log and
 returns once the session has really started (ai-dashboard shows it planning):
-"Planning session started: pid N, log PATH". If the session ends first, the last lines of its log
-are printed and ai-plan exits with its status; if it cannot be confirmed within
+"Planning session started: pid N, log PATH" (also when the plan already finished with exit 0). If
+the session ends first otherwise, the last lines of its log are printed and ai-plan exits with its
+status (1 for exit 0); if it cannot be confirmed within
 AI_PLAN_ACK_SECONDS (default 20) it exits 1 and leaves the session running.
 EOF
 }
@@ -61,7 +62,8 @@ log=.ai/local/$name
 setsid python3 -I "$AI_BIN/lib/workflow.py" exec-logged "$name" -- \
   "$AI_BIN/ai-run" --plan "$prompt" "${rest[@]}" </dev/null &
 pid=$!
-started() {
+# observed STATE: the observation is this session's planning record in STATE.
+observed() {
   python3 -I -c '
 import json, sys
 try:
@@ -70,11 +72,11 @@ try:
 except (OSError, ValueError):
     sys.exit(1)
 ok = isinstance(record, dict) and record.get("stage") == "planning" and \
-    record.get("state") == "active" and record.get("pid") == int(sys.argv[2])
-sys.exit(0 if ok else 1)' .ai/local/observation.json "$pid"
+    record.get("state") == sys.argv[3] and record.get("pid") == int(sys.argv[2])
+sys.exit(0 if ok else 1)' .ai/local/observation.json "$pid" "$1"
 }
 for (( i = 0; i < ack * 5; i++ )); do
-  if started; then
+  if observed active; then
     disown "$pid" 2>/dev/null || true
     printf 'Planning session started: pid %s, log %s\n' "$pid" "$log"
     exit 0
@@ -82,6 +84,11 @@ for (( i = 0; i < ack * 5; i++ )); do
   if ! kill -0 "$pid" 2>/dev/null; then
     code=0
     wait "$pid" || code=$?
+    # A plan that finished between two polls started too: its own planning/done and exit 0.
+    if (( code == 0 )) && observed done; then
+      printf 'Planning session started: pid %s, log %s\n' "$pid" "$log"
+      exit 0
+    fi
     printf 'ai-plan: the planning session ended early (exit %s); last lines of %s:\n' "$code" "$log" >&2
     if [[ -f "$log" && ! -L "$log" ]]; then tail -n 10 -- "$log" >&2; else echo '(no log was created)' >&2; fi
     exit $(( code > 0 ? code : 1 ))
