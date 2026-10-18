@@ -48,8 +48,8 @@ After T023: `.ai/bin/ai-check` PASS (974 tests, 610.2 s); `-k session_gate_allow
   from the fixture template.
 
 ## Flow chart
-T023 updated the vault `agents-flow.md` "Inside one task" (session limit with the gate allowance,
-timed host gate). T026 (timeout rerun) changes the flow next. T026 sets this line to "Flow chart updated (…)".
+Flow chart updated (T023: vault `agents-flow.md` "Inside one task" (session limit with the gate allowance,
+timed host gate)). T026 (timeout rerun) changes the flow next. T026 sets this line to "Flow chart updated (…)".
 
 ## Manual testing for the human
 

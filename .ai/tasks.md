@@ -2448,7 +2448,7 @@ Evidence: `-k gate_time` Ran 4 OK; `-k outcome` Ran 86 OK; `.ai/bin/ai-check` PA
 
 
 ## T023 — ai-run records its gate runs and gives implementation sessions room for the gate (FL-28 part 1, runner)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T022
 Model: opus
 
