@@ -359,7 +359,14 @@ tmux new -s my-app-ai
    the PR body then starts with a "Disputed findings" section, and you resolve them at
    the PR; the pipeline never resolves a dispute itself. Once you merge that PR, its
    disputes are history: a later branch inherits the unchanged file without a draft,
-   and only disputes recorded on that branch count. The PR targets `--pr-base`,
+   and only disputes recorded on that branch count. A later run whose review is clean
+   (no unresolved findings, no dispute) makes the PR ready again, but only when the
+   pipeline drafted it itself (recorded in host state, outside the checkout); a PR you
+   drafted, or one drafted with `--draft`, stays a draft ("left as draft"). `--draft`
+   also revokes an earlier pipeline draft, so that PR is never made ready automatically;
+   if that record cannot be removed the run stops and names the file to delete. A human
+   re-draft between two runs is not seen: the record still says the pipeline drafted it.
+   The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. The review itself compares against `origin/<base>` when that is strictly
    ahead of your local `<base>` (a stale local `main` would otherwise pull already merged

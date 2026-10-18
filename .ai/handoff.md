@@ -50,6 +50,7 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T009: `-k pr_undraft` 14 OK, `-k draft` 25 OK; `.ai/bin/ai-check` PASS (962 tests, 612.9 s).
 T007: `-k plan_outcome` 3 OK, `-k outcome` 85 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (948 tests, 569.5 s).
 T006: `-k ai_plan` 12 OK, `-k setup` 30 OK, `-k Docs` 3 OK, `-k script_modes` 1 OK;
 `.ai/bin/ai-check` PASS (945 tests, 591.1 s).
@@ -94,7 +95,7 @@ continues uncommitted task work in its own session or the validated checkpoint; 
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
 stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
 every start check of the resumed run"; T006: the plan node says `ai-plan objective.md` with
-`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. Still to be updated by T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
+`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. T009: the PR node and the "draft after two fix rounds" bullet say a clean PR is made ready again only when the pipeline drafted it itself. T010 audits the chart.
 
 ## Manual testing for the human
 
@@ -134,7 +135,8 @@ the task named).
 - `test_exec_logged_*` (T013: both streams in a new 0600 log in `.ai/local` with the launcher's PID kept; an existing symlink, FIFO (no blocking) or file at the name exits 1 untouched and the command never runs; a symlinked or missing `.ai/local` exits 1; two concurrent launches get their own logs; a bad name or relative command exits 2 with nothing created).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
 - `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007: a successful plan appends one `plan` outcome `done` with model, seconds, task count and one `plan written:` run-log row, `plan-scope` and `ai-status --outcomes` still fine; an invalid queue records `stopped`; a session timeout records `timeout`).
-- `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
+- `test_pr_undraft_record_*` (T008: record/get/clear/take round trip in the host `pr-draft` directory, per branch, unreadable means not ours, bad arguments, a directory fault keeps the record and fails).
+- `test_pr_undraft_*` (T009: a created or converted policy draft is made ready by a later clean run and the record consumed; a human draft and a `--draft` PR stay draft (`left as draft`); `--draft` revokes the record; a failed revocation stops with a hard-rule ⛔ naming the file, no `gh` change, no recovery session, and a later clean run still leaves the PR draft; a failed `gh pr ready` finishes and keeps the record; a ready PR clears a stale record).
 
 ## Human todos
 - Merge order: PR #29, PR #30, then this branch (it builds on both).
@@ -161,4 +163,6 @@ block before ai-pipeline's start check), `armed_resume`/`clean_or_armed` shared 
 the `test_limit_relaunch_accept_*` matrix. T013: `workflow.py exec-logged NAME -- CMD` (the
 detached log for T006's `ai-plan --detach`). T006: `scripts/ai-plan` (foreground exec of
 `ai-run --plan`; `--detach` with a confirmed start printing PID and log), installed by
-`setup-project`. Next: T007.
+`setup-project`. T007: planning sessions in the outcome log and run log. T008: host `pr-draft`
+record. T009: the PR step un-drafts only a recorded pipeline draft (`--draft` revokes it; a
+failed revocation is a hard-rule stop). Next: T010 (docs, flow chart and handoff audit).

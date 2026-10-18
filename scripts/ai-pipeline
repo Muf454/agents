@@ -626,6 +626,20 @@ if [[ "$open_pr" != yes ]]; then
   finish
 fi
 step pr 'Pull request'
+# Draft reasons: the human's --draft (never recorded) or the pipeline's policy (unresolved
+# findings, disputes). Only a PR the pipeline drafted for policy is made ready again later;
+# that ownership lives in host state (pr-draft), which agent sessions cannot forge.
+human_draft=no
+if [[ "$draft" == yes ]]; then
+  human_draft=yes
+  # The human's explicit draft revokes pipeline ownership, before any gh change: a record that
+  # cannot be removed stops the run (it would un-draft the PR in a later run).
+  if ! why=$(ai_helper pr-draft clear 2>&1 >/dev/null); then
+    printf 'could not revoke the pipeline draft record: %s; delete that file, then rerun ai-pipeline --draft\n' \
+      "${why#Error: }" > .ai/local/last-error
+    stop 'pull request'
+  fi
+fi
 if ! git remote get-url origin >/dev/null 2>&1; then
   ai_notify "🏁 FINISHED on $branch (local only): no 'origin' remote to open a PR on. Your todo: push and open a PR."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
@@ -640,21 +654,53 @@ title=$(ai_helper pr-title)
 body=$(mktemp .ai/local/pr-XXXXXXXX.md)
 ai_helper pr-body "$reviews" "$unresolved" > "$body"
 disputes=$(ai_helper disputes-verify) || stop 'pull request'
-make_draft=no
+policy_draft=no
 # A recorded dispute keeps the PR a draft for good; only the human resolves it.
-if [[ "$draft" == yes || "$unresolved" == 1 || "$disputes" != 0 ]]; then make_draft=yes; fi
+if [[ "$unresolved" == 1 || "$disputes" != 0 ]]; then policy_draft=yes; fi
+make_draft=no
+if [[ "$human_draft" == yes || "$policy_draft" == yes ]]; then make_draft=yes; fi
+pipeline_drafted=no
+if [[ "$policy_draft" == yes && "$human_draft" == no ]]; then pipeline_drafted=yes; fi
 if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" ]]; then
   gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
-  if [[ "$make_draft" == yes && "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" != true ]]; then
+  is_draft=$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null || true)
+  if [[ "$make_draft" == yes && "$is_draft" != true ]]; then
     # Never leave an existing ready PR "ready" when the policy says draft.
     gh pr ready --undo "$branch" >/dev/null 2>&1 && \
       [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
       { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
+    if [[ "$pipeline_drafted" == yes ]]; then
+      ai_helper pr-draft record "$url" converted || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
+    fi
+  elif [[ "$make_draft" == no && "$is_draft" == true ]]; then
+    # Ready again only when the pipeline drafted it itself: the record is consumed first, so
+    # a record that cannot be removed never un-drafts (a human re-draft between runs is not seen).
+    if how=$(ai_helper pr-draft take "$url" 2>/dev/null); then
+      if gh pr ready "$branch" >/dev/null 2>&1 && \
+         [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
+        printf '%s\n' 'Marked the PR ready (the pipeline had made it a draft).'
+        ai_log none "pull request marked ready: $url" PASS 'drafted by the pipeline earlier'
+      else
+        printf '%s\n' 'Warning: could not mark the PR ready; it stays a draft.'
+        # Best effort: a lost record only leaves the PR draft (fails closed).
+        ai_helper pr-draft record "$url" "$how" >/dev/null 2>&1 || true
+      fi
+    elif [[ "$(ai_helper pr-draft get 2>/dev/null)" == "$url" ]]; then
+      printf '%s\n' 'Warning: could not consume the pipeline draft record; PR left as draft.'
+    else
+      printf '%s\n' 'PR is a draft set outside the pipeline; left as draft.'
+    fi
+  elif [[ "$make_draft" == no && "$is_draft" == false ]]; then
+    # A ready PR: any record is stale (a human made it ready). Never un-drafts anything.
+    ai_helper pr-draft clear >/dev/null 2>&1 || printf '%s\n' 'Warning: could not clear a stale pipeline draft record.'
   fi
 else
   pr_args=(--title "$title" --body-file "$body" --base "$pr_base")
   if [[ "$make_draft" == yes ]]; then pr_args+=(--draft); fi
   url=$(gh pr create --head "$branch" "${pr_args[@]}" | tail -n 1) || { printf '%s\n' 'gh pr create failed' > .ai/local/last-error; stop 'pull request'; }
+  if [[ "$pipeline_drafted" == yes ]]; then
+    ai_helper pr-draft record "$url" created || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
+  fi
 fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'

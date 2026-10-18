@@ -438,3 +438,4 @@
 | 2026-10-18T05:08:21Z | runner | T007 | completed | PASS | 48ed1b8 | Claude checkpointed; continuing queue |
 | 2026-10-18T05:35:00Z | claude (sonnet) | T008 | DONE: `workflow.py pr-draft record/get/clear/take`, host record under `binding_dir()/pr-draft/`, fails closed, durable removal (unlink, dir fsync, lstat) | PASS (ai-check 954 tests, 593 s; -k pr_undraft_record 6 OK) | parent 48f1e7a | no pipeline change (T009); flow unchanged |
 | 2026-10-18T05:29:13Z | runner | T008 | completed | PASS | 54c0d00 | Claude checkpointed; continuing queue |
+| 2026-10-18T05:50:50Z | claude (opus) | T009 | DONE: PR step un-drafts only a recorded pipeline draft (take before `gh pr ready`); `--draft` revokes the record first, a failed revocation stops (ai-recover hard rule) | PASS (ai-check 962 tests, 612.9 s, finished in the background past the 600 s tool timeout; -k pr_undraft 14 OK; -k draft 25 OK) | parent 50f22b7 | mock `pr ready` now removes gh-draft; flow chart updated |

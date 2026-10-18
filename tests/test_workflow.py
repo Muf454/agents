@@ -669,7 +669,9 @@ if args[:2] == ['pr', 'view']:
 if args[:2] == ['pr', 'ready']:
     if os.environ.get('MOCK_GH_READY_FAIL'):
         sys.exit(1)
-    draft.touch(); sys.exit(0)
+    if '--undo' in args: draft.touch()
+    else: draft.unlink(missing_ok=True)
+    sys.exit(0)
 if args[:2] in (['pr', 'create'], ['pr', 'edit']):
     body = args[args.index('--body-file') + 1]
     shutil.copy(body, str(log) + '.body.md')
@@ -9882,6 +9884,138 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', MOCK_GH_EXISTING='1')
         self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+
+    # ---------------------------------------------------------------- un-draft (R15)
+    GH_PR_URL = 'https://github.com/example/project/pull/7'
+    UNDRAFT = ['pr', 'ready', 'feature/test']
+
+    def pr_undraft_policy_run(self):
+        """Run 1: a deferred finding makes the new PR a draft for policy; the GitHub draft is
+        simulated by gh-draft (the mock's create doesn't set it)."""
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-always', MOCK_CLAUDE='triage-defer')
+        self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        (self.base / 'gh-draft').touch()
+
+    def pr_undraft_human_commit(self):
+        """A later human change, so the next run gets a fresh (clean) review."""
+        later = self.project / 'later.txt'
+        later.write_text((later.read_text() if later.exists() else '') + 'later\n')
+        self.commit('human follow-up')
+
+    def pr_undraft_get(self, expected=0):
+        return self.helper('pr-draft', 'get', expected=expected).stdout.strip()
+
+    def test_pr_undraft_created_policy_draft_is_made_ready_by_a_clean_run(self):
+        self.pr_undraft_policy_run()
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertFalse((self.base / 'gh-draft').exists())
+        self.pr_undraft_get(expected=1)
+        self.assertIn('Marked the PR ready', result.stdout)
+        self.assertIn('pull request marked ready', (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+
+    def test_pr_undraft_converted_policy_draft_is_made_ready_by_a_clean_run(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.pr_undraft_get(expected=1)
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1',
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-defer')
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.assertEqual(json.loads(self.pr_undraft_record_file().read_text())['how'], 'converted')
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertFalse((self.base / 'gh-draft').exists())
+        self.pr_undraft_get(expected=1)
+
+    def test_pr_undraft_human_draft_stays_a_draft(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        (self.base / 'gh-draft').touch()  # the human drafted it on GitHub
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('PR is a draft set outside the pipeline; left as draft.', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_draft_flag_is_never_recorded(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft')
+        self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        self.pr_undraft_get(expected=1)
+        (self.base / 'gh-draft').touch()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('left as draft', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_draft_flag_revokes_pipeline_ownership(self):
+        self.pr_undraft_policy_run()
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', MOCK_GH_EXISTING='1')
+        self.pr_undraft_get(expected=1)
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertIn('left as draft', result.stdout)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory modes')
+    def test_pr_undraft_failed_revocation_stops_and_never_undrafts(self):
+        self.pr_undraft_policy_run()
+        record = self.pr_undraft_record_file()
+        record.parent.chmod(0o500)
+        self.addCleanup(record.parent.chmod, 0o700)
+        before = len(self.gh_calls())
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', expected=1,
+                           MOCK_GH_EXISTING='1', AI_AUTO_RECOVER='1')
+        self.assertIn('escalated to the human', result.stderr)
+        last_error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('could not revoke the pipeline draft record', last_error)
+        self.assertIn(str(record), last_error)
+        stopped = [line for line in self.notifications().splitlines() if '⛔' in line]
+        self.assertTrue(stopped)
+        self.assertIn('could not revoke the pipeline draft record', stopped[-1])
+        self.assertIn(str(record), stopped[-1])
+        run2 = self.gh_calls()[before:]
+        self.assertEqual([c for c in run2 if c[:2] in (['pr', 'edit'], ['pr', 'ready'])], [])
+        self.assertEqual(self.recovery_calls(), [])
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertIn('could not consume the pipeline draft record', result.stdout)
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+
+    def test_pr_undraft_failed_ready_keeps_the_record(self):
+        self.pr_undraft_policy_run()
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1', MOCK_GH_READY_FAIL='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('could not mark the PR ready', result.stdout)
+        self.assertIn('Pull request: ' + self.GH_PR_URL, result.stdout)
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.assertEqual(json.loads(self.pr_undraft_record_file().read_text())['how'], 'created')
+
+    def test_pr_undraft_ready_pr_clears_a_stale_record(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.helper('pr-draft', 'record', self.GH_PR_URL, 'created')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.pr_undraft_get(expected=1)
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
 
     def test_current_review_still_requires_fresh_validation(self):
         self.ready()

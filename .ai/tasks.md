@@ -2114,7 +2114,7 @@ tests OK. No pipeline change (T009).
 
 
 ## T009 — PR step un-drafts only a PR the pipeline drafted (R15, pipeline)
-Status: TODO
+Status: DONE
 Dependencies: T008
 Model: opus
 
@@ -2201,7 +2201,35 @@ Targeted: `python3 -m unittest discover -s tests -k draft` (must say `Ran N test
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+- `scripts/ai-pipeline` PR step: `human_draft` (`--draft`) vs `policy_draft` (unresolved or
+  disputes); `--draft` runs `pr-draft clear` right after `step pr`, before push/`gh`, and a
+  failure writes `could not revoke the pipeline draft record: …; delete that file, then rerun
+  ai-pipeline --draft` and stops `pull request`. A policy draft records `created` (after `gh pr
+  create`) or `converted` (after `ready --undo` + isDraft check). `make_draft=no` on an existing
+  draft: `pr-draft take URL` first, then `gh pr ready` + isDraft `false` → message and run-log
+  `pull request marked ready` (committed with `record pull request`); a failed ready warns and
+  re-records the same HOW; a failed take prints `could not consume…` when the record is still
+  there, else `PR is a draft set outside the pipeline; left as draft.` A ready PR clears a stale
+  record (warning only on failure).
+- `scripts/ai-recover`: `*'pipeline draft record'*` added to the hard-rule patterns.
+- Mock change (deliberate): `MOCK_GH` `pr ready --undo` touches `gh-draft`, plain `pr ready`
+  removes it. No other existing test changed.
+- Tests: 8 `test_pr_undraft_*` pipeline tests (created/converted un-draft, human draft, `--draft`
+  never recorded, three-run revocation, failed revocation with auto-recovery on: ⛔ and
+  last-error name the record path, no `pr edit`/`pr ready`, `recovery_calls()` empty, then a
+  clean run leaves it draft with `could not consume`; `MOCK_GH_READY_FAIL` keeps the record as
+  `created`; stale record cleared). With the failed revocation and recovery on, stderr carries
+  the escalation summary; the reason is asserted in last-error and the ⛔.
+- Wording check: `pr-body` adds draft warnings only for disputes/unresolved and
+  `finish-summary` the "Decide the unresolved review findings (draft PR…)" todo only when
+  unresolved, so an un-drafted PR (clean run) gets no draft wording and a human draft gets no
+  claim either way. Limitation: when `gh pr ready` fails the summary does not say the PR is
+  still a draft; the console warning does.
+- Docs: README pull-request step, docs/workflow.md PR stage (rule, `--draft` exception,
+  limitation). Vault `agents-flow.md` PR node and draft bullet updated; hub Log line.
+- Validation: `-k pr_undraft` Ran 14 OK; `-k draft` Ran 25 OK; `.ai/bin/ai-check` PASS (962
+  tests, 612.9 s; it went past the 600 s foreground tool timeout, finished in the background
+  with exit 0).
 
 ## T010 — Docs, flow chart and handoff audit (all items)
 Status: TODO

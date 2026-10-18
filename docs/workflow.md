@@ -686,7 +686,16 @@ unpushed content into the PR.
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when
-significant findings remain after the round limit, or while any dispute is recorded. The
+significant findings remain after the round limit, or while any dispute is recorded.
+Un-draft rule: a policy draft (findings or disputes, not `--draft`) the pipeline created or
+converted is recorded in host state (`pr-draft record`, `binding_dir()/pr-draft/`); a later
+run that needs no draft takes (consumes) that record for the PR's URL first, then runs `gh
+pr ready` and confirms `isDraft == false` (logged "pull request marked ready"). A failed
+ready warns and re-records (best effort); a record that cannot be consumed or no record
+leaves the PR draft ("left as draft"); a ready PR clears a stale record. `--draft` clears
+the record at the start of the PR step, before any `gh` change; a failed clear stops the
+run ("could not revoke the pipeline draft record", a hard rule for recovery). Limitation:
+a human re-draft between two runs is not seen. The
 PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
 "Manual testing for the human" section (split into subsections `### Needs you` for steps
