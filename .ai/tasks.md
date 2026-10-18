@@ -2760,7 +2760,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T027 — The host restores a tracked script's recorded executable bit after a session (FL-29, runner)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -2808,7 +2808,15 @@ Targeted: `python3 -m unittest discover -s tests -k script_modes` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+BLOCKED: implementation complete, but the full gate `.ai/bin/ai-check` exceeded the 600000 ms
+foreground timeout in this session, so a green gate is not established.
+Done: `exec-bits` helper (scripts/lib/workflow.py), `ai_helper exec-bits` call plus the
+`Restored the executable bit recorded in git: <paths>` line in scripts/ai-run after `ai_branch`,
+one sentence in docs/workflow.md, 4 `test_exec_bits_*` tests plus a `chmod-tracked` mock mode.
+Evidence: `-k exec_bits` Ran 4 OK; `-k script_modes` Ran 1 OK. Mutation: with the helper call
+replaced by `true`, `test_exec_bits_runner_restores_the_bit_a_session_lost` fails.
+Flow unchanged (a host detail inside the task step).
+Blocker: run `.ai/bin/ai-check` (longer timeout) to confirm; then set DONE.
 
 ## T028 — Prompts: `chmod +x` is the only form and also repairs a tracked script (FL-29, templates)
 Status: TODO

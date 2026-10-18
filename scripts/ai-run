@@ -838,6 +838,11 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
   ai_branch
+  # A session cannot always chmod: give back the bit git records for a tracked script.
+  restored=$(ai_helper exec-bits) || ai_die 'Cannot restore recorded executable bits.'
+  if [[ -n "$restored" ]]; then
+    printf 'Restored the executable bit recorded in git: %s\n' "${restored//$'\n'/ }"
+  fi
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")
   case "$task_status" in

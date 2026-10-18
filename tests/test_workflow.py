@@ -13,6 +13,7 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -433,6 +434,10 @@ if mode in ('error-once', 'error-once-partial') and not pathlib.Path('.ai/local/
     print(json.dumps({'type':'result','subtype':'error','is_error':True}))
     sys.exit(0)
 if mode in ('error-once', 'error-once-partial'):
+    mode = 'success'
+if mode == 'chmod-tracked' and 'RUNNER CONTRACT' in prompt:
+    # A session that loses the recorded executable bit of a tracked script, then completes normally.
+    os.chmod(os.environ['MOCK_CHMOD_PATH'], 0o644)
     mode = 'success'
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
@@ -12444,6 +12449,61 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIsNotNone(match, 'the handoff needs a "## Flow chart" line')
         self.setup_project()
         self.assertIn(match.group(1), self.pr_body_for(handoff))
+
+    def exec_bits_file(self, name, mode, content='#!/usr/bin/env bash\n'):
+        path = self.project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        path.chmod(mode)
+        return path
+
+    def exec_bits_mode(self, path):
+        return stat.S_IMODE(os.lstat(path).st_mode)
+
+    def test_exec_bits_restores_a_committed_executable_script(self):
+        script = self.exec_bits_file('scripts/tool.sh', 0o755)
+        plain = self.exec_bits_file('notes.txt', 0o644, 'text\n')
+        self.commit('tracked files')
+        script.chmod(0o644)
+        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/tool.sh\n')
+        self.assertEqual(self.exec_bits_mode(script), 0o755)
+        self.assertEqual(self.exec_bits_mode(plain), 0o644)
+
+    def test_exec_bits_skips_symlinks_deleted_untracked_and_gate_files(self):
+        target = self.exec_bits_file('target.txt', 0o644, 'text\n')
+        link = self.exec_bits_file('scripts/link.sh', 0o755)
+        gone = self.exec_bits_file('scripts/gone.sh', 0o755)
+        gate = self.exec_bits_file('.ai/bin/tool', 0o755)
+        self.commit('tracked files')
+        link.unlink()
+        link.symlink_to('../target.txt')
+        gone.unlink()
+        gate.chmod(0o644)
+        untracked = self.exec_bits_file('free.sh', 0o644)
+        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.exec_bits_mode(target), 0o644)
+        self.assertEqual(self.exec_bits_mode(gate), 0o644)
+        self.assertEqual(self.exec_bits_mode(untracked), 0o644)
+        self.assertFalse(gone.exists())
+        self.assertTrue(link.is_symlink())
+
+    def test_exec_bits_restores_a_staged_executable_bit(self):
+        script = self.exec_bits_file('scripts/new.sh', 0o644)
+        self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/new.sh'])
+        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/new.sh\n')
+        self.assertEqual(self.exec_bits_mode(script), 0o755)
+
+    def test_exec_bits_runner_restores_the_bit_a_session_lost(self):
+        self.ready()
+        script = self.exec_bits_file('scripts/tool.sh', 0o755)
+        self.commit('a tracked script')
+        result = self.tool('ai-run', '--approved', MOCK_CLAUDE='chmod-tracked', MOCK_CHMOD_PATH='scripts/tool.sh')
+        self.assertIn('Restored the executable bit recorded in git: scripts/tool.sh', result.stdout)
+        self.assertIn('Status: DONE', (self.project / '.ai/tasks.md').read_text())
+        self.assertTrue(self.run_cmd(['git', 'ls-tree', 'HEAD', '--', 'scripts/tool.sh']).stdout.startswith('100755'))
+        self.assertNotIn('mode change', self.run_cmd(['git', 'log', '--summary', '--format=']).stdout)
+        self.assertEqual(self.exec_bits_mode(script), 0o755)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
     def test_script_modes_all_shebang_scripts_are_executable(self):
         scripts_dir = ROOT / 'scripts'

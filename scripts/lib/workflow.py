@@ -4457,6 +4457,30 @@ def clear_scratch():
         os.close(local_fd)
 
 
+def exec_bits():
+    """exec-bits: give back the execute bit git records (index mode 100755) to a regular file
+    that lost it in the working tree. Gate files and symlinks are never touched. Prints the
+    restored relative paths, one per line."""
+    root = checkout_root()
+    gate = ('.ai/validate', '.ai/ci-setup')
+    for entry in git('ls-files', '-s', '-z', cwd=root).split(b'\0'):
+        meta, _, raw = entry.partition(b'\t')
+        if not meta.startswith(b'100755 '):
+            continue
+        name = raw.decode()
+        if name.startswith('.ai/bin/') or name in gate:
+            continue
+        path = root / name
+        try:
+            mode = os.lstat(path).st_mode
+            if not stat.S_ISREG(mode) or mode & 0o111:
+                continue
+            os.chmod(path, stat.S_IMODE(mode) | ((mode & 0o444) >> 2))
+        except OSError:
+            continue
+        print(name)
+
+
 def read_record(dir_fd, name, limit, tail=False):
     """(text, stat) of the regular file NAME in DIR_FD, at most LIMIT bytes, or None. Never
     follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines."""
@@ -4915,6 +4939,8 @@ def main():
         deps_record(arguments)
     elif command == 'clear-scratch':
         clear_scratch()
+    elif command == 'exec-bits':
+        exec_bits()
     elif command == 'exec-logged':
         exec_logged(arguments)
     elif command == 'tree-snapshot':
