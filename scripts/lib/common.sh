@@ -123,6 +123,22 @@ ai_root() {
   mkdir -p .ai/local
 }
 ai_helper() { python3 "$AI_BIN/lib/workflow.py" "$@"; }
+# The armed-tree acceptance contract (ai-pipeline, before its start check): one predicate for
+# ai-pipeline and ai-run. A resume (a human start drops the arm), the checkout exactly the armed
+# tree, no stage open.
+armed_resume() {
+  local stage
+  [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && stage=$(ai_helper run-manifest stage 2>/dev/null) && \
+    [[ -z "$stage" ]] && ai_helper run-manifest limit-armed 2>/dev/null
+}
+# The one acceptance of a dirty tree between the resume and ai-run's disarm; AI_ARMED=yes records
+# that the arm admitted it (never inherited from the environment).
+AI_ARMED=no
+clean_or_armed() {
+  [[ -n "$(git status --porcelain --untracked-files=all)" ]] || return 0
+  armed_resume || return 1
+  AI_ARMED=yes
+}
 ai_guard_digest() {
   # Inline verifier is loaded before Claude starts. Never ask a potentially
   # modified project helper to verify its own integrity.

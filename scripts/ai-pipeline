@@ -121,14 +121,26 @@ fi
 # and committed by the dispute reconciliation below. Otherwise start from a clean checkpoint,
 # or, on the usage-limit relaunch's resume, from exactly the preserved task work it armed.
 open_stage=$(ai_helper run-manifest stage 2>&1) || ai_die "Cannot read this branch's open stage: ${open_stage#Error: }"
-# A resume (a human start drops the arm), the checkout exactly the armed tree, no stage open.
-armed_resume() {
-  [[ -n "${AI_RECOVERY_ATTEMPT:-}" && -z "$open_stage" ]] && ai_helper run-manifest limit-armed 2>/dev/null
-}
-# The one acceptance of a dirty tree between the resume and ai-run's first session.
-clean_or_armed() {
-  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || armed_resume
-}
+# Armed-tree acceptance contract: the path from the relaunch's `exec ai-pipeline` to ai-run's
+# `limit-disarm` (docs/workflow.md "What the resumed run does with preserved work").
+# 1. One predicate: every check on that path that requires a clean checkout is `clean_or_armed`
+#    (lib/common.sh): here, both tests of reconcile_disputes, ai-run's start check.
+# 2. No host write while armed: no commit and no tracked write before the disarm. Where the path
+#    could commit (reconcile_disputes), the armed tree is admitted only with nothing to record,
+#    else it stops before the write (the fail-closed stop of rule 6).
+# 3. One consumer: ai-run's `limit-disarm` (one call site); after it the normal rules apply
+#    unchanged (ai-check, checkpoint-guard, committed-matches-worktree, the no_checkpoint stop).
+# 4. Matrix, not sites: tests `test_limit_relaunch_accept_*` cover the resume-path states.
+# 5. An armed resume re-enters at implementation: no earlier stage (plan review or plan
+#    revision, the queue repair) runs on an armed tree (`! armed_resume` guards).
+# 6. An armed manifest is terminal for recovery: every stop between the resume and the disarm is
+#    one ⛔ with nothing committed, whatever its reason and AI_AUTO_RECOVER (ai-recover).
+# 7. The consumer runs after ai-run's complete startup, dependency setup included.
+# 8. The arm ends at the act: every check of the consumer runs armed and is therefore terminal;
+#    `limit-disarm` is the last statement before the armed checkpoint or the first session.
+# A new cleanliness check, commit, review or session on this path uses `clean_or_armed`, the
+# fail-closed stop or the `! armed_resume` guard and extends the matrix; a new check of the
+# consumer goes before the disarm.
 [[ -n "$open_stage" || -z "$(git status --porcelain --untracked-files=all -- . \
     ':!.ai/reviews/recheck.md' ':!.ai/reviews/disputes.md' ':!.ai/reviews/fallback-log.md')" ]] || clean_or_armed || \
   ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
@@ -332,14 +344,18 @@ reconcile_disputes() {
   local status added paths=() file
   status=$(ai_helper recheck-status 2>&1) || recheck_fail "$status"
   # Preserved task work is admitted only with nothing to record (no host write while armed):
-  # a pending re-check or dirty review records stop before the re-check, record or commit.
+  # a pending re-check, dirty review records or a dispute the host has not recorded yet stop
+  # before the re-check, the record or the commit.
   if [[ "$status" == pending || -n "$(git status --porcelain --untracked-files=all -- \
         .ai/reviews/recheck.md .ai/reviews/disputes.md .ai/reviews/fallback-log.md)" ]] && armed_resume; then
     recheck_fail 'preserved task work carries uncommitted review records; inspect them.'
   fi
+  if [[ "$status" == verified ]] && armed_resume && ! ai_helper disputes-record --check >/dev/null 2>&1; then
+    recheck_fail 'preserved task work carries uncommitted review records; inspect them.'
+  fi
   # The fallback log is appended by every Claude review and committed with the next record.
   if [[ "$status" != verified && -n "$(git status --porcelain --untracked-files=all -- . ':!.ai/reviews/fallback-log.md')" ]] && \
-      ! armed_resume; then
+      ! clean_or_armed; then
     recheck_fail 'uncommitted .ai/reviews/recheck.md or disputes.md that do not verify; inspect them.'
   fi
   [[ "$status" != none ]] || return 0

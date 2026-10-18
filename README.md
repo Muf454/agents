@@ -446,7 +446,9 @@ once, going straight back to implementation (no plan review re-run on the preser
 own session reconciles it, or, when the task was already DONE, the runner validates and commits
 it (`checkpoint T… (validated; the session did not commit)`), never a recovery commit; a stop
 before that, including the resumed run's own checks of the preserved work (queue, task status,
-dependency setup), is final (⛔, nothing committed, even with auto-recovery on). Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+dependency setup), is final (⛔, nothing committed, even with auto-recovery on). Every start check
+of the resumed run accepts exactly that preserved tree, so a settled re-check or recorded disputes
+don't block it; only inconsistent uncommitted review records stop it, before anything is written. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
 
 ### Claude fallback reviewer

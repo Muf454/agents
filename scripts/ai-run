@@ -123,20 +123,8 @@ plan_scope() {
     ai_die "$error"
   }
 }
-# A resume (a human start drops the arm), the checkout exactly the armed tree, no stage open.
-armed_resume() {
-  local stage
-  [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && stage=$(ai_helper run-manifest stage 2>/dev/null) && \
-    [[ -z "$stage" ]] && ai_helper run-manifest limit-armed 2>/dev/null
-}
-# The one acceptance of a dirty tree before the first session; `armed` records that the armed
-# exception admitted it (the consumer below then owes the preserved work its route).
-armed=no
-clean_or_armed() {
-  [[ -n "$(git status --porcelain --untracked-files=all)" ]] || return 0
-  armed_resume || return 1
-  armed=yes
-}
+# `clean_or_armed` (lib/common.sh) admits the armed tree below; AI_ARMED=yes then means the
+# consumer owes the preserved work its route, and stays yes until the consumer's disarm.
 # A task attempt whose runner was killed (SIGKILL, no exit handler) left its marker; log it as
 # `crashed` once, before the clean-checkpoint refusal below: `ai_helper state implementing`
 # dirties tracked .ai/state.md before every session, so a killed runner always leaves a dirty
@@ -218,7 +206,8 @@ on_exit() {
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
         2>/dev/null || true
     fi
-    ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
+    # No host write while armed: the preserved tree stays exactly the armed one.
+    [[ "$AI_ARMED" == yes ]] || ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
@@ -682,7 +671,7 @@ checkpoint_done() {
 # here runs while the manifest is still armed, so each stop is terminal for recovery; only the
 # act (the armed checkpoint or the bound task's session) follows the disarm.
 bound='' route=''
-if [[ "$armed" == yes ]]; then
+if [[ "$AI_ARMED" == yes ]]; then
   bound=$(ai_helper run-manifest limit-task 2>/dev/null) || \
     ai_die 'Cannot read the task of the preserved work in the run manifest.'
   newly=$(ai_helper tasks newly-done HEAD 2>&1) || ai_die "Cannot compare the task queue with HEAD: ${newly#Error: }"
@@ -720,6 +709,7 @@ if [[ -n "$bound" ]]; then
   ai_branch
   ai_helper tasks check
   ai_helper run-manifest limit-disarm || ai_die 'Cannot consume the preserved work in the run manifest.'
+  AI_ARMED=consumed
   printf 'Resuming preserved work of the usage-limit stop (%s).\n' "$bound"
 fi
 

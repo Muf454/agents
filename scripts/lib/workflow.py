@@ -2141,7 +2141,11 @@ def disputes_record(arguments):
     """Append a dispute record for every upheld answer of the verified, current re-check that
     has none yet (keyed by review digest + finding id), then rewrite the file from host state.
     The file may lag behind host state (an interrupted earlier write) but never differ from it.
-    Prints the number of records added."""
+    Prints the number of records added. `--check` writes nothing and fails unless a real call
+    would write nothing either (the armed resume admits only that: no host write while armed)."""
+    if arguments not in ([], ['--check']):
+        fail('Usage: disputes-record [--check]')
+    check = arguments == ['--check']
     records = dispute_records()
     inherited = inherited_disputes()
     actual = DISPUTES.read_text() if DISPUTES.exists() else None
@@ -2166,12 +2170,18 @@ def disputes_record(arguments):
                       'evidence': ' '.join(evidence.split()), 'answer': ' '.join(reason.split()),
                       'date': now()})
     records += added
+    rendered = render_disputes(records, inherited) if records else actual
+    if check:
+        if added or rendered != actual:
+            fail(f'{len(added)} dispute record(s) to add; .ai/reviews/disputes.md would change.')
+        print(0)
+        return
     if added:
         path = disputes_store()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
-    if records:
-        atomic(DISPUTES, render_disputes(records, inherited))
+    if rendered != actual:
+        atomic(DISPUTES, rendered)
     print(len(added))
 
 

@@ -6547,9 +6547,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.assertIn('Start from a clean checkpoint', result.stderr)
                 self.assertEqual((self.git_head(), self.subjects_now(), self.sessions_run()), (head, subjects, 1))
 
-    def recheck_settled(self):
+    def recheck_settled(self, answer=None):
         # Review triaged with M1 accepted (fix task T002) and M2 rejected; the re-check upheld M2
-        # and is verified and committed (its dispute is recorded by the pipeline's start).
+        # (or ANSWER) and is verified and committed (its dispute is recorded by the pipeline's start).
         self.tool('ai-run', '--approved')
         self.tool('ai-review', '--base', 'main', MOCK_CODEX='two-major-once')
         self.commit('record review')
@@ -6561,7 +6561,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         queue = self.project / '.ai/tasks.md'
         queue.write_text(queue.read_text().rstrip('\n') + '\n\n' + task('T002'))
         self.commit('record triage')
-        self.tool('ai-review', '--recheck', MOCK_RECHECK=self.UPHELD_M2)
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=answer or self.UPHELD_M2)
         self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
 
     def test_limit_relaunch_preserved_settled_recheck_resumes(self):
@@ -6826,6 +6826,196 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(self.recovery_calls()), 1)
         self.assertNotIn('stopped on the preserved work', notes)
         self.assertEqual(self.git_head(), head)  # nothing committed by the runner
+
+    # ------------------------- armed-tree acceptance: a matrix of resume-path states (T015)
+    # Listed by name, not repeated here: the stale plan review after a committed partial checkpoint
+    # (test_limit_relaunch_reenter_partial_checkpoint_*), the bound task DONE in HEAD with trailing
+    # edits (test_limit_relaunch_preserved_done_committed_work_is_checkpointed), a failing gate
+    # after the disarm (test_limit_relaunch_preserved_done_work_failing_validation_commits_nothing),
+    # the consumer's own stops (test_limit_relaunch_consume_*).
+    REFUSALS = ('Re-check of rejected findings', 'Start from a clean checkpoint')
+    WITHDRAWN_M2 = json.dumps({'answers': [{'id': 'M2', 'verdict': 'withdrawn', 'reason': 'the gate covers it'}]})
+
+    def assert_accepted(self, result, scheduled, task_id='T001'):
+        # The admitted resume: completed, the arm consumed once, no refusal anywhere, and nothing
+        # committed between the scheduled HEAD (or the relaunch's stop record) and the task's own
+        # checkpoint.
+        self.assert_preserved_completed(result, task_id)
+        local = self.project / '.ai/local'
+        texts = [self.notifications(), (self.project / '.ai/run-log.md').read_text(), result.stdout, result.stderr]
+        texts += [path.read_text() for path in (local / 'last-error', local / 'observation.json') if path.exists()]
+        for text in texts:
+            for refusal in self.REFUSALS:
+                self.assertNotIn(refusal, text)
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--first-parent', '--format=%s',
+                                 f'{scheduled}..HEAD']).stdout.splitlines()
+        if subjects[0] == 'chore(ai): record stop during usage limit relaunch':
+            subjects = subjects[1:]
+        self.assertIn(subjects[0], {f'implement {task_id}', self.UNCOMMITTED.format(task_id)})
+
+    def accept_recheck(self, answer, disputes):
+        # The reviewer's scenario (round 4 P3): M1 accepted (fix task T002), M2 rejected, the
+        # re-check settled and recorded by reconcile_disputes, the limit during T002's session.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=lambda: self.recheck_settled(answer))
+        self.commit_of('chore(ai): record review re-check')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        tracked = self.run_cmd(['git', 'ls-files', '--', '.ai/reviews/disputes.md']).stdout.strip()
+        self.assertEqual(bool(tracked), disputes)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'IN_PROGRESS')
+        scheduled, reviews = self.git_head(), self.review_commits()
+        result = self.relaunch()
+        self.assert_accepted(result, scheduled, 'T002')
+        # The checkpointed fix got its own review, then the run finished.
+        self.assertGreater(self.review_commits(), reviews)
+        self.assert_order('implement T002', 'chore(ai): record independent review')
+        self.assertEqual(self.helper('disputes-verify').stdout.strip(), '1' if disputes else '0')
+
+    def review_commits(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines().count(
+            'chore(ai): record independent review')
+
+    def test_limit_relaunch_accept_reviewer_scenario_verified_with_disputes(self):
+        self.accept_recheck(self.UPHELD_M2, disputes=True)
+
+    def test_limit_relaunch_accept_verified_without_disputes(self):
+        # Every rejection withdrawn on re-check: verified, no disputes file.
+        self.accept_recheck(self.WITHDRAWN_M2, disputes=False)
+
+    def test_limit_relaunch_accept_recheck_status_none(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'none')
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+
+    def accept_untouched_queue(self, *args):
+        # limit-far-keep: the session edited source (preserved.txt) but not .ai/tasks.md, so the
+        # queue is `tasks untouched` and the plan review current; the loop is not entered (T016).
+        self.limit_relaunch_scheduled(mode='limit-far-keep', args=args)
+        self.helper('tasks', 'untouched')
+        self.assertNotIn('.ai/tasks.md', self.porcelain())
+        self.assertIn('preserved.txt', self.porcelain())
+        scheduled, plans, plan_commits = self.git_head(), self.plan_calls(), self.plan_review_commits()
+        result = self.relaunch()
+        self.assert_accepted(result, scheduled)
+        self.assertEqual((self.plan_calls(), self.plan_review_commits()), (plans, plan_commits))
+        self.assertEqual(self.sessions_run(), 2)
+        return plans
+
+    def test_limit_relaunch_accept_untouched_queue_with_plan_review(self):
+        self.assertEqual(self.accept_untouched_queue(), 1)
+
+    def test_limit_relaunch_accept_untouched_queue_with_skip_plan_review(self):
+        self.assertEqual(self.accept_untouched_queue('--skip-plan-review'), 0)
+
+    def test_limit_relaunch_accept_tasks_complete(self):
+        # `tasks complete` true on the armed tree: ai-pipeline still runs ai-run, which consumes it.
+        self.limit_relaunch_scheduled(mode='limit-far-done')
+        self.helper('tasks', 'complete')
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_accept_tasks_not_complete(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'))
+        self.helper('tasks', 'complete', expected=1)
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+        self.assertEqual(self.sessions_run(), 2)
+
+    def refused_review_records(self, plant, recovery, **env):
+        # An inconsistent review record on the armed tree: the run stops before any write, the
+        # tree exactly the armed one (limit-armed still matches), nothing committed, no session.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled, **env)
+        plant()
+        head = self.git_head()
+        names = ('preserved.txt', '.ai/tasks.md', '.ai/run-log.md', '.ai/reviews/recheck.md')
+        contents = {self.project / name: (self.project / name).read_bytes() for name in names}
+        message = 'preserved task work carries uncommitted review records'
+        if recovery:
+            self.relaunch(expected=1, MOCK_RECOVER='commit_and_rerun')
+            self.assert_terminal_armed(message, head, contents, task_id='T002')
+        else:
+            self.armed_resume(expected=1)
+            self.assert_armed_stop(message, head, contents, sessions=2)
+            self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('Re-check of rejected findings', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.sessions_run(), 2)
+        self.helper('run-manifest', 'limit-armed')
+
+    def drop_recheck_binding(self):
+        # Host state only (limit-verify still passes): the committed re-check no longer verifies.
+        for binding in (self.base / 'host-state').rglob('recheck-*.sha256'):
+            binding.unlink()
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+
+    def test_limit_relaunch_accept_pending_recheck_fails_closed(self):
+        self.refused_review_records(self.drop_recheck_binding, recovery=False)
+
+    def test_limit_relaunch_accept_pending_recheck_fails_closed_with_recovery_on(self):
+        self.refused_review_records(self.drop_recheck_binding, recovery=True)
+
+    def dirty_recheck(self):
+        # Planted by the limited session (MOCK_LIMIT_APPEND), so the scheduled digest includes it.
+        self.assertIn('.ai/reviews/recheck.md', self.porcelain())
+
+    def test_limit_relaunch_accept_uncommitted_recheck_fails_closed(self):
+        self.refused_review_records(self.dirty_recheck, recovery=False, MOCK_LIMIT_APPEND='.ai/reviews/recheck.md')
+
+    def test_limit_relaunch_accept_uncommitted_recheck_fails_closed_with_recovery_on(self):
+        self.refused_review_records(self.dirty_recheck, recovery=True, MOCK_LIMIT_APPEND='.ai/reviews/recheck.md')
+
+    def test_limit_relaunch_accept_unrecorded_dispute_fails_closed(self):
+        # A verified re-check whose upheld dispute the host would have to (re)write: lost host
+        # dispute records. Admitted only with nothing to record, so it stops before disputes-record.
+        def lose_dispute_records():
+            for store in (self.base / 'host-state').rglob('disputes-*.json'):
+                store.unlink()
+            self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+            self.helper('disputes-record', '--check', expected=1)
+        self.refused_review_records(lose_dispute_records, recovery=False)
+        self.assertTrue((self.project / '.ai/reviews/disputes.md').exists())
+
+    def test_limit_relaunch_accept_disputes_record_check_writes_nothing(self):
+        self.ready()
+        self.recheck_settled()
+        self.helper('disputes-record', '--check', expected=1)  # D1 to add
+        self.assertFalse((self.project / '.ai/reviews/disputes.md').exists())
+        self.assertEqual(list((self.base / 'host-state').rglob('disputes-*.json')), [])
+        self.assertEqual(self.helper('disputes-record').stdout.strip(), '1')
+        written = (self.project / '.ai/reviews/disputes.md').stat().st_mtime_ns
+        self.assertEqual(self.helper('disputes-record', '--check').stdout.strip(), '0')
+        self.assertEqual(self.helper('disputes-record').stdout.strip(), '0')
+        # Nothing to record: the file is not rewritten either.
+        self.assertEqual((self.project / '.ai/reviews/disputes.md').stat().st_mtime_ns, written)
+        self.helper('disputes-record', '--bogus', expected=1)
+
+    def test_limit_relaunch_accept_consumer_stop_writes_no_tracked_file(self):
+        # ai-run's stop handler logs no run-log line while armed: the tree stays the armed one.
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:DONE')
+        log = (self.project / '.ai/run-log.md').read_bytes()
+        self.armed_resume(expected=1)
+        self.assertIn('Preserved work marks another task DONE', self.notifications())
+        self.assertEqual((self.project / '.ai/run-log.md').read_bytes(), log)
+        self.helper('run-manifest', 'limit-armed')
+
+    def test_limit_relaunch_accept_one_predicate_and_one_consumer(self):
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            with self.subTest(root=str(root)):
+                self.assertEqual((root / 'ai-run').read_text().count('limit-disarm'), 1)
+                common = (root / 'lib/common.sh').read_text()
+                for name in ('armed_resume() {', 'clean_or_armed() {'):
+                    self.assertEqual(common.count(name), 1)
+                    for script in ('ai-pipeline', 'ai-run', 'ai-recover'):
+                        self.assertNotIn(name, (root / script).read_text())
+                pipeline = (root / 'ai-pipeline').read_text()
+                # Every clean-checkout test before ai-run's call goes through the predicate.
+                before = pipeline[:pipeline.index('"$AI_BIN/ai-run" --approved "${run_args[@]}"')]
+                code = [line for line in before.splitlines() if not line.lstrip().startswith('#')]
+                # The start check and both tests of reconcile_disputes.
+                self.assertEqual(sum('clean_or_armed' in line for line in code), 3)
+                self.assertIn('Armed-tree acceptance contract', before)
 
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()

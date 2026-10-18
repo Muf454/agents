@@ -88,7 +88,8 @@ the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notificat
 relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
 continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
-stop while armed is terminal; T019: "checks first, then the arm ends"). Still to be updated by T015 (limit relaunch), T006 (`ai-plan`), T007 (outcome log bullet)
+stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
+every start check of the resumed run"). Still to be updated by T006 (`ai-plan`), T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -124,7 +125,7 @@ the task named).
 - `test_limit_relaunch_reenter_*` (T016: the arm is granted only for an implementation stop; an armed resume skips the plan review loop, so a committed partial checkpoint with a stale plan review completes without a plan review or recovery decision; a clean resume still re-reviews; a needs-human plan decision still stops).
 - `test_limit_relaunch_terminal_*` (T018: a stop of the resumed run while the tree is armed is one ⛔ with nothing committed and no recovery decision session, also with auto-recovery on; the relaunch itself and stops after the disarm are unaffected).
 - `test_limit_relaunch_consume_*` (T019: ai-run's own checks of the preserved work, another task newly DONE, a wrong next task, a blocked or unknown bound task, a failing dependency setup, stop terminal with auto-recovery on and the arm retained; the disarm is the last statement before the checkpoint or the session).
-- `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state, accepted-plus-rejected findings with a verified re-check included, commits nothing before ai-run consumes the arm, and fails closed on inconsistent review records).
+- `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
 - `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
@@ -149,5 +150,7 @@ STAGE` records `limit_stage`; `limit-arm` arms only an `implementation` stop; ai
 the plan review loop while armed. T018: ai-recover is terminal while `limit_resume` exists (one
 ⛔ with the stop's reason, no decision session, nothing committed, arm kept). T019: audited
 ai-run's consumer (every check armed, `limit-disarm` last before the act; no code change) and
-pinned it with `test_limit_relaunch_consume_*`. Next: the queue's
-next task.
+pinned it with `test_limit_relaunch_consume_*`. T015: the armed-tree acceptance contract (comment
+block before ai-pipeline's start check), `armed_resume`/`clean_or_armed` shared in
+`lib/common.sh`, no tracked write while armed (ai-run's stop handler, `disputes-record --check`),
+the `test_limit_relaunch_accept_*` matrix. Next: the queue's next task.

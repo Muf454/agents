@@ -255,6 +255,24 @@ schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exit
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch
 accepts"). No infinite loop, boot startup, or monetary spending guarantee is added.
+
+**What the resumed run does with preserved work.** When the limited session left uncommitted
+task work, the relaunch arms it (`limit_resume`) and the resumed `ai-pipeline` and `ai-run`
+accept exactly that tree through one predicate, `clean_or_armed` (`scripts/lib/common.sh`: a
+clean `git status`, or a resume whose checkout `run-manifest limit-armed` finds equal to the
+arm with no stage open), at every clean-checkout check up to ai-run's `limit-disarm`. A settled
+re-check (status `none`, or `verified` with or without recorded disputes) does not block the
+resume, and neither does a plan review the run already passed: the armed resume re-enters at
+implementation. Nothing is committed and no tracked file is written before ai-run validates:
+the disarm is the last statement before the armed checkpoint (full `ai-check`) or the bound
+task's session, and after it the normal rules apply. Inconsistent review records on the armed
+tree (a `pending` re-check, an uncommitted re-check report or dispute file, a dispute the host
+would still have to record) fail closed with `Re-check of rejected findings: preserved task
+work carries uncommitted review records; inspect them.`: one ⛔, nothing committed, the arm and
+the tree kept, also with auto-recovery on. The contract is the comment block before
+ai-pipeline's start check and is tested as a matrix of resume-path states
+(`test_limit_relaunch_accept_*`; details under "How the resumed run continues preserved work"
+in the recovery contract).
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
@@ -777,10 +795,13 @@ finding HEAD and the tree digest equal to `limit_resume`). It stands at every cl
 check between the resume and ai-run's first act: ai-pipeline's start, both tests of the dispute
 reconciliation and ai-run's start. A human `ai-pipeline --approved` is never a resume, so it
 refuses a dirty tree with `Start from a clean checkpoint` as before (and its `run-manifest
-start` drops the arm). While armed the host writes nothing: a pending re-check or an
-uncommitted `.ai/reviews/recheck.md`, `disputes.md` or `fallback-log.md` stops before the
-re-check or commit (`Re-check of rejected findings: preserved task work carries uncommitted
-review records; inspect them.`), and the plan-revision queue repair is skipped. The armed
+start` drops the arm). While armed the host writes nothing: a pending re-check, an
+uncommitted `.ai/reviews/recheck.md`, `disputes.md` or `fallback-log.md`, or a verified
+re-check whose dispute records the host would still have to write (`workflow.py
+disputes-record --check`, which writes nothing and fails unless a real call would write nothing
+either) stops before the re-check or commit (`Re-check of rejected findings: preserved task work
+carries uncommitted review records; inspect them.`), the plan-revision queue repair is skipped,
+and ai-run's stop handler appends no run-log line until the disarm. The armed
 resume re-enters the run at implementation: the plan review loop is not entered while armed
 (the arm exists only after an implementation stop, so this run already passed the plan-approval
 boundary; a partial checkpoint the limited session committed makes the saved plan review stale,
