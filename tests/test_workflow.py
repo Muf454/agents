@@ -3440,6 +3440,47 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Objective from a subdirectory.', self.plan_prompt())
 
+    def test_plan_read_dir_adds_read_only_directories(self):
+        self.plan_ready()
+        research, plans = self.base / 'research', self.base / 'real-plans'
+        research.mkdir()
+        plans.mkdir()
+        (self.base / 'plans-link').symlink_to(plans)
+        self.plan('--read-dir', str(research), '--read-dir', str(self.base / 'plans-link'))
+        args = self.plan_args()[0]
+        resolved = [os.path.realpath(research), os.path.realpath(plans)]
+        added = [args[i + 1] for i, arg in enumerate(args) if arg == '--add-dir']
+        self.assertEqual(added, resolved)
+        start = args.index('--allowedTools') + 1
+        end = next(i for i in range(start, len(args)) if args[i].startswith('--'))
+        allowed = args[start:end]
+        base_allowed = self.helper('plan-allowlist').stdout.splitlines()
+        self.assertEqual(allowed, base_allowed + [f'Read(/{path}/**)' for path in resolved])
+        extra = [entry for entry in allowed if entry not in base_allowed]
+        self.assertFalse(any(entry.startswith(('Edit(', 'Write(')) for entry in extra))
+        prompt = self.plan_prompt()
+        self.assertIn(f'Read-only reference directories: {resolved[0]}, {resolved[1]}. '
+                      'Read them as needed; never edit them.', prompt)
+
+    def test_plan_read_dir_invalid_paths_run_no_session(self):
+        self.plan_ready()
+        invalid = ('star*dir', 'comma,dir', 'paren(dir', 'mark?dir', 'bracket]dir', 'line\ndir')
+        for name in invalid:
+            (self.base / name).mkdir()
+        cases = [(str(self.base / 'missing'), 'Read directory not found')]
+        cases += [(str(self.base / name), 'Invalid --read-dir path') for name in invalid]
+        for path, error in cases:
+            with self.subTest(path=path):
+                self.assertIn(error, self.plan('--read-dir', path, expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+
+    def test_plan_read_dir_refused_outside_plan(self):
+        self.plan_ready()
+        result = self.tool('ai-run', '--approved', '--read-dir', str(self.base), expected=1)
+        self.assertIn('--read-dir only applies to --plan.', result.stderr)
+        self.assertEqual(self.plan_args(), [])
+
     def test_plan_session_invalid_queue_stops_and_keeps_the_file(self):
         self.plan_ready()
         result = self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')

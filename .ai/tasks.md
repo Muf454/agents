@@ -1751,7 +1751,7 @@ tests). docs/workflow.md updated. Vault flow chart mentions the dashboard once, 
 
 
 ## T005 — `ai-run --plan --read-dir DIR`: read-only reference directories for the planning session (DB-04)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -1793,6 +1793,17 @@ Targeted: `python3 -m unittest discover -s tests -k queue_repair_planning` (must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-18. `scripts/ai-run`: `--read-dir DIR` (repeatable) parsed beside `--knowledge-dir`
+(existing dir, `pwd -P`, refuses `*?[]()`, `,`, newline with `Invalid --read-dir path: …`;
+missing → `Read directory not found: …`); refused without `--plan`. The plan block appends
+`--add-dir DIR` to `knowledge_args` and `Read(//DIR/**)` to `plan_allowed`, and the contract
+sentence `Read-only reference directories: …. Read them as needed; never edit them.`; no
+Edit/Write entry. Usage text and docs/workflow.md "Plan stage" updated. Tests
+`test_plan_read_dir_adds_read_only_directories` (symlinked dir resolved, exact allowlist =
+plan-allowlist + Read entries, prompt names both), `test_plan_read_dir_invalid_paths_run_no_session`
+(missing, `*`, `,`, `(`, `?`, `]`, newline; no mock call), `test_plan_read_dir_refused_outside_plan`.
+Evidence: `-k plan_read_dir` Ran 3 OK; `-k queue_repair_planning` Ran 4 OK; `-k plan_session`
+Ran 12 OK; `.ai/bin/ai-check` Ran 926 tests OK. Flow chart unchanged (T006 owns the plan node).
 
 
 ## T013 — `workflow.py exec-logged`: a detached runner's log created exclusively in the pinned `.ai/local` (DB-04, plan review round 2 P8)

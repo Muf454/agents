@@ -129,7 +129,7 @@ the task named).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
 - `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
+- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos

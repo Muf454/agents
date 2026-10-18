@@ -279,7 +279,7 @@ with the same care as other local transcripts.
 
 ## Plan stage (`ai-run --plan`)
 
-`ai-run --plan PROMPT_FILE [--revision]` writes the plan in one headless Claude session before
+`ai-run --plan PROMPT_FILE [--revision] [--read-dir DIR]...` writes the plan in one headless Claude session before
 any pipeline runs. The prompt file is resolved when the arguments are parsed (a missing,
 unreadable, non-regular or larger than 200 KB file stops before anything else). The run refuses
 `AI_PIPELINE`, `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions` and `--run-timeout`
@@ -299,6 +299,15 @@ objective and a `PLANNING CONTRACT`; its tools are `Read,Glob,Grep,Edit,Write` a
 limit pauses on the `planning` stage and resumes. Just before the session the host copies the
 working-tree `.ai/tasks.md` to a `mktemp` baseline under `$TMPDIR` (outside the checkout and
 the planner's allowlist; removed by the exit handler).
+
+`--read-dir DIR` (repeatable, `--plan` only; elsewhere `--read-dir only applies to --plan.`)
+gives the session read-only reference directories such as plans or research. Each must exist
+(`Read directory not found: …`) and is resolved with `pwd -P`; a resolved path containing `*`,
+`?`, `[`, `]`, `(`, `)`, `,` or a newline stops with `Invalid --read-dir path: …` before any
+session. Each directory adds `--add-dir DIR` (beside the knowledge base's) and the allow entry
+`Read(//DIR/**)` (Claude Code's absolute form); no Edit or Write entry is added, so
+`plan-scope` is unchanged. The contract names them: `Read-only reference directories: <list>.
+Read them as needed; never edit them.` `--knowledge-dir` stays the knowledge base option.
 
 After the session: gate verified, branch unchanged, `plan-scope START` (the run log is also
 allowed, for the exit handler's stop line), `plan-keeps-done START --baseline <copy>` (every
