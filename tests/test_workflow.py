@@ -319,7 +319,8 @@ if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
     # Preserved work of a session stopped at the far limit: its task IN_PROGRESS (-dirty), DONE
     # (-done, -done-committed: committed with preserved.txt, then preserved-after.txt edited) or
     # unchanged (-keep); MOCK_LIMIT_ALSO="T002:DONE ..." sets more statuses, MOCK_EXTRA_FILE is
-    # rewritten, MOCK_LIMIT_APPEND gets one more line.
+    # rewritten, MOCK_LIMIT_APPEND gets one more line, MOCK_LIMIT_RENAME="T001:T009" renames a
+    # task's heading.
     task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
     def set_status(text, tid, status):
         start = text.index('## ' + tid + ' —')
@@ -334,6 +335,9 @@ if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
         text = set_status(text, task_id, own)
     for item in os.environ.get('MOCK_LIMIT_ALSO', '').split():
         text = set_status(text, *item.split(':'))
+    if os.environ.get('MOCK_LIMIT_RENAME'):
+        old, new = os.environ['MOCK_LIMIT_RENAME'].split(':')
+        text = text.replace('## ' + old + ' —', '## ' + new + ' —')
     queue.write_text(text)
     pathlib.Path('preserved.txt').write_text('preserved work of ' + task_id + '\n')
     if os.environ.get('MOCK_EXTRA_FILE'):
@@ -6723,6 +6727,105 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_limit_relaunch_preserved_done_committed_work_failed_dependency_setup_commits_nothing(self):
         self.deps_failed_before_the_checkpoint('limit-far-done-committed')
+
+    # --------------------- the arm ends at the act: consumer checks run armed (T019)
+    CONSUME = dict(AI_AUTO_RECOVER='1', MOCK_RECOVER='commit_and_rerun')
+
+    def consume_stopped(self, message, names=('preserved.txt', '.ai/tasks.md'), **env):
+        # The relaunch with auto-recovery on stops in ai-run's consumer while armed: T018's
+        # terminal ⛔ with MESSAGE, nothing committed, no recovery decision, the arm kept.
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes() for name in names}
+        result = self.relaunch(expected=1, **self.CONSUME, **env)
+        self.assert_terminal_armed(message, head, contents)
+        self.assertNotIn(self.RESUMING.format('T001'), result.stdout + result.stderr)
+        self.assertNotIn('checkpoint T001', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_consume_another_task_done_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:DONE')
+        self.consume_stopped('Preserved work marks another task DONE; inspect it before continuing')
+
+    def test_limit_relaunch_consume_next_task_is_another_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:IN_PROGRESS')
+        self.consume_stopped('Preserved work belongs to T001, but the next task is T002; inspect the queue')
+
+    def test_limit_relaunch_consume_blocked_task_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', MOCK_LIMIT_ALSO='T001:BLOCKED')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.consume_stopped('Blocked task was not checkpointed; inspect and commit before resuming')
+
+    def test_limit_relaunch_consume_task_missing_from_the_queue_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', MOCK_LIMIT_RENAME='T001:T009')
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        self.consume_stopped('Preserved work belongs to T001, which is not in the task queue; inspect the queue')
+
+    def test_limit_relaunch_consume_failed_dependency_setup_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', prepare=self.deps_preserved, MOCK_DEPS='fail-later',
+                                      MOCK_REQUIRE='vendor-deps/deps.lock', MOCK_EXTRA_FILE='deps.lock')
+        self.consume_stopped('Dependency setup', names=('preserved.txt', 'deps.lock', '.ai/tasks.md'),
+                             MOCK_DEPS='fail-later')
+
+    def test_limit_relaunch_consume_disarm_is_the_last_statement_before_the_act(self):
+        # From the single limit-disarm call to each act, only the loop head's re-checks and the
+        # iteration-1 session limit may stop. The loop's `none` branch is skipped: the session
+        # route reaches the loop only after `tasks next` printed the bound task under the lock.
+        allowed = {'ai_guard_verify', 'ai_branch', 'ai_helper tasks check',
+                   'active_task=$(ai_helper tasks next)',
+                   "(( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun "
+                   "--approved to continue.'"}
+        stops = re.compile(r'\bai_die\b|\bexit\b|git commit|claude_session')
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            raw = (root / 'ai-run').read_text().splitlines()
+            disarm = next(i for i, line in enumerate(raw) if 'limit-disarm' in line)
+            for act in ('checkpoint_done "$bound"', 'claude_session "$prompt" "${task_model:-$model}"'):
+                with self.subTest(root=str(root), act=act):
+                    end = next(i for i in range(disarm, len(raw)) if raw[i].strip().startswith(act))
+                    skip_until = None
+                    for number in range(disarm + 1, end):
+                        line = raw[number].strip()
+                        if skip_until is not None:
+                            skip_until = None if raw[number] == skip_until else skip_until
+                        elif line == 'if [[ "$active_task" == none ]]; then':
+                            skip_until = raw[number][:len(raw[number]) - len(raw[number].lstrip())] + 'fi'
+                        elif not line.startswith('#') and line not in allowed:
+                            code = re.sub(r"'[^']*'", "''", line)  # quoted text (the prompt) is not a statement
+                            self.assertIsNone(stops.search(code), f'ai-run line {number + 1}: {line}')
+                    self.assertIsNone(skip_until)
+
+    def test_limit_relaunch_consume_control_in_progress_work_with_recovery_on(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assert_preserved_completed(self.relaunch(**self.CONSUME))
+
+    def test_limit_relaunch_consume_control_done_work_with_recovery_on(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done')
+        self.assert_preserved_completed(self.relaunch(**self.CONSUME))
+
+    def test_limit_relaunch_consume_control_incomplete_session_recovers_normally(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.relaunch(expected=1, MOCK_CLAUDE='no-progress', AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', self.notifications())
+
+    def test_limit_relaunch_consume_control_failing_validation_recovers_normally(self):
+        def failing_on_preserved_work():
+            (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
+                                                       '[[ ! -e preserved.txt ]]\n')
+            self.commit('a gate the preserved work fails')
+        self.limit_relaunch_scheduled(mode='limit-far-done', prepare=failing_on_preserved_work)
+        head = self.git_head()
+        self.relaunch(expected=1, AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        notes = self.notifications()
+        self.assertIn('Validation failed; T001 returned to IN_PROGRESS.', notes)
+        self.assertNotIn('limit_resume', self.manifest())  # the act had started
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', notes)
+        self.assertEqual(self.git_head(), head)  # nothing committed by the runner
 
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
