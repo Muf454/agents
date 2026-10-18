@@ -1632,7 +1632,57 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done (the first session hit the 1800 s limit; its work was kept by the recovery checkpoint
+0e4f7ea and reconciled here without code change).
 
+Audit of the resume path (`AI_RECOVERY_ATTEMPT` set, no open stage):
+- ai-pipeline, start → `ai-run --approved` call. (a) clean-checkout tests: the start check
+  (`clean_or_armed`); `reconcile_disputes`' two tests (non-verified dirty tree, and "clean after
+  recording it"), both `clean_or_armed`. The open-stage checks (`complete_plan_stage`,
+  `complete_stage`) and the plan revision loop's check are not on the path (no open stage; loop
+  guarded). `publish_ready`, the post-ai-run checks stay untouched. (b) commits/tracked writes:
+  `reconcile_disputes`' `disputes-record` and `host_commit`: fail closed first (pending re-check,
+  dirty `recheck.md`/`disputes.md`/`fallback-log.md`, or `disputes-record --check` failing on a
+  verified re-check → `recheck_fail`, terminal by rule 6, ai-recover's armed check); otherwise
+  nothing is added and nothing dirty, so no commit. `revision-queue-repair` and the plan review
+  loop's `host_commit`/stage-set: `! armed_resume` in their entry conditions (T016). `run-manifest
+  start` only for a human start; `fix-rounds init`, `pipeline-register`, notifications write host
+  state or ignored `.ai/local` only. (c) sessions/reviews: `ai-review --recheck` only for
+  `pending` (refused armed above), `ai-review --plan` and the plan revision session inside the
+  guarded loop; the first is ai-run's, after the disarm. Stage order matches the plan note:
+  start checks → `reconcile_disputes` → `base_reached` → `plan_decision_check` → queue check →
+  `plan_decision_check` → implementation (`tasks complete || armed_resume` → ai-run).
+- ai-run, start → first `claude_session`. (a) the start check (`clean_or_armed`, sets
+  `AI_ARMED=yes`). (b) `outcome attempt-reconcile` (host), `approved-gate.sha256` (ignored),
+  the stop handler's `ai_log` (now skipped while `AI_ARMED=yes`: was a tracked run-log write on a
+  consumer stop), dependency setup (`ai_deps`, rule 7). The first tracked write is
+  `checkpoint_done`'s or the loop's `ai_helper state implementing`, both after `limit-disarm`.
+  (c) the first session is after `limit-disarm` (single call site, rule 8).
+- `clean_or_armed`/`armed_resume` now live once in `scripts/lib/common.sh`, shared unchanged by
+  both scripts (`AI_ARMED` set by the predicate, reset to `no` on load, `consumed` after the
+  disarm). `disputes-record --check` (workflow.py) writes nothing and fails unless a real call
+  would write nothing; a real call no longer rewrites an unchanged `disputes.md`.
+- Contract comment block (rules 1–8 + the extension rule) before ai-pipeline's start check.
+
+Matrix (`test_limit_relaunch_accept_*`, 15 tests): reviewer scenario (M1 accepted → T002, M2
+rejected, re-check upheld and recorded, T002 limited, resumed, reviewed, finished, `--no-pr`);
+status `none`; `verified` without disputes (fixture: M2 `withdrawn` on re-check, no
+`disputes.md`); untouched queue with plan review on and `--skip-plan-review` (mock mode
+`limit-far-keep`: edits `preserved.txt`, not `.ai/tasks.md`; plan reviewer not invoked, no plan
+review commit); `tasks complete` true/false; fail closed: `pending` via a host-only removal of the
+re-check binding (`limit-verify` still passes) and an uncommitted `recheck.md` planted by the
+limited session (`MOCK_LIMIT_APPEND`), each with recovery off and on (`MOCK_RECOVER=commit_and_rerun`:
+terminal, no recovery call/commit); lost host dispute records; `disputes-record --check` writes
+nothing; a consumer stop writes no run-log line; one predicate (in `lib/common.sh`, three uses in
+ai-pipeline before ai-run) and one `limit-disarm` (script and installed copy). Listed by name, not
+repeated: `test_limit_relaunch_reenter_partial_checkpoint_*` (stale plan review),
+`test_limit_relaunch_preserved_done_committed_work_is_checkpointed` (DONE in HEAD with trailing
+edits), `test_limit_relaunch_preserved_done_work_failing_validation_commits_nothing` (failing
+gate after the disarm), `test_limit_relaunch_consume_*` (consumer stops).
+
+Docs: docs/workflow.md "What the resumed run does with preserved work" and the recovery
+contract; README "Recovery"; vault flow chart node ("through every start check of the resumed
+run").
 
 ## T004 — Dashboard: a run waiting for its limit relaunch shows paused; a killed planning session shows as a stop (MC-01, DB-04)
 Status: TODO
