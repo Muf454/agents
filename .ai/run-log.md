@@ -417,3 +417,4 @@
 | 2026-10-18T00:07:56Z | runner | T016 | completed | PASS | acd30a9 | Claude checkpointed; continuing queue |
 | 2026-10-18T00:37:57Z | runner | T018 | stopped (exit 1); inspect state/diff before resuming | see local logs | 87ab43f | No merge or deployment performed |
 | 2026-10-18T01:00:07Z | claude (opus) | T018 | DONE: reconciled WIP 5a25637 (no code change needed): ai-recover escalates while `limit_resume` exists (one ⛔ with the stop's reason, no decision, nothing committed, arm kept), before every other rule; ai-run startup-order audit found no defect; 5 `test_limit_relaunch_terminal_*` tests; docs/workflow.md, README | PASS (ai-check 892 tests, 536.8 s; -k limit_relaunch_terminal 5 OK; -k limit_relaunch 75 OK; -k recovery 68 OK) | parent 6a62c3b | First session hit the 1800 s limit |
+| 2026-10-18T01:09:07Z | runner | T018 | completed | PASS | 46f5170 | Claude checkpointed; continuing queue |
