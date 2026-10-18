@@ -1387,7 +1387,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T019 — The arm ends at the act: every consumer check runs armed, the disarm is the last statement before the checkpoint or the session (MC-01 part 1, plan review round 8 P16 design task)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T011, T018
 Model: opus
 
@@ -1483,6 +1483,27 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- Audit: T011 already implemented the planned order in `scripts/ai-run` (limit-task → newly-done
+  → deps → route → loop-head re-checks → single `limit-disarm` → Resuming line, task-clear → act).
+  Nothing was after the disarm, so no code move was needed and `scripts/ai-run` is unchanged.
+- 10 `test_limit_relaunch_consume_*` tests (all with `AI_AUTO_RECOVER=1`; the stops also use
+  `MOCK_RECOVER=commit_and_rerun`): another task newly DONE, next task not the bound one, bound
+  task BLOCKED (`MOCK_LIMIT_ALSO=T001:BLOCKED`), bound ID missing from the queue (new mock
+  `MOCK_LIMIT_RENAME=T001:T009` renames the heading before the limit, so it is in the digest), and
+  dependency setup `fail-later`. Each is T018's terminal ⛔ via `assert_terminal_armed`, with no
+  Resuming line, no `checkpoint T001` commit and one session. The span test covers `scripts/ai-run`
+  and the installed copy. Controls: in-progress and done happy paths; an incomplete session
+  and failing validation of the armed checkpoint both take normal recovery (`MOCK_RECOVER=escalate`
+  so the control has one decision and no commit; the arm is gone).
+- Span test deviation: the text between the disarm and the first `claude_session` includes the
+  loop's `active_task == none` branch (final validation, `ai_die`, `exit 0`). The test skips that
+  block: the session route reaches the loop only after `tasks next` printed the bound task under
+  the lock. Quoted text (the runner prompt mentions `git commit`) is ignored.
+- Mutation: moving `limit-disarm` to just after the `limit-task` read fails all five terminal
+  cases and all four span subtests. Reverted.
+- Docs: docs/workflow.md (one sentence), README "Recovery" (half sentence), vault flow chart
+  ("checks first, then the arm ends"), hub log.
+- Validation: `-k limit_relaunch_consume` 10 OK; `-k limit_relaunch` 85 OK.
 
 
 ## T015 — Armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed (MC-01 part 1, plan review round 4 P3 design task)
