@@ -250,7 +250,12 @@ the digest itself and copies the run's `task` record into `limit_task`,
 `limit-armed`, `limit-task`, `limit-disarm`, `limit-count`; schedule, hold and claim give back
 the attempt `ai-recover` reserved; a human start and `clear-attempts` drop them, and the `task`
 record too; cap
-`AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+`AI_LIMIT_RELAUNCH_MAX`). `run-manifest task` prints the recorded `task` (exit 1 silently when
+there is none). The optional `timeout_reruns` (unique task IDs, at most 200; any other shape
+invalidates the manifest) holds the tasks whose timed-out session was committed and rerun once:
+`run-manifest timeout-rerun ID` appends ID, or fails `session timeout: ID was already committed
+and rerun once in this run` and writes nothing. A human start drops the list; `clear-attempts`
+keeps it, so a resumed pipeline never resets "once per task". A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch

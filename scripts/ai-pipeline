@@ -86,6 +86,8 @@ printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || ai_observe start
 finish() {
   ai_observe done "${1:-no PR}"
+  # Keeps the manifest's timeout reruns: a pipeline resumed under the same approval must not
+  # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
   ai_drop_marker
   exit 0

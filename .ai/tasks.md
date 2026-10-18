@@ -2537,7 +2537,7 @@ Ran 6 OK; `.ai/bin/ai-check` PASS (974 tests, 608.9 s, finished in the backgroun
 
 
 ## T024 — Run manifest: read the session's task, record a timeout rerun once per task (FL-28 part 2, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -2585,6 +2585,18 @@ Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_record` (must
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- `workflow.py`: `run-manifest task` (read only; exit 1 silently without a record) and
+  `timeout-rerun ID` (usage error unless `task_id_valid`; a repeat fails `session timeout: ID was
+  already committed and rerun once in this run` with the manifest bytes unchanged; else one atomic
+  append). `timeout_reruns_valid` (list, ≤ 200, unique valid IDs) joins the manifest validity
+  check, named in the comment above `LIMIT_FIELDS`. `start` writes a fresh dict (verified by test);
+  `clear-attempts` keeps the field, commented there and at its only caller, `finish()` in
+  `scripts/ai-pipeline`. docs/workflow.md describes both actions and the field. Flow unchanged.
+- Tests: `test_timeout_rerun_manifest_{task_reads_the_recorded_task,once_per_task,
+  kept_on_resume_dropped_on_start,wrong_shape_is_invalid}`.
+- Validation: `-k timeout_rerun_manifest` Ran 4 OK; `-k limit_relaunch_record` Ran 7 OK
+  (unchanged); `-k run_manifest` Ran 4 OK; `.ai/bin/ai-check` PASS (978 tests, 618.6 s; finished in
+  the background past the 600 s tool timeout).
 
 
 ## T025 — ai-recover commits a timed-out IN_PROGRESS task's validated work once and reruns (FL-28 part 2, recovery)

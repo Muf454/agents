@@ -5951,6 +5951,62 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.assertIn('No valid run manifest', invalid.stderr)
                 self.approve_run()
 
+    def timeout_rerun_manifest(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        return next((self.base / 'host-state').rglob('run.json'))
+
+    def test_timeout_rerun_manifest_task_reads_the_recorded_task(self):
+        self.timeout_rerun_manifest()
+        self.assertEqual(self.helper('run-manifest', 'task', expected=1).stdout, '')
+        self.helper('run-manifest', 'task-set', 'T003')
+        self.assertEqual(self.helper('run-manifest', 'task').stdout, 'T003\n')
+        self.helper('run-manifest', 'task', 'T003', expected=1)  # no arguments
+        self.helper('run-manifest', 'task-clear')
+        self.assertEqual(self.helper('run-manifest', 'task', expected=1).stdout, '')
+
+    def test_timeout_rerun_manifest_once_per_task(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'timeout-rerun', 'T003')
+        self.assertEqual(json.loads(path.read_text())['timeout_reruns'], ['T003'])
+        before = path.read_bytes()
+        again = self.helper('run-manifest', 'timeout-rerun', 'T003', expected=1)
+        self.assertIn('session timeout: T003 was already committed and rerun once in this run', again.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'timeout-rerun', 'T004')
+        self.assertEqual(json.loads(path.read_text())['timeout_reruns'], ['T003', 'T004'])
+        before = path.read_bytes()
+        for args in (('bad',), (), ('T005', 'T006')):
+            with self.subTest(args=args):
+                usage = self.helper('run-manifest', 'timeout-rerun', *args, expected=1)
+                self.assertIn('Usage: run-manifest timeout-rerun ID', usage.stderr)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_timeout_rerun_manifest_kept_on_resume_dropped_on_start(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'timeout-rerun', 'T003')
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertEqual(json.loads(path.read_text())['timeout_reruns'], ['T003'])
+        self.helper('run-manifest', 'timeout-rerun', 'T003', expected=1)
+        self.approve_run()
+        self.assertNotIn('timeout_reruns', json.loads(path.read_text()))
+        self.helper('run-manifest', 'timeout-rerun', 'T003')
+
+    def test_timeout_rerun_manifest_wrong_shape_is_invalid(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'timeout-rerun', 'T003')
+        valid = json.loads(path.read_text())
+        many = [f'T{n:03d}' for n in range(201)]
+        for value in ('T003', ['T003', 'T003'], ['x'], [7], {'T003': 1}, None, many):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(dict(valid, timeout_reruns=value)) + '\n')
+                invalid = self.helper('run-manifest', 'gate', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+        path.write_text(json.dumps(dict(valid, timeout_reruns=many[:200])) + '\n')
+        self.helper('run-manifest', 'gate')
+        self.assertIn('too many', self.helper('run-manifest', 'timeout-rerun', 'T999', expected=1).stderr)
+
     def test_limit_relaunch_record_setting_recorded_with_the_run(self):
         self.setup_project()
         self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', 'c' * 64, 'main', '--approved'],

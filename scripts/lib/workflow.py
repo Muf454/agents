@@ -1295,7 +1295,8 @@ def binding_dir():
 
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
 # used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
-# scheduled at and the armed resume binding ({"head", "tree", "task"}).
+# scheduled at and the armed resume binding ({"head", "tree", "task"}). The other optional
+# field, `timeout_reruns`, is checked beside them (timeout_reruns_valid).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
                 'limit_stage', 'limit_resume')
 
@@ -1323,6 +1324,15 @@ def limit_fields_valid(data):
                  or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
                      and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
                      and task_id_valid(resume['task']))))
+
+
+def timeout_reruns_valid(data):
+    """The optional `timeout_reruns` field: the tasks whose timed-out session was committed and
+    rerun in this run, unique valid IDs, at most 200. Any other shape invalidates the manifest,
+    as a wrong limit field does."""
+    reruns = data.get('timeout_reruns', [])
+    return (isinstance(reruns, list) and len(reruns) <= 200
+            and all(task_id_valid(task) for task in reruns) and len(set(reruns)) == len(reruns))
 
 
 def limit_binding():
@@ -1495,7 +1505,7 @@ def run_manifest(arguments):
                  and all(isinstance(a, str) for a in data['args'])
                  and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
                  and ('task' not in data or task_id_valid(data['task']))
-                 and limit_fields_valid(data))
+                 and limit_fields_valid(data) and timeout_reruns_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
@@ -1519,6 +1529,8 @@ def run_manifest(arguments):
         atomic(path, json.dumps(data) + '\n')
         print(data['attempts'])
     elif action == 'clear-attempts':
+        # Keeps `timeout_reruns`: a resumed pipeline must not reset "once per task" (only
+        # `start`, a human-approved run, does).
         data['attempts'] = 0
         for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
@@ -1537,6 +1549,25 @@ def run_manifest(arguments):
         if 'task' in data:
             data.pop('task')
             atomic(path, json.dumps(data) + '\n')
+    elif action == 'task':
+        # Read only: the task of the implementation session ai-run recorded, if any.
+        if len(arguments) != 1:
+            fail('Usage: run-manifest task')
+        if 'task' not in data:
+            sys.exit(1)
+        print(data['task'])
+    elif action == 'timeout-rerun':
+        # Claims the one commit-and-rerun of a timed-out session allowed per task in this run.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest timeout-rerun ID')
+        task = arguments[1]
+        reruns = data.get('timeout_reruns', [])
+        if task in reruns:
+            fail(f'session timeout: {task} was already committed and rerun once in this run')
+        if len(reruns) >= 200:
+            fail('session timeout: too many timeout reruns in this run')
+        data['timeout_reruns'] = reruns + [task]
+        atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
         # current implementation review (triage) or the current plan review (plan-revision).

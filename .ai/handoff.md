@@ -9,6 +9,10 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
   `ai_guard_verify`); an implementation session's limit is base + min(2 × gate-seconds, base),
   capped by the remaining run time; the `Session:` line shows the breakdown. Triage, plan
   revision and `--plan` keep the plain limit.
+- T024: `run-manifest task` (read only) prints the session's recorded task; `run-manifest
+  timeout-rerun ID` claims the one timeout commit-and-rerun per task (`timeout_reruns`, kept by
+  `clear-attempts`, dropped by `start`, a wrong shape invalidates the manifest). Not used yet:
+  `ai-recover` adopts it in T025.
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
@@ -32,8 +36,8 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-After T023 (re-verified after the flow-chart line fix 0166a48): `.ai/bin/ai-check` PASS (974 tests,
-608.9 s); `-k session_gate_allowance` 5 OK, `-k flow_this_repo` 1 OK,
+After T024: `.ai/bin/ai-check` PASS (978 tests, 618.6 s); `-k timeout_rerun_manifest` 4 OK,
+`-k limit_relaunch_record` 7 OK. After T023: `-k session_gate_allowance` 5 OK, `-k flow_this_repo` 1 OK,
 `-k timeout` 12 OK, `-k outcome` 86 OK, `-k Docs` 3 OK. `.ai/validate` is unchanged: shell syntax checks, then
 `tests/run_parallel.py`. Batch 6's last full gate: 965 tests, about 600 s on this machine.
 
@@ -88,5 +92,5 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
   T026 and T033 add theirs.
 
 ## Next action
-T022 and T023 are DONE; T024 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
+T022–T024 are DONE; T025 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
 T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.
