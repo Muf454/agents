@@ -2600,7 +2600,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T025 — ai-recover commits a timed-out IN_PROGRESS task's validated work once and reruns (FL-28 part 2, recovery)
-Status: TODO
+Status: DONE
 Dependencies: T024
 Model: opus
 
@@ -2666,7 +2666,28 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+- `scripts/ai-recover`: the `commit_and_rerun)` body moved unchanged into `commit_validated WHY
+  HUMAN` (`$why`/`$human` → `$1`/`$2`, keeps `ai_observe recovering … checks`); the case calls it.
+  New rule after the second `record_stop_leftovers`, before the `recover.md` check, with the exact
+  predicate from the notes (stage implementation, reason `Claude exited 124 (`/`137 (`,
+  `run-manifest task`, `tasks status` IN_PROGRESS, dirty checkout); `timeout-rerun` refusal → ⛔
+  `the T session timed out again after one commit-and-rerun in this run.`; else 🔧 line,
+  `commit_validated`, `resume`. Commented (deterministic, once per task spent before the gate,
+  budget checked above). Usage text: one sentence. ai-run's message unchanged; no hard-rule
+  pattern matches `Claude exited 124 (timeout/interruption/error). Preserve partial work; see
+  .ai/local/claude-XXXXXXXX.json …` (only a random mktemp name containing e.g. `gate` could match).
+- Tests: mock claude modes `timeout-once`/`timeout-always` (counter `timeout-session-calls` in
+  `MOCK_STATE_DIR`; `ai-task set T001 IN_PROGRESS`, `partial.txt`, sleep past `--session-timeout
+  1`); `test_timeout_rerun_recover_commits_the_partial_work_once_and_finishes`,
+  `test_timeout_rerun_recover_second_timeout_of_the_task_escalates`.
+- Mutation: with `timeout-rerun` replaced by `true`, the second test fails: two 🔧 recoveries,
+  then ⛔ `already tried 2 time(s)` (loops to the attempt budget).
+- Evidence: `-k timeout_rerun` 6 OK; `-k recovery` 72 OK; `.ai/bin/ai-check` PASS (980 tests,
+  661.3 s, finished in the background past the 600 s tool timeout), which includes all
+  `test_limit_relaunch_*` and `test_usage_limit_*` (a separate targeted run of those two groups
+  was stopped by the tool's time limit, so the gate is their evidence).
+- README, docs/workflow.md, the flow chart and the vault hub Log line are T026's (vault not
+  accessible from this session).
 
 ## T026 — Timeout rerun: the cases that stay as today, docs and flow chart (FL-28 part 2, contract)
 Status: TODO

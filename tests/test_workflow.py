@@ -437,6 +437,17 @@ if mode in ('error-once', 'error-once-partial'):
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
+if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT' in prompt:
+    # A session that marks T001 IN_PROGRESS, leaves partial work and runs past --session-timeout:
+    # -once only on its first call (then the normal mock completes T001), -always every time.
+    calls = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'timeout-session-calls'
+    count = len(calls.read_text().splitlines()) if calls.exists() else 0
+    with open(calls, 'a') as f: f.write('call\n')
+    if mode == 'timeout-always' or count == 0:
+        subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'IN_PROGRESS'], check=True, stdout=subprocess.DEVNULL)
+        pathlib.Path('partial.txt').write_text(f'partial work of session {count + 1}\n')
+        time.sleep(30)
+    mode = 'success'
 if mode == 'self-kill':
     os.kill(os.getpid(), signal.SIGKILL)
 if mode == 'sigkill-runner':
@@ -5127,6 +5138,39 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
         self.assertIn('this kind of stop always needs a human', self.notifications())
         self.assertEqual(len(self.recovery_calls()), 1)
+
+    def recovery_checkpoints(self):
+        return self.run_cmd(['git', 'log', '--format=%H %s']).stdout.count('recovery checkpoint (validated leftover work)')
+
+    def test_timeout_rerun_recover_commits_the_partial_work_once_and_finishes(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-once')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.recovery_calls(), [])  # no decision session
+        log = self.run_cmd(['git', 'log', '--reverse', '--format=%H %s']).stdout.splitlines()
+        recovery = [line.split()[0] for line in log if 'recovery checkpoint (validated leftover work)' in line]
+        self.assertEqual(len(recovery), 1)
+        self.assertIn('partial.txt', self.run_cmd(['git', 'show', '--name-only', '--format=', recovery[0]]).stdout.split())
+        done = [n for n, line in enumerate(log) if line.endswith(' implement T001')]
+        self.assertEqual(len(done), 1)
+        self.assertLess([n for n, line in enumerate(log) if line.startswith(recovery[0])][0], done[0])
+        notes = self.notifications()
+        self.assertIn('the T001 session timed out; committing its validated partial work once', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['timeout_reruns'], ['T001'])
+
+    def test_timeout_rerun_recover_second_timeout_of_the_task_escalates(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='2', MOCK_CLAUDE='timeout-always')
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('timed out again after one commit-and-rerun', notes)
+        self.assertEqual(self.recovery_checkpoints(), 1)
+        self.assertEqual(self.recovery_calls(), [])
 
     def test_recovery_decision_parsing_is_strict(self):
         log = self.base / 'decision.json'

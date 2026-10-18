@@ -11,8 +11,13 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
   revision and `--plan` keep the plain limit.
 - T024: `run-manifest task` (read only) prints the session's recorded task; `run-manifest
   timeout-rerun ID` claims the one timeout commit-and-rerun per task (`timeout_reruns`, kept by
-  `clear-attempts`, dropped by `start`, a wrong shape invalidates the manifest). Not used yet:
-  `ai-recover` adopts it in T025.
+  `clear-attempts`, dropped by `start`, a wrong shape invalidates the manifest).
+- T025: `ai-recover` — after the hard rules, the attempt budget and the stop leftovers — sees an
+  implementation stop `Claude exited 124|137 (` whose recorded task is IN_PROGRESS with a dirty
+  checkout, claims `timeout-rerun`, and then commits the work through `commit_validated` (the
+  former `commit_and_rerun` body: deps, full gate, checkpoint guard, recovery checkpoint, verify)
+  and resumes, without a decision session. A second timeout of that task in the run is ⛔ `timed
+  out again after one commit-and-rerun`. Docs and flow chart: T026.
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
@@ -36,6 +41,7 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
+After T025: `.ai/bin/ai-check` PASS (980 tests, 661.3 s); `-k timeout_rerun` 6 OK, `-k recovery` 72 OK.
 After T024: `.ai/bin/ai-check` PASS (978 tests, 618.6 s); `-k timeout_rerun_manifest` 4 OK,
 `-k limit_relaunch_record` 7 OK. After T023: `-k session_gate_allowance` 5 OK, `-k flow_this_repo` 1 OK,
 `-k timeout` 12 OK, `-k outcome` 86 OK, `-k Docs` 3 OK. `.ai/validate` is unchanged: shell syntax checks, then
@@ -92,5 +98,5 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
   T026 and T033 add theirs.
 
 ## Next action
-T022–T024 are DONE; T025 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
+T022–T025 are DONE; T026 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
 T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.
