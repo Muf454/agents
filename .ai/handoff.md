@@ -1,193 +1,83 @@
 # Handoff
 
 ## What has been implemented?
-Branch `feature/limits-plan-stage` (from `fix/flow-batch-5` at edc3dc6; PR #30 on PR #29, neither
-merged) implements three items Zack decided on 2026-10-17 (planned in a Claude planning session,
-unattended). All 19 tasks are DONE (T010 is the last, the audit). The plan, by item:
-- **MC-01 part 1** (T001–T004): a pipeline stop whose only reason is a usage limit beyond the
-  wait budget schedules a relaunch in host state and pauses (⏸, exit 75) instead of ⛔; the
-  watchdog timer (`--recover`) starts `ai-recover` once the reset has passed and the run resumes
-  without a Claude decision (▶ RESUMED). Cap `AI_LIMIT_RELAUNCH_MAX` (default 2) per human-started
-  run; past it, without a recovering timer, or with the cap at 0, ⛔ as today. No mission tick.
-  Plan review round 1: the schedule is held/claimed right after the attempt reservation (no
-  launch loop, no double schedule), and T011 lets the relaunch continue the limited session's
-  uncommitted task work once, validated as usual. Plan review round 2: T012 binds that exception
-  to the exact preserved tree (a change during the wait escalates, nothing absorbed) and T011
-  also checkpoints a task marked DONE just before the limit; T013 creates the `--detach` log
-  safely; T008/T009 make `--draft` revocation durable or stop. Plan review round 3: T014 makes
-  the relaunch verify HEAD and the whole tree (the existing `tree_snapshot`, submodules
-  included) once, before it commits, resumes or arms anything; the watchdog's stall alarm reads
-  the pending schedule from the manifest, not from the local pause log. Plan review round 4:
-  T015 makes the resumed run accept the armed tree through one predicate on the whole path to
-  ai-run (a settled re-check no longer refuses it) with no commit while armed; T002's probe
-  treats a missing schedule as absent, never as due. Plan review round 5: T016 binds the arm
-  to an `implementation` stop and makes the armed resume re-enter at implementation (no plan
-  review loop on the preserved tree, so a partial checkpoint that made the plan review stale
-  no longer ends in a recovery decision); T006's `ai-plan` creates `.ai/local` on first use.
-  Plan review round 6: T017 binds the preserved work to the task the limited session was
-  working on (ai-run records it in the host manifest before every session; the arm requires
-  it), so T011's resumed ai-run decides by that task's status and a task committed DONE before
-  the limit with trailing edits is checkpointed, validated, before any session or the final
-  handoff; T006 resolves relative directory arguments against the caller's directory before
-  `ai_root`; T016's needs-human test now expects the schedule consumed and no arm on the
-  relaunch, plus a separate armed-resume stop. Plan review round 7: T018 makes an armed
-  manifest terminal for ai-recover (a stop of the resumed run before the preserved work is
-  continued is one ⛔ with nothing committed, also with auto-recovery on, so the fail-closed
-  stop can no longer end in a recovery commit of the preserved tree); T011's armed checkpoint
-  runs after dependency setup, also when no runnable task remains. Plan review round 8: T019
-  makes the arm end at the act (ai-run's own consistency and routing checks run while the
-  manifest is still armed, so they are terminal too; `limit-disarm` is the last statement
-  before the armed checkpoint or the session), and T002's probe no longer raises the ordinary
-  stall alarm on top of a refused or launched due relaunch.
-- **DB-04** (T004–T007): `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` replaces
-  `launch-plan.sh` (same edit allowlist as `ai-run --plan`, read-only reference directories,
-  confirmed detached start printing PID and log), planning sessions in the outcome log and run
-  log, and a killed planning session shown as a stop on the dashboard's Plan box (the nine-box
-  dashboard with the Plan box already exists).
-- **R15** (T008–T009): the PR step un-drafts an existing draft PR only when host state records
-  that the pipeline drafted it; human drafts and `--draft` runs stay draft.
-- T010: docs, flow chart and handoff audit (2026-10-18): wording fixes only, flow chart unchanged.
-- T020 (review round 1 M1): a `converted` draft record is written only when the first `isDraft`
-  lookup returned exactly `false`; an unknown prior state still converts but prints a note and
-  records nothing. T021 (N1) is next.
-See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
+Nothing yet on `fix/flow-batch-7` (from `master` at 1423b60). This is the plan for batch 7, written
+2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
+in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
+T001–T021 are batch 6's DONE tasks (merged in #31). They stay in the queue unchanged because the
+host refuses a plan that removes DONE blocks.
+- **FL-28** (T022–T026, opus): an implementation session gets room for two measured gate runs
+  (from host `gate` outcome lines, at most double the base limit). `ai-recover` commits a
+  timed-out IN_PROGRESS task's partial work once per task per run, without a decision session,
+  and only when the full gate passes. A second timeout of the same task is ⛔.
+- **FL-29** (T027 sonnet, T028 haiku): the template allowlist already has `Bash(chmod +x *)`.
+  Left to do: the host restores the executable bit that git records (100755) after a session, and
+  the prompts say `chmod +x` is the only form (never `chmod 755`), including for a tracked script
+  that lost its bit.
+- **FL-30** (T029 sonnet): the parser already accepts `P1 (MAJOR) title` (`FINDING_CELL`,
+  `test_finding_cell_*`). The family-budget stop came from an older installed copy. Left to do: a
+  regression for the exact row and the restart path, and a full table example in the revision
+  prompt.
+- **FL-31** (T030–T032 sonnet): progress lines and a stop summary in `tests/run_parallel.py`, an
+  over-budget list (30 s × the timeout scale) beside the slowest 15, a shared `ready()` fixture
+  template, and an audit that trims redundant pipeline setup runs. No test is weakened.
+- T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-T020: `-k pr_undraft` 15 OK; mutation (record on an unknown state) fails the new test on the
-record assertion; `.ai/bin/ai-check` see the task result.
-T010: `-k Docs` 3 OK, `-k flow_this_repo` 1 OK; `.ai/bin/ai-check` PASS (962 tests, 617.3 s; the call passed
-the 600 s foreground limit and finished in the background, exit 0).
-T009: `-k pr_undraft` 14 OK, `-k draft` 25 OK; `.ai/bin/ai-check` PASS (962 tests, 612.9 s).
-T007: `-k plan_outcome` 3 OK, `-k outcome` 85 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (948 tests, 569.5 s).
-T006: `-k ai_plan` 12 OK, `-k setup` 30 OK, `-k Docs` 3 OK, `-k script_modes` 1 OK;
-`.ai/bin/ai-check` PASS (945 tests, 591.1 s).
-T013: `-k exec_logged` 7 OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s).
-T019: `-k limit_relaunch_consume` 10 OK, `-k limit_relaunch` 85 OK, `-k recovery` 70 OK,
-`-k Docs` 3 OK; `.ai/bin/ai-check` PASS (902 tests, 561.5 s). Mutation: moving
-`limit-disarm` to the top of the consumer fails the five terminal cases and the span test.
-T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k plan_review` 20 OK,
-`-k recovery` 65 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (887 tests, 531.5 s). Without the new `! armed_resume` guard the partial
-checkpoint test fails as round 5 P3 describes (`Commit the plan before reviewing it.` →
-recovery decision).
-T011: `-k limit_relaunch_preserved` 20 OK, `-k recheck` 32 OK, `-k recovery` 65 OK;
-`.ai/bin/ai-check` PASS (879 tests, 520.3 s).
-T014: `-k limit_relaunch_verify` 9 OK; full gate and the other groups see the task result.
-Mutation: moving the `relaunch_verify` call below the leftovers commit fails all 9.
-T012: `.ai/bin/ai-check` PASS (844 tests); `-k limit_relaunch` 27 OK, `-k recovery` 65 OK,
-`-k usage_limit` 6 OK.
-T003: `-k limit_relaunch` 22 OK, `-k recovery` 65 OK, `-k Docs` 3 OK; full gate see the task
-result. Mutation: skipping the `relaunch_verify` call fails the moved-HEAD test.
-T002: `.ai/bin/ai-check` PASS, 832 tests in 460.9 s; `-k limit_relaunch_watchdog` 8 OK;
-`-k watchdog` 61 OK. Mutation: dropping the "due and `--recover`" clause of `relaunch_quiet`
-fails 4 of the 8 tests.
+None yet (planning only). `.ai/validate` is unchanged: shell syntax checks, then
+`tests/run_parallel.py`. Batch 6's last full gate: 965 tests, about 600 s on this machine.
 
 ## Assumptions
-- MC-01: the relaunch also covers a Codex limit stop (same message and mechanism); default cap 2;
-  a due relaunch needs `AI_AUTO_RECOVER` on and does not use `AI_RECOVER_MAX`; a scheduled pause
-  exits 75; any non-limit stop after a relaunch follows the normal recovery rules.
-- DB-04: `ai-plan` keeps `plan-allowlist` unchanged (it also allows
-  `.ai/reviews/dispositions.md`, which `launch-plan.sh` did not); a finished plan keeps today's
-  dashboard view (Plan ✓, 📝 under Plan check) until the pipeline starts.
-- R15: a PR drafted because of `--draft` is the human's choice and never recorded; a `--draft`
-  run that cannot remove the pipeline's record stops (⛔ names the file); an un-draft
-  failure warns and does not stop the run; a human who un-drafts and re-drafts between two runs
-  is not detected (documented limitation).
+- Gate allowance = min(2 × G, session_timeout), where G is the largest of the last 3 passing host
+  gate runs of this project. Implementation sessions only. No measurement yet means no change.
+- "Once per task" holds per human-started run. It survives resumes (`clear-attempts` keeps it)
+  and is dropped by `run-manifest start`.
+- A timeout on a TODO task, or with nothing left but bookkeeping, still goes to today's decision
+  session.
+- FL-31 cannot be profiled (denied), so the speed tasks record before and after `-k` timings and
+  convert only provably redundant setup runs. The FL-23 measurement predicts only a small gain
+  from the fixture template.
 
 ## Flow chart
-Flow chart updated (T002: "When something goes wrong" gained the usage-limit relaunch path;
-T003: the limit-only decision before the hard rules, its ⛔ fallbacks (no recovering timer, cap),
-the relaunch's gate/branch/HEAD check and ▶ RESUMED, and the ▶/⏸ notification wording; T014: the
-relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T011: the resume
-continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
-is for implementation stops only and the armed resume re-enters at implementation; T018: a
-stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
-every start check of the resumed run"; T006: the plan node says `ai-plan objective.md` with
-`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. T009: the PR node and the "draft after two fix rounds" bullet say a clean PR is made ready again only when the pipeline drafted it itself. T010 (2026-10-18) audited the chart against the code: no gap, no node changed.
+Flow unchanged so far (planning only). T023 (session limit) and T026 (timeout rerun) change the
+flow and update the vault `agents-flow.md`. T026 sets this line to "Flow chart updated (…)".
 
 ## Manual testing for the human
 
 ### Needs you
-1. After merging (#29, then #30, then this branch), refresh the installed copies
-   (`setup-project --upgrade --apply` here and in raid-planner / family-planner) so `.ai/bin`
-   gets `ai-plan`, the new `ai-recover` and `ai-watchdog`; then REINSTALL each watchdog timer
-   (`.ai/bin/ai-watchdog <checkout> --install-timer --recover`): the timer runs a host copy made
-   at install time.
-2. Limit relaunch on a real limit (or a disposable checkout with `AI_LIMIT_MAX_WAIT=60`): when a
-   run hits a Claude limit far away, check the phone shows `⏸ PAUSED … relaunches by itself after
-   <time>` (no ⛔), `ai-dashboard` shows the run paused, and within ~10 min after the reset the
-   run continues with `▶ RESUMED after the usage limit`.
-3. Start a planning session with `ai-plan <prompt> --read-dir ~/zWiki --read-dir
-   ~/Projects/wt/plans --read-dir ~/Projects/wt/research --detach`: it prints a PID and log, the
-   dashboard shows the Plan box active, the plan is left uncommitted. Then retire
-   `~/Projects/wt/plans/sessions/launch-plan.sh` and update mission control's notes to use
-   `ai-plan`.
-4. R15 on a real PR: a run that drafted its PR because of a dispute or deferral becomes ready
-   after a later clean run; a PR you drafted yourself stays draft.
+1. Review and commit this plan, then start `ai-pipeline --approved` on `fix/flow-batch-7`.
+2. After merging: run `setup-project --upgrade --apply` here and in raid-planner, family-planner
+   and family-budget, so `.ai/bin` gets the new `ai-run` and `ai-recover` and `.ai/prompts` gets
+   the new runner, triage and plan-revision wording. Reinstall each watchdog timer
+   (`ai-watchdog <checkout> --install-timer --recover`).
+3. On the next real run with a ~9-minute gate: check that the `Session:` line shows the allowance
+   (`+ …s for two gate runs`) from the second task on, and that a session timeout on an
+   IN_PROGRESS task ends in `🔧 … committing its validated partial work once` instead of ⛔.
+4. Decide whether CI's `AI_CHECK_TIMEOUT`/job timeout (raised to 3000 s / 55 min in #32) can
+   come down after FL-31. The workflow file is a gate file; only you change it.
+5. If T031 and T032 report a small gain: profile one slow pipeline test yourself (e.g.
+   `python3 -m cProfile -s cumtime -m unittest discover -s tests -k
+   extra_fix_round_clean_review_after_it_opens_a_ready_pr`), or allow a profiling command, so a
+   follow-up can target the dominant cost (FL-23 follow-up).
 
 ### Covered by automated tests
-Each group is a name prefix; `python3 -m unittest discover -s tests -k <group>` runs it (added by
-the task named).
-- `test_limit_relaunch_record_*` (T001: limit-stop record, relaunch time, manifest schedule/cap/attempt give-back).
-- `test_limit_relaunch_watchdog_*` (T002: due relaunch started, refusal reported once with no stall alarm on top of it, no stall alarm while waiting, nothing launched or reported for a checkout without a schedule, `--timer-recovers`).
-- `test_limit_relaunch_recover_*` (T003: pause instead of ⛔, resume without Claude, cap, off switch, no timer, mixed reason, terminal escalation after a claim, interrupted scheduling restores the wait).
-- `test_dashboard_limit_relaunch_*` and `test_dashboard_plan_killed_*` (T004: a gone run with a scheduled relaunch shows paused with its note, a newer error wins, an in-process pause stays idle, a killed planning session shows a stop on the Plan box, all widths 40–200).
-- `test_limit_relaunch_binding_*` (T012: tree digest = `tree_snapshot` incl. submodules, verify/arm only for the exact scheduled tree, a human edit during the wait escalates and is preserved, `tasks newly-done`).
-- `test_limit_relaunch_verify_*` (T014: the relaunch verifies before any commit or resume; bookkeeping-only edits, a moved HEAD on a clean tree, in-scope edits during an open stage and submodule changes all stop with the checkout untouched).
-- `test_limit_relaunch_bound_*` (T017: ai-run records each session's task in the manifest and clears it after the checkpoint, keeps it through a limit stop, notes once without a manifest; the arm names the task, `limit-task`; a relaunch of preserved work with no task recorded is one ⛔ with the checkout untouched).
-- `test_limit_relaunch_preserved_*` (T011: the relaunch continues uncommitted task work once, decided by the bound task's status; a task DONE before the limit, committed or not, is checkpointed without a session, dependency setup first; moved HEAD escalates; a human start refuses a dirty tree; a settled re-check does not refuse the preserved work).
-- `test_limit_relaunch_reenter_*` (T016: the arm is granted only for an implementation stop; an armed resume skips the plan review loop, so a committed partial checkpoint with a stale plan review completes without a plan review or recovery decision; a clean resume still re-reviews; a needs-human plan decision still stops).
-- `test_limit_relaunch_terminal_*` (T018: a stop of the resumed run while the tree is armed is one ⛔ with nothing committed and no recovery decision session, also with auto-recovery on; the relaunch itself and stops after the disarm are unaffected).
-- `test_limit_relaunch_consume_*` (T019: ai-run's own checks of the preserved work, another task newly DONE, a wrong next task, a blocked or unknown bound task, a failing dependency setup, stop terminal with auto-recovery on and the arm retained; the disarm is the last statement before the checkpoint or the session).
-- `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
-- `test_exec_logged_*` (T013: both streams in a new 0600 log in `.ai/local` with the launcher's PID kept; an existing symlink, FIFO (no blocking) or file at the name exits 1 untouched and the command never runs; a symlinked or missing `.ai/local` exits 1; two concurrent launches get their own logs; a bad name or relative command exits 2 with nothing created).
-- `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007: a successful plan appends one `plan` outcome `done` with model, seconds, task count and one `plan written:` run-log row, `plan-scope` and `ai-status --outcomes` still fine; an invalid queue records `stopped`; a session timeout records `timeout`).
-- `test_pr_undraft_record_*` (T008: record/get/clear/take round trip in the host `pr-draft` directory, per branch, unreadable means not ours, bad arguments, a directory fault keeps the record and fails).
-- `test_pr_undraft_*` (T009: a created or converted policy draft is made ready by a later clean run and the record consumed; a human draft and a `--draft` PR stay draft (`left as draft`); `--draft` revokes the record; a failed revocation stops with a hard-rule ⛔ naming the file, no `gh` change, no recovery session, and a later clean run still leaves the PR draft; a failed `gh pr ready` finishes and keeps the record; a ready PR clears a stale record).
-- `test_pr_undraft_unknown_state_never_records_ownership` (T020, review round 1 M1: a human
-  draft whose first `isDraft` lookup fails is still converted under policy but gets no `pr-draft`
-  record, and a later clean run leaves it draft without `gh pr ready`).
-- `test_ai_plan_detach_finished_before_ack_is_success` (T021, review round 1 N1: a runner that
-  writes its own `planning/done` and exits 0 before any `planning/active` poll gives `Planning
-  session started: pid N, log PATH`, exit 0) and `test_ai_plan_detach_exit_zero_without_done_is_failure`
-  (exit 0 with no observation or another PID's, and a non-zero exit with its own `planning/done`,
-  stay `ended early`, exit 1 or the session's status).
+Added by the tasks named (each group runs with `python3 -m unittest discover -s tests -k <group>`):
+- `test_gate_time_*` (T022), `test_session_gate_allowance_*` (T023).
+- `test_timeout_rerun_manifest_*` (T024), `test_timeout_rerun_recover_*` (T025),
+  `test_timeout_rerun_unchanged_*` (T026).
+- `test_exec_bits_*` (T027, T028).
+- `test_finding_cell_plan_dispositions_incident_row`,
+  `test_finding_cell_plan_revision_restart_records_decorated_rows`,
+  `test_finding_cell_prompts_show_the_table` (T029).
+- `test_parallel_runner_progress_*` (T030), `test_fixture_template_*` (T031).
 
 ## Human todos
-- Merge order: PR #29, PR #30, then this branch (it builds on both).
-- Installed copies and watchdog timers: upgrade and reinstall after merging (see Needs you 1).
-- Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
+- Commit the plan, approve the run.
+- After merge: the upgrades and timer reinstall above; tick FL-28 to FL-31 in the vault backlog
+  (sessions never tick it).
+- Vault: this planning session could edit only `.ai/` files, so it left no hub Log line. T023,
+  T026 and T033 add theirs.
 
 ## Next action
-T001–T003, T012 and T014 done (limit-stop record and manifest schedule helpers; watchdog starts a due
-relaunch, reports a refusal once, no stall alarm while waiting, `--timer-recovers`; ai-recover
-schedules a limit-only stop, restores a pending wait, and resumes a claimed relaunch after
-verifying HEAD and the whole tree (`worktree-digest` = `tree_snapshot`, submodules included);
-`limit_resume` binds `{head, tree}`; `tasks newly-done REV` for T011; T014: that verification
-is the one site before any commit, stage resume or session, followed by a four-row transition
-table). T017 binds the arm to the task; T011: the resumed run admits the armed tree
-(`clean_or_armed`) and ai-run continues it once (the bound task's session, or the validated
-`checkpoint_done` when it is already DONE), no recovery decision. T016: `limit-schedule AT CAP
-STAGE` records `limit_stage`; `limit-arm` arms only an `implementation` stop; ai-pipeline skips
-the plan review loop while armed. T018: ai-recover is terminal while `limit_resume` exists (one
-⛔ with the stop's reason, no decision session, nothing committed, arm kept). T019: audited
-ai-run's consumer (every check armed, `limit-disarm` last before the act; no code change) and
-pinned it with `test_limit_relaunch_consume_*`. T015: the armed-tree acceptance contract (comment
-block before ai-pipeline's start check), `armed_resume`/`clean_or_armed` shared in
-`lib/common.sh`, no tracked write while armed (ai-run's stop handler, `disputes-record --check`),
-the `test_limit_relaunch_accept_*` matrix. T013: `workflow.py exec-logged NAME -- CMD` (the
-detached log for T006's `ai-plan --detach`). T006: `scripts/ai-plan` (foreground exec of
-`ai-run --plan`; `--detach` with a confirmed start printing PID and log), installed by
-`setup-project`. T007: planning sessions in the outcome log and run log. T008: host `pr-draft`
-record. T009: the PR step un-drafts only a recorded pipeline draft (`--draft` revokes it; a
-failed revocation is a hard-rule stop). T010: audit of README, docs/workflow.md, the usage texts and the
-vault chart; wording fixed ("weekly limit" → the "beyond the wait budget" escalation; relaunch in the
-`--help` of ai-run, ai-pipeline and ai-watchdog; AI_LIMIT_RELAUNCH_MAX in the README settings note,
-AI_PLAN_ACK_SECONDS as environment only).
-Recorded mismatch (not fixed, a behaviour change): `ai-recover` (line 87) silently uses 2 for an
-`AI_LIMIT_RELAUNCH_MAX` outside `^[0-9]$`, while the T001 spec asked for validation next to `max`
-(`AI_RECOVER_MAX` is validated). The README now says so. Review round 1 fixes: T020 (M1, draft
-ownership only from a confirmed ready PR) and T021 (N1, `ai-plan --detach` reports a plan that
-finished with exit 0 and its own `planning/done` before acknowledgement as started). Next: all
-tasks are DONE; the full gate
-result (see Validation run) decides `ready_for_review`. Human acceptance is still open.
+Start with T022 (or any task without dependencies: T024, T027, T029, T030, T031). FL-28 runs
+T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.

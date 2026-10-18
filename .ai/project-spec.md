@@ -1,153 +1,151 @@
-# Spec: Limits and plan stage: limit-only stops relaunch by themselves (MC-01 part 1), `ai-plan` planning command (DB-04), un-draft only pipeline-drafted PRs (R15)
+# Spec: Flow batch 7: session limit vs a slow gate and timeout recovery (FL-28), executable bits (FL-29), disposition finding cells (FL-30), a faster self-check with progress (FL-31)
 
 ## Objective
-Three items Zack decided on 2026-10-17 (vault `agents.md` Log, `agents-backlog.md`):
-1. **MC-01 part 1 only.** A pipeline stop whose only reason is a usage limit (the reset is
-   beyond `AI_LIMIT_MAX_WAIT`) is not a human problem: `ai-recover` schedules a relaunch at the
-   parsed reset time in host state and exits without ⛔; the installed watchdog timer (wakes every
-   10 min, `--recover`) starts `ai-recover` again once that time has passed, and `ai-recover`
-   resumes the approved run without a Claude decision. A per-run cap (`AI_LIMIT_RELAUNCH_MAX`)
-   bounds it; past the cap, or without a watchdog timer that recovers, the stop escalates with ⛔
-   as today. Part 2 (mission tick, headless mission-control session) is NOT built.
-2. **DB-04.** A toolkit command `ai-plan PROMPT_FILE` replaces mission control's hand-run
-   launcher (`~/Projects/wt/plans/sessions/launch-plan.sh`): same `.ai`-only edit allowlist,
-   read-only reference directories (`--read-dir`), registered in the host registry, a `planning`
-   stage on the dashboard from the moment the session starts, logged like other sessions
-   (session JSON log, outcome log, run-log line), optional detached start (`--detach`) that
-   prints the PID and log. It never commits. The dashboard Plan box shows a planning session
-   that died without a plan as a stop.
-3. **R15.** When the PR step runs with a clean review and no dispute, `ai-pipeline` runs
-   `gh pr ready` only on a PR the pipeline itself converted to (or created as) draft, recorded
-   durably in host state when it drafts; a PR a human set to draft is never un-drafted.
+Four backlog items from the vault `agents-backlog.md` (FL-28 to FL-31), planned 2026-10-18 on
+`fix/flow-batch-7`. The branch was created from `master` at 1423b60, which contains batch 6 (#31),
+the CI cap raise (#32) and the toolkit self-upgrade (#33).
+1. **FL-28.** Implementation sessions get extra time sized from the measured gate time, so a
+   ~9-minute gate no longer uses up a 30-minute session. Also, a session timeout on an
+   IN_PROGRESS task is recovered once per task by the host: it commits the validated partial work
+   and reruns, without escalating.
+2. **FL-29.** The runner can make a tracked script executable inside the checkout. Finish what is
+   left: the host restores the recorded mode, and the prompts give the exact allowed command.
+3. **FL-30.** Disposition finding cells accept a leading finding ID followed by text, and the
+   revision prompt template shows the exact row format.
+4. **FL-31.** The self-check gets faster (a shared fixture repository, fewer full `ai-pipeline`
+   fixture runs, the slowest-15 list kept as a budget) and prints progress, so a timeout shows how
+   far the run got. No test is weakened or skipped.
 
-Branch `feature/limits-plan-stage`, created from `fix/flow-batch-5` at edc3dc6 (PR #30, open,
-built on open PR #29; master has #27 and #28). Planned by Claude on 2026-10-17 (unattended
-planning session; no human until 09:00, so assumptions are recorded, not asked). Hub decisions
-respected: AD-4 (small files in host state / `.ai/local/`, no daemon: the existing watchdog timer
-does the waking), AD-5 (telemetry never authorizes anything), gate files are never edited by a
-pipeline session.
-
-## Verified against the code (2026-10-17, edc3dc6)
-- **MC-01 open.** `ai_limit_pause` (`scripts/lib/common.sh:95–112`) sleeps until the reset + 60 s
-  (or `AI_LIMIT_RETRY`, default 1800 s, when the reset is unknown) and dies with
-  `<Agent> usage limit: the reset is beyond the <max>s wait budget. Rerun after it resets.` when
-  `AI_WAITED + wait > AI_LIMIT_MAX_WAIT` (default 28800). The parsed reset epoch is not written
-  anywhere. Inside `ai-pipeline`, `stop()` (`scripts/ai-pipeline:147–163`) execs `ai-recover`,
-  whose hard rules (`scripts/ai-recover:137–143`) match `*'beyond the'*'wait budget'*` and
-  escalate (⛔). The watchdog (`scripts/lib/watchdog.py:370–515`) starts `ai-recover` only for a
-  `died:` incident (`start_recovery`, 293–335, which always passes `--stage 'crash (pipeline
-  killed or restarted)'` and writes a default last-error); it already treats a usage-limit pause
-  as quiet until its end (`paused_until`, 119–132, from `.ai/local/pauses.log`). The run manifest
-  (`run_manifest`, `scripts/lib/workflow.py:1279–1397`) holds the attempt budget (`attempts`,
-  `reserve-attempt`, `clear-attempts`) and the approved settings (`RUN_SETTINGS`, 1980).
-  `ai-recover` reserves an attempt (70) before the hard rules, so a limit path must give it back.
-  Tests: `test_usage_limit_beyond_wait_budget_stops` (tests/test_workflow.py:5062, standalone
-  `ai-run`, stays as is), mock `limit-far` (tests/test_workflow.py:312), watchdog recovery tests
-  with `mock_systemd_run` (1067–1107).
-- **DB-04 mostly built, gaps remain.** `ai-run --plan PROMPT_FILE` (`scripts/ai-run:29–37,
-  90–99, 323–379`) already runs the headless opus session with `workflow.py plan-allowlist`
-  (Read/Glob/Grep + Edit/Write of the five plan records and `reviews/dispositions.md`,
-  workflow.py:2752–2764), registers the checkout (`pipeline-register`), records
-  `observe step planning`, `planned`, `stop plan` (on_exit 197–200), never commits; the
-  dashboard already has nine boxes with Plan first (`FLOW`, `scripts/lib/dashboard.py:422–426`;
-  tests `test_dashboard_plan_*`, tests/test_dashboard.py:1056–1170, golden widths at 120/119/60
-  columns already pass). Gaps against the decision: (a) no `ai-plan` command; (b) no way to grant
-  the read-only reference directories mission control's launcher grants (`Read(//home/zack/zWiki/**)`,
-  `Read(//home/zack/Projects/wt/plans/**)`, `Read(//home/zack/Projects/wt/research/**)`;
-  `--knowledge-dir` grants one directory and its prompt says "Read/update"); (c) no detached
-  start (mission control uses `nohup … &` and `echo pid`); (d) a planning session is not in the
-  outcome log and writes no run-log line on success; (e) a planning `ai-run` killed by SIGKILL
-  leaves `stage planning, state active` with no runner, which the dashboard shows as `idle`
-  (`inspect`, dashboard.py:382–392), not as a stop.
-- **R15 open.** The PR step (`scripts/ai-pipeline:600–619`) sets `make_draft=yes` for `--draft`,
-  an unresolved fix round or a recorded dispute; creates the PR with `--draft` or converts an
-  existing ready PR with `gh pr ready --undo`; it never runs `gh pr ready`, and records nowhere
-  that it drafted. The test mock `MOCK_GH` (tests/test_workflow.py:608–630) treats every
-  `pr ready` call as "make draft" (it ignores `--undo`).
+## Verified against the code (2026-10-18, 1423b60)
+- **FL-28, session limit.** `scripts/ai-run` sets `session_timeout=1800` (`--session-timeout`,
+  3600 for `--plan`). `claude_session` (~291–345) caps it only by the remaining run time. Nothing
+  measures the gate. The host gate runs in `checkpoint_done` (~669) and the final check (~777).
+  `.ai/local/validation.json` keeps only start and end timestamps, in an agent-writable directory.
+  The host outcome log (`outcomes.jsonl` under the host state root, outside every checkout)
+  records task, review, plan and plan-revision lines, but not the gate.
+- **FL-28, recovery.** A session timeout makes `claude_session` stop with `ai_die "Claude exited
+  124 (timeout/interruption/error). Preserve partial work; …"` (exit 137 after `--kill-after`).
+  ai-pipeline stops with stage `implementation` (~541), and `ai-recover` gets a reason that
+  matches no hard rule. A read-only Claude session then decides; for an unfinished task it
+  usually escalates. `commit_and_rerun` (~322–344) already runs dependency setup and the full
+  gate, commits only on a pass and checks the commit. The host manifest records the session's
+  task (`run-manifest task-set`, ~1526). That record survives a stop and is cleared at the runner
+  checkpoint. There is no read action for it outside `limit-task`.
+- **FL-29.** `templates/.ai/permissions.allow` (~33) and this repository's allowlist (~42) already
+  contain `Bash(chmod +x *)`. `templates/.ai/prompts/runner.md` (~58) and `triage.md` (~64)
+  already say to run `chmod +x <path>` on a new script. README (~179) and docs/workflow.md (~149)
+  mention it. Still missing, from the incident (batch 6 T006, `chmod 755` denied while git already
+  recorded 100755): (a) the prompts never say that only the `+x` form is allowed, or how to fix a
+  TRACKED script whose working-tree file lost its bit; (b) nothing on the host side re-aligns such
+  a file with the mode git recorded, so the post-session gate (`test_script_modes`) fails.
+- **FL-30.** Already done in the parser: `FINDING_CELL` (`workflow.py` ~1017) accepts `P1
+  (MAJOR) title`, `P1 — title`, `P1: title` and `P1 title`, for triage and plan dispositions.
+  Tests `test_finding_cell_*` (~11279–11345) cover this, including `P1 (MAJOR) selection highlight
+  is lost`. The unmatched-cell hint names the row to write. `plan-revision.md` (~30–32) shows
+  `| P1 | accepted | <evidence> | T012 |`. The family-budget incident ran on an older installed copy
+  (its toolkit upgrade PR #2 was opened later the same day). Still missing: a regression test for
+  the exact incident row, and for the restart path (a complete but uncommitted section with
+  decorated cells is recorded without a session). The prompt shows one row but not the table
+  header or the rejected and needs-human row shapes.
+- **FL-31.** `.ai/validate` runs `python3 tests/run_parallel.py`. That script prints nothing until
+  every batch has finished, then prints the failing batches, the slowest 15 tests and `Ran N tests`.
+  A SIGTERM from `ai-check`'s `timeout` stops it without any summary, so the output shows nothing
+  about how far it got. Every `ToolkitTest` builds its project in `ready()` (~1615:
+  `setup-project`, a bootstrap commit, a branch switch, a second commit). The FL-23 notes
+  (`plans/sessions/agents-T006-deferred.md`) measured that setup at under 0.1 s and the slow
+  25–29 s tests as spending their time inside the pipeline. Profiling commands are denied to
+  sessions; `python3 -m unittest …` and `.ai/bin/ai-check` are allowed.
 
 ## Scope
-In: `scripts/lib/common.sh`, `scripts/ai-recover`, `scripts/lib/watchdog.py`, `scripts/ai-watchdog`
-(only if its argument passing needs it), `scripts/lib/workflow.py`, `scripts/lib/dashboard.py`,
-`scripts/ai-run`, new `scripts/ai-plan`, `scripts/ai-pipeline`, `tests/`, `README.md`,
-`docs/workflow.md`, the vault flow chart `agents-flow.md` and the hub Log line.
-Out: MC-01 part 2 (mission tick / `ai-mission` / headless mission-control session); changing the
-standalone `ai-run`/`ai-review` limit behaviour outside a pipeline; any gate file (`.ai/bin`,
-`.ai/prompts`, `.ai/validate`, `.ai/permissions.allow`, `.claude/settings.json`,
-`.github/workflows/*`); deleting mission control's `launch-plan.sh` (outside the repo; human step).
+- `scripts/lib/workflow.py`: outcome kind `gate` and command `gate-seconds`; run-manifest actions
+  `task` and `timeout-rerun TASK` with field `timeout_reruns`; command `exec-bits` (restore the
+  recorded executable bit of tracked files).
+- `scripts/ai-run`: measure and record its own gate runs; give implementation sessions an
+  allowance for the gate; run `exec-bits` after each session.
+- `scripts/ai-recover`: the session-timeout rule (validated commit and rerun, once per task),
+  using the existing `commit_and_rerun` steps factored into one function.
+- `templates/.ai/prompts/runner.md`, `triage.md`, `plan-revision.md`: wording only.
+- `tests/run_parallel.py`: progress lines, a stop summary and a per-test budget report.
+- `tests/test_workflow.py`: new regression tests, a shared `ready()` template and fewer
+  redundant pipeline runs (assertions kept).
+- README.md, docs/workflow.md, the vault flow chart and the hub Log.
 
-## Acceptance criteria (whole batch)
-- A pipeline whose Claude (or Codex, same message) session hits a limit beyond the wait budget,
-  with auto-recovery on and the watchdog timer installed with `--recover`, ends with
-  `⏸ PAUSED … relaunches by itself after <time>`, no ⛔, no recovery Claude session, and a host
-  schedule; a watchdog probe after that time starts `ai-recover`, which resumes the approved run
-  (`▶ RESUMED`) without consuming the `AI_RECOVER_MAX` budget. A further limit stop beyond
-  `AI_LIMIT_RELAUNCH_MAX` (default 2) relaunches, a missing/non-recovering timer, or
-  `AI_LIMIT_RELAUNCH_MAX=0`, escalates with ⛔ as today (the message names the reset time).
-  A due schedule is consumed by the first recovery that sees it (a later escalation is one
-  terminal ⛔, never a launch loop); a recovery started while the schedule is still in the
-  future restores the wait without counting a relaunch or retrying early; uncommitted work of
-  the limited implementation session is continued once by the normal implementation session
-  (validated before any commit), not escalated (plan review round 1, P1–P3). The exception is
-  bound to the preserved tree (HEAD, index, worktree contents and submodules, the existing
-  `tree_snapshot` digest) recorded when the relaunch is scheduled; the claimed relaunch
-  verifies it under the lock exactly once, before any commit, resume, arm or session, and any
-  change during the wait (a tracked, untracked, staged or bookkeeping change, a commit, a
-  submodule change, also while a triage or plan-revision stage is open) escalates with the
-  checkout exactly as found and nothing committed. The preserved work is bound to the task the
-  limited session was working on (ai-run records it in the host manifest before every
-  implementation session; an implementation stop with no recorded task gets no arm): when that
-  task is DONE, in HEAD already or only in the preserved queue, ai-run validates and
-  checkpoints the preserved edits before any session and before the final handoff, also when
-  no runnable task remains; otherwise that task's own session continues them (plan review
-  round 2, P3/P9; round 3, P9/P10; round 6, P3). The resumed run
-  admits the armed tree through one predicate at every cleanliness check between the resume
-  and ai-run's first session, a settled re-check or recorded disputes included, commits
-  nothing while the tree is armed, and stops fail closed (nothing committed, arm kept) in the
-  only states where it would have to commit first (uncommitted review records, a pending
-  re-check), which a limit stop in an implementation session cannot produce (round 4, P3); that
-  stop, like every stop while the tree is armed, is terminal for recovery too: ai-recover
-  escalates an armed manifest before any rule, commit or decision session, whatever the
-  recovery settings (round 7, P16). The armed checkpoint runs after ai-run's complete startup,
-  dependency setup included, also when no runnable task remains (round 7, P17). The arm ends
-  at the act: ai-run's own checks of the preserved work (another task newly DONE, a next task
-  other than the interrupted one, a blocked or unknown bound task, a failing dependency setup)
-  run while the manifest is still armed and are therefore terminal too, and the arm is
-  consumed as the last statement before the armed checkpoint or the bound task's session
-  (round 8, P16). The
-  watchdog's stall alarm stays silent while a relaunch is pending in the manifest, whether or
-  not the local pause log still carries the wait (round 3, P2), and while a due relaunch is the
-  probe's to handle (launched, or refused with the probe's own single ⛔); it applies again once
-  the schedule is gone or when no recovering probe can handle it (round 8, P19); a checkout
-  without a schedule
-  (no manifest, an unscheduled or finished run) is never treated as due (round 4, P11). The arm
-  is granted only for a stop of the `implementation` stage (recorded in the manifest when the
-  relaunch is scheduled; a dirty tree after any other stage's limit stop escalates with
-  nothing committed) and an armed resume re-enters the run at implementation: it never enters
-  the plan review loop, so a partial checkpoint the limited session committed while its task
-  was still IN_PROGRESS (which makes the saved plan review stale) cannot make the resume run a
-  plan review on the preserved tree; a needs-human plan decision still stops it, and a clean
-  resume behaves as today (round 5, P3).
-- The dashboard shows a gone run as paused only with evidence of a currently scheduled
-  relaunch (`relaunch_at` in the observation); a newer last-error still wins.
-- `ai-plan PROMPT_FILE [--read-dir DIR]... [--detach]` runs the planning session with the same
-  edit allowlist as `ai-run --plan`, Read access to each `--read-dir`, a `planning` dashboard
-  stage while it runs, an outcome record `kind: plan` and a run-log line; `--detach` returns
-  after the session has confirmably started and prints its PID and log path. The session never
-  commits. A planning session killed without a plan shows as a stop on the Plan box. The
-  detached log is created exclusively (unique name, no symlink or FIFO followed) inside the
-  pinned `.ai/local` and becomes the runner's stdout/stderr through that descriptor (P8).
-  `ai-plan` works as the first toolkit command in a freshly installed checkout: like every
-  other command it runs `ai_root` first, which refuses a symlinked `.ai`/`.ai/local` and then
-  creates a missing `.ai/local` before the detached launch (round 5, P12). The prompt file,
-  `--knowledge-dir` and every `--read-dir` are resolved against the caller's working directory
-  before `ai_root` changes to the checkout root, so a relative path names the same directory
-  it would for `ai-run --plan` run from the same place (round 6, P14).
-- `ai-pipeline` un-drafts an existing draft PR only when host state records that the pipeline
-  drafted that PR, the review is clean and no dispute remains; a human-drafted PR stays draft,
-  and a run with `--draft` clears the pipeline's record, so a later run never un-drafts it. A
-  `--draft` run whose clear cannot be confirmed stops (⛔, names the record to delete) before it
-  changes the PR, and an un-draft first consumes the record, so a record that cannot be removed
-  never un-drafts (P4).
-- Every behaviour change has an offline regression test in the existing style; `.ai/bin/ai-check`
-  passes; README.md and `docs/workflow.md` describe the new behaviour; the vault flow chart is
-  updated in the tasks that change the flow.
+## Non-goals
+- No change to gate files: `.ai/bin`, `.ai/prompts`, `.ai/validate`, `.ai/ci-setup`,
+  `.ai/permissions.allow`, `.claude/settings.json` and `.github/workflows/*`. The installed copy
+  gets the new scripts and prompts through the human's `setup-project --upgrade` after merge.
+- No change to the CI timeout (the job and `AI_CHECK_TIMEOUT` in the workflow); lowering it again
+  is the human's decision.
+- No profiling, no new allowlist entries, no new setting unless needed (none is planned).
+- No removal, skipping or weakening of a test; no test ID removed or renamed.
+- No change to the parser's accepted cell shapes (FL-30 already accepts them); no change to triage
+  or to the decision prompt's actions.
+- No unvalidated commit: the timeout rule commits only after the full gate passes, as
+  `commit_and_rerun` does today.
+
+## Constraints
+- Sessions are capped at 30 minutes including a ~9-minute gate, so every task is about 15 minutes
+  of work.
+- Host authority stays out of the checkout (AD-4, AD-5). The gate time comes from the host outcome
+  log, which agents cannot write; the once-per-task record lives in the host run manifest.
+- Tests with time bounds assert "within N s" with generous bounds scaled by `tests/timeouts.py`.
+- A changed flow updates `agents-flow.md` (vault) in the same task, plus a hub Log line.
+
+## Requirements and acceptance criteria
+- **R1 (FL-28, gate allowance).** An implementation session's limit is `session_timeout +
+  min(2 × G, session_timeout)`. G is the largest `seconds` among the last 3 `gate` outcome lines
+  with result `pass` for this project (0 when there are none). The result is still capped by the
+  remaining run time. Triage, plan revision and planning sessions are unchanged. The `Session:`
+  line names the allowance. Each host gate run of `ai-run` appends a `gate` outcome line (`pass`,
+  `fail` or `timeout`, measured seconds). Observable: with `gate pass 300` recorded,
+  `--session-timeout 1000` gives `limit 1600s`; with nothing recorded, today's line is printed
+  byte for byte.
+- **R2 (FL-28, timeout recovery).** In `ai-recover`, stage `implementation`, a reason starting
+  `Claude exited 124 (` or `Claude exited 137 (`, the manifest's task IN_PROGRESS in the working
+  queue and a dirty checkout after the leftovers commit lead to: a 🔧 notification, dependency
+  setup, the full gate, a `recovery checkpoint` commit and a resume, with no Claude decision
+  session, the first time for that task in the run. A second such timeout of the same task is one
+  ⛔ `timed out again`. A failing gate escalates as `commit_and_rerun` does today, with nothing
+  committed. Every other case behaves as today: the hard rules, the attempt budget,
+  `AI_AUTO_RECOVER=0`, the armed rule, a TODO task and a clean checkout.
+- **R3 (FL-29).** After each implementation session, `ai-run` restores the executable bit of
+  tracked regular files whose index mode is 100755 and whose working-tree file lacks it. Gate
+  paths, symlinks and untracked files are never touched, and each restored path is printed. The
+  runner and triage prompts say that `chmod +x <path>` is the only allowed form (never `chmod 755`)
+  and that it also repairs a tracked script whose bit was lost (`git diff` shows `old mode
+  100755`).
+- **R4 (FL-30).** The incident row `| P1 (MAJOR) dev proxy vs Origin check | accepted | … | T002 |`
+  passes `plan-dispositions-check`. An interrupted revision whose complete, uncommitted section
+  uses such cells is recorded by the restarted pipeline without a session. `plan-revision.md`
+  shows the table header and one row of each kind (accepted, rejected, needs-human).
+- **R5 (FL-31, progress).** `run_parallel.py` prints one flushed progress line per finished
+  batch: batches done/total, tests run, failing batches and elapsed seconds. On SIGTERM or an
+  interrupt it prints a stop summary (finished and running batches, tests run, failing batch
+  numbers) before it exits non-zero. The final report is unchanged.
+- **R6 (FL-31, budget).** Every finished test over a per-test budget (30 s × the
+  `tests/timeouts.py` scale; `AI_TEST_BUDGET` overrides it) is listed as a warning after the
+  slowest 15. The budget never changes the exit code. The docs state the budget rule.
+- **R7 (FL-31, speed).** `ready()` copies a per-process template of the bootstrapped project
+  instead of rebuilding it, with the same files, modes, branch and commit subjects. Tests that run
+  `ai-pipeline` more than once only to reach a precondition are trimmed where the precondition is
+  already asserted elsewhere; every change is listed. The discovered test ID set only grows, every
+  test passes, and no assertion is removed.
+
+## Assumptions (unattended planning; recorded instead of asked)
+- A1: "Scale with the measured gate time" means room for two gate runs (one failing, one
+  passing), capped at doubling the base limit. The measurement comes from the host outcome log
+  (agent-unwritable), not from `.ai/local/validation.json` (agent-writable). The first run on a
+  project, with no measurement yet, behaves as today.
+- A2: Only implementation sessions run the gate, so only they get the allowance.
+- A3: "Once per task" is per human-started run: `run-manifest start` drops the record and
+  `clear-attempts` keeps it, so a resumed pipeline cannot reset it. A second timeout of the same
+  task escalates instead of going to the decision session, which could choose `commit_and_rerun`
+  again.
+- A4: A timeout on a TODO task (the session never marked it) or on a clean checkout is left to
+  today's decision session (usually `rerun`).
+- A5: FL-30's parser part is done (verified above); only the regression and the prompt remain.
+- A6: FL-31's speed work cannot be profiled. The fixture template is built because Zack asked for
+  it, even though the FL-23 measurement predicts a small gain. Its result records before and after
+  `-k` timings. Pipeline-run trimming is limited to provably redundant setup runs.
+- A7: The previous queue's 21 DONE tasks (batch 6) stay in `.ai/tasks.md` unchanged because the
+  host refuses a plan that removes them. The new tasks are T022–T033.
