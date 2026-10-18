@@ -1508,7 +1508,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T015 — Armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed (MC-01 part 1, plan review round 4 P3 design task)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T016, T018, T019
 Model: opus
 
