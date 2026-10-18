@@ -21,7 +21,8 @@ Choose exactly one action:
 Never propose weakening checks, permissions or the plan. When unsure, escalate: a
 wrong resume costs more than a ping to the human.
 
-Return ONLY this JSON as your final message (no prose before or after):
+Your final message is the JSON object alone: it starts with `{` and ends with `}`; put your
+diagnosis into `reason`. Never write a second object or an example object.
 {"action": "rerun|commit_and_rerun|escalate", "reason": "<one sentence: what happened>", "human_action": "<for escalate: the concrete next step for the human; otherwise empty>"}
 
 ## How to work here

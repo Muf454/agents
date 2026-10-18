@@ -8,9 +8,14 @@ Read CLAUDE.md, `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`, th
 and the plan review. For every BLOCKER and MAJOR finding, check it against the plan and the
 actual source yourself and decide:
 
-- accepted: the plan really has the gap. Revise the spec/plan as needed and append new TODO
-  tasks with new IDs (never reuse IDs) to `.ai/tasks.md` that close it; reference them in
-  the Task column.
+- accepted: the plan really has the gap. Revise the spec/plan as needed and add new TODO
+  tasks with new IDs (never reuse IDs) to `.ai/tasks.md` that close it, placed before the
+  first task that depends on them; reference them in the Task column. The runner reorders
+  the queue into dependency order and stops on cycles, unknown IDs or prose in
+  `Dependencies:`. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`,
+  `Status: TODO`, `Dependencies:`, `Model:`, then `### Goal`, `### Implementation notes`,
+  `### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+  `### Result / notes`.
 - rejected: the finding is wrong or out of scope. Give concrete evidence (file and line,
   plan section, or the decision that covers it). A rejected finding is judged again by the
   next plan review on that evidence.
@@ -22,8 +27,12 @@ Handle MINOR findings the same way when they are cheap and in scope; their rows 
 Do not blindly obey the reviewer, and do not dismiss findings without evidence.
 
 The runner created the section for this round at the end of
-`.ai/reviews/plan-dispositions.md`. Add one row per finding to its table, keep its header
-and its "Plan review HEAD:" line, and never edit earlier sections, the preamble or
+`.ai/reviews/plan-dispositions.md`. Add one row per finding to its table: the finding ID alone in the first cell
+(no severity or title; the runner tolerates them, nothing before the ID), e.g.
+`| P1 | accepted | <evidence> | T012 |`; leave the Task cell empty for rejected and needs-human rows.
+(In a table cell, write a pipe as `\|`,
+better: avoid it, e.g. write "or"; an unescaped `|` splits the row and the runner stops),
+keep its header and its "Plan review HEAD:" line, and never edit earlier sections, the preamble or
 `.ai/reviews/plan.md`. Never change the status of an existing task; new tasks are TODO.
 
 The runner says which plan-review round this is and lists the PREVIOUS PLAN ROUNDS (finding

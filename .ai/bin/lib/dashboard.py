@@ -2,12 +2,16 @@
 terminal text. Nothing here writes a file: checkouts are read only through workflow.py's pinned,
 bounded readers, processes only through a ProcSource (`/proc` or a test fixture tree)."""
 import argparse
+import base64
+import binascii
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -15,7 +19,7 @@ import unicodedata
 # No __pycache__: .ai/bin is part of the approved gate digest.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workflow import (BOX_KEYS, DIR_FLAGS, NOTIFICATIONS_LIMIT, OBSERVATION_LIMIT,  # noqa: E402
+from workflow import (BOX_KEYS, COUNTS, DIR_FLAGS, NOTIFICATIONS_LIMIT, OBSERVATION_LIMIT,  # noqa: E402
                       OBSERVATION_STATES, SMALL_LIMIT, TASKS_LIMIT, checkout_fds, close_fds,
                       git_branch, read_record, state_root, task_blocks)
 
@@ -23,6 +27,9 @@ RUNNER_NAMES = ('ai-run', 'ai-pipeline', 'ai-recover')
 PIPELINE_NAMES = ('ai-pipeline', 'ai-recover')
 SHELLS = ('bash', 'sh')
 FROM_ENVIRONMENT = object()
+# A runner started with this in its environment (the toolkit's own test fixtures) is not listed.
+IGNORE_ENV = b'AI_DASHBOARD_IGNORE=1'
+ENVIRON_LIMIT = 256 * 1024
 
 
 def is_runner(args, names=RUNNER_NAMES):
@@ -70,6 +77,29 @@ class ProcSource:
             return os.readlink(self.root / str(pid) / 'cwd')
         except OSError:
             return None
+
+    def environ(self, pid):
+        """The set of `KEY=VALUE` entries of a process environment, or None when it cannot be
+        read (another user's process, a race, a fixture FIFO or directory, > ENVIRON_LIMIT)."""
+        try:
+            fd = os.open(self.root / str(pid) / 'environ',
+                         os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            data = b''
+            while len(data) <= ENVIRON_LIMIT:
+                chunk = os.read(fd, ENVIRON_LIMIT + 1 - len(data))
+                if not chunk:
+                    return set(data.split(b'\0')) - {b''}
+                data += chunk
+            return None
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
 
     def start_ns(self, ticks):
         """Process start (stat field 22, clock ticks since boot) as epoch ns."""
@@ -122,7 +152,8 @@ def inside(path, base):
 def discover(source=None, only_under=FROM_ENVIRONMENT):
     """[(checkout, [(pid, start ticks), ...])] for every registered checkout and every checkout
     a live runner works in, deduplicated by realpath; ONLY_UNDER (`AI_DASHBOARD_ROOT`, test
-    only) keeps just the checkouts inside it."""
+    only) keeps just the checkouts inside it. A runner whose environment has IGNORE_ENV is
+    skipped (an unreadable environment is not); a registered checkout is listed regardless."""
     source = source or ProcSource()
     if only_under is FROM_ENVIRONMENT:
         only_under = os.environ.get('AI_DASHBOARD_ROOT') or None
@@ -140,6 +171,8 @@ def discover(source=None, only_under=FROM_ENVIRONMENT):
     for pid in source.pids():
         found = source.process(pid)
         if not found or not is_runner(found[0]):
+            continue
+        if IGNORE_ENV in (source.environ(pid) or ()):
             continue
         cwd = source.cwd(pid)
         if not has_ai(cwd):
@@ -206,8 +239,8 @@ def sanitize(text, limit=200):
 STAGES = (*BOX_KEYS, 'none')
 EVENT_COUNT = 20
 HIDE_AFTER = 24 * 3600
-RANK = {'needs_you': 0, 'crashed': 1, 'running': 2, 'paused': 2, 'recovering': 2, 'finished': 3,
-        'idle': 4, 'unknown': 5}
+RANK = {'needs_you': 0, 'crashed': 1, 'running': 2, 'paused': 2, 'recovering': 2, 'planned': 3,
+        'finished': 4, 'idle': 5, 'unknown': 6}
 
 
 def text_field(value, limit=200):
@@ -227,16 +260,20 @@ def observation_of(local_fd, seen):
     if not isinstance(data, dict) or data.get('stage') not in STAGES \
             or data.get('state') not in OBSERVATION_STATES:
         return None
+    relaunch = data.get('relaunch_at')
     return {'stage': data['stage'], 'state': data['state'], 'detail': text_field(data.get('detail')),
-            'note': text_field(data.get('note'), 400), 'since': text_field(data.get('since'), 40)}
+            'note': text_field(data.get('note'), 400), 'since': text_field(data.get('since'), 40),
+            'relaunch_at': relaunch if isinstance(relaunch, int) and not isinstance(relaunch, bool) else None}
 
 
 def events_of(local_fd, seen):
-    """The last EVENT_COUNT notification lines as {'ts', 'message'}; malformed lines skipped."""
+    """(events, mark): the last EVENT_COUNT notification lines as {'ts', 'message'} (malformed
+    lines skipped) and 16 hex that change whenever the log is appended to or rewritten, even when
+    the displayed events look the same. The mark is None without a log."""
     record = read_record(local_fd, 'notifications.log', NOTIFICATIONS_LIMIT, tail=True) \
         if local_fd is not None else None
     if record is None:
-        return []
+        return [], None
     seen.append(record[1].st_mtime)
     events = []
     for line in record[0].splitlines():
@@ -246,7 +283,11 @@ def events_of(local_fd, seen):
             continue
         if isinstance(data, dict) and isinstance(data.get('message'), str):
             events.append({'ts': text_field(data.get('ts'), 40), 'message': text_field(data['message'], 300)})
-    return events[-EVENT_COUNT:]
+    info = record[1]
+    lines = record[0].splitlines()
+    last = lines[-1] if lines else ''
+    digest = hashlib.sha256(f'{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{last}'.encode('utf-8', 'replace'))
+    return events[-EVENT_COUNT:], digest.hexdigest()[:16]
 
 
 def tasks_of(ai_fd, seen):
@@ -264,12 +305,60 @@ def tasks_of(ai_fd, seen):
             'current': text_field(current, 120)}
 
 
+PR_URL = re.compile(r'''https://[^\s<>"']+/pull/\d+''')
+PR_LOGGED = re.compile(r'''pull request ready: (https://[^\s<>"']+/pull/\d+)''')
+REVIEW_HEAD = re.compile(r'(?:Host evidence: |Plan review of plan digest [0-9a-f]{64}; )HEAD ([0-9a-f]{7,40});')
+COUNT_DIGITS = 6
+
+
+def pr_of(ai_fd):
+    """The pull request URL: the one in state.md's `Next action:` line, else the last
+    `pull request ready:` run-log line, else ''."""
+    record = read_record(ai_fd, 'state.md', TASKS_LIMIT)
+    for line in (record[0].splitlines() if record else ()):
+        if line.startswith('Next action:'):
+            found = PR_URL.search(line)
+            if found:
+                return text_field(found[0], 300)
+    record = read_record(ai_fd, 'run-log.md', TASKS_LIMIT, tail=True)
+    found = PR_LOGGED.findall(record[0]) if record else []
+    return text_field(found[-1], 300) if found else ''
+
+
+def reviews_of(ai_fd):
+    """{'plan', 'code'}: each {'blocker', 'major', 'minor', 'head'} from the report's single counts
+    line, or None. Informational only: not verified against the host binding (the pipeline stays
+    authoritative)."""
+    result = {'plan': None, 'code': None}
+    try:
+        directory = os.open('reviews', DIR_FLAGS, dir_fd=ai_fd)
+    except OSError:
+        return result
+    try:
+        for key, name in (('plan', 'plan.md'), ('code', 'current.md')):
+            record = read_record(directory, name, TASKS_LIMIT)
+            counts = COUNTS.findall(record[0]) if record else []
+            if len(counts) != 1 or any(len(count) > COUNT_DIGITS for count in counts[0]):
+                continue
+            try:
+                blocker, major, minor = (int(count) for count in counts[0])
+            except ValueError:
+                continue
+            head = REVIEW_HEAD.search(record[0])
+            result[key] = {'blocker': blocker, 'major': major, 'minor': minor,
+                           'head': head[1][:7] if head else ''}
+    finally:
+        close_fds(directory)
+    return result
+
+
 def inspect(checkout, runners, now, source=None):
     """One checkout as a plain dict; every checkout-derived string is sanitised. A checkout whose
     records cannot be read safely comes back with status `unknown`."""
     run = {'project': text_field(os.path.basename(checkout.rstrip('/')) or checkout, 80),
            'checkout': text_field(checkout, 300), 'branch': 'unknown', 'liveness': 'gone',
-           'observation': None, 'events': [], 'last_error': '', 'tasks': None, 'status': 'unknown',
+           'observation': None, 'events': [], 'notifications_mark': None, 'last_error': '', 'tasks': None, 'pr': '',
+           'reviews': {'plan': None, 'code': None}, 'status': 'unknown',
            'stage': 'unknown', 'since': '', 'updated': 0.0}
     fds = checkout_fds(checkout)
     if fds is None:
@@ -282,8 +371,10 @@ def inspect(checkout, runners, now, source=None):
         observation = observation_of(local_fd, seen)
         observed = seen[0] if observation else 0.0
         run['observation'] = observation
-        run['events'] = events_of(local_fd, seen)
+        run['events'], run['notifications_mark'] = events_of(local_fd, seen)
         run['tasks'] = tasks_of(ai_fd, seen)
+        run['pr'] = pr_of(ai_fd)
+        run['reviews'] = reviews_of(ai_fd)
         error = read_record(local_fd, 'last-error', SMALL_LIMIT) if local_fd is not None else None
         errored = bool(error and error[1].st_mtime > observed)
         if error:
@@ -297,8 +388,13 @@ def inspect(checkout, runners, now, source=None):
             status = state if state in ('paused', 'recovering') else 'running'
         elif state == 'stopped' or errored:
             status = 'needs_you'
+        elif state == 'paused' and observation['relaunch_at'] is not None:
+            status = 'paused'  # waiting for the scheduled usage-limit relaunch
+        elif observation and observation['stage'] == 'planning' and state in ('active', 'paused'):
+            status = 'needs_you'
+            run['last_error'] = 'planning session ended without a plan (killed?)'
         elif state == 'done':
-            status = 'finished'
+            status = 'planned' if observation['stage'] == 'planning' else 'finished'
         else:
             status = 'idle'
         run.update(status=status, stage=observation['stage'] if observation else 'unknown',
@@ -308,16 +404,19 @@ def inspect(checkout, runners, now, source=None):
         close_fds(root_fd, ai_fd, local_fd)
 
 
-def snapshot(all_runs=False, now=None, source=None):
-    """{'state_root', 'runs'}: needs_you, crashed, live, finished, idle, then newest first. Old
-    (> 24 h) finished and idle runs are hidden unless ALL_RUNS."""
+def snapshot(all_runs=False, now=None, source=None, marks=False):
+    """{'state_root', 'runs'}: needs_you, crashed, live, planned, finished, idle, then newest
+    first. Old (> 24 h) planned, finished and idle runs are hidden unless ALL_RUNS."""
     now = time.time() if now is None else now
     source = source or ProcSource()
     runs = [inspect(checkout, runners, now, source) for checkout, runners in discover(source)]
     if not all_runs:
         runs = [run for run in runs
-                if run['status'] not in ('finished', 'idle') or now - run['updated'] <= HIDE_AFTER]
+                if run['status'] not in ('planned', 'finished', 'idle') or now - run['updated'] <= HIDE_AFTER]
     runs.sort(key=lambda run: (RANK[run['status']], -run['updated']))
+    if not marks:
+        for run in runs:
+            run.pop('notifications_mark', None)
     return {'state_root': str(state_root()), 'runs': runs}
 
 
@@ -327,11 +426,13 @@ def title_line(run):
 
 
 # The flow, left to right: (stage key, label, compact label, role). `recheck` shares Triage's box.
-FLOW = (('plan_review', 'Plan check', 'Plan', 'codex'), ('plan_revision', 'Plan revision', 'Revise', 'claude'),
+FLOW = (('planning', 'Plan', 'Plan', 'claude'), ('plan_review', 'Plan check', 'PlanCheck', 'codex'),
+        ('plan_revision', 'Plan revision', 'Revise', 'claude'),
         ('setup', 'Setup', 'Setup', 'script'), ('build', 'Build', 'Build', 'claude'),
         ('checks', 'Checks', 'Checks', 'script'), ('review', 'Review', 'Review', 'codex'),
         ('triage', 'Triage', 'Triage', 'claude'), ('pr', 'PR', 'PR', 'script'))
-BOX_OF = {**{key: index for index, (key, *_rest) in enumerate(FLOW)}, 'recheck': 6}
+BOX_OF = {key: index for index, (key, *_rest) in enumerate(FLOW)}
+BOX_OF['recheck'] = BOX_OF['triage']
 WIDE_FROM = 120
 OVERLAYS = {'paused': '⏸', 'recovering': '🔧', 'crashed': '⚠'}
 ACTIVE = ('running', 'paused', 'recovering', 'crashed', 'needs_you')
@@ -387,12 +488,22 @@ def position(run):
         return len(FLOW), 'done'
     if not observation:
         return None, 'unknown'
+    if status == 'planned':
+        return BOX_OF['plan_review'], 'planned'
     if status == 'needs_you':
         return index, 'stopped'
     if index is None:
         return None, 'unknown'
     return index, {'running': 'active', 'paused': 'paused', 'recovering': 'recovering',
                    'crashed': 'crashed'}.get(status, 'idle')
+
+
+def passed(run, index, i):
+    """Whether box I is ticked: before the current box, or, for an observation without a box (a
+    pipeline's start record), the Plan box."""
+    if index is not None:
+        return i < index
+    return bool(run['observation']) and i == 0
 
 
 def box_label(run, index, here):
@@ -424,6 +535,8 @@ def marker_text(run, index, mode):
         if index is None:
             return ' · '.join(part for part in ('⛔ stopped before Plan check', note) if part), 'stopped'
         return f"⛔ {note or 'stopped'}", 'stopped'
+    if mode == 'planned':
+        return f"📝 {observation['note'] or 'planned'}", 'dim'
     if mode == 'unknown':
         text = 'stage unknown' if observation else 'stage unknown (older toolkit)'
         if not observation and run['last_error']:
@@ -439,10 +552,10 @@ def box_rows(run, index, mode):
     """[(top, middle, bottom) segment lists, x offset, width] per box, and the next x."""
     boxes, x = [], 2
     for i, (key, _label, _compact, _role) in enumerate(FLOW):
-        here = i == index
+        here = i == index and mode != 'planned'
         overlay = f' {OVERLAYS[mode]}' if here and mode in OVERLAYS else ''
         label = box_label(run, i, here) + overlay
-        if mode == 'done' or (index is not None and i < index):
+        if mode == 'done' or passed(run, index, i):
             style = 'done'
         elif not here:
             style = 'pending'
@@ -455,7 +568,7 @@ def box_rows(run, index, mode):
         tl, h, tr, v, bl, _h, br = DOUBLE if here and mode != 'idle' else SINGLE
         inner = cols(label) + 2
         boxes.append(((tl + h * inner + tr, f'{v} {label} {v}', bl + h * inner + br), x, inner + 2, style))
-        x += inner + 4
+        x += inner + 3
     return boxes
 
 
@@ -466,7 +579,7 @@ def wide_card(run, width):
     for i, (rows, _x, _w, style) in enumerate(boxes):
         for row, text in enumerate(rows):
             if i:
-                lines[row].append(('──' if row == 1 else '  ', 'dim'))
+                lines[row].append(('─' if row == 1 else ' ', 'dim'))
             lines[row].append((text, style))
     marker, used = [], 0
 
@@ -476,7 +589,7 @@ def wide_card(run, width):
         used = column + cols(text)
 
     for i, (_rows, x, _w, _style) in enumerate(boxes):
-        if mode == 'done' or (index is not None and i < index):
+        if mode == 'done' or passed(run, index, i):
             place(x + 2, '✓', 'done')
     if mode != 'done':
         text, style = marker_text(run, index, mode)
@@ -492,8 +605,8 @@ def compact_card(run):
     index, mode = position(run)
     line = [('  ', 'dim')]
     for i, (_key, _label, short, _role) in enumerate(FLOW):
-        here = i == index
-        if mode == 'done' or (index is not None and i < index):
+        here = i == index and mode != 'planned'
+        if mode == 'done' or passed(run, index, i):
             mark, style = '✓', 'done'
         elif not here:
             mark, style = '·', 'pending'
@@ -527,6 +640,11 @@ def event_line(run):
 
 def expanded_lines(run):
     lines = [[(f"  path: {run['checkout']}", 'dim')]]
+    if run['pr']:
+        lines.append([(f"  pr: {run['pr']}", 'dim')])
+    sides = [f"{side} B{r['blocker']} M{r['major']} m{r['minor']}" + (f" @{r['head']}" if r['head'] else '')
+             for side, r in run['reviews'].items() if r]
+    lines.append([(f"  reviews: {' · '.join(sides) if sides else 'none yet'}", 'dim')])
     if run['last_error']:
         lines.append([(f"  error: {run['last_error']}", 'stopped')])
     if run['tasks'] and run['tasks']['current']:
@@ -663,12 +781,85 @@ def interface(screen, all_runs):
             selected = paths.index(current) if current in paths else selected
 
 
+def fingerprint(run):
+    observation = run['observation']
+    return [run['status'], run['stage'], observation['state'] if observation else None,
+            run.get('notifications_mark')]
+
+
+def fingerprints(runs):
+    return {run['checkout']: fingerprint(run) for run in runs}
+
+
+def encode_cursor(prints):
+    raw = json.dumps(prints, sort_keys=True).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+
+
+def decode_cursor(text):
+    """The {checkout: fingerprint} map of a cursor, or None when it is not one."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(text + '=' * (-len(text) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    if not isinstance(data, dict) or not all(
+            isinstance(value, list) and len(value) == 4 for value in data.values()):
+        return None
+    return data
+
+
+def wait_for_change(baseline, timeout, interval, source=None):
+    """(payload, changed): polls until a checkout is new to BASELINE or its fingerprint differs.
+    BASELINE None means the first snapshot. Checkouts that disappeared are not reported."""
+    deadline = time.monotonic() + timeout
+    while True:
+        data = snapshot(all_runs=True, source=source, marks=True)
+        prints = fingerprints(data['runs'])
+        if baseline is None:
+            baseline = prints
+        changed = [run for run in data['runs'] if baseline.get(run['checkout']) != prints[run['checkout']]]
+        timed_out = not changed and time.monotonic() >= deadline
+        if changed or timed_out:
+            for run in changed:
+                run.pop('notifications_mark', None)
+            return {'state_root': data['state_root'], 'cursor': encode_cursor(prints),
+                    'timed_out': timed_out, 'runs': changed}, bool(changed)
+        time.sleep(max(0.0, min(interval, deadline - time.monotonic())))
+
+
 def main(arguments=None):
     parser = argparse.ArgumentParser(prog='ai-dashboard', description='Watch all pipelines on this machine.')
     parser.add_argument('--once', action='store_true', help='print the text view once and exit')
     parser.add_argument('--json', action='store_true', help='print the snapshot as JSON and exit')
     parser.add_argument('--all', action='store_true', help='also show old finished and idle runs')
+    parser.add_argument('--wait', action='store_true',
+                        help='block until a run changes, print the changed runs as JSON (exit 1 on timeout)')
+    parser.add_argument('--since', metavar='CURSOR', help='with --wait: the cursor of a previous call')
+    parser.add_argument('--timeout', type=float, metavar='SECONDS', help='with --wait: give up after this (3600)')
+    parser.add_argument('--interval', type=float, metavar='SECONDS', help='with --wait: poll period (2)')
     args = parser.parse_args(arguments)
+    if args.wait:
+        if args.once:
+            parser.error('--wait cannot be combined with --once')
+        timeout = 3600.0 if args.timeout is None else args.timeout
+        interval = 2.0 if args.interval is None else args.interval
+        if not timeout > 0:
+            parser.error('--timeout must be greater than 0')
+        if not interval >= 0.1:
+            parser.error('--interval must be at least 0.1')
+        baseline = None
+        if args.since is not None:
+            baseline = decode_cursor(args.since)
+            if baseline is None:
+                parser.error('--since is not a cursor printed by ai-dashboard --wait')
+        try:
+            payload, changed = wait_for_change(baseline, timeout, interval)
+        except KeyboardInterrupt:
+            return 130
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if changed else 1
+    if args.since is not None or args.timeout is not None or args.interval is not None:
+        parser.error('--since, --timeout and --interval need --wait')
     if args.json:
         print(json.dumps(snapshot(args.all), ensure_ascii=False, indent=2))
     elif args.once or not (sys.stdin.isatty() and sys.stdout.isatty()):
