@@ -1,5 +1,6 @@
 """Offline integration tests: real shell tools/Git, mock Claude and Codex."""
 import ast
+import atexit
 import calendar
 import contextlib
 import errno
@@ -52,6 +53,32 @@ def git_fixture_env(base=None):
         count += 1
     env['GIT_CONFIG_COUNT'] = str(count)
     return env
+
+
+_READY_TEMPLATE = {}
+
+
+def ready_template():
+    """Per-process template of a bootstrapped project (setup-project, the bootstrap commit and
+    the feature branch), built once and copied by ToolkitTest.ready(). Batches are separate
+    processes, so each builds its own."""
+    if 'project' not in _READY_TEMPLATE:
+        root = Path(tempfile.mkdtemp(prefix='ai-ready-template-'))
+        atexit.register(shutil.rmtree, root, True)
+        project = root / 'project with spaces'
+        project.mkdir()
+        env = git_fixture_env()
+        steps = (['git', 'init', '-b', 'main'], ['git', 'config', 'user.name', 'Toolkit Test'],
+                 ['git', 'config', 'user.email', 'toolkit-test@example.invalid'],
+                 ['git', 'config', 'commit.gpgsign', 'false'],
+                 [str(ROOT / 'scripts/setup-project'), str(project)],
+                 ['git', 'add', '--all'], ['git', 'commit', '-qm', 'bootstrap'],
+                 ['git', 'switch', '-c', 'feature/test'])
+        for step in steps:
+            subprocess.run(step, cwd=project, env=env, capture_output=True, text=True, check=True,
+                           timeout=COMMAND_TIMEOUT)
+        _READY_TEMPLATE['project'] = project
+    return _READY_TEMPLATE['project']
 
 
 def command_timeout(name):
@@ -1637,13 +1664,64 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('exit 124', (self.project / '.ai/local/diagnosis.md').read_text())
         self.assertEqual(len(self.notifications().splitlines()), 1)
 
-    def ready(self, queue=None):
-        self.setup_project()
-        self.commit('bootstrap')
-        self.run_cmd(['git', 'switch', '-c', 'feature/test'])
+    def ready(self, queue=None, fresh=False):
+        untouched = [entry.name for entry in self.project.iterdir()] == ['.git']
+        if not fresh and untouched and not any(self.config.iterdir()):
+            shutil.rmtree(self.project / '.git')
+            shutil.copytree(ready_template(), self.project, symlinks=True, dirs_exist_ok=True)
+        else:
+            self.setup_project()
+            self.commit('bootstrap')
+            self.run_cmd(['git', 'switch', '-c', 'feature/test'])
         (self.project / '.ai/tasks.md').write_text(queue or task('T001'))
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -c "assert 2 + 2 == 4"\n')
         self.commit('approved plan and real fixture gate')
+
+    def test_fixture_template_equivalence(self):
+        self.ready()
+        other = self.base / 'fresh' / 'project with spaces'  # setup-project records the directory name
+        other.mkdir(parents=True)
+        project, self.project = self.project, other
+        self.run_cmd(['git', 'init', '-b', 'main'])
+        self.run_cmd(['git', 'config', 'user.name', 'Toolkit Test'])
+        self.run_cmd(['git', 'config', 'user.email', 'toolkit-test@example.invalid'])
+        self.run_cmd(['git', 'config', 'commit.gpgsign', 'false'])
+        self.ready(fresh=True)
+
+        def snapshot(path):
+            self.project = path
+            files = {}
+            for entry in sorted(path.rglob('*')):
+                relative = entry.relative_to(path)
+                if relative.parts[0] == '.git':
+                    continue
+                data = entry.read_bytes() if entry.is_file() else None
+                if data is not None:  # setup-project stamps the wall-clock time (state.md)
+                    data = re.sub(rb'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', b'TIME', data)
+                files[str(relative)] = (entry.stat().st_mode, data)
+            return (files, self.run_cmd(['git', 'branch', '--show-current']).stdout,
+                    self.run_cmd(['git', 'log', '--format=%s']).stdout,
+                    self.run_cmd(['git', 'ls-files', '--cached', '--others']).stdout)
+        self.assertEqual(snapshot(project), snapshot(other))
+
+    def test_fixture_template_copies_are_independent(self):
+        self.ready()
+        (self.project / 'extra.txt').write_text('only here\n')
+        self.commit('extra')
+        first = self.project
+        second = self.base / 'second' / 'project with spaces'
+        second.mkdir(parents=True)
+        self.project = second
+        self.run_cmd(['git', 'init', '-b', 'main'])
+        self.ready()
+        self.assertFalse((second / 'extra.txt').exists())
+        self.assertNotIn('extra', self.run_cmd(['git', 'log', '--format=%s']).stdout.split('\n'))
+        self.assertTrue((first / 'extra.txt').exists())
+
+    def test_fixture_template_has_no_bytecode(self):
+        self.ready()
+        for root in (ready_template(), self.project):
+            self.assertEqual(list((root / '.ai/bin').rglob('__pycache__')), [], root)
 
     def tool(self, name, *args, expected=0, timeout=None, **env):
         if timeout is None:

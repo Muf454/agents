@@ -2980,7 +2980,7 @@ BLOCKED: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not fin
 
 
 ## T031 — Shared fixture template for `ready()` (FL-31, fixtures)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -3032,7 +3032,18 @@ Targeted: `python3 -m unittest discover -s tests -k finding_cell` (must say `Ran
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+Implemented in `tests/test_workflow.py`: `ready_template()` (lazy, per process, `ai-ready-template-` tempdir
+removed by `atexit`, project dir `project with spaces`) and `ready(queue=None, fresh=False)`, which copies
+the template (`copytree(symlinks=True)`, after removing setUp's `.git`) only when the project holds just
+`.git` and the XDG config dir is empty; otherwise the old path runs. `setup-project` reads nothing from the
+environment, so the template env is `git_fixture_env()`. It records the directory name and a wall-clock
+stamp in `.ai/state.md`, so the equivalence test builds the fresh project in a `project with spaces`
+directory and masks ISO timestamps (the first gate run failed on that; fixed). New tests:
+`test_fixture_template_equivalence`, `_copies_are_independent`, `_has_no_bytecode`. No test needed
+`fresh=True` (the full suite passes without it). Timings after: `-k finding_cell` Ran 10 tests in 8.766s;
+`-k plan_revision` Ran 15 tests in 70.936s. Before-numbers were not taken (avoided stashing or checking
+out the old file in a shared worktree), so no speed-up is claimed. Gate: 1001 collected (998 + 3 new),
+OK, 633.5 s (finished in the background past the 600 s tool timeout). Flow unchanged.
 
 ## T032 — Fewer full `ai-pipeline` fixture runs per test (FL-31, slow tests)
 Status: TODO

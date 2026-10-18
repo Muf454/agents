@@ -468,3 +468,4 @@
 | 2026-10-18T22:43:51Z | runner | T027 | blocked; try next independent task | not complete | 2ed401f | See task result |
 | 2026-10-18T22:56:49Z | runner | T029 | blocked; try next independent task | not complete | 20bfcf5 | See task result |
 | 2026-10-18T23:13:31Z | runner | T030 | blocked; try next independent task | not complete | be112cd | See task result |
+| 2026-10-19T00:10:00Z | claude (sonnet) | T031 | DONE: `ready()` copies a per-process bootstrapped template (`ready_template()`, `fresh=True` opts out); 3 `test_fixture_template_*` tests (equivalence masks wall-clock stamps) | PASS (ai-check 1001 tests, 633.5 s, finished in the background past the 600 s tool timeout; -k fixture_template 3 OK; -k finding_cell 10 in 8.8 s; -k plan_revision 15 in 70.9 s) | parent 06e785a | No before timings taken; flow unchanged |

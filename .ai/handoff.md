@@ -108,5 +108,5 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
   T026 and T033 add theirs (T026's is in).
 
 ## Next action
-T022–T026 are DONE (FL-28 complete); next is any task without dependencies: T027, T029, T030,
-T031. T028 waits for T027, T032 for T030 and T031. T033 comes last.
+T022–T026 and T031 are DONE (FL-28 complete); next is any task without dependencies: T027, T029,
+T030. T028 waits for T027, T032 for T030 and T031. T033 comes last.
