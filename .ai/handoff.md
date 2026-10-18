@@ -50,7 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
-T019: `-k limit_relaunch_consume` 10 OK; others see the task result. Mutation: moving
+T019: `-k limit_relaunch_consume` 10 OK, `-k limit_relaunch` 85 OK, `-k recovery` 70 OK,
+`-k Docs` 3 OK; `.ai/bin/ai-check` PASS (902 tests, 561.5 s). Mutation: moving
 `limit-disarm` to the top of the consumer fails the five terminal cases and the span test.
 T016: `-k limit_relaunch_reenter` 8 OK, `-k limit_relaunch` 70 OK, `-k plan_review` 20 OK,
 `-k recovery` 65 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (887 tests, 531.5 s). Without the new `! armed_resume` guard the partial

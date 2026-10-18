@@ -1387,7 +1387,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T019 — The arm ends at the act: every consumer check runs armed, the disarm is the last statement before the checkpoint or the session (MC-01 part 1, plan review round 8 P16 design task)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T011, T018
 Model: opus
 
@@ -1503,7 +1503,8 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
   cases and all four span subtests. Reverted.
 - Docs: docs/workflow.md (one sentence), README "Recovery" (half sentence), vault flow chart
   ("checks first, then the arm ends"), hub log.
-- Validation: `-k limit_relaunch_consume` 10 OK; `-k limit_relaunch` 85 OK.
+- Validation: `-k limit_relaunch_consume` 10 OK; `-k limit_relaunch` 85 OK; `-k recovery` 70 OK;
+  `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (902 tests, 561.5 s).
 
 
 ## T015 — Armed-tree acceptance contract: one predicate on the whole resume path, no host write while armed (MC-01 part 1, plan review round 4 P3 design task)
