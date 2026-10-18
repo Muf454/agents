@@ -234,8 +234,9 @@ if 'PLANNING CONTRACT' in prompt:
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
     with open(state / 'plan-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
     with open(state / 'plan-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
-    if os.path.exists('.ai/local/observation.json'):
+    if os.path.isfile('.ai/local/observation.json'):
         with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    time.sleep(float(os.environ.get('MOCK_PLAN_SLEEP', '0')))  # a session still running (ai-plan --detach)
     mode = os.environ.get('MOCK_CLAUDE', 'plan-ok')
     if mode == 'limit-once' and not (state / 'plan-limit-hit').exists():
         (state / 'plan-limit-hit').touch()
@@ -3578,6 +3579,221 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-run', '--approved', '--read-dir', str(self.base), expected=1)
         self.assertIn('--read-dir only applies to --plan.', result.stderr)
         self.assertEqual(self.plan_args(), [])
+
+    # ---------------------------------------------------------------- ai-plan command (DB-04)
+    def ai_plan(self, *args, expected=0, cwd=None, **env):
+        if cwd is None:
+            return self.tool('ai-plan', *args, expected=expected, **env)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-plan'), *args], cwd=cwd,
+                                env=dict(self.env, **env), capture_output=True, text=True,
+                                timeout=COMMAND_TIMEOUT)
+        if expected is not None:
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def ai_plan_runner(self, pid):
+        """True while PID is this fixture's ai-run runner (not a zombie, not a reused PID)."""
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+            cmdline = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        except OSError:
+            return False
+        return state != 'Z' and any(part == bytes(self.project / '.ai/bin/ai-run') for part in cmdline)
+
+    def ai_plan_wait(self, pid, timeout=COMMAND_TIMEOUT):
+        deadline = time.monotonic() + timeout
+        while self.ai_plan_runner(pid):
+            if time.monotonic() > deadline:
+                self.fail(f'detached planning runner {pid} still running after {timeout} s')
+            time.sleep(0.05)
+
+    def ai_plan_stop(self, pid):
+        # TERM runs ai-run's trap once the (sleeping) mock session returns.
+        if self.ai_plan_runner(pid):
+            os.kill(pid, signal.SIGTERM)
+        self.ai_plan_wait(pid)
+
+    def ai_plan_started(self, result):
+        match = re.search(r'^Planning session started: pid (\d+), log (\.ai/local/plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log)$',
+                          result.stdout, re.M)
+        self.assertIsNotNone(match, result.stdout + result.stderr)
+        pid = int(match.group(1))
+        self.addCleanup(self.ai_plan_stop, pid)
+        return pid, self.project / match.group(2)
+
+    def ai_plan_logs(self):
+        return sorted((self.project / '.ai/local').glob('plan-*.log'))
+
+    def test_ai_plan_foreground_matches_ai_run_plan(self):
+        objective = self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.ai_plan(str(objective))
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        args = self.plan_args()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('planning', 'done', '2 tasks'))
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertIn('.ai/tasks.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        self.assertEqual(self.ai_plan_logs(), [])
+
+    def test_ai_plan_detach_confirms_the_started_session(self):
+        objective = self.plan_ready()
+        started = time.monotonic()
+        result = self.ai_plan(str(objective), '--detach', MOCK_PLAN_SLEEP='3')
+        self.assertLess(time.monotonic() - started, COMMAND_TIMEOUT)
+        pid, log = self.ai_plan_started(result)
+        self.assertTrue(self.ai_plan_runner(pid), 'the printed PID is not the ai-run runner')
+        self.assertTrue(log.is_file())
+        self.assertEqual(self.ai_plan_logs(), [log])
+        self.ai_plan_wait(pid)
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('planning', 'done', '2 tasks'))
+        self.assertEqual(self.plan_args()[0][self.plan_args()[0].index('--model') + 1], 'opus')
+
+    def test_ai_plan_detach_lock_held_ends_early(self):
+        import fcntl
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with (self.project / '.ai/local/workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.ai_plan(str(objective), '--detach', expected=None)
+        self.assertGreaterEqual(result.returncode, 1, result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn('ended early', output)
+        self.assertIn('Another runner/reviewer owns this checkout', output)
+        self.assertEqual(self.plan_args(), [])
+
+    def test_ai_plan_detach_unconfirmed_leaves_the_session_running(self):
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        (self.project / '.ai/local/observation.json').mkdir()
+        result = self.ai_plan(str(objective), '--detach', expected=1, AI_PLAN_ACK_SECONDS='1',
+                              MOCK_PLAN_SLEEP='4')
+        match = re.search(r'could not confirm the planning session started within 1 s \(pid (\d+), log '
+                          r'(\.ai/local/plan-\S+\.log)\)', result.stderr)
+        self.assertIsNotNone(match, result.stdout + result.stderr)
+        pid = int(match.group(1))
+        self.addCleanup(self.ai_plan_stop, pid)
+        self.assertTrue(self.ai_plan_runner(pid), 'ai-plan must never kill the session: '
+                        + (self.project / match.group(2)).read_text())
+        self.ai_plan_stop(pid)
+        self.assertIn('Invalid AI_PLAN_ACK_SECONDS',
+                      self.ai_plan(str(objective), '--detach', expected=1, AI_PLAN_ACK_SECONDS='0').stderr)
+
+    def test_ai_plan_detach_concurrent_launches_keep_their_own_logs(self):
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        processes = [subprocess.Popen([str(self.project / '.ai/bin/ai-plan'), str(objective), '--detach'],
+                                      cwd=self.project, env=dict(self.env, MOCK_PLAN_SLEEP='3'),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for _ in range(2)]
+        results = []
+        for process in processes:
+            out, err = process.communicate(timeout=COMMAND_TIMEOUT)
+            results.append(subprocess.CompletedProcess(process.args, process.returncode, out, err))
+        winners = [result for result in results if result.returncode == 0]
+        losers = [result for result in results if result.returncode != 0]
+        self.assertEqual((len(winners), len(losers)), (1, 1), [r.stdout + r.stderr for r in results])
+        self.assertIn('ended early', losers[0].stderr)
+        pid, log = self.ai_plan_started(winners[0])
+        logs = self.ai_plan_logs()
+        self.assertEqual(len(logs), 2)
+        lost = next(path for path in logs if path != log)
+        self.assertIn('Another runner/reviewer owns this checkout', lost.read_text())
+        self.ai_plan_wait(pid)
+        text = log.read_text()
+        self.assertTrue(text.startswith('Approved workflow gate SHA-256: '), text)
+        self.assertIn('Plan ready on feature/test: 2 tasks', text)
+        self.assertNotIn('Another runner/reviewer', text)
+
+    def test_ai_plan_detach_symlinked_local_refused_before_launch(self):
+        objective = self.plan_ready()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = self.base / 'sentinel'
+        sentinel.write_bytes(b'keep me\n')
+        now = time.time()
+        for offset in range(-1, 4):
+            stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now + offset))
+            (outside / f'plan-{stamp}-00000000.log').symlink_to(sentinel)
+        planted = sorted(path.name for path in outside.iterdir())
+        local = self.project / '.ai/local'
+        if local.exists():
+            shutil.rmtree(local)
+        local.symlink_to(outside)
+        result = self.ai_plan(str(objective), '--detach', expected=None)
+        self.assertGreaterEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('ended early', result.stdout + result.stderr)
+        self.assertNotIn('Planning session started', result.stdout)
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), planted)
+        self.assertEqual(sentinel.read_bytes(), b'keep me\n')
+        self.assertEqual(self.plan_args(), [])
+
+    def test_ai_plan_detach_first_use_creates_local(self):
+        objective = self.plan_ready()
+        local = self.project / '.ai/local'
+        self.assertFalse(local.exists(), 'setup-project must not create .ai/local')
+        result = self.ai_plan(str(objective), '--detach', MOCK_PLAN_SLEEP='1')
+        pid, log = self.ai_plan_started(result)
+        self.assertTrue(local.is_dir() and not local.is_symlink())
+        self.assertEqual(self.ai_plan_logs(), [log])
+        self.ai_plan_wait(pid)
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+
+    def test_ai_plan_foreground_first_use_creates_local(self):
+        objective = self.plan_ready()
+        local = self.project / '.ai/local'
+        self.assertFalse(local.exists(), 'setup-project must not create .ai/local')
+        self.assertIn('Plan ready on feature/test: 2 tasks', self.ai_plan(str(objective)).stdout)
+        self.assertTrue(local.is_dir() and not local.is_symlink())
+
+    def test_ai_plan_missing_prompt_and_help(self):
+        self.plan_ready()
+        for extra in ((), ('--detach',)):
+            with self.subTest(extra=extra):
+                result = self.ai_plan('missing.md', *extra, expected=1)
+                self.assertIn('Prompt file not found or unreadable: missing.md', result.stderr)
+        self.assertIn('Missing PROMPT_FILE', self.ai_plan('--detach', expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        self.assertFalse((self.project / '.ai/local').exists() and self.ai_plan_logs())
+        self.assertIn('Usage: ai-plan PROMPT_FILE', self.ai_plan('--help').stdout)
+
+    def test_ai_plan_relative_dirs_resolve_from_the_callers_directory(self):
+        self.plan_ready()
+        for relative in ('sub/reference', 'reference', 'sub/kb', 'kb', 'only-at-root'):
+            (self.project / relative).mkdir(parents=True)
+            (self.project / relative / (relative.replace('/', '-') + '.marker')).write_text('marker\n')
+        (self.project / 'prompt.md').write_text('Build a tiny CLI that greets the user.\n')
+        self.commit('reference directories')
+        sub = self.project / 'sub'
+        root = os.path.realpath(self.project)
+        options = ('../prompt.md', '--read-dir', './reference', '--read-dir', '../reference', '--knowledge-dir', './kb')
+        self.ai_plan(*options, cwd=sub)
+        pid, _ = self.ai_plan_started(self.ai_plan(*options, '--detach', cwd=sub, MOCK_PLAN_SLEEP='1'))
+        self.ai_plan_wait(pid)
+        self.assertEqual(len(self.plan_args()), 2)
+        for args in self.plan_args():
+            added = [args[i + 1] for i, arg in enumerate(args) if arg == '--add-dir']
+            # ai-run puts the knowledge base first, then the read directories in the given order.
+            self.assertEqual(added, [f'{root}/sub/kb', f'{root}/sub/reference', f'{root}/reference'])
+            # root is absolute, so this is Claude Code's //abs form.
+            self.assertIn(f'Read(/{root}/sub/reference/**)', args)
+            self.assertIn(f'Read(/{root}/reference/**)', args)
+        for extra in ((), ('--detach',)):
+            with self.subTest(extra=extra):
+                result = self.ai_plan('../prompt.md', '--read-dir', './only-at-root', *extra, cwd=sub, expected=1)
+                self.assertIn('Read directory not found: ./only-at-root', result.stderr)
+                result = self.ai_plan('../prompt.md', '--knowledge-dir', './only-at-root', *extra, cwd=sub,
+                                      expected=1)
+                self.assertIn('Knowledge directory must already exist.', result.stderr)
+        self.assertEqual(len(self.plan_args()), 2)
+
+    def test_ai_plan_setup_installs_it_executable(self):
+        self.setup_project()
+        self.assertEqual((self.project / '.ai/bin/ai-plan').read_bytes(), (ROOT / 'scripts/ai-plan').read_bytes())
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-plan', os.X_OK))
 
     def test_plan_session_invalid_queue_stops_and_keeps_the_file(self):
         self.plan_ready()
@@ -11316,10 +11532,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         shutil.copytree(ROOT / 'templates', old / 'templates')
         for relative in drop:
             (old / relative).unlink()
-            if relative == 'scripts/ai-task':  # the older setup did not know the command either
+            if relative in ('scripts/ai-task', 'scripts/ai-plan'):  # the older setup did not know it either
                 workflow = old / 'scripts/lib/workflow.py'
                 import re
-                workflow.write_text(re.sub(r"'ai-task',\s*", '', workflow.read_text()))
+                name = relative.removeprefix('scripts/')
+                workflow.write_text(re.sub(rf"'{name}',\s*", '', workflow.read_text()))
         for relative in ('scripts/ai-status', 'scripts/lib/workflow.py', 'templates/.ai/prompts/runner.md'):
             with (old / relative).open('a') as file:
                 file.write('\n# older release\n' if not relative.endswith('.md') else '\nolder release\n')
@@ -11440,6 +11657,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('recheck.md', json.dumps(self.stamp_files()))
         (self.project / '.ai/tasks.md').write_text(task('T001', status='DONE'))
         self.assertIn('DONE', self.tool('ai-task', 'show', 'T001').stdout)
+
+    def test_toolkit_upgrade_creates_ai_plan_executable(self):
+        self.setup_old(self.old_toolkit(drop=('scripts/ai-plan',)))
+        self.assertFalse((self.project / '.ai/bin/ai-plan').exists())
+        self.assertIn('CREATE .ai/bin/ai-plan', self.upgrade().stdout)
+        self.upgrade('--apply')
+        self.assertEqual((self.project / '.ai/bin/ai-plan').read_bytes(), (ROOT / 'scripts/ai-plan').read_bytes())
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-plan', os.X_OK))
 
     def test_toolkit_upgrade_write_failure_rolls_back_everything(self):
         old = self.old_toolkit(drop=('scripts/ai-task', 'templates/.ai/prompts/recheck.md'))

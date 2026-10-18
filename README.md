@@ -126,8 +126,28 @@ To write the plan without an interactive session (for example from mission contr
 objective in a file (a regular file of at most 200 KB) and run:
 
 ```bash
-.ai/bin/ai-run --plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS]
+.ai/bin/ai-plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS] \
+  [--knowledge-dir DIR] [--read-dir DIR]... [--detach]
 ```
+
+`ai-plan` is the supported way to start a planning session; without `--detach` it simply becomes
+`ai-run --plan objective.md …` (same options, same process). Paths (the objective,
+`--knowledge-dir`, every `--read-dir`) are resolved against your working directory. With
+`--detach` it starts the session in the background, its output in
+`.ai/local/plan-<UTC stamp>-<8 hex>.log` (created exclusively, never through a symlink), and
+returns only once `ai-dashboard`'s record shows that session planning:
+`Planning session started: pid N, log PATH` (exit 0). If the session ends first (for example
+another runner holds the checkout) it prints `ended early` with the last lines of the log and
+exits with the session's status; if the start cannot be confirmed within `AI_PLAN_ACK_SECONDS`
+(default 20) it exits 1 with `could not confirm …` and leaves the session running. Mission
+control's equivalent of a hand-run launcher is:
+
+```bash
+.ai/bin/ai-plan objective.md --read-dir ~/zWiki --read-dir ~/Projects/wt/plans \
+  --read-dir ~/Projects/wt/research --detach
+```
+
+The session limit stays 3600 seconds unless `--session-timeout` is given.
 
 One Claude session (default model `opus`, default limit 3600 seconds; the watchdog's `hung`
 warning may still fire after 45 quiet minutes) gets `.ai/prompts/plan.md`, the objective and a
@@ -256,7 +276,7 @@ commands not yet authorized. The bounded runner is the no-prompt unattended path
 | Mode | Started by | May do | May not do |
 | --- | --- | --- | --- |
 | Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
-| ai-run --plan | you or mission control, `ai-run --plan objective.md` | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
+| ai-run --plan | you or mission control, `ai-plan objective.md [--detach]` (or `ai-run --plan objective.md`) | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
 | ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
 | ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
 | ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
@@ -838,6 +858,7 @@ Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the f
 | `scripts/ai-status` | Compact status derived from records, task queue, Git, validation |
 | `scripts/ai-check` | Bounded full gate, logs, and content-bound evidence |
 | `scripts/ai-run` | Bounded fresh-session implementation loop and checkpoint checks |
+| `scripts/ai-plan` | Starts a headless planning session (`ai-run --plan`), in the foreground or `--detach`ed with a confirmed start |
 | `scripts/ai-review` | Revision-bound, read-only Codex review (Claude fallback at its limit) and report preservation |
 | `scripts/ai-pipeline` | Hands-off implement → review → triage/fix → PR → notify, resumable |
 | `scripts/ai-dashboard` | Read-only view of every pipeline on the machine (TUI, `--once`, `--json`, `--all`); see [Watch all pipelines](#watch-all-pipelines) |

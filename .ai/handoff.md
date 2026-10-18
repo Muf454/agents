@@ -90,7 +90,8 @@ relaunch node verifies HEAD and tree first, else ⛔ with nothing committed; T01
 continues uncommitted task work in its own session or the validated checkpoint; T016: the arm
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
 stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
-every start check of the resumed run"). Still to be updated by T006 (`ai-plan`), T007 (outcome log bullet)
+every start check of the resumed run"; T006: the plan node says `ai-plan objective.md` with
+`--detach` for mission control, the 📝 notifications row names `ai-plan`). Still to be updated by T007 (outcome log bullet)
 and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
@@ -130,10 +131,14 @@ the task named).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
 - `test_exec_logged_*` (T013: both streams in a new 0600 log in `.ai/local` with the launcher's PID kept; an existing symlink, FIFO (no blocking) or file at the name exits 1 untouched and the command never runs; a symlinked or missing `.ai/local` exits 1; two concurrent launches get their own logs; a bad name or relative command exits 2 with nothing created).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
+- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos
+- T006 is BLOCKED only on `chmod +x scripts/ai-plan` (the runner may not chmod; the committed
+  git mode is already 100755). Run it, then `.ai/bin/ai-check` (the only failing test was
+  `test_script_modes_all_shebang_scripts_are_executable` for ai-plan), then
+  `.ai/bin/ai-task set T006 DONE` and resume the pipeline.
 - Merge order: PR #29, PR #30, then this branch (it builds on both).
 - Installed copies and watchdog timers: upgrade and reinstall after merging (see Needs you 1).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.

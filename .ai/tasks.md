@@ -1868,7 +1868,7 @@ Ran 7 tests OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s). No ai-plan change 
 unchanged.
 
 ## T006 — `ai-plan PROMPT_FILE` command with a confirmed `--detach` start (DB-04)
-Status: TODO
+Status: BLOCKED
 Dependencies: T005, T013
 Model: opus
 
@@ -1982,7 +1982,26 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+BLOCKED (2026-10-18) only on the file mode: `chmod +x scripts/ai-plan` is denied to the runner
+(both `chmod` and `git update-index --chmod` refused); `git add --chmod=+x` made the committed
+mode 100755, but the working-tree file is 0644, so
+`test_script_modes_all_shebang_scripts_are_executable` (script='ai-plan') fails. Human step:
+`chmod +x scripts/ai-plan`, rerun `.ai/bin/ai-check`, then `.ai/bin/ai-task set T006 DONE`.
+Implemented: `scripts/ai-plan` (foreground `exec ai-run --plan`; `--detach` via `setsid python3 -I
+workflow.py exec-logged plan-<stamp>-<8 hex>.log -- ai-run --plan … </dev/null &`, 0.2 s poll of
+`observation.json` for `planning`/`active`/that PID, `ended early` with the log tail (or `(no log was
+created)`), `could not confirm` exit 1 leaving the runner running, `disown`; `AI_PLAN_ACK_SECONDS`
+validated; prompt, `--knowledge-dir` and `--read-dir` resolved from the caller's cwd before
+`ai_root`, other options passed through in order). `setup-project` installs `.ai/bin/ai-plan`
+(workflow.py list); the upgrade test helper `old_toolkit(drop=…)` now also strips `ai-plan`.
+Mock claude: `MOCK_PLAN_SLEEP` and an `isfile` guard for the observation copy. Docs: README
+(Plan section, Modes row, scripts table), docs/workflow.md "Plan stage"; vault flow chart (plan
+node, notification row). Note: ai-run orders `--add-dir` as knowledge dir first, then read dirs
+in the given order; the P14 test asserts that real order.
+Evidence: `-k ai_plan` Ran 12 tests OK; `-k setup` Ran 30 tests OK; `-k Docs` Ran 3 tests OK;
+`-k upgrade_creates_ai_plan` 1 OK; `test_dashboard_plan_live_ai_run_plan_is_running_on_plan` and
+all plan-stage tests pass in the gate. Gate:
+945 tests, 1 failure = the script-mode test above (nothing else).
 
 ## T007 — Planning sessions in the outcome log and the run log (DB-04, logging)
 Status: TODO

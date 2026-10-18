@@ -277,7 +277,32 @@ Git hooks remain active and may consume additional time. Monitor your provider u
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
-## Plan stage (`ai-run --plan`)
+## Plan stage (`ai-plan`, `ai-run --plan`)
+
+`ai-plan PROMPT_FILE [--revision] [--model NAME] [--session-timeout S] [--knowledge-dir DIR]
+[--read-dir DIR]... [--detach]` is the supported way to start a planning session (mission
+control: `ai-plan PROMPT --read-dir ~/zWiki --read-dir ~/Projects/wt/plans --read-dir
+~/Projects/wt/research --detach`; the session limit stays 3600 s). It checks only its own
+arguments: the prompt file exists, is regular and readable, and the prompt, `--knowledge-dir`
+and every `--read-dir` are resolved against the caller's working directory (with `ai-run`'s
+wording for a missing directory) before `ai_root` changes to the checkout root; every other
+option goes to `ai-run` unchanged, in the original order. Like every toolkit command it then
+runs `ai_root` (the `paths` check refuses a symlinked `.ai` or `.ai/local` before anything is
+launched, then `.ai/local` is created: `setup-project` does not create it).
+
+- Foreground: `exec ai-run --plan PROMPT …` (same PID, so the dashboard, watchdog and lock see
+  an `ai-run` runner).
+- `--detach`: `setsid python3 -I workflow.py exec-logged plan-<UTC stamp>-<8 hex>.log --
+  ai-run --plan PROMPT … </dev/null &`. A non-interactive shell's background job is not a
+  process-group leader, so `setsid` execs without forking, and `exec-logged` creates the log
+  exclusively in the pinned `.ai/local` (no symlink or FIFO followed) and execs the runner on
+  it: `$!` is the runner. Then every 0.2 s for at most `AI_PLAN_ACK_SECONDS` (default 20):
+  `.ai/local/observation.json` with `stage: planning`, `state: active` and `pid` equal to the
+  runner's → `Planning session started: pid N, log PATH`, exit 0; the runner exited →
+  `ai-plan: the planning session ended early (exit N); last lines of PATH:` plus the log's last
+  10 lines (or `(no log was created)`), exit N (at least 1); neither → `ai-plan: could not
+  confirm the planning session started within N s (pid N, log PATH).`, exit 1. The runner is
+  never killed; it is disowned before `ai-plan` exits.
 
 `ai-run --plan PROMPT_FILE [--revision] [--read-dir DIR]...` writes the plan in one headless Claude session before
 any pipeline runs. The prompt file is resolved when the arguments are parsed (a missing,
