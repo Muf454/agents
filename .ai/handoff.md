@@ -32,7 +32,8 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-After T023: `.ai/bin/ai-check` PASS (974 tests, 610.2 s); `-k session_gate_allowance` 5 OK,
+After T023 (re-verified after the flow-chart line fix 0166a48): `.ai/bin/ai-check` PASS (974 tests,
+608.9 s); `-k session_gate_allowance` 5 OK, `-k flow_this_repo` 1 OK,
 `-k timeout` 12 OK, `-k outcome` 86 OK, `-k Docs` 3 OK. `.ai/validate` is unchanged: shell syntax checks, then
 `tests/run_parallel.py`. Batch 6's last full gate: 965 tests, about 600 s on this machine.
 
@@ -87,5 +88,5 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
   T026 and T033 add theirs.
 
 ## Next action
-T022 is DONE; T023 is next (or any task without dependencies: T024, T027, T029, T030, T031). FL-28 runs
+T022 and T023 are DONE; T024 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
 T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.

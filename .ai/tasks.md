@@ -2448,7 +2448,7 @@ Evidence: `-k gate_time` Ran 4 OK; `-k outcome` Ran 86 OK; `.ai/bin/ai-check` PA
 
 
 ## T023 — ai-run records its gate runs and gives implementation sessions room for the gate (FL-28 part 1, runner)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T022
 Model: opus
 
@@ -2530,6 +2530,10 @@ them (`test_runner_logs_task_outcomes_and_report`, `test_runner_logs_blocked_and
 Evidence: `-k session_gate_allowance` Ran 5 OK; `-k timeout` Ran 12 OK; `-k Docs` Ran 3 OK;
 `-k outcome` Ran 86 OK after the filter; `.ai/bin/ai-check` PASS (974 tests, 610.2 s, finished in the
 background past the 600 s tool timeout).
+The runner's post-checkpoint gate then failed only on `test_pr_body_flow_this_repo_declares_the_flow_chart`
+(the handoff "## Flow chart" line did not start with "Flow chart updated (…)"); mission control fixed
+the line in 0166a48. Re-verified in a fresh session: `-k flow_this_repo -k session_gate_allowance`
+Ran 6 OK; `.ai/bin/ai-check` PASS (974 tests, 608.9 s, finished in the background past the 600 s tool timeout).
 
 
 ## T024 — Run manifest: read the session's task, record a timeout rerun once per task (FL-28 part 2, helper)
