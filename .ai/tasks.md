@@ -1359,6 +1359,31 @@ Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- Reconciled WIP 5a25637 (the first session hit the 1800 s limit); no further code change needed.
+- scripts/ai-recover: after `reserve-attempt`, the settings restore, `limit-hold`/`limit-claim`,
+  the handlers and the marker, and before `AI_AUTO_RECOVER`, the gate/branch checks,
+  `relaunch_verify`, the plan-revision decision and every rule: `limit-task` succeeds → `escalate`
+  (⛔ with `$reason` and `the resumed run stopped on the preserved work of T… before continuing
+  it; nothing was committed.`). Transition table comment gains the row. No `limit-disarm` in
+  ai-recover.
+- Tests (5 `test_limit_relaunch_terminal_*`): the reviewer's re-check case with recovery on
+  (bound task T002 in that fixture; T015's host-only `pending` state has no fixture yet, T015 adds
+  that variant); helper-level arm, any reason, matching and moved HEAD (attempt counted); controls:
+  relaunch with recovery on resumes, after the disarm recovery is normal (one decision call);
+  `limit-disarm` once in ai-run, never in ai-recover (installed copies included).
+- Startup audit (scripts/ai-run, resume path, in order): `ai_supervise_settings`, `command -v
+  claude`, `ai_root`, `state-root-check`, `ai_lock`, `rm last-error`, start branch, `ai_branch`,
+  HEAD exists, `attempt-dir`/`attempt-reconcile`, `clean_or_armed` (sets `armed`), `tasks check`,
+  gate digest/approval, allowlist load, traps, prompt load, session budget (~612–620); armed block
+  (~685–691: `limit-task`, `newly-done` HEAD); dependency setup (~696–702, T011's widened
+  condition `|| -n "$bound"`); route by status (~704–717); `ai_guard_verify`, `ai_branch`, `tasks
+  check`; `limit-disarm` (~722), the last check-bearing statement before `checkpoint_done` / the
+  `for` loop (only the resume printf and the best-effort `task-clear` follow). No skipped startup
+  step and no check placed only after the disarm: no defect. The loop head repeats
+  `ai_guard_verify`/`ai_branch`/`tasks check` after the disarm (already passed armed); T019 owns
+  the span rule and its test.
+- Docs: docs/workflow.md "Interruption, limits, and recovery" and README "Recovery" (sentence
+  added); vault flow chart's relaunch edge already says "a stop while armed is terminal" (T011).
 
 
 ## T019 — The arm ends at the act: every consumer check runs armed, the disarm is the last statement before the checkpoint or the session (MC-01 part 1, plan review round 8 P16 design task)
