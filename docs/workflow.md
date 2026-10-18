@@ -1225,6 +1225,12 @@ minutes by category, and every attempt by the model that ran it ("Attempts by mo
 whose first attempt ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
 
+`outcome gate pass|fail|timeout SECONDS` records one host gate run (`kind: gate`, project,
+branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` prints this
+project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
+log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
+overlaps the checkout (exit 1), so agents cannot write the record it reads.
+
 ## Observation records and the dashboard
 
 `ai-dashboard --wait [--since CURSOR]` polls the same read-only snapshot and returns the runs

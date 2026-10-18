@@ -8247,6 +8247,64 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('\N{LINE SEPARATOR}'.encode(), log.read_bytes())  # written unescaped
         self.assertEqual([r['title'] for r in wf.read_outcomes([log])], [title, 'three'])
 
+    def gate_seconds(self):
+        return self.helper('gate-seconds').stdout.strip()
+
+    def test_gate_time_outcome_records_a_gate_run(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'gate', 'pass', '300')
+        rows = self.outcome_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['kind'], rows[0]['result'], rows[0]['seconds']), ('gate', 'pass', 300))
+        self.assertEqual((rows[0]['project'], rows[0]['branch']), ('project with spaces', 'main'))
+        self.assertTrue(rows[0]['time'])
+        for args in (('maybe', '3'), ('pass', 'x'), ('pass',), ('pass', '-1'), ('pass', '3', '4')):
+            result = self.helper('outcome', 'gate', *args, expected=1)
+            self.assertIn('Usage: outcome gate pass|fail|timeout SECONDS', result.stderr)
+        self.assertEqual(len(self.outcome_rows()), 1)
+
+    def test_gate_time_seconds_from_the_last_three_passes(self):
+        self.outcome_log_project()
+        self.assertEqual(self.gate_seconds(), '0')  # no log
+        self.helper('outcome', 'gate', 'fail', '900')
+        self.helper('outcome', 'gate', 'timeout', '1800')
+        self.assertEqual(self.gate_seconds(), '0')
+        self.helper('outcome', 'gate', 'pass', '300')
+        self.assertEqual(self.gate_seconds(), '300')
+        for seconds in ('100', '500', '200'):
+            self.helper('outcome', 'gate', 'pass', seconds)
+        self.assertEqual(self.gate_seconds(), '500')
+        for seconds in ('120', '130', '140'):
+            self.helper('outcome', 'gate', 'pass', seconds)
+        self.assertEqual(self.gate_seconds(), '140')
+        self.helper('gate-seconds', 'extra', expected=1)
+
+    def test_gate_time_ignores_other_projects_and_torn_lines(self):
+        self.outcome_log_project()
+        self.helper('outcome', 'gate', 'pass', '60')
+        log = self.base / 'host-state/outcomes.jsonl'
+        foreign = {'time': 't', 'kind': 'gate', 'project': 'other', 'branch': 'b', 'result': 'pass', 'seconds': 999}
+        odd = [{**foreign, 'project': 'project with spaces', 'seconds': value} for value in ('700', -5, True, 7.5)]
+        with log.open('a') as stream:
+            stream.write(''.join(json.dumps(r) + '\n' for r in (foreign, *odd)))
+        self.assertEqual(self.gate_seconds(), '60')
+        log.write_bytes(log.read_bytes() + b'{"kind": "gate", "project": "project with spaces", "result": "pass", "sec')
+        self.assertEqual(self.gate_seconds(), '60')
+
+    def test_gate_time_report_unchanged_by_gate_lines(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        empty = self.tool('ai-status', '--outcomes').stdout
+        self.helper('outcome', 'gate', 'pass', '30')
+        self.assertEqual(self.tool('ai-status', '--outcomes').stdout, empty)
+        log.write_bytes(b'')
+        self.helper('outcome', 'task', 'T001', 'done', 'm', '5')
+        self.outcome_log_review()
+        before = self.tool('ai-status', '--outcomes').stdout
+        self.helper('outcome', 'gate', 'pass', '30')
+        self.helper('outcome', 'gate', 'timeout', '600')
+        self.assertEqual(self.tool('ai-status', '--outcomes').stdout, before)
+
     def test_outcome_log_io_short_write_is_a_failure(self):
         import runpy
         self.outcome_log_project()

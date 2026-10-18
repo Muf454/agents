@@ -3776,6 +3776,8 @@ def outcome(arguments):
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
+    | gate pass|fail|timeout SECONDS (one host gate run of ai-run; read by gate-seconds,
+      not part of outcomes_report)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
     | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
@@ -3884,6 +3886,10 @@ def outcome(arguments):
         if len(rest) != 1 or not rest[0]:
             fail('Usage: outcome catchup BRANCH')
         record['branch'] = rest[0]
+    elif kind == 'gate':
+        if len(rest) != 2 or rest[0] not in ('pass', 'fail', 'timeout') or not rest[1].isdigit():
+            fail('Usage: outcome gate pass|fail|timeout SECONDS')
+        record.update(result=rest[0], seconds=int(rest[1]))
     else:
         fail(f'Unknown outcome kind: {kind}')
     try:
@@ -3899,9 +3905,25 @@ def outcome(arguments):
             remove_marker(marker)
 
 
+def gate_seconds(arguments):
+    """Prints this project's gate time: the largest seconds among its last 3 passing host gate
+    runs (`outcome gate pass`), or 0 without any. Torn or foreign lines are ignored; a missing or
+    unreadable log is 0. The log sits in the host state root, which agents cannot write."""
+    if arguments:
+        fail('Usage: gate-seconds')
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    project = project_name()
+    passes = [r['seconds'] for r in read_outcomes([outcomes_path()])
+              if r.get('kind') == 'gate' and r.get('result') == 'pass' and r.get('project') == project
+              and type(r.get('seconds')) is int and r['seconds'] >= 0]
+    print(max(passes[-3:], default=0))
+
+
 def outcomes_report(arguments):
     """Summary of the outcome log(s) for tuning the model rules."""
-    records = read_outcomes(arguments or [outcomes_path()])
+    # Gate runs are runner timing (gate_seconds), not outcomes: a log of only gate lines still
+    # reports "No outcomes recorded yet".
+    records = [r for r in read_outcomes(arguments or [outcomes_path()]) if r.get('kind') != 'gate']
     if not records:
         print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
         return
@@ -4916,6 +4938,8 @@ def main():
         fallback_record(arguments)
     elif command == 'outcome':
         outcome(arguments)
+    elif command == 'gate-seconds':
+        gate_seconds(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
     elif command == 'pr-draft':

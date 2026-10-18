@@ -2387,7 +2387,7 @@ unchanged (the detached launch already ends in "started").
 
 
 ## T022 — Host gate-time record: `outcome gate` and `gate-seconds` (FL-28 part 1, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -2432,6 +2432,19 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+Done 2026-10-18. `scripts/lib/workflow.py`: `outcome gate pass|fail|timeout SECONDS` (exactly two
+arguments, SECONDS `isdigit`, else `Usage: outcome gate pass|fail|timeout SECONDS`, nothing
+appended) records `result` and int `seconds` with the common time/project/branch. New
+`gate_seconds` (command `gate-seconds`, no arguments): `check_state_root` as `outcome` does,
+lenient `read_outcomes`, keeps `kind gate`, `result pass`, `project == project_name()` and an
+int (not bool) `seconds >= 0`, prints `max` of the last 3, default 0. `outcomes_report` did NOT
+skip unknown kinds at its "No outcomes recorded yet" check (a log of only gate lines printed a
+report header), so it now drops `gate` records first. docs/workflow.md describes both.
+Tests `test_gate_time_*` (4): record + usage errors (incl. `-1` and 3 args), last-3 max
+(0/0/300/500/140, extra argument → exit 1), other project / non-int seconds / torn tail
+ignored, `ai-status --outcomes` byte-identical with gate lines (empty log and task+review log).
+Evidence: `-k gate_time` Ran 4 OK; `-k outcome` Ran 86 OK; `.ai/bin/ai-check` PASS (969 tests,
+618.5 s, finished in the background past the 600 s tool timeout). Flow unchanged.
 
 
 ## T023 — ai-run records its gate runs and gives implementation sessions room for the gate (FL-28 part 1, runner)

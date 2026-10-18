@@ -1,8 +1,12 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet on `fix/flow-batch-7` (from `master` at 1423b60). This is the plan for batch 7, written
-2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
+On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
+- T022: `workflow.py outcome gate pass|fail|timeout SECONDS` records a host gate run;
+  `gate-seconds` prints the largest seconds of this project's last 3 passes (or 0);
+  `ai-status --outcomes` skips gate lines (it did not before, for a log of only gate lines).
+
+The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
 T001–T021 are batch 6's DONE tasks (merged in #31). They stay in the queue unchanged because the
 host refuses a plan that removes DONE blocks.
@@ -24,7 +28,8 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-None yet (planning only). `.ai/validate` is unchanged: shell syntax checks, then
+After T022: `.ai/bin/ai-check` PASS (969 tests, 618.5 s); `-k gate_time` 4 OK, `-k outcome`
+86 OK. `.ai/validate` is unchanged: shell syntax checks, then
 `tests/run_parallel.py`. Batch 6's last full gate: 965 tests, about 600 s on this machine.
 
 ## Assumptions
@@ -45,7 +50,7 @@ flow and update the vault `agents-flow.md`. T026 sets this line to "Flow chart u
 ## Manual testing for the human
 
 ### Needs you
-1. Review and commit this plan, then start `ai-pipeline --approved` on `fix/flow-batch-7`.
+1. (Done: plan committed in 9bc2228 and the run approved.)
 2. After merging: run `setup-project --upgrade --apply` here and in raid-planner, family-planner
    and family-budget, so `.ai/bin` gets the new `ai-run` and `ai-recover` and `.ai/prompts` gets
    the new runner, triage and plan-revision wording. Reinstall each watchdog timer
@@ -72,12 +77,11 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 - `test_parallel_runner_progress_*` (T030), `test_fixture_template_*` (T031).
 
 ## Human todos
-- Commit the plan, approve the run.
 - After merge: the upgrades and timer reinstall above; tick FL-28 to FL-31 in the vault backlog
   (sessions never tick it).
 - Vault: this planning session could edit only `.ai/` files, so it left no hub Log line. T023,
   T026 and T033 add theirs.
 
 ## Next action
-Start with T022 (or any task without dependencies: T024, T027, T029, T030, T031). FL-28 runs
+T022 is DONE; T023 is next (or any task without dependencies: T024, T027, T029, T030, T031). FL-28 runs
 T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.

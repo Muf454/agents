@@ -4,13 +4,13 @@ Project: agents
 Branch: fix/flow-batch-7
 Phase: implementing
 Current task: none
-Last completed task: T021
-Tasks complete: 21
-Tasks remaining: 12
-Last validation: not run on this branch
+Last completed task: T022
+Tasks complete: 22
+Tasks remaining: 11
+Last validation: PASS (ai-check 969 tests, 618.5 s) after T022
 Blocked: no
-Next action: Human: review and commit the batch 7 plan (T022–T033: FL-28, FL-29, FL-30, FL-31), then start ai-pipeline --approved
-Last updated: 2026-10-18T12:00:00Z
+Next action: Implement T023 (ai-run records gate runs, session gate allowance)
+Last updated: 2026-10-18T20:20:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
