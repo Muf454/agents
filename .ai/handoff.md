@@ -50,6 +50,8 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T006: `-k ai_plan` 12 OK, `-k setup` 30 OK, `-k Docs` 3 OK, `-k script_modes` 1 OK;
+`.ai/bin/ai-check` PASS (945 tests, 591.1 s).
 T013: `-k exec_logged` 7 OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s).
 T019: `-k limit_relaunch_consume` 10 OK, `-k limit_relaunch` 85 OK, `-k recovery` 70 OK,
 `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (902 tests, 561.5 s). Mutation: moving
@@ -135,10 +137,6 @@ the task named).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos
-- T006 is BLOCKED only on `chmod +x scripts/ai-plan` (the runner may not chmod; the committed
-  git mode is already 100755). Run it, then `.ai/bin/ai-check` (the only failing test was
-  `test_script_modes_all_shebang_scripts_are_executable` for ai-plan), then
-  `.ai/bin/ai-task set T006 DONE` and resume the pipeline.
 - Merge order: PR #29, PR #30, then this branch (it builds on both).
 - Installed copies and watchdog timers: upgrade and reinstall after merging (see Needs you 1).
 - Backlog (vault, sessions do not tick it): MC-01 part 1, DB-04 and R15 when this merges.
@@ -161,4 +159,6 @@ pinned it with `test_limit_relaunch_consume_*`. T015: the armed-tree acceptance 
 block before ai-pipeline's start check), `armed_resume`/`clean_or_armed` shared in
 `lib/common.sh`, no tracked write while armed (ai-run's stop handler, `disputes-record --check`),
 the `test_limit_relaunch_accept_*` matrix. T013: `workflow.py exec-logged NAME -- CMD` (the
-detached log for T006's `ai-plan --detach`). Next: the queue's next task.
+detached log for T006's `ai-plan --detach`). T006: `scripts/ai-plan` (foreground exec of
+`ai-run --plan`; `--detach` with a confirmed start printing PID and log), installed by
+`setup-project`. Next: T007.

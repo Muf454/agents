@@ -1868,7 +1868,7 @@ Ran 7 tests OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s). No ai-plan change 
 unchanged.
 
 ## T006 — `ai-plan PROMPT_FILE` command with a confirmed `--detach` start (DB-04)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T005, T013
 Model: opus
 
@@ -1982,11 +1982,10 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-BLOCKED (2026-10-18) only on the file mode: `chmod +x scripts/ai-plan` is denied to the runner
-(both `chmod` and `git update-index --chmod` refused); `git add --chmod=+x` made the committed
-mode 100755, but the working-tree file is 0644, so
-`test_script_modes_all_shebang_scripts_are_executable` (script='ai-plan') fails. Human step:
-`chmod +x scripts/ai-plan`, rerun `.ai/bin/ai-check`, then `.ai/bin/ai-task set T006 DONE`.
+DONE 2026-10-18. The earlier block (working-tree file 0644, runner may not chmod) was cleared by
+the human: `scripts/ai-plan` is now -rwxr-xr-x on disk and 100755 in Git. Re-verified: `-k ai_plan`
+Ran 12 OK; `-k setup` Ran 30 OK; `-k Docs` Ran 3 OK; `-k script_modes` Ran 1 OK;
+`.ai/bin/ai-check` Ran 945 tests OK.
 Implemented: `scripts/ai-plan` (foreground `exec ai-run --plan`; `--detach` via `setsid python3 -I
 workflow.py exec-logged plan-<stamp>-<8 hex>.log -- ai-run --plan … </dev/null &`, 0.2 s poll of
 `observation.json` for `planning`/`active`/that PID, `ended early` with the log tail (or `(no log was

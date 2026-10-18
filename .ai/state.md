@@ -3,14 +3,14 @@
 Project: agents
 Branch: feature/limits-plan-stage
 Phase: implementing
-Current task: T006
-Last completed task: T013
-Tasks complete: 14
-Tasks remaining: 5
-Last validation: FAIL at 2026-10-18T04:20Z (1 of 945: test_script_modes, ai-plan not executable on disk)
-Blocked: yes — T006 needs a human `chmod +x scripts/ai-plan` (runner may not chmod)
-Next action: Human runs `chmod +x scripts/ai-plan`, reruns ai-check, sets T006 DONE; then T007
-Last updated: 2026-10-18T04:21:17Z
+Current task: none
+Last completed task: T006
+Tasks complete: 15
+Tasks remaining: 4
+Last validation: PASS at 2026-10-18T04:35Z (ai-check 945 tests)
+Blocked: no
+Next action: T007
+Last updated: 2026-10-18T04:35:50Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
