@@ -433,3 +433,4 @@
 | 2026-10-18T04:21:47Z | runner | T006 | stopped (exit 1); inspect state/diff before resuming | see local logs | 1507dd1 | No merge or deployment performed |
 | 2026-10-18T04:23:09Z | mission control | T006 | Unblocked: restored the executable bit on scripts/ai-plan (the runner may not chmod; git already records 100755); T006 back to IN_PROGRESS so the rerun reconciles it and reruns the gate | not run | parent 1507dd1 | Human-side unstick only |
 | 2026-10-18T04:35:50Z | claude (opus) | T006 | DONE: reconciled (no code change): implementation from 015ea75/1507dd1 verified with ai-plan now executable on disk | PASS (ai-check 945 tests, 591.1 s; -k ai_plan 12 OK; -k setup 30 OK; -k Docs 3 OK; -k script_modes 1 OK) | parent dc7bfc2 | Human todo for chmod removed from handoff |
+| 2026-10-18T04:46:13Z | runner | T006 | completed | PASS | 8c38baf | Claude checkpointed; continuing queue |
