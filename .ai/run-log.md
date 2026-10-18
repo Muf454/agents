@@ -444,3 +444,4 @@
 | 2026-10-18T06:25:12Z | runner | T010 | completed | PASS | f74edd9 | Claude checkpointed; continuing queue |
 | 2026-10-18T06:35:31Z | runner | none | queue complete; ready for independent review | PASS | 143b3fc | Human acceptance remains |
 | 2026-10-18T06:39:48Z | runner | triage | stopped (exit 1); inspect state/diff before resuming | see local logs | 2a2fefa | No merge or deployment performed |
+| 2026-10-18T06:40:43Z | runner | triage | review triaged into dispositions/tasks | n/a | b895cc9 | Fix tasks run next |
