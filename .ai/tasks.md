@@ -1868,7 +1868,7 @@ Ran 7 tests OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s). No ai-plan change 
 unchanged.
 
 ## T006 — `ai-plan PROMPT_FILE` command with a confirmed `--detach` start (DB-04)
-Status: BLOCKED
+Status: IN_PROGRESS
 Dependencies: T005, T013
 Model: opus
 
