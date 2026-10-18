@@ -3,6 +3,7 @@ import ast
 import calendar
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -233,8 +234,9 @@ if 'PLANNING CONTRACT' in prompt:
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
     with open(state / 'plan-args.log', 'a') as f: f.write(json.dumps([a for a in args if a != prompt]) + '\n')
     with open(state / 'plan-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
-    if os.path.exists('.ai/local/observation.json'):
+    if os.path.isfile('.ai/local/observation.json'):
         with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    time.sleep(float(os.environ.get('MOCK_PLAN_SLEEP', '0')))  # a session still running (ai-plan --detach)
     mode = os.environ.get('MOCK_CLAUDE', 'plan-ok')
     if mode == 'limit-once' and not (state / 'plan-limit-hit').exists():
         (state / 'plan-limit-hit').touch()
@@ -264,6 +266,8 @@ if 'PLANNING CONTRACT' in prompt:
         pathlib.Path('.ai/tasks.md').write_text(queue.rstrip('\n') + '\n\n' + template.replace('TXXX', new_id))
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
+    if mode == 'plan-timeout':
+        time.sleep(30)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
     if mode == 'plan-missing-sections':
         second = drop_sections(second)
@@ -304,11 +308,56 @@ if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before ever
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
+if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT' in prompt:
+    # The host run manifest as this session sees it (ai-run's task record).
+    copy_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
+    for manifest in pathlib.Path(os.environ['AI_STATE_DIR']).rglob('run.json'):
+        pathlib.Path(f'.ai/local/manifest-{copy_id}.json').write_bytes(manifest.read_bytes())
 if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists():
     pathlib.Path('.ai/local/mock-limit-hit').touch()
     print(json.dumps({'type':'result','subtype':'error','is_error':True,
                       'result':"You've hit your usage limit. Try again in 2 minutes."}))
     sys.exit(1)
+if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
+    # Preserved work of a session stopped at the far limit: its task IN_PROGRESS (-dirty), DONE
+    # (-done, -done-committed: committed with preserved.txt, then preserved-after.txt edited) or
+    # unchanged (-keep); MOCK_LIMIT_ALSO="T002:DONE ..." sets more statuses, MOCK_EXTRA_FILE is
+    # rewritten, MOCK_LIMIT_APPEND gets one more line, MOCK_LIMIT_RENAME="T001:T009" renames a
+    # task's heading.
+    task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
+    def set_status(text, tid, status):
+        start = text.index('## ' + tid + ' —')
+        end = text.find('\n## ', start + 1)
+        if end == -1: end = len(text)
+        return text[:start] + re.sub(r'^Status:.*$', 'Status: ' + status, text[start:end], count=1, flags=re.M) + text[end:]
+    queue = pathlib.Path('.ai/tasks.md')
+    text = queue.read_text()
+    own = {'limit-far-dirty': 'IN_PROGRESS', 'limit-far-keep': None, 'limit-far-dirty-checkpoint': 'IN_PROGRESS',
+           'limit-far-clean-checkpoint': 'IN_PROGRESS'}.get(mode, 'DONE')
+    if own:
+        text = set_status(text, task_id, own)
+    for item in os.environ.get('MOCK_LIMIT_ALSO', '').split():
+        text = set_status(text, *item.split(':'))
+    if os.environ.get('MOCK_LIMIT_RENAME'):
+        old, new = os.environ['MOCK_LIMIT_RENAME'].split(':')
+        text = text.replace('## ' + old + ' —', '## ' + new + ' —')
+    queue.write_text(text)
+    pathlib.Path('preserved.txt').write_text('preserved work of ' + task_id + '\n')
+    if os.environ.get('MOCK_EXTRA_FILE'):
+        pathlib.Path(os.environ['MOCK_EXTRA_FILE']).write_text('not in the plan')
+    if mode == 'limit-far-done-committed':
+        subprocess.run(['git', 'add', '--', '.ai/tasks.md', 'preserved.txt'], check=True)
+        subprocess.run(['git', 'commit', '-qm', 'implement ' + task_id], check=True)
+        pathlib.Path('preserved-after.txt').write_text('edited after the commit\n')
+    if mode in ('limit-far-dirty-checkpoint', 'limit-far-clean-checkpoint'):
+        # A partial checkpoint: the task stays IN_PROGRESS in HEAD; -dirty edits further.
+        subprocess.run(['git', 'add', '--', '.ai/tasks.md', 'preserved.txt'], check=True)
+        subprocess.run(['git', 'commit', '-qm', 'partial ' + task_id], check=True)
+        if mode == 'limit-far-dirty-checkpoint':
+            pathlib.Path('preserved-after.txt').write_text('edited after the partial checkpoint\n')
+    if os.environ.get('MOCK_LIMIT_APPEND'):
+        with open(os.environ['MOCK_LIMIT_APPEND'], 'a') as f: f.write('planted by the limited session\n')
+    mode = 'limit-far'
 if mode == 'limit-far':
     print(json.dumps({'type':'result','subtype':'error','is_error':True,
                       'result':'Claude AI usage limit reached|' + str(int(time.time()) + 7 * 86400)}))
@@ -615,12 +664,17 @@ if args[:2] == ['pr', 'view']:
     if not os.environ.get('MOCK_GH_EXISTING'):
         sys.exit(1)
     if 'isDraft' in args:
+        failed = draft.with_name('gh-draft-lookup-failed')
+        if os.environ.get('MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE') and not failed.exists():
+            failed.touch(); sys.exit(1)
         print('true' if draft.exists() else 'false'); sys.exit(0)
     print('https://github.com/example/project/pull/7'); sys.exit(0)
 if args[:2] == ['pr', 'ready']:
     if os.environ.get('MOCK_GH_READY_FAIL'):
         sys.exit(1)
-    draft.touch(); sys.exit(0)
+    if '--undo' in args: draft.touch()
+    else: draft.unlink(missing_ok=True)
+    sys.exit(0)
 if args[:2] in (['pr', 'create'], ['pr', 'edit']):
     body = args[args.index('--body-file') + 1]
     shutil.copy(body, str(log) + '.body.md')
@@ -1105,6 +1159,172 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.crashed_marker()
         self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_RECOVER_ACK_SECONDS='1')
         self.assertIn('did not confirm it started', self.notifications())
+
+    def limit_relaunch_fixture(self, at):
+        # An approved run stopped at a usage limit: relaunch scheduled at AT, nothing running.
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        self.helper('run-manifest', 'limit-schedule', str(at), '2', 'implementation')
+        self.watchdog_phase('implementing')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+
+    def launches(self):
+        log = self.base / 'systemd-run.log'
+        return log.read_text() if log.exists() else ''
+
+    def test_limit_relaunch_watchdog_due_schedule_starts_ai_recover(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        self.host_watchdog(AI_WATCHDOG_NOW=str(start))  # without --recover: nothing relaunches
+        self.assertEqual(self.launches(), '')
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage usage limit relaunch', self.launches())
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+        self.assertEqual(self.notifications(), '')
+        state = self.watchdog_state()
+        self.assertNotIn('stall_seen_ns', state)
+        self.assertNotIn('stalled', state['active'])
+
+    def test_limit_relaunch_watchdog_pending_schedule_is_not_stalled(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start + 3600)
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))
+        (self.project / '.ai/local/pauses.log').write_text(f'{stamp} paused 3660s: Claude usage limit\n')
+        for args in ((), ('--recover',)):
+            with self.subTest(args=args):
+                self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start + 360))
+                self.assertEqual(self.launches(), '')
+                self.assertEqual(self.notifications(), '')
+                self.assertEqual(self.watchdog_state()['active'], [])
+
+    def test_limit_relaunch_watchdog_schedule_alone_suppresses_the_stall(self):
+        # P2: a kill before the pauses.log append leaves only the host schedule.
+        start = int(time.time())
+        at = start + 3600
+        self.limit_relaunch_fixture(at)
+        local = self.project / '.ai/local'
+        for pauses in (None, f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start - 7200))} paused 60s: x\n'):
+            for args in (('--recover',), ()):
+                with self.subTest(pauses=pauses, args=args):
+                    if pauses:
+                        (local / 'pauses.log').write_text(pauses)
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start + 360))
+                    self.assertEqual(self.launches(), '')
+                    self.assertEqual(self.notifications(), '')
+                    self.assertEqual(self.watchdog_state()['active'], [])
+                    self.assertNotIn('stall_seen_ns', self.watchdog_state())
+        (local / 'pauses.log').unlink()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(at + 1))
+        self.assertIn('ai-recover --stage usage limit relaunch', self.launches())
+        (local / 'pipeline.active').unlink()  # the mock's takeover; the relaunch claims:
+        self.helper('run-manifest', 'limit-claim', str(at))
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(at + 600))
+        self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(at + 960))
+        self.assertIn('killed runner?', self.notifications())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+
+    def test_limit_relaunch_watchdog_refusal_reported_once_without_a_stall(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 0\n')  # changed gate
+        for offset in (0, 360, 720):
+            self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + offset))
+            state = self.watchdog_state()
+            self.assertNotIn('stall_seen_ns', state)
+            self.assertNotIn('stalled', state['active'])
+            self.assertEqual(state['active'], [f'relaunch:{start - 10}'])
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('⛔ STOPPED, needs you: the usage-limit relaunch could not start: '
+                      'auto-recovery refused: gate files changed', self.notifications())
+        # A human start drops the schedule: the stall rule applies again.
+        self.approve_run()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start + 1080))
+        self.host_watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + 1440))
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 2)
+        self.assertIn('killed runner?', self.notifications().splitlines()[1])
+
+    def test_limit_relaunch_watchdog_checkout_copy_refused_and_due_without_recover_stalls(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        self.watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start))  # not the host copy
+        self.watchdog('--recover', expected=1, AI_WATCHDOG_NOW=str(start + 360))
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('the usage-limit relaunch could not start: auto-recovery only runs from the installed timer',
+                      self.notifications())
+        # Due, but this probe cannot relaunch: the killed-runner alarm is right.
+        (self.project / '.ai/local/watchdog.json').unlink()
+        self.notify_log.unlink()
+        self.host_watchdog(AI_WATCHDOG_NOW=str(start + 720))
+        self.host_watchdog(expected=1, AI_WATCHDOG_NOW=str(start + 1080))
+        self.assertEqual(self.launches(), '')
+        self.assertNotIn('usage-limit relaunch', self.notifications())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('killed runner?', self.notifications())
+
+    def test_limit_relaunch_watchdog_absent_schedule_changes_nothing(self):
+        # P11: no schedule is "absent", never "due at 0".
+        self.setup_project()
+        self.commit('bootstrap')
+        self.mock_systemd_run()
+        local = self.project / '.ai/local'
+        start = int(time.time())
+        cases = (('no manifest', None, 'planning'), ('approved, unscheduled', 'approve', 'implementing'),
+                 ('finished', 'finish', 'ready_for_review'))
+        for args in (('--recover',), ()):
+            for name, run, phase in cases:
+                with self.subTest(case=name, args=args):
+                    for path in (local / 'watchdog.json', self.notify_log):
+                        path.unlink(missing_ok=True)
+                    if run:
+                        self.approve_run()
+                    if run == 'finish':
+                        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2', 'implementation')
+                        self.helper('run-manifest', 'clear-attempts')
+                    self.watchdog_phase(phase)
+                    self.host_watchdog(*args, AI_WATCHDOG_NOW=str(start))
+                    stalls = phase == 'implementing'
+                    self.host_watchdog(*args, expected=1 if stalls else 0, AI_WATCHDOG_NOW=str(start + 360))
+                    self.assertEqual(self.launches(), '')
+                    self.assertNotIn('usage-limit relaunch', self.notifications())
+                    self.assertFalse(any(key.startswith('relaunch:') for key in self.watchdog_state()['active']))
+                    if stalls:
+                        self.assertEqual(len(self.notifications().splitlines()), 1)
+                        self.assertIn('killed runner?', self.notifications())
+                    else:
+                        self.assertEqual(self.notifications(), '')
+            for path in self.base.joinpath('host-state').rglob('run.json'):
+                path.unlink()
+
+    def test_limit_relaunch_watchdog_live_marker_or_runner_blocks_the_launch(self):
+        start = int(time.time())
+        self.limit_relaunch_fixture(start - 10)
+        pipeline = self.watchdog_runner(name='ai-pipeline')
+        (self.project / '.ai/local/pipeline.active').write_text(f'{pipeline.pid}\n')
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.assertEqual(self.launches(), '')
+        (self.project / '.ai/local/pipeline.active').unlink()
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))  # the ai-pipeline still runs
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(self.notifications(), '')
+
+    def test_limit_relaunch_watchdog_timer_recovers(self):
+        self.setup_project()
+        self.mock_systemctl()
+        result = self.watchdog('--timer-recovers', expected=1)
+        self.assertTrue(result.stdout.startswith('no-recover ai-watchdog-'), result.stdout)
+        self.assertIn('(timer missing: no unit files)', result.stdout)
+        self.watchdog('--install-timer', '--recover')
+        self.assertTrue(self.watchdog('--timer-recovers').stdout.startswith('recovers ai-watchdog-'))
+        self.watchdog('--install-timer', '--diagnose')
+        self.assertIn('installed without --recover', self.watchdog('--timer-recovers', expected=1).stdout)
+        self.watchdog('--timer-recovers', '--timer-status', expected=2)
 
     def test_watchdog_reports_unannounced_stops(self):
         self.setup_project()
@@ -2091,6 +2311,104 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.clear_scratch()
         self.assertEqual(result.stdout + result.stderr, '')
         self.assertFalse(scratch.exists())
+
+    EXEC_LOG = 'plan-20261018T120000Z-0123abcd.log'
+
+    def exec_logged_fixture(self):
+        """A checkout with `.ai/local` and an executable script that leaves a marker, prints its
+        PID to stdout and a line to stderr."""
+        (self.project / '.ai/local').mkdir(parents=True)
+        self.exec_marker = self.base / 'exec-ran'
+        script = self.base / 'exec-script'
+        script.write_text(f'#!/bin/sh\ntouch "{self.exec_marker}"\necho "pid $$"\necho "to stderr" >&2\n')
+        os.chmod(script, 0o700)
+        return script
+
+    def exec_logged(self, name, script, expected=1):
+        return self.helper('exec-logged', name, '--', str(script), expected=expected)
+
+    def test_exec_logged_writes_both_streams_and_keeps_the_pid(self):
+        script = self.exec_logged_fixture()
+        process = subprocess.Popen(['python3', str(HELPER), 'exec-logged', self.EXEC_LOG, '--', str(script)],
+                                   cwd=self.project, env=self.env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        out, err = process.communicate(timeout=COMMAND_TIMEOUT)
+        self.assertEqual(process.returncode, 0, out + err)
+        self.assertEqual(out + err, '')
+        log = self.project / '.ai/local' / self.EXEC_LOG
+        self.assertEqual(log.read_text().splitlines(), [f'pid {process.pid}', 'to stderr'])
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_exec_logged_refuses_a_symlink_without_following_it(self):
+        script = self.exec_logged_fixture()
+        sentinel = self.base / 'sentinel'
+        sentinel.write_bytes(b'keep me\n')
+        (self.project / '.ai/local' / self.EXEC_LOG).symlink_to(sentinel)
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('already exists', result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b'keep me\n')
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_refuses_a_fifo_without_blocking(self):
+        script = self.exec_logged_fixture()
+        os.mkfifo(self.project / '.ai/local' / self.EXEC_LOG)
+        started = time.monotonic()
+        result = self.run_cmd(['python3', str(HELPER), 'exec-logged', self.EXEC_LOG, '--', str(script)],
+                              expected=1, timeout=SHORT_TIMEOUT)
+        self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+        self.assertIn('already exists', result.stderr)
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_refuses_a_symlinked_local(self):
+        script = self.exec_logged_fixture()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        local = self.project / '.ai/local'
+        local.rmdir()
+        local.symlink_to(outside)
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('.ai/local is missing or unsafe', result.stderr)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.exec_marker.exists())
+        local.unlink()
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('.ai/local is missing or unsafe', result.stderr)
+
+    def test_exec_logged_never_truncates_an_existing_file(self):
+        script = self.exec_logged_fixture()
+        log = self.project / '.ai/local' / self.EXEC_LOG
+        log.write_text('earlier run\n')
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('already exists', result.stderr)
+        self.assertEqual(log.read_text(), 'earlier run\n')
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_concurrent_launches_get_their_own_logs(self):
+        script = self.exec_logged_fixture()
+        names = ('plan-20261018T120000Z-00000001.log', 'plan-20261018T120000Z-00000002.log')
+        processes = [subprocess.Popen(['python3', str(HELPER), 'exec-logged', name, '--', str(script)],
+                                      cwd=self.project, env=self.env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL) for name in names]
+        for process in processes:
+            self.assertEqual(process.wait(timeout=COMMAND_TIMEOUT), 0)
+        for name, process in zip(names, processes):
+            lines = (self.project / '.ai/local' / name).read_text().splitlines()
+            self.assertEqual(lines, [f'pid {process.pid}', 'to stderr'])
+
+    def test_exec_logged_rejects_bad_names_and_a_relative_command(self):
+        script = self.exec_logged_fixture()
+        local = self.project / '.ai/local'
+        for name in ('../x.log', 'plan-x.log', f'sub/{self.EXEC_LOG}'):
+            result = self.exec_logged(name, script, expected=2)
+            self.assertIn('invalid log name', result.stderr)
+        (self.project / 'exec-script').write_bytes(script.read_bytes())
+        os.chmod(self.project / 'exec-script', 0o700)
+        result = self.exec_logged(self.EXEC_LOG, 'exec-script', expected=2)
+        self.assertIn('not an absolute path', result.stderr)
+        self.exec_logged(self.EXEC_LOG, self.base / 'missing', expected=2)
+        self.assertEqual(list(local.iterdir()), [])
+        self.assertFalse((self.base / 'x.log').exists())
+        self.assertFalse(self.exec_marker.exists())
 
     def test_scratch_clear_runs_before_and_after_each_session(self):
         self.ready()
@@ -3215,6 +3533,40 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.seen()[-1]['detail'], 'sonnet · revision')
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
 
+    def plan_outcomes(self):
+        path = self.base / 'host-state/outcomes.jsonl'
+        records = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in records if r['kind'] == 'plan']
+
+    def test_plan_outcome_done_records_the_session_and_the_run_log_line(self):
+        self.plan_ready()
+        self.plan()
+        (record,) = self.plan_outcomes()
+        self.assertEqual((record['result'], record['model'], record['tasks'], record['revision']),
+                         ('done', 'opus', 2, False))
+        self.assertIsInstance(record['seconds'], int)
+        rows = [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if 'plan written:' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('plan written: 2 tasks (opus, first plan)', rows[0])
+        self.helper('plan-scope', self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.plan('--revision')
+        self.assertTrue(self.plan_outcomes()[-1]['revision'])
+        self.tool('ai-status', '--outcomes')
+
+    def test_plan_outcome_stopped_when_the_queue_is_invalid(self):
+        self.plan_ready()
+        self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        (record,) = self.plan_outcomes()
+        self.assertEqual((record['result'], record['tasks']), ('stopped', None))
+        self.assertNotIn('plan written:', (self.project / '.ai/run-log.md').read_text())
+
+    def test_plan_outcome_timeout(self):
+        self.plan_ready()
+        self.plan('--session-timeout', '1', expected=1, MOCK_CLAUDE='plan-timeout')
+        (record,) = self.plan_outcomes()
+        self.assertEqual(record['result'], 'timeout')
+
     def test_plan_session_prompt_file_paths(self):
         self.plan_ready()
         self.assertIn('Prompt file not found', self.tool('ai-run', '--plan', 'missing.md', expected=1).stderr)
@@ -3227,6 +3579,297 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                                 env=self.env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Objective from a subdirectory.', self.plan_prompt())
+
+    def test_plan_read_dir_adds_read_only_directories(self):
+        self.plan_ready()
+        research, plans = self.base / 'research', self.base / 'real-plans'
+        research.mkdir()
+        plans.mkdir()
+        (self.base / 'plans-link').symlink_to(plans)
+        self.plan('--read-dir', str(research), '--read-dir', str(self.base / 'plans-link'))
+        args = self.plan_args()[0]
+        resolved = [os.path.realpath(research), os.path.realpath(plans)]
+        added = [args[i + 1] for i, arg in enumerate(args) if arg == '--add-dir']
+        self.assertEqual(added, resolved)
+        start = args.index('--allowedTools') + 1
+        end = next(i for i in range(start, len(args)) if args[i].startswith('--'))
+        allowed = args[start:end]
+        base_allowed = self.helper('plan-allowlist').stdout.splitlines()
+        self.assertEqual(allowed, base_allowed + [f'Read(/{path}/**)' for path in resolved])
+        extra = [entry for entry in allowed if entry not in base_allowed]
+        self.assertFalse(any(entry.startswith(('Edit(', 'Write(')) for entry in extra))
+        prompt = self.plan_prompt()
+        self.assertIn(f'Read-only reference directories: {resolved[0]}, {resolved[1]}. '
+                      'Read them as needed; never edit them.', prompt)
+
+    def test_plan_read_dir_invalid_paths_run_no_session(self):
+        self.plan_ready()
+        invalid = ('star*dir', 'comma,dir', 'paren(dir', 'mark?dir', 'bracket]dir', 'line\ndir')
+        for name in invalid:
+            (self.base / name).mkdir()
+        cases = [(str(self.base / 'missing'), 'Read directory not found')]
+        cases += [(str(self.base / name), 'Invalid --read-dir path') for name in invalid]
+        for path, error in cases:
+            with self.subTest(path=path):
+                self.assertIn(error, self.plan('--read-dir', path, expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+
+    def test_plan_read_dir_refused_outside_plan(self):
+        self.plan_ready()
+        result = self.tool('ai-run', '--approved', '--read-dir', str(self.base), expected=1)
+        self.assertIn('--read-dir only applies to --plan.', result.stderr)
+        self.assertEqual(self.plan_args(), [])
+
+    # ---------------------------------------------------------------- ai-plan command (DB-04)
+    def ai_plan(self, *args, expected=0, cwd=None, **env):
+        if cwd is None:
+            return self.tool('ai-plan', *args, expected=expected, **env)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-plan'), *args], cwd=cwd,
+                                env=dict(self.env, **env), capture_output=True, text=True,
+                                timeout=COMMAND_TIMEOUT)
+        if expected is not None:
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def ai_plan_runner(self, pid):
+        """True while PID is this fixture's ai-run runner (not a zombie, not a reused PID)."""
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+            cmdline = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        except OSError:
+            return False
+        return state != 'Z' and any(part == bytes(self.project / '.ai/bin/ai-run') for part in cmdline)
+
+    def ai_plan_wait(self, pid, timeout=COMMAND_TIMEOUT):
+        deadline = time.monotonic() + timeout
+        while self.ai_plan_runner(pid):
+            if time.monotonic() > deadline:
+                self.fail(f'detached planning runner {pid} still running after {timeout} s')
+            time.sleep(0.05)
+
+    def ai_plan_stop(self, pid):
+        # TERM runs ai-run's trap once the (sleeping) mock session returns.
+        if self.ai_plan_runner(pid):
+            os.kill(pid, signal.SIGTERM)
+        self.ai_plan_wait(pid)
+
+    def ai_plan_started(self, result):
+        match = re.search(r'^Planning session started: pid (\d+), log (\.ai/local/plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log)$',
+                          result.stdout, re.M)
+        self.assertIsNotNone(match, result.stdout + result.stderr)
+        pid = int(match.group(1))
+        self.addCleanup(self.ai_plan_stop, pid)
+        return pid, self.project / match.group(2)
+
+    def ai_plan_logs(self):
+        return sorted((self.project / '.ai/local').glob('plan-*.log'))
+
+    def test_ai_plan_foreground_matches_ai_run_plan(self):
+        objective = self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.ai_plan(str(objective))
+        self.assertIn('Plan ready on feature/test: 2 tasks', result.stdout)
+        args = self.plan_args()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('planning', 'done', '2 tasks'))
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertIn('.ai/tasks.md', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+        self.assertEqual(self.ai_plan_logs(), [])
+
+    def test_ai_plan_detach_confirms_the_started_session(self):
+        objective = self.plan_ready()
+        started = time.monotonic()
+        result = self.ai_plan(str(objective), '--detach', MOCK_PLAN_SLEEP='3')
+        self.assertLess(time.monotonic() - started, COMMAND_TIMEOUT)
+        pid, log = self.ai_plan_started(result)
+        self.assertTrue(self.ai_plan_runner(pid), 'the printed PID is not the ai-run runner')
+        self.assertTrue(log.is_file())
+        self.assertEqual(self.ai_plan_logs(), [log])
+        self.ai_plan_wait(pid)
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+        record = self.observation()
+        self.assertEqual((record['stage'], record['state'], record['note']), ('planning', 'done', '2 tasks'))
+        self.assertEqual(self.plan_args()[0][self.plan_args()[0].index('--model') + 1], 'opus')
+
+    def test_ai_plan_detach_lock_held_ends_early(self):
+        import fcntl
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with (self.project / '.ai/local/workflow.lock').open('w') as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.ai_plan(str(objective), '--detach', expected=None)
+        self.assertGreaterEqual(result.returncode, 1, result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn('ended early', output)
+        self.assertIn('Another runner/reviewer owns this checkout', output)
+        self.assertEqual(self.plan_args(), [])
+
+    def ai_plan_fake_runner(self, body):
+        """Replace the fixture's ai-run with a script that never reports planning/active, so the
+        parent's poll always sees the child exit first."""
+        runner = self.project / '.ai/bin/ai-run'
+        runner.unlink()
+        runner.write_text('#!/usr/bin/env bash\n' + body)
+        runner.chmod(0o755)
+
+    def test_ai_plan_detach_finished_before_ack_is_success(self):
+        objective = self.plan_ready()
+        self.ai_plan_fake_runner(
+            'printf \'{"stage": "planning", "state": "done", "pid": %s, "note": "2 tasks"}\' "$$" '
+            '> .ai/local/observation.json\necho "Plan ready on feature/test: 2 tasks"\n')
+        result = self.ai_plan(str(objective), '--detach')
+        pid, log = self.ai_plan_started(result)
+        self.assertNotIn('ended early', result.stderr)
+        self.assertTrue(log.is_file())
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+        self.assertEqual(self.observation()['pid'], pid)
+
+    def test_ai_plan_detach_exit_zero_without_done_is_failure(self):
+        objective = self.plan_ready()
+        cases = {'no observation': 'echo planned nothing\n',
+                 'another pid': 'printf \'{"stage": "planning", "state": "done", "pid": 1}\' '
+                                '> .ai/local/observation.json\n',
+                 'non-zero exit': 'printf \'{"stage": "planning", "state": "done", "pid": %s}\' "$$" '
+                                  '> .ai/local/observation.json\nexit 3\n'}
+        for name, body in cases.items():
+            with self.subTest(name):
+                (self.project / '.ai/local/observation.json').unlink(missing_ok=True)
+                self.ai_plan_fake_runner(body)
+                result = self.ai_plan(str(objective), '--detach', expected=3 if name == 'non-zero exit' else 1)
+                self.assertIn('ended early', result.stderr)
+                self.assertNotIn('Planning session started', result.stdout)
+
+    def test_ai_plan_detach_unconfirmed_leaves_the_session_running(self):
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        (self.project / '.ai/local/observation.json').mkdir()
+        result = self.ai_plan(str(objective), '--detach', expected=1, AI_PLAN_ACK_SECONDS='1',
+                              MOCK_PLAN_SLEEP='4')
+        match = re.search(r'could not confirm the planning session started within 1 s \(pid (\d+), log '
+                          r'(\.ai/local/plan-\S+\.log)\)', result.stderr)
+        self.assertIsNotNone(match, result.stdout + result.stderr)
+        pid = int(match.group(1))
+        self.addCleanup(self.ai_plan_stop, pid)
+        self.assertTrue(self.ai_plan_runner(pid), 'ai-plan must never kill the session: '
+                        + (self.project / match.group(2)).read_text())
+        self.ai_plan_stop(pid)
+        self.assertIn('Invalid AI_PLAN_ACK_SECONDS',
+                      self.ai_plan(str(objective), '--detach', expected=1, AI_PLAN_ACK_SECONDS='0').stderr)
+
+    def test_ai_plan_detach_concurrent_launches_keep_their_own_logs(self):
+        objective = self.plan_ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        processes = [subprocess.Popen([str(self.project / '.ai/bin/ai-plan'), str(objective), '--detach'],
+                                      cwd=self.project, env=dict(self.env, MOCK_PLAN_SLEEP='3'),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for _ in range(2)]
+        results = []
+        for process in processes:
+            out, err = process.communicate(timeout=COMMAND_TIMEOUT)
+            results.append(subprocess.CompletedProcess(process.args, process.returncode, out, err))
+        winners = [result for result in results if result.returncode == 0]
+        losers = [result for result in results if result.returncode != 0]
+        self.assertEqual((len(winners), len(losers)), (1, 1), [r.stdout + r.stderr for r in results])
+        self.assertIn('ended early', losers[0].stderr)
+        pid, log = self.ai_plan_started(winners[0])
+        logs = self.ai_plan_logs()
+        self.assertEqual(len(logs), 2)
+        lost = next(path for path in logs if path != log)
+        self.assertIn('Another runner/reviewer owns this checkout', lost.read_text())
+        self.ai_plan_wait(pid)
+        text = log.read_text()
+        self.assertTrue(text.startswith('Approved workflow gate SHA-256: '), text)
+        self.assertIn('Plan ready on feature/test: 2 tasks', text)
+        self.assertNotIn('Another runner/reviewer', text)
+
+    def test_ai_plan_detach_symlinked_local_refused_before_launch(self):
+        objective = self.plan_ready()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = self.base / 'sentinel'
+        sentinel.write_bytes(b'keep me\n')
+        now = time.time()
+        for offset in range(-1, 4):
+            stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now + offset))
+            (outside / f'plan-{stamp}-00000000.log').symlink_to(sentinel)
+        planted = sorted(path.name for path in outside.iterdir())
+        local = self.project / '.ai/local'
+        if local.exists():
+            shutil.rmtree(local)
+        local.symlink_to(outside)
+        result = self.ai_plan(str(objective), '--detach', expected=None)
+        self.assertGreaterEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('ended early', result.stdout + result.stderr)
+        self.assertNotIn('Planning session started', result.stdout)
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), planted)
+        self.assertEqual(sentinel.read_bytes(), b'keep me\n')
+        self.assertEqual(self.plan_args(), [])
+
+    def test_ai_plan_detach_first_use_creates_local(self):
+        objective = self.plan_ready()
+        local = self.project / '.ai/local'
+        self.assertFalse(local.exists(), 'setup-project must not create .ai/local')
+        result = self.ai_plan(str(objective), '--detach', MOCK_PLAN_SLEEP='1')
+        pid, log = self.ai_plan_started(result)
+        self.assertTrue(local.is_dir() and not local.is_symlink())
+        self.assertEqual(self.ai_plan_logs(), [log])
+        self.ai_plan_wait(pid)
+        self.assertIn('Plan ready on feature/test: 2 tasks', log.read_text())
+
+    def test_ai_plan_foreground_first_use_creates_local(self):
+        objective = self.plan_ready()
+        local = self.project / '.ai/local'
+        self.assertFalse(local.exists(), 'setup-project must not create .ai/local')
+        self.assertIn('Plan ready on feature/test: 2 tasks', self.ai_plan(str(objective)).stdout)
+        self.assertTrue(local.is_dir() and not local.is_symlink())
+
+    def test_ai_plan_missing_prompt_and_help(self):
+        self.plan_ready()
+        for extra in ((), ('--detach',)):
+            with self.subTest(extra=extra):
+                result = self.ai_plan('missing.md', *extra, expected=1)
+                self.assertIn('Prompt file not found or unreadable: missing.md', result.stderr)
+        self.assertIn('Missing PROMPT_FILE', self.ai_plan('--detach', expected=1).stderr)
+        self.assertEqual(self.plan_args(), [])
+        self.assertFalse((self.project / '.ai/local').exists() and self.ai_plan_logs())
+        self.assertIn('Usage: ai-plan PROMPT_FILE', self.ai_plan('--help').stdout)
+
+    def test_ai_plan_relative_dirs_resolve_from_the_callers_directory(self):
+        self.plan_ready()
+        for relative in ('sub/reference', 'reference', 'sub/kb', 'kb', 'only-at-root'):
+            (self.project / relative).mkdir(parents=True)
+            (self.project / relative / (relative.replace('/', '-') + '.marker')).write_text('marker\n')
+        (self.project / 'prompt.md').write_text('Build a tiny CLI that greets the user.\n')
+        self.commit('reference directories')
+        sub = self.project / 'sub'
+        root = os.path.realpath(self.project)
+        options = ('../prompt.md', '--read-dir', './reference', '--read-dir', '../reference', '--knowledge-dir', './kb')
+        self.ai_plan(*options, cwd=sub)
+        pid, _ = self.ai_plan_started(self.ai_plan(*options, '--detach', cwd=sub, MOCK_PLAN_SLEEP='1'))
+        self.ai_plan_wait(pid)
+        self.assertEqual(len(self.plan_args()), 2)
+        for args in self.plan_args():
+            added = [args[i + 1] for i, arg in enumerate(args) if arg == '--add-dir']
+            # ai-run puts the knowledge base first, then the read directories in the given order.
+            self.assertEqual(added, [f'{root}/sub/kb', f'{root}/sub/reference', f'{root}/reference'])
+            # root is absolute, so this is Claude Code's //abs form.
+            self.assertIn(f'Read(/{root}/sub/reference/**)', args)
+            self.assertIn(f'Read(/{root}/reference/**)', args)
+        for extra in ((), ('--detach',)):
+            with self.subTest(extra=extra):
+                result = self.ai_plan('../prompt.md', '--read-dir', './only-at-root', *extra, cwd=sub, expected=1)
+                self.assertIn('Read directory not found: ./only-at-root', result.stderr)
+                result = self.ai_plan('../prompt.md', '--knowledge-dir', './only-at-root', *extra, cwd=sub,
+                                      expected=1)
+                self.assertIn('Knowledge directory must already exist.', result.stderr)
+        self.assertEqual(len(self.plan_args()), 2)
+
+    def test_ai_plan_setup_installs_it_executable(self):
+        self.setup_project()
+        self.assertEqual((self.project / '.ai/bin/ai-plan').read_bytes(), (ROOT / 'scripts/ai-plan').read_bytes())
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-plan', os.X_OK))
 
     def test_plan_session_invalid_queue_stops_and_keeps_the_file(self):
         self.plan_ready()
@@ -3497,6 +4140,82 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
         self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', gate, 'feature/test', '--approved',
                       '--base', 'main', '--no-pr'], env=dict(self.env, AI_AUTO_RECOVER='1'))
+
+    PR_URL = 'https://github.com/o/r/pull/7'
+
+    def pr_undraft_fixture(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'feature/draft'])
+
+    def pr_undraft_record_file(self):
+        files = list((self.base / 'host-state').rglob('pr-draft/*.json'))
+        self.assertEqual(len(files), 1)
+        return files[0]
+
+    def test_pr_undraft_record_round_trip_and_location(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+        record = self.pr_undraft_record_file()
+        self.assertEqual(record.parent.name, 'pr-draft')
+        self.assertFalse(str(record).startswith(str(self.project) + os.sep))
+        self.assertEqual(json.loads(record.read_text())['how'], 'created')
+        self.helper('pr-draft', 'clear')
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'clear')  # nothing to remove is fine
+
+    def test_pr_undraft_record_is_per_branch(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'converted')
+        self.run_cmd(['git', 'checkout', '-q', '-b', 'feature/other'])
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+        self.run_cmd(['git', 'checkout', '-q', 'feature/draft'])
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+
+    def test_pr_undraft_record_unreadable_is_not_ours(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        record = self.pr_undraft_record_file()
+        good = json.loads(record.read_text())
+        for content in ('garbage', '[1]', json.dumps(dict(good, url='https://x/issues/3')),
+                        json.dumps(dict(good, how='other'))):
+            with self.subTest(content=content):
+                record.write_text(content)
+                self.helper('pr-draft', 'get', expected=1)
+                self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+
+    def test_pr_undraft_record_rejects_bad_arguments(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'other', expected=1)
+        self.helper('pr-draft', 'record', 'https://github.com/o/r/issues/7', 'created', expected=1)
+        self.helper('pr-draft', 'record', 'http://github.com/o/r/pull/7', 'created', expected=1)
+        self.helper('pr-draft', 'get', expected=1)
+        self.run_cmd(['git', 'checkout', '-q', '--detach'])
+        self.helper('pr-draft', 'record', self.PR_URL, 'created', expected=1)
+
+    def test_pr_undraft_record_take_consumes_a_matching_record(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'converted')
+        self.helper('pr-draft', 'take', 'https://github.com/o/r/pull/8', expected=1)
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
+        self.assertEqual(self.helper('pr-draft', 'take', self.PR_URL).stdout.strip(), 'converted')
+        self.helper('pr-draft', 'get', expected=1)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory modes')
+    def test_pr_undraft_record_fault_keeps_the_record_and_fails(self):
+        self.pr_undraft_fixture()
+        self.helper('pr-draft', 'record', self.PR_URL, 'created')
+        record = self.pr_undraft_record_file()
+        record.parent.chmod(0o500)
+        self.addCleanup(record.parent.chmod, 0o700)
+        cleared = self.helper('pr-draft', 'clear', expected=1)
+        self.assertIn(str(record), cleared.stderr)
+        self.helper('pr-draft', 'take', self.PR_URL, expected=1)
+        self.assertEqual(self.helper('pr-draft', 'get').stdout.strip(), self.PR_URL)
 
     def test_plan_revision_stage_set_and_verify(self):
         start = self.plan_stage_ready()
@@ -5065,6 +5784,1745 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('wait budget', result.stderr)
         self.assertFalse((self.base / 'sleep.log').exists())
         self.assertIn('⛔ STOPPED, needs you: runner stopped at T001', self.notifications())
+
+    # ---------------------------------------------------------------- limit relaunch (MC-01)
+    LIMIT_MESSAGE = 'Claude usage limit: the reset is beyond the 60s wait budget. Rerun after it resets.'
+
+    def limit_far_stop(self, prepare=None):
+        self.ready()
+        if prepare:
+            prepare()
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertIn(self.LIMIT_MESSAGE, result.stderr)
+        self.assertEqual((self.project / '.ai/local/last-error').read_text(), self.LIMIT_MESSAGE + '\n')
+        self.assertFalse((self.base / 'sleep.log').exists())
+        return result
+
+    def limit_stop(self, *args, expected=0, **env):
+        result = self.run_cmd(['python3', str(HELPER), 'limit-stop', *args], expected=expected,
+                              env=dict(self.env, **env))
+        if expected:
+            self.assertEqual(result.stdout, '')
+        return result.stdout.strip()
+
+    def test_limit_relaunch_record_beyond_budget_stop(self):
+        self.limit_far_stop()
+        record = (self.project / '.ai/local/limit-stop')
+        self.assertFalse(record.is_symlink())
+        agent, reset = record.read_text().split()
+        self.assertEqual(agent, 'Claude')
+        self.assertLess(abs(int(reset) - (time.time() + 7 * 86400)), 300)
+        self.assertEqual(self.limit_stop(), f'Claude {int(reset) + 60}')
+
+    def test_limit_relaunch_record_planted_temp_symlink_is_not_followed(self):
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep me\n')
+
+        def plant():
+            # Planted by the session (ai-run's startup path check refuses it earlier).
+            claude = self.mock_bin / 'claude'
+            claude.rename(self.mock_bin / 'claude-real')
+            claude.write_text(f'#!/usr/bin/env bash\nln -s {shlex.quote(str(sentinel))} .ai/local/limit-stop.tmp\n'
+                              f'exec {shlex.quote(str(self.mock_bin / "claude-real"))} "$@"\n')
+            os.chmod(claude, 0o755)
+        self.limit_far_stop(plant)
+        self.assertTrue((self.project / '.ai/local/limit-stop.tmp').is_symlink())
+        self.assertEqual(sentinel.read_text(), 'keep me\n')
+        self.assertRegex((self.project / '.ai/local/limit-stop').read_text(), r'^Claude \d+\n$')
+
+    def test_limit_relaunch_record_limit_stop_rejects_anything_else(self):
+        self.setup_project()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+
+        def records(error=self.LIMIT_MESSAGE + '\n', stop='Claude 0\n'):
+            for name in ('last-error', 'limit-stop'):
+                (local / name).unlink(missing_ok=True)
+            if stop is not None:
+                (local / 'limit-stop').write_text(stop)
+            (local / 'last-error').write_text(error)
+
+        records()
+        self.assertEqual(self.limit_stop('--now', '1000', AI_LIMIT_RETRY='600'), 'Claude 1600')
+        records(stop='Claude 900\n')
+        self.assertEqual(self.limit_stop('--now', '1000'), 'Claude 1000')  # the reset has passed
+        records(stop='Claude 5000\n')
+        self.assertEqual(self.limit_stop('--now', '1000'), 'Claude 5060')
+        for error, stop in ((self.LIMIT_MESSAGE + '\nsomething else\n', 'Claude 0\n'),
+                            ('other text: ' + self.LIMIT_MESSAGE + '\n', 'Claude 0\n'),
+                            ('runner stopped\n', 'Claude 0\n'),
+                            (self.LIMIT_MESSAGE + '\n', None),
+                            (self.LIMIT_MESSAGE + '\n', 'garbage\n'),
+                            (self.LIMIT_MESSAGE + '\n', 'Codex 0\n')):
+            with self.subTest(error=error, stop=stop):
+                records(error, stop)
+                self.limit_stop('--now', '1000', expected=1)
+        records()
+        when = (local / 'last-error').stat().st_mtime
+        os.utime(local / 'limit-stop', (when - 300, when - 300))
+        self.limit_stop('--now', '1000', expected=1)  # a stale record from an earlier stop
+
+    def test_limit_relaunch_record_manifest_schedule_lifecycle(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        manifest_path = next((self.base / 'host-state').rglob('run.json'))
+
+        def manifest():
+            return json.loads(manifest_path.read_text())
+
+        self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '0\n')
+        self.helper('run-manifest', 'limit-at', expected=1)
+        self.helper('run-manifest', 'reserve-attempt')
+        self.helper('run-manifest', 'task-set', 'T001')  # the arm names its task (T017)
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation').stdout, '1\n')
+        self.assertEqual(manifest()['attempts'], 0)
+        self.assertEqual(self.helper('run-manifest', 'limit-due', '99', expected=1).stdout, '')
+        self.assertEqual(self.helper('run-manifest', 'limit-due', '100').stdout, '100\n')
+        failed = self.helper('run-manifest', 'limit-schedule', '200', '2', 'implementation', expected=1)
+        self.assertIn('a relaunch is already scheduled', failed.stderr)
+        self.assertEqual(manifest()['limit_relaunches'], 1)
+        # Still waiting: the recovery's reservation is given back, the schedule kept.
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'limit-hold', '99').stdout, '100\n')
+        self.assertEqual((manifest()['attempts'], manifest()['limit_relaunch_at']), (0, 100))
+        self.helper('run-manifest', 'limit-claim', '99', expected=1)
+        self.helper('run-manifest', 'limit-hold', '100', expected=1)
+        self.assertEqual(self.helper('run-manifest', 'limit-at').stdout, '100\n')
+        # Due: claimed once, the attempt given back (never below 0).
+        self.helper('run-manifest', 'reserve-attempt')
+        self.assertEqual(self.helper('run-manifest', 'limit-claim', '100').stdout, '1\n')
+        self.assertNotIn('limit_relaunch_at', manifest())
+        self.assertEqual(manifest()['attempts'], 0)
+        self.helper('run-manifest', 'limit-claim', '100', expected=1)
+        self.helper('run-manifest', 'limit-claim', '100', expected=1)
+        self.helper('run-manifest', 'limit-at', expected=1)
+        self.helper('run-manifest', 'limit-due', '100', expected=1)
+        self.assertEqual(manifest()['attempts'], 0)
+        # The relaunch checks the checkout it resumes (the binding's own tests:
+        # test_limit_relaunch_binding_*); verify writes nothing, arm records the exact binding.
+        before = manifest_path.read_bytes()
+        self.helper('run-manifest', 'limit-verify')
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-armed', expected=1)
+        self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(manifest()['limit_resume'],
+                         {'head': manifest()['limit_head'], 'tree': manifest()['limit_tree'], 'task': 'T001'})
+        self.helper('run-manifest', 'limit-armed')
+        self.helper('run-manifest', 'limit-disarm')
+        self.helper('run-manifest', 'limit-armed', expected=1)
+        self.helper('run-manifest', 'limit-disarm')  # missing is fine
+        for action in ('limit-verify', 'limit-arm', 'limit-armed'):
+            self.helper('run-manifest', action, 'a' * 40, expected=1)  # no binding argument
+        # The cap counts relaunches per human-started run.
+        self.assertEqual(self.helper('run-manifest', 'limit-schedule', '300', '2', 'implementation').stdout, '2\n')
+        self.helper('run-manifest', 'limit-claim', '300')
+        capped = self.helper('run-manifest', 'limit-schedule', '400', '2', 'implementation', expected=1)
+        self.assertIn('usage limit: already relaunched 2 time(s) in this run', capped.stderr)
+        self.assertEqual(self.helper('run-manifest', 'limit-count').stdout, '2\n')
+        self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(manifest()['limit_stage'], 'implementation')
+        fields = {'limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
+                  'limit_stage', 'limit_resume', 'task'}
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertFalse(set(manifest()) & fields)
+        for action in ('limit-verify', 'limit-arm'):
+            unscheduled = self.helper('run-manifest', action, expected=1)
+            self.assertIn('no scheduled relaunch', unscheduled.stderr)
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '500', '2', 'implementation')
+        self.helper('run-manifest', 'limit-arm')
+        self.approve_run()
+        self.assertFalse(set(manifest()) & fields)
+        tree = 'c' * 64
+        for key, value in (('limit_relaunches', '1'), ('limit_relaunch_at', '100'),
+                           ('limit_head', 'x' * 40), ('limit_tree', 'a' * 40), ('limit_tree', 7),
+                           ('limit_resume', 7), ('limit_resume', 'a' * 40),
+                           ('limit_resume', {'head': 'a' * 40}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': 'x' * 64}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'other': 1}),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree, 'task': 'x1'}),
+                           ('limit_task', 7), ('limit_task', 'T1'),
+                           ('limit_stage', 7), ('limit_stage', ''), ('limit_stage', 'x' * 41),
+                           ('limit_relaunches', True)):
+            with self.subTest(key=key, value=value):
+                manifest_path.write_text(json.dumps(dict(manifest(), **{key: value})) + '\n')
+                invalid = self.helper('run-manifest', 'limit-count', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.approve_run()
+
+    def test_limit_relaunch_record_setting_recorded_with_the_run(self):
+        self.setup_project()
+        self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', 'c' * 64, 'main', '--approved'],
+                     env=dict(self.env, AI_LIMIT_RELAUNCH_MAX='3'))
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_LIMIT_RELAUNCH_MAX'], '3')
+        restored = self.helper('run-manifest', 'env').stdout
+        self.assertIn('AI_LIMIT_RELAUNCH_MAX=3\0', restored)
+
+    def test_limit_relaunch_record_write_never_follows_planted_files(self):
+        self.setup_project()
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        sentinel = self.base / 'sentinel'
+        sentinel.write_text('keep me\n')
+
+        def write(*args, expected=0):
+            started = time.monotonic()
+            result = self.run_cmd(['python3', str(HELPER), 'limit-stop-write', *args], expected=expected,
+                                  timeout=SHORT_TIMEOUT)
+            self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+            return result
+
+        def regular_record(expected):
+            path = local / 'limit-stop'
+            self.assertTrue(path.is_file() and not path.is_symlink())
+            self.assertEqual(path.read_text(), expected)
+
+        for name in ('limit-stop', 'limit-stop.tmp'):
+            with self.subTest(symlink=name):
+                (local / name).unlink(missing_ok=True)
+                (local / name).symlink_to(sentinel)
+                write('Claude', '123')
+                self.assertEqual(sentinel.read_text(), 'keep me\n')
+                regular_record('Claude 123\n')
+        (local / 'limit-stop').unlink()
+        os.mkfifo(local / 'limit-stop')
+        write('Codex', '0')  # never blocks on the FIFO: it is replaced
+        regular_record('Codex 0\n')
+        for args in (('Gemini', '1'), ('Claude', 'soon'), ('Claude', '1' * 13), ('Claude',)):
+            with self.subTest(args=args):
+                write(*args, expected=1)
+                regular_record('Codex 0\n')
+        # The first temp name of an in-process writer, planted as a symlink and as a FIFO.
+        wf = self.outcome_module()
+        first = local / f'.limit-stop.{os.getpid()}.tmp'
+        for plant in (lambda: first.symlink_to(sentinel), lambda: os.mkfifo(first)):
+            plant()
+            started = time.monotonic()
+            with mock.patch.dict(os.environ, AI_ROOT=str(self.project)):
+                wf.limit_stop_write(['Claude', '77'])
+            self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+            self.assertEqual(sentinel.read_text(), 'keep me\n')
+            regular_record('Claude 77\n')
+            first.unlink()
+        # .ai/local replaced by a symlink: nothing is written anywhere.
+        outside = self.base / 'outside'
+        outside.mkdir()
+        shutil.rmtree(local)
+        local.symlink_to(outside)
+        write('Claude', '5', expected=1)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_limit_relaunch_record_observe_relaunch(self):
+        self.setup_project()
+        observation = self.project / '.ai/local/observation.json'
+        observation.parent.mkdir(exist_ok=True)
+        self.helper('observe', 'step', 'build', 'T001')
+        self.helper('observe', 'relaunch', '1700000000', 'note')
+        record = json.loads(observation.read_text())
+        self.assertEqual((record['state'], record['note'], record['relaunch_at']), ('paused', 'note', 1700000000))
+        self.assertEqual((record['stage'], record['detail']), ('build', 'T001'))
+        self.helper('observe', 'step', 'build', 'x')
+        self.assertNotIn('relaunch_at', json.loads(observation.read_text()))
+        self.helper('observe', 'relaunch', 'later', 'note')  # warns, never fails the caller
+        self.assertNotIn('relaunch_at', json.loads(observation.read_text()))
+
+    def manifest(self, **changes):
+        # The host run manifest; CHANGES (None drops a field) are written back first.
+        path = next((self.base / 'host-state').rglob('run.json'))
+        data = json.loads(path.read_text())
+        if changes:
+            data.update(changes)
+            data = {key: value for key, value in data.items() if value is not None}
+            path.write_text(json.dumps(data) + '\n')
+        return data
+
+    def watchdog_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('watchdog', ROOT / 'scripts/lib/watchdog.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def git_head(self):
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def limit_relaunch_scheduled(self, timer=True, expected=75, prepare=None, mode='limit-far', queue=None,
+                                 args=(), **env):
+        # A pipeline stopped at a usage limit beyond the wait budget, recovering timer installed.
+        # PREPARE runs on the feature branch before the approved run starts; MODE is the
+        # limited session's mock mode, QUEUE the task queue, ARGS more ai-pipeline arguments.
+        self.ready(queue)
+        if prepare:
+            prepare()
+        self.mock_systemctl()
+        if timer:
+            self.watchdog('--install-timer', '--recover')
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', *args, expected=expected,
+                         AI_AUTO_RECOVER='1', MOCK_CLAUDE=mode, AI_LIMIT_MAX_WAIT='60', **env)
+
+    def assert_relaunch_waiting(self, at):
+        local = self.project / '.ai/local'
+        for name in ('last-error', 'limit-stop', 'pipeline.active'):
+            self.assertFalse((local / name).exists(), name)
+        self.assertEqual(self.watchdog_module().paused_until(local), at * 1_000_000_000)
+        self.assertEqual(json.loads((local / 'observation.json').read_text())['relaunch_at'], at)
+        manifest = self.manifest()
+        self.assertEqual((manifest['limit_relaunches'], manifest['limit_relaunch_at'], manifest['attempts']),
+                         (1, at, 0))
+        self.assertEqual(self.recovery_calls(), [])
+
+    def relaunch(self, expected=0, **env):
+        # The watchdog's due launch, run directly: the schedule moved into the past first.
+        self.manifest(limit_relaunch_at=int(time.time()) - 1)
+        return self.tool('ai-recover', '--stage', 'usage limit relaunch', expected=expected,
+                         timeout=PIPELINE_TIMEOUT, **env)
+
+    def test_limit_relaunch_recover_schedules_then_resumes(self):
+        result = self.limit_relaunch_scheduled()
+        self.assertIn('Paused at a Claude usage limit; the watchdog relaunches the run after', result.stdout)
+        notes = self.notifications()
+        self.assertIn('⏸ PAUSED: feature/test stopped at a Claude usage limit during implementation; '
+                      'relaunches by itself after', notes)
+        self.assertIn('(relaunch 1/2)', notes)
+        self.assertNotIn('⛔', notes)
+        at = self.manifest()['limit_relaunch_at']
+        self.assertLess(abs(at - (time.time() + 7 * 86400 + 60)), 300)
+        self.assertEqual(self.manifest()['limit_head'], self.git_head())
+        self.assert_relaunch_waiting(at)
+        scheduled = self.git_head()
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2): feature/test.', notes)
+        self.assertNotIn('🔧', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.helper('tasks', 'complete')
+        manifest = self.manifest()
+        self.assertEqual(manifest['attempts'], 0)
+        self.assertNotIn('limit_relaunch_at', manifest)
+        # The stop's bookkeeping was committed after the verification, on the scheduled HEAD.
+        log = self.run_cmd(['git', 'log', '--format=%H %P %s']).stdout.splitlines()
+        record = next(line for line in log if 'record stop during usage limit relaunch' in line)
+        self.assertEqual(record.split()[1], scheduled)
+
+    def test_limit_relaunch_recover_moved_head_escalates_untouched(self):
+        self.limit_relaunch_scheduled()
+        (self.project / 'moved.txt').write_text('a human commit during the wait\n')
+        self.commit('human commit')
+        moved = self.git_head()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the branch moved to another commit while the usage-limit relaunch waited', stop)
+        self.assertIn('nothing was committed', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+        self.assertEqual(self.git_head(), moved)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: this stop is terminal
+
+    def binding_submodule(self, name='sub'):
+        # A committed submodule NAME in the fixture checkout; returns sub_git(cwd, *args).
+        origin = self.base / f'{name}-origin'
+        origin.mkdir()
+
+        def sub_git(cwd, *args):
+            subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid',
+                            '-c', 'commit.gpgsign=false', *args], cwd=cwd, env=self.env,
+                           check=True, capture_output=True)
+        sub_git(origin, 'init', '-q', '-b', 'main')
+        (origin / 'file.txt').write_text('committed\n')
+        sub_git(origin, 'add', 'file.txt')
+        sub_git(origin, 'commit', '-qm', 'sub')
+        self.run_cmd(['git', '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+                      str(origin), name])
+        return sub_git
+
+    def worktree_digest(self):
+        return self.helper('worktree-digest').stdout.strip()
+
+    def test_limit_relaunch_binding_worktree_digest_covers_the_whole_tree(self):
+        project = self.project
+        for name in ('.ai/reviews', '.ai/local'):
+            (project / name).mkdir(parents=True)
+        for name, text in (('a.txt', 'one\n'), ('b.txt', 'two\n'), ('.ai/state.md', 'Phase: x\n'),
+                           ('.ai/reviews/dispositions.md', '# Dispositions\n')):
+            (project / name).write_text(text)
+        (project / 'link').symlink_to('a.txt')
+        self.commit('bootstrap')
+        base = self.worktree_digest()
+        self.assertRegex(base, r'^[0-9a-f]{64}$')
+        self.assertEqual(base, self.tree_snapshot())
+        (project / '.ai/local/scratch').write_text('host only\n')
+        self.assertEqual(self.worktree_digest(), base)
+
+        def restore():
+            self.run_cmd(['git', 'reset', '-q', '--hard'])
+            (project / 'new.txt').unlink(missing_ok=True)
+
+        def link(target):
+            (project / 'link').unlink()
+            (project / 'link').symlink_to(target)
+
+        def staged_only():
+            (project / 'a.txt').write_text('staged\n')
+            self.run_cmd(['git', 'add', '--', 'a.txt'])
+            (project / 'a.txt').write_text('one\n')
+            self.assertEqual(self.run_cmd(['git', 'diff', '--name-only']).stdout, 'a.txt\n')
+
+        cases = (('tracked edit', lambda: (project / 'a.txt').write_text('edited\n')),
+                 ('state.md edit', lambda: (project / '.ai/state.md').write_text('Phase: y\n')),
+                 ('dispositions edit', lambda: (project / '.ai/reviews/dispositions.md').write_text('x\n')),
+                 ('untracked file', lambda: (project / 'new.txt').write_text('new\n')),
+                 ('deleted file', lambda: (project / 'b.txt').unlink()),
+                 ('staged only', staged_only),
+                 ('mode change', lambda: (project / 'a.txt').chmod(0o755)),
+                 ('symlink target', lambda: link('b.txt')))
+        for name, change in cases:
+            with self.subTest(change=name):
+                change()
+                self.assertNotEqual(self.worktree_digest(), base)
+                restore()
+                self.assertEqual(self.worktree_digest(), base)
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'empty'])
+        self.assertNotEqual(self.worktree_digest(), base)
+
+    def test_limit_relaunch_binding_worktree_digest_covers_submodules(self):
+        sub_git = self.binding_submodule()
+        self.commit('add submodule')
+        sub = self.project / 'sub'
+
+        def parent():
+            return (self.git_head(), self.run_cmd(['git', 'diff', '--cached', '--binary']).stdout)
+        seen, before = [self.worktree_digest()], parent()
+        for change in (lambda: (sub / 'file.txt').write_text('modified\n'),
+                       lambda: (sub_git(sub, 'add', 'file.txt'), sub_git(sub, 'commit', '-qm', 'move'))):
+            change()
+            seen.append(self.worktree_digest())
+            self.assertNotIn(seen[-1], seen[:-1])
+            self.assertEqual(parent(), before)
+
+    def test_limit_relaunch_binding_manifest_records_and_verifies_the_tree(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        sub_git = self.binding_submodule()
+        self.commit('bootstrap')
+        self.approve_run()
+        manifest_path = next((self.base / 'host-state').rglob('run.json'))
+
+        def schedule():
+            self.helper('run-manifest', 'clear-attempts')
+            self.helper('run-manifest', 'task-set', 'T001')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+
+        def refused(reason):
+            before = manifest_path.read_bytes()
+            for action in ('limit-verify', 'limit-arm'):
+                result = self.helper('run-manifest', action, expected=1)
+                self.assertIn(reason, result.stderr)
+            self.assertEqual(manifest_path.read_bytes(), before)
+            self.assertNotIn('limit_resume', self.manifest())
+
+        schedule()
+        manifest = self.manifest()
+        self.assertEqual((manifest['limit_head'], manifest['limit_tree']), (self.git_head(), self.worktree_digest()))
+        before = manifest_path.read_bytes()
+        self.helper('run-manifest', 'limit-verify')
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-arm')
+        self.helper('run-manifest', 'limit-armed')
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('x')
+        result = self.helper('run-manifest', 'limit-verify', expected=1)
+        self.assertIn('the checkout changed', result.stderr)
+        self.helper('run-manifest', 'limit-armed', expected=1)
+        self.run_cmd(['git', 'checkout', '--', 'notes.txt'])
+        schedule()
+        (self.project / 'human.txt').write_text('new\n')
+        refused('the checkout changed')
+        (self.project / 'human.txt').unlink()
+        schedule()
+        (self.project / 'notes.txt').write_text('committed by a human\n')
+        self.commit('human commit')
+        refused('moved to another commit')
+        schedule()
+        (self.project / 'sub/file.txt').write_text('inside the submodule\n')
+        refused('the checkout changed')
+        sub_git(self.project / 'sub', 'checkout', '--', 'file.txt')
+        self.helper('run-manifest', 'limit-verify')
+        self.manifest(limit_resume='a' * 40)
+        invalid = self.helper('run-manifest', 'limit-count', expected=1)
+        self.assertIn('No valid run manifest', invalid.stderr)
+
+    def test_limit_relaunch_binding_recover_human_change_escalates_untouched(self):
+        self.limit_relaunch_scheduled()
+        scheduled = self.git_head()
+        self.assertEqual(self.manifest()['limit_tree'], self.worktree_digest())
+        edited, added = self.project / 'CLAUDE.md', self.project / 'human-note.txt'
+        self.assertEqual(self.run_cmd(['git', 'ls-files', '--', 'CLAUDE.md']).stdout, 'CLAUDE.md\n')
+        edited.write_bytes(edited.read_bytes() + b'a human edit during the wait\n')
+        added.write_text('a human file\n')
+        contents = (edited.read_bytes(), added.read_bytes())
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the checkout changed while the usage-limit relaunch waited', stop)
+        self.assertIn('nothing was committed', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertEqual((edited.read_bytes(), added.read_bytes()), contents)
+        self.assertEqual(self.git_head(), scheduled)
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_binding_tasks_newly_done(self):
+        queue = self.project / '.ai/tasks.md'
+        queue.parent.mkdir()
+        queue.write_text(task('T001', 'DONE') + task('T002') + task('T003'))
+        self.commit('queue')
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, '')
+        queue.write_text(task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, 'T002\n')
+        queue.write_text(task('T001', 'DONE') + task('T002', 'DONE') + task('T003', 'DONE') + task('T004', 'DONE'))
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, 'T002\nT003\nT004\n')
+        self.helper('tasks', 'newly-done', 'no-such-revision', expected=1)
+        queue.write_text(task('T001', 'DONE') + task('T001'))
+        self.helper('tasks', 'newly-done', 'HEAD', expected=1)
+
+    # ---------------------------------------------- preserved work bound to its task (T017)
+    def test_limit_relaunch_bound_manifest_task_record_and_arm(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        self.commit('bootstrap')
+        self.approve_run()
+        path = next((self.base / 'host-state').rglob('run.json'))
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.assertEqual(self.manifest()['task'], 'T001')
+        before = path.read_bytes()
+        for bad in (('x1',), ('T1',), ()):
+            self.helper('run-manifest', 'task-set', *bad, expected=1)
+            self.assertEqual(path.read_bytes(), before)
+        for _ in range(2):  # missing is fine
+            self.helper('run-manifest', 'task-clear')
+            self.assertNotIn('task', self.manifest())
+        # Scheduled without a task: no limit_task, and the arm of the dirty tree fails closed.
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('preserved edit\n')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.assertNotIn('limit_task', self.manifest())
+        before = path.read_bytes()
+        refused = self.helper('run-manifest', 'limit-arm', expected=1)
+        self.assertIn('the usage-limit stop left uncommitted changes with no task recorded', refused.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(self.helper('run-manifest', 'limit-task', expected=1).stdout, '')
+        # Scheduled with a task: copied into limit_task, then named by the arm.
+        self.helper('run-manifest', 'clear-attempts')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        self.helper('run-manifest', 'task-clear')  # the arm reads limit_task, never task
+        self.helper('run-manifest', 'limit-arm')
+        self.assertEqual(self.manifest()['limit_resume']['task'], 'T001')
+        self.assertEqual(self.helper('run-manifest', 'limit-task').stdout, 'T001\n')
+        self.helper('run-manifest', 'limit-task', 'x', expected=1)
+        self.helper('run-manifest', 'limit-armed')
+        self.helper('run-manifest', 'limit-disarm')
+        self.helper('run-manifest', 'limit-task', expected=1)
+        # clear-attempts and a new start drop both records.
+        for reset in (lambda: self.helper('run-manifest', 'clear-attempts'), self.approve_run):
+            self.helper('run-manifest', 'clear-attempts')
+            self.helper('run-manifest', 'task-set', 'T002')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+            self.assertEqual((self.manifest()['task'], self.manifest()['limit_task']), ('T002', 'T002'))
+            reset()
+            self.assertFalse({'task', 'limit_task'} & set(self.manifest()))
+        # Invalid records: a task of the wrong type, an arm without its task.
+        tree = 'c' * 64
+        for key, value in (('task', 7), ('task', 'x1'), ('limit_task', 7),
+                           ('limit_resume', {'head': 'a' * 40, 'tree': tree})):
+            with self.subTest(key=key, value=value):
+                self.manifest(**{key: value})
+                invalid = self.helper('run-manifest', 'limit-count', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.approve_run()
+
+    def test_limit_relaunch_bound_ai_run_records_each_session_task(self):
+        self.ready(task('T001') + task('T002'))
+        self.approve_run()
+        self.tool('ai-run', '--approved', MOCK_COPY_MANIFEST='1')
+        self.helper('tasks', 'complete')
+        local = self.project / '.ai/local'
+        for name in ('T001', 'T002'):
+            self.assertEqual(json.loads((local / f'manifest-{name}.json').read_text())['task'], name)
+        self.assertNotIn('task', self.manifest())
+
+    def test_limit_relaunch_bound_ai_run_limit_stop_keeps_the_task(self):
+        self.ready()
+        self.approve_run()
+        self.manifest(task='T009')  # a stale record from an interrupted run is cleared first
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60',
+                  MOCK_COPY_MANIFEST='1')
+        self.assertEqual(json.loads((self.project / '.ai/local/manifest-T001.json').read_text())['task'], 'T001')
+        self.assertEqual(self.manifest()['task'], 'T001')
+
+    def test_limit_relaunch_bound_standalone_ai_run_without_manifest_notes_once(self):
+        self.ready()
+        self.assertEqual(list((self.base / 'host-state').rglob('run.json')), [])
+        result = self.tool('ai-run', '--approved')
+        self.assertEqual(result.stderr.count('Note: could not record the task in the run manifest.'), 1)
+        self.helper('tasks', 'complete')
+
+    def bound_limit_stop(self, record_task, stage='implementation', edit=True):
+        # A pipeline stopped at the limit with its preserved work: the schedule is reset and the
+        # stop rewritten around an uncommitted source edit (EDIT), then ai-recover --stage STAGE
+        # schedules it again.
+        self.limit_relaunch_scheduled()
+        self.manifest(limit_relaunches=None, limit_relaunch_at=None, limit_head=None, limit_tree=None,
+                      limit_task=None, limit_stage=None, task=None)
+        if record_task:
+            self.helper('run-manifest', 'task-set', 'T001')
+        edited = self.project / 'CLAUDE.md'
+        if edit:
+            edited.write_bytes(edited.read_bytes() + b'preserved work of the limited session\n')
+        local = self.project / '.ai/local'
+        (local / 'limit-stop').write_text(f'Claude {int(time.time()) + 3600}\n')
+        (local / 'last-error').write_text(self.LIMIT_MESSAGE + '\n')
+        self.tool('ai-recover', '--stage', stage, expected=75)
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        return edited
+
+    def test_limit_relaunch_bound_relaunch_without_task_escalates_untouched(self):
+        edited = self.bound_limit_stop(record_task=False)
+        self.assertNotIn('limit_task', self.manifest())
+        head, status, content = self.git_head(), self.porcelain(), edited.read_bytes()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the usage-limit stop left uncommitted changes with no task recorded; '
+                      'nothing was committed.', stop)
+        self.assertIn('inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertEqual((self.git_head(), self.porcelain(), edited.read_bytes()), (head, status, content))
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: this stop is terminal
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_bound_relaunch_with_task_arms_it(self):
+        self.bound_limit_stop(record_task=True)
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        # The arm names T001, and the resumed run consumes it there (T011): T001's session.
+        result = self.relaunch()
+        self.assertEqual(result.stdout.count('Resuming preserved work of the usage-limit stop (T001).'), 1)
+        self.assertNotIn('limit_resume', self.manifest())
+        self.helper('run-manifest', 'limit-task', expected=1)
+        self.assertIn('CLAUDE.md', self.commit_of(self.UNCOMMITTED.format('T001'))[2])
+
+    # ---------------------------------------------- armed resume re-enters at implementation (T016)
+    def plan_review_commits(self):
+        return self.subjects_now().count('chore(ai): record plan review')
+
+    def plant_plan_decision(self):
+        # A needs-human revision record of the current plan review in host state (what a
+        # supervised revision that asked the human records), bound to HEAD.
+        content = (self.project / '.ai/reviews/plan.md').read_text()
+        store = next((self.base / 'host-state').rglob('run.json')).parent / \
+            f"plan-revisions-{hashlib.sha256(b'feature/test').hexdigest()[:16]}.json"
+        store.write_text(json.dumps([{
+            'commit': self.git_head(), 'report_digest': hashlib.sha256(content.encode()).hexdigest(),
+            'round': 1, 'accepted': 0, 'rejected': 0, 'needs_human': 1,
+            'questions': 'Keep option A or switch to B?'}]) + '\n')
+        self.helper('plan-revisions', 'decision')
+
+    def assert_no_plan_commit_refusal(self, *outputs):
+        local = self.project / '.ai/local'
+        texts = [self.notifications(), (self.project / '.ai/run-log.md').read_text(), *outputs]
+        texts += [path.read_text() for path in (local / 'last-error', local / 'observation.json') if path.exists()]
+        for text in texts:
+            self.assertNotIn('Commit the plan before reviewing it', text)
+
+    def reenter_partial_checkpoint(self, *args):
+        # Round 5 P3: a partial checkpoint (source committed, T001 still IN_PROGRESS, zero DONE),
+        # more edits preserved, then the far limit; the relaunch must not re-run the plan review.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint', args=args)
+        partial, _, files = self.commit_of('partial T001')
+        self.assertIn('preserved.txt', files)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.helper('tasks', 'untouched')
+        self.assertIn('preserved-after.txt', self.porcelain())
+        if not args:
+            self.assertTrue(self.helper('plan-review-info').stdout.startswith('stale'))
+        plans, plan_commits = self.plan_calls(), self.plan_review_commits()
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual((self.plan_calls(), self.plan_review_commits()), (plans, plan_commits))
+        self.assert_no_plan_commit_refusal(result.stdout, result.stderr)
+        # Between the partial checkpoint and ai-run's checkpoint of the task only the relaunch's
+        # stop record and T001's own session may commit: no plan review, no host record.
+        checkpoint, _, files = self.commit_of(self.UNCOMMITTED.format('T001'))
+        self.assertIn('preserved-after.txt', files)
+        between = self.run_cmd(['git', 'log', '--format=%s', f'{partial}..{checkpoint}^']).stdout.split('\n')
+        self.assertLessEqual(set(filter(None, between)),
+                             {'chore(ai): record stop during usage limit relaunch', 'implement T001'})
+        return plans
+
+    def test_limit_relaunch_reenter_partial_checkpoint_skips_the_plan_review(self):
+        self.assertEqual(self.reenter_partial_checkpoint(), 1)  # reviewed once, before the limit
+
+    def test_limit_relaunch_reenter_partial_checkpoint_with_skip_plan_review(self):
+        self.assertEqual(self.reenter_partial_checkpoint('--skip-plan-review'), 0)
+
+    def test_limit_relaunch_reenter_clean_resume_re_reviews_the_plan(self):
+        # Control: the partial checkpoint with a clean tree is never armed; the resumed run
+        # re-reviews the stale plan on the clean checkout as today, then completes.
+        self.limit_relaunch_scheduled(mode='limit-far-clean-checkpoint')
+        self.assertEqual(self.porcelain().replace(' M .ai/state.md\n', '').replace(' M .ai/run-log.md\n', '')
+                         .replace(' M .ai/handoff.md\n', ''), '')
+        self.assertEqual(self.plan_calls(), 1)
+        result = self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertNotIn(self.RESUMING.format('T001'), result.stdout)  # never armed
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.plan_statuses()[-1], 'clean')
+        self.assertEqual(self.plan_review_commits(), 2)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('limit_resume', self.manifest())
+        self.helper('tasks', 'complete')
+
+    def test_limit_relaunch_reenter_plan_decision_on_the_relaunch_escalates_unarmed(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint')
+        self.plant_plan_decision()
+        head, status, subjects = self.git_head(), self.porcelain(), self.subjects_now()
+        edits = {path: path.read_bytes() for path in (self.project / 'preserved-after.txt', self.project / '.ai/tasks.md')}
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('plan review needs your decision', notes.splitlines()[-1])
+        manifest = self.manifest()
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: terminal
+        self.assertNotIn('limit_resume', manifest)
+        self.assertEqual((self.git_head(), self.porcelain(), self.subjects_now()), (head, status, subjects))
+        self.assertEqual({path: path.read_bytes() for path in edits}, edits)
+        self.assertEqual(self.sessions_run(), 1)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_reenter_plan_decision_stops_an_armed_resume(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty-checkpoint')
+        self.plant_plan_decision()
+        head, status, plans = self.git_head(), self.porcelain(), self.plan_calls()
+        edits = {path: path.read_bytes() for path in (self.project / 'preserved-after.txt', self.project / '.ai/tasks.md')}
+        self.armed_resume(expected=1, AI_SETTINGS_FROM_MANIFEST='1')
+        self.assert_armed_stop('plan review needs your decision', head, edits)
+        self.assertEqual((self.porcelain(), self.plan_calls()), (status, plans))
+        self.assertIn('plan review needs your decision',
+                      (self.project / '.ai/local/last-error').read_text())
+
+    def test_limit_relaunch_reenter_stage_bound_arm_helper(self):
+        self.setup_project()
+        (self.project / 'notes.txt').write_text('notes\n')
+        self.commit('bootstrap')
+        self.approve_run()
+        path = next((self.base / 'host-state').rglob('run.json'))
+        with (self.project / 'notes.txt').open('a') as file:
+            file.write('preserved edit\n')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.assertEqual(self.manifest()['limit_stage'], 'implementation')
+        self.helper('run-manifest', 'limit-arm')
+        self.assertIn('limit_resume', self.manifest())
+        # Another stage's stop on the same dirty tree is never armed (checked before the task).
+        for record_task in (True, False):
+            self.helper('run-manifest', 'clear-attempts')
+            self.assertNotIn('limit_stage', self.manifest())
+            if record_task:
+                self.helper('run-manifest', 'task-set', 'T001')
+            self.helper('run-manifest', 'limit-schedule', '100', '2', 'review')
+            self.assertEqual(self.manifest()['limit_stage'], 'review')
+            before = path.read_bytes()
+            refused = self.helper('run-manifest', 'limit-arm', expected=1)
+            self.assertIn('the usage-limit stop left uncommitted changes outside an implementation session',
+                          refused.stderr)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertNotIn('limit_resume', self.manifest())
+        self.helper('run-manifest', 'clear-attempts')
+        before = path.read_bytes()
+        for stage in ('', 'x' * 41, 'tab\there'):
+            self.helper('run-manifest', 'limit-schedule', '100', '2', stage, expected=1)
+            self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'limit-schedule', '100', '2', expected=1)
+        self.assertEqual(path.read_bytes(), before)
+        self.manifest(limit_stage=7)
+        self.assertIn('No valid run manifest', self.helper('run-manifest', 'limit-count', expected=1).stderr)
+
+    def test_limit_relaunch_reenter_stage_bound_arm_end_to_end(self):
+        edited = self.bound_limit_stop(record_task=True, stage='review')
+        self.assertEqual(self.manifest()['limit_stage'], 'review')
+        head, status, content = self.git_head(), self.porcelain(), edited.read_bytes()
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn('the usage-limit stop left uncommitted changes outside an implementation session; '
+                      'nothing was committed.', stop)
+        self.assertIn('inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertEqual((self.git_head(), self.porcelain(), edited.read_bytes()), (head, status, content))
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)  # claimed: terminal
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_reenter_stage_bound_clean_tree_resumes(self):
+        self.bound_limit_stop(record_task=True, stage='review', edit=False)
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+
+    # ---------------------------------------------- relaunch verification contract (T014)
+    def porcelain(self):
+        return self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout
+
+    def subjects_now(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+
+    def verify_refused(self, reason, *changed):
+        # The due relaunch refuses the checkout exactly as found: one ⛔ with REASON, nothing
+        # committed or touched (CHANGED stay byte-identical), no arm, no session, no resume.
+        head, status, subjects = self.git_head(), self.porcelain(), self.subjects_now()
+        contents = [path.read_bytes() for path in changed]
+        self.relaunch(expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn(f'Recovery: {reason} while the usage-limit relaunch waited; nothing was committed. '
+                      'Next: inspect the checkout, commit or discard what changed, then rerun ai-pipeline.', stop)
+        self.assertNotIn('▶ RESUMED', notes)
+        self.assertNotIn('🔧', notes)
+        self.assertEqual((self.git_head(), self.porcelain(), self.subjects_now()), (head, status, subjects))
+        self.assertEqual([path.read_bytes() for path in changed], contents)
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('limit_relaunch_at', manifest)
+        self.assertEqual(self.recovery_calls(), [])
+        # No session: only the implementation session that hit the limit ever ran.
+        self.assertEqual((self.project / '.ai/local/mock-invocations').read_text().count('call'), 1)
+
+    def test_limit_relaunch_verify_bookkeeping_only_edit_escalates(self):
+        # Round 3 P9: confined to the bookkeeping files, the edit used to be committed as leftovers.
+        self.limit_relaunch_scheduled()
+        bookkeeping = [self.project / name for name in ('.ai/state.md', '.ai/run-log.md', '.ai/handoff.md')]
+        with bookkeeping[0].open('a') as file:
+            file.write('A human note during the wait.\n')
+        self.assertLessEqual({line[3:] for line in self.porcelain().splitlines()},
+                             {'.ai/state.md', '.ai/run-log.md', '.ai/handoff.md'})
+        self.verify_refused('the checkout changed', *bookkeeping)
+        self.assertFalse([s for s in self.subjects_now() if s.startswith('chore(ai): record stop during')])
+
+    def test_limit_relaunch_verify_clean_checkout_moved_head_escalates(self):
+        # Round 3 P9: a clean checkout on another commit used to resume.
+        self.limit_relaunch_scheduled()
+        if self.porcelain():
+            self.commit('a human records the stop')
+        (self.project / 'moved.txt').write_text('a human commit during the wait\n')
+        self.commit('human commit')
+        self.assertEqual(self.porcelain(), '')
+        self.verify_refused('the branch moved to another commit')
+
+    def open_host_stage(self, name):
+        # The host record `run-manifest stage-set NAME HEAD` writes (as ai-pipeline does before
+        # a stage); written directly because stage-set needs a published review, which this
+        # fixture (stopped during implementation) has none of.
+        branch, head = 'feature/test', self.git_head()
+        state = next((self.base / 'host-state').rglob('run.json')).parent
+        path = state / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+        digest = {'triage': 'review_digest', 'plan-revision': 'report_digest'}[name]
+        path.write_text(json.dumps({'branch': branch, 'stage': {'name': name, 'start_head': head,
+                                                                digest: '0' * 64}}) + '\n')
+        self.assertEqual(self.helper('run-manifest', 'stage').stdout.split()[:2], [name, head])
+        return path
+
+    def verify_open_stage_edit(self, name, scoped):
+        # Round 3 P9: an in-scope edit while a stage is open used to resume (and be completed).
+        self.limit_relaunch_scheduled()
+        record = self.open_host_stage(name)
+        before = record.read_bytes()
+        edited = self.project / scoped
+        edited.parent.mkdir(parents=True, exist_ok=True)
+        with edited.open('a') as file:
+            file.write('| P1 | accepted | a human edit during the wait | |\n')
+        self.verify_refused('the checkout changed', edited)
+        self.assertEqual(record.read_bytes(), before)
+        self.assertEqual(self.helper('run-manifest', 'stage').stdout.split()[0], name)
+
+    def test_limit_relaunch_verify_triage_stage_in_scope_edit_escalates(self):
+        self.verify_open_stage_edit('triage', '.ai/reviews/dispositions.md')
+
+    def test_limit_relaunch_verify_plan_revision_stage_in_scope_edit_escalates(self):
+        self.verify_open_stage_edit('plan-revision', '.ai/reviews/plan-dispositions.md')
+
+    def scheduled_with_submodule(self):
+        subs = []
+
+        def prepare():
+            subs.append(self.binding_submodule())
+            self.commit('add submodule')
+        self.limit_relaunch_scheduled(prepare=prepare)
+        return subs[0], self.project / 'sub'
+
+    def parent_index(self):
+        return (self.git_head(), self.run_cmd(['git', 'diff', '--cached', '--binary']).stdout,
+                self.run_cmd(['git', 'ls-files', '-s', '--', 'sub']).stdout)
+
+    def test_limit_relaunch_verify_submodule_file_edit_escalates(self):
+        # Round 3 P10: neither the parent HEAD nor its index sees an edit inside a submodule.
+        _, sub = self.scheduled_with_submodule()
+        before = self.parent_index()
+        (sub / 'file.txt').write_text('a human edit inside the submodule\n')
+        self.assertEqual(self.parent_index(), before)
+        self.verify_refused('the checkout changed', sub / 'file.txt')
+        self.assertEqual(self.parent_index(), before)
+
+    def test_limit_relaunch_verify_submodule_commit_escalates(self):
+        # Round 3 P10: a commit inside the submodule moves only its own HEAD.
+        sub_git, sub = self.scheduled_with_submodule()
+        before = self.parent_index()
+        (sub / 'file.txt').write_text('a human commit inside the submodule\n')
+        sub_git(sub, 'commit', '-qam', 'human')
+        sub_head = self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout
+        self.assertEqual(self.parent_index(), before)
+        self.verify_refused('the checkout changed', sub / 'file.txt')
+        # No `git add` of the submodule path: the gitlink and the submodule's HEAD are as found.
+        self.assertEqual(self.parent_index(), before)
+        self.assertEqual(self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout, sub_head)
+
+    def verify_resumes(self, scheduled_head):
+        # The positive control: nothing changed during the wait → the relaunch resumes, records the
+        # stop's leftovers on the scheduled HEAD and the pipeline completes.
+        self.relaunch()
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2): feature/test.', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.helper('tasks', 'complete')
+        log = self.run_cmd(['git', 'log', '--format=%H %P %s']).stdout.splitlines()
+        record = next(line for line in log if 'record stop during usage limit relaunch' in line)
+        self.assertEqual(record.split()[1], scheduled_head)
+
+    def test_limit_relaunch_verify_unchanged_checkout_resumes(self):
+        self.limit_relaunch_scheduled()
+        self.verify_resumes(self.git_head())
+
+    def test_limit_relaunch_verify_unchanged_checkout_with_submodule_resumes(self):
+        _, sub = self.scheduled_with_submodule()
+        scheduled, sub_head = self.git_head(), self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout
+        self.verify_resumes(scheduled)
+        self.assertEqual(self.run_cmd(['git', '-C', str(sub), 'rev-parse', 'HEAD']).stdout, sub_head)
+
+    def test_limit_relaunch_verify_single_site_before_any_checkout_mutation(self):
+        self.setup_project()
+        for script in (ROOT / 'scripts/ai-recover', self.project / '.ai/bin/ai-recover'):
+            with self.subTest(script=str(script)):
+                lines = script.read_text().splitlines()
+                calls = [n for n, line in enumerate(lines) if line.strip() == 'relaunch_verify']
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(sum('relaunch_verify' in line and not line.lstrip().startswith('#')
+                                     for line in lines), 2)  # the definition and the one call
+                # Nothing before the call writes to the checkout, reads it to decide or starts a session.
+                mutating = re.compile(r'git (add|commit|stash|checkout|switch|reset|restore|status)|'
+                                      r'claude |limit-arm|_scope|plan-revisions|^\s*resume |'
+                                      r'resume_open_stage|record_stop_leftovers')
+                early = [line for line in lines[:calls[0]] if mutating.search(line)
+                         and not line.lstrip().startswith('#')]
+                self.assertEqual(early, [])
+                text = script.read_text()
+                self.assertIn("\"${1#Error: } while the usage-limit relaunch waited; nothing was committed.\" \\\n"
+                              "    'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'", text)
+
+    def test_limit_relaunch_recover_cap_reached_escalates(self):
+        self.limit_relaunch_scheduled(AI_LIMIT_RELAUNCH_MAX='1')
+        self.assertIn('(relaunch 1/1)', self.notifications())
+        self.relaunch(expected=1, MOCK_CLAUDE='limit-far')
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/1)', notes)
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('usage limit again after 1 relaunch(es) in this run.', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        self.assertNotIn('limit_relaunch_at', self.manifest())
+
+    def test_limit_relaunch_recover_off_escalates_as_before(self):
+        self.limit_relaunch_scheduled(expected=1, AI_LIMIT_RELAUNCH_MAX='0')
+        notes = self.notifications()
+        self.assertIn('this kind of stop always needs a human', notes)
+        self.assertNotIn('⏸', notes)
+        self.assertNotIn('limit_relaunches', self.manifest())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_recover_needs_a_recovering_timer_and_a_limit_only_stop(self):
+        self.limit_relaunch_scheduled(timer=False, expected=1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('the usage limit resets around ', notes)
+        self.assertIn('ai-watchdog --install-timer --recover', notes)
+        self.assertNotIn('limit_relaunches', self.manifest())
+        # The limit message plus another line: not a limit-only stop, the hard rule as today.
+        self.watchdog('--install-timer', '--recover')
+        error = self.project / '.ai/local/last-error'
+        error.write_text(self.LIMIT_MESSAGE + '\nCodex failed as well.\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1)
+        self.assertIn('this kind of stop always needs a human', self.notifications().splitlines()[-1])
+        self.assertNotIn('limit_relaunches', self.manifest())
+        # The exact message with the timer installed schedules (the positive control).
+        error.write_text(self.LIMIT_MESSAGE + '\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=75)
+        self.assertEqual(self.manifest()['limit_relaunches'], 1)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_limit_relaunch_recover_claimed_relaunch_stops_once(self):
+        # P1: the claim consumes the schedule, so a refused relaunch is terminal, never relaunched.
+        self.limit_relaunch_scheduled()
+        self.mock_systemd_run()
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/other'])
+        self.manifest(limit_relaunch_at=int(time.time()) - 1)
+        self.host_watchdog('--recover', expected=None)
+        self.assertIn('ai-recover --stage usage limit relaunch', self.launches())
+        self.tool('ai-recover', '--stage', 'usage limit relaunch', expected=1)  # what systemd-run starts
+        self.host_watchdog('--recover', expected=None)
+        self.assertEqual(len(self.launches().splitlines()), 1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn("not the approved run's branch", notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('limit_relaunch_at', self.manifest())
+
+    def test_limit_relaunch_recover_interrupted_scheduling_keeps_waiting(self):
+        # P2: a kill between limit-schedule and the cleanup (or before the pauses.log line) must
+        # neither schedule twice nor retry before the reset.
+        self.limit_relaunch_scheduled()
+        self.mock_systemd_run()
+        local = self.project / '.ai/local'
+        at = self.manifest()['limit_relaunch_at']
+        crash = 'crash (pipeline killed or restarted)'
+
+        def killed_after_schedule():
+            (local / 'last-error').write_text(self.LIMIT_MESSAGE + '\n')
+            (local / 'limit-stop').write_text(f'Claude {at - 60}\n')
+            self.crashed_marker()
+
+        def killed_during_cleanup():
+            (local / 'last-error').write_text('ai-pipeline was killed, crashed or the machine restarted\n')
+            self.crashed_marker()
+
+        def watchdog_launch():
+            killed_during_cleanup()
+            (local / 'last-error').unlink()
+            self.host_watchdog('--recover', expected=None)
+            self.assertIn('ai-recover --stage crash', self.launches().splitlines()[-1])
+
+        def before_pause_line():
+            killed_after_schedule()
+            (local / 'pauses.log').unlink()
+
+        for variant in (killed_after_schedule, killed_during_cleanup, watchdog_launch, before_pause_line):
+            with self.subTest(variant=variant.__name__):
+                variant()
+                result = self.tool('ai-recover', '--stage', crash, expected=75)
+                self.assertIn('Still waiting for the usage-limit relaunch after', result.stdout)
+                self.assert_relaunch_waiting(at)
+                self.assertNotIn('🔧', self.notifications())
+                self.assertNotIn('⛔', self.notifications())
+        launched = self.launches()
+        start = int(time.time())
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start))
+        self.host_watchdog('--recover', AI_WATCHDOG_NOW=str(start + 360))
+        self.assertEqual(self.launches(), launched)
+        self.assertNotIn('⛔', self.notifications())
+        self.relaunch()
+        self.assertIn('▶ RESUMED after the usage limit (relaunch 1/2)', self.notifications())
+        self.assertIn('🏁 FINISHED', self.notifications())
+        self.assertEqual(self.recovery_calls(), [])
+
+    # ---------------------------------------------- preserved task work resumed (T011)
+    RESUMING = 'Resuming preserved work of the usage-limit stop ({}).'
+    UNCOMMITTED = 'chore(ai): checkpoint {} (validated; the session did not commit)'
+
+    def sessions_run(self):
+        calls = self.project / '.ai/local/mock-invocations'
+        return calls.read_text().count('call') if calls.exists() else 0
+
+    def commit_of(self, subject):
+        # (sha, parent, files) of the one commit with SUBJECT.
+        lines = [line for line in self.run_cmd(['git', 'log', '--format=%H %P %s']).stdout.splitlines()
+                 if line.split(' ', 2)[2] == subject]
+        self.assertEqual(len(lines), 1, subject)
+        sha, parent, _ = lines[0].split(' ', 2)
+        return sha, parent, self.run_cmd(['git', 'show', '--name-only', '--format=', sha]).stdout.split()
+
+    def assert_preserved_completed(self, result, task_id='T001'):
+        # The resumed run continued the preserved work: no recovery decision, no ⛔, arm consumed.
+        notes = self.notifications()
+        self.assertIn('▶ RESUMED after the usage limit', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertEqual(result.stdout.count(self.RESUMING.format(task_id)), 1)
+        manifest = self.manifest()
+        self.assertNotIn('limit_resume', manifest)
+        self.assertNotIn('task', manifest)
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.porcelain(), '')
+
+    def armed_resume(self, expected, **env):
+        # The relaunch's resume of the armed tree, with the fixtures' AI_AUTO_RECOVER=0 (a claimed
+        # relaunch escalates at once with recovery off): arm as ai-recover does, then resume.
+        self.helper('run-manifest', 'limit-arm')
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                         AI_RECOVERY_ATTEMPT='1', **env)
+
+    def assert_armed_stop(self, message, head, contents, sessions=1):
+        # One ⛔ with MESSAGE, no session after the SESSIONS before the relaunch, nothing
+        # committed, the edits and the arm kept.
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn(message, notes.splitlines()[-1])
+        self.assertEqual(self.sessions_run(), sessions)
+        self.assertEqual(self.git_head(), head)
+        self.assertEqual({path: path.read_bytes() for path in contents}, contents)
+        self.assertIn('limit_resume', self.manifest())
+
+    def test_limit_relaunch_preserved_in_progress_work_completes_in_its_session(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.assertTrue((self.project / 'preserved.txt').exists())
+        self.assertIn('preserved.txt', self.porcelain())
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual(self.sessions_run(), 2)  # the limited session, then T001's own
+        _, _, files = self.commit_of(self.UNCOMMITTED.format('T001'))
+        self.assertIn('preserved.txt', files)
+        self.helper('stamp', 'verify')
+
+    def test_limit_relaunch_preserved_moved_head_escalates_untouched(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        edits = {path: path.read_bytes() for path in (self.project / 'preserved.txt', self.project / '.ai/tasks.md')}
+        (self.project / 'moved.txt').write_text('a human commit during the wait\n')
+        self.run_cmd(['git', 'add', '--', 'moved.txt'])
+        self.run_cmd(['git', 'commit', '-qm', 'human commit'])
+        self.verify_refused('the branch moved to another commit', *edits)
+        self.assertEqual({path: path.read_bytes() for path in edits}, edits)
+
+    def test_limit_relaunch_preserved_human_changes_during_the_wait_escalate(self):
+        # Round 2 P9 end to end: an unrelated tracked edit and an untracked file, HEAD unchanged.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        human = self.project / 'CLAUDE.md'
+        human.write_bytes(human.read_bytes() + b'a human edit during the wait\n')
+        (self.project / 'human-notes.txt').write_text('untracked\n')
+        self.verify_refused('the checkout changed', self.project / 'preserved.txt', self.project / '.ai/tasks.md',
+                            human, self.project / 'human-notes.txt')
+
+    def test_limit_relaunch_preserved_done_work_is_checkpointed_without_a_session(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done')
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual(self.sessions_run(), 1)  # no implementation session after the relaunch
+        _, _, files = self.commit_of(self.UNCOMMITTED.format('T001'))
+        self.assertIn('preserved.txt', files)
+        self.assertIn('.ai/tasks.md', files)
+
+    def test_limit_relaunch_preserved_done_work_precedes_the_next_task(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'))
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual(self.sessions_run(), 2)  # T002's session only
+        self.assert_order(self.UNCOMMITTED.format('T001'), 'chore(ai): record T001 runner checkpoint',
+                          'implement T002')
+        self.assertNotIn('preserved.txt', self.commit_of('implement T002')[2])
+
+    def failing_validation(self, mode):
+        def failing_on_preserved_work():
+            (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
+                                                       '[[ ! -e preserved.txt && ! -e preserved-after.txt ]]\n')
+            self.commit('a gate the preserved work fails')
+        self.limit_relaunch_scheduled(mode=mode, prepare=failing_on_preserved_work)
+        head = self.git_head()
+        self.relaunch(expected=1)
+        self.assertIn('Validation failed; T001 returned to IN_PROGRESS.', self.notifications())
+        self.assertEqual(self.git_head(), head)  # nothing committed by the runner
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.assertEqual(self.sessions_run(), 1)
+        self.assertNotIn('limit_resume', self.manifest())  # the act came after the disarm
+        return head
+
+    def test_limit_relaunch_preserved_done_work_failing_validation_commits_nothing(self):
+        self.failing_validation('limit-far-done')
+
+    def test_limit_relaunch_preserved_done_committed_work_failing_validation_commits_nothing(self):
+        self.failing_validation('limit-far-done-committed')
+        self.assertEqual(self.subjects_now()[0], 'implement T001')  # HEAD is the session's commit
+
+    def test_limit_relaunch_preserved_done_committed_work_is_checkpointed(self):
+        # Round 6 P3: the session committed its task DONE, edited further, then hit the limit.
+        self.limit_relaunch_scheduled(mode='limit-far-done-committed')
+        self.assertEqual(self.helper('tasks', 'newly-done', 'HEAD').stdout, '')
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        session_commit = self.git_head()
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual(self.sessions_run(), 1)
+        _, parent, files = self.commit_of(self.UNCOMMITTED.format('T001'))
+        self.assertIn('preserved-after.txt', files)
+        self.assertEqual(parent, session_commit)
+
+    def test_limit_relaunch_preserved_done_committed_work_precedes_the_next_task(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done-committed', queue=task('T001') + task('T002'))
+        result = self.relaunch()
+        self.assert_preserved_completed(result)
+        self.assertEqual(self.sessions_run(), 2)
+        self.assert_order('implement T001', self.UNCOMMITTED.format('T001'),
+                          'chore(ai): record T001 runner checkpoint', 'implement T002')
+        self.assertNotIn('preserved-after.txt', self.commit_of('implement T002')[2])
+
+    def test_limit_relaunch_preserved_another_task_done_stops_armed(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:DONE')
+        head = self.git_head()
+        contents = {path: path.read_bytes() for path in (self.project / 'preserved.txt', self.project / '.ai/tasks.md')}
+        self.armed_resume(expected=1)
+        self.assert_armed_stop('Preserved work marks another task DONE; inspect it before continuing', head, contents)
+
+    def test_limit_relaunch_preserved_next_task_is_another_stops_armed(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:IN_PROGRESS')
+        head = self.git_head()
+        contents = {path: path.read_bytes() for path in (self.project / 'preserved.txt', self.project / '.ai/tasks.md')}
+        self.armed_resume(expected=1)
+        self.assert_armed_stop('Preserved work belongs to T001, but the next task is T002; inspect the queue',
+                               head, contents)
+
+    def test_limit_relaunch_preserved_incomplete_session_loses_the_exception(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.relaunch(expected=1, MOCK_CLAUDE='no-progress')
+        self.assertEqual(self.sessions_run(), 2)
+        self.assertNotIn('limit_resume', self.manifest())
+        # The stop took the normal recovery path: a Claude decision on the dirty tree.
+        calls = self.recovery_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('No completed/blocked checkpoint for T001', calls[0])
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('the checkout has uncommitted changes', notes)
+        self.assertIn('preserved.txt', self.porcelain())
+
+    def test_limit_relaunch_preserved_human_start_on_an_armed_tree_is_refused(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.helper('run-manifest', 'limit-arm')
+        head = self.git_head()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertIn('Start from a clean checkpoint', result.stderr)
+        self.assertEqual((self.git_head(), self.sessions_run()), (head, 1))
+
+    def test_limit_relaunch_preserved_ai_run_refuses_a_tree_other_than_the_armed_one(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.helper('run-manifest', 'limit-arm')
+        armed = self.manifest()['limit_resume']
+        head, subjects = self.git_head(), self.subjects_now()
+        self.manifest(limit_resume=dict(armed, head='a' * 40))
+        for extra in (False, True):
+            with self.subTest(extra=extra):
+                if extra:
+                    self.manifest(limit_resume=armed)
+                    (self.project / 'one-more.txt').write_text('not in the armed tree\n')
+                result = self.tool('ai-run', '--approved', expected=1, AI_RECOVERY_ATTEMPT='1')
+                self.assertIn('Start from a clean checkpoint', result.stderr)
+                self.assertEqual((self.git_head(), self.subjects_now(), self.sessions_run()), (head, subjects, 1))
+
+    def recheck_settled(self, answer=None):
+        # Review triaged with M1 accepted (fix task T002) and M2 rejected; the re-check upheld M2
+        # (or ANSWER) and is verified and committed (its dispute is recorded by the pipeline's start).
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='two-major-once')
+        self.commit('record review')
+        head = self.helper('review-info').stdout.split()[0]
+        self.helper('start-dispositions', head)
+        dispositions = self.project / '.ai/reviews/dispositions.md'
+        dispositions.write_text(dispositions.read_text() + '| M1 | accepted | real defect | T002 |\n'
+                                '| M2 | rejected | the second defect is handled by the gate | none |\n')
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(queue.read_text().rstrip('\n') + '\n\n' + task('T002'))
+        self.commit('record triage')
+        self.tool('ai-review', '--recheck', MOCK_RECHECK=answer or self.UPHELD_M2)
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+
+    def test_limit_relaunch_preserved_settled_recheck_resumes(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'IN_PROGRESS')
+        head = self.git_head()
+        result = self.relaunch()
+        self.assert_preserved_completed(result, 'T002')
+        self.assertNotIn('Re-check of rejected findings', result.stdout + result.stderr)
+        self.assertEqual(self.sessions_run(), 3)  # the fixture's T001, the limited T002, T002's own
+        # Nothing was committed between the relaunch and the resumed session's own commit.
+        self.assertEqual(self.commit_of('implement T002')[1], head)
+
+    def test_limit_relaunch_preserved_uncommitted_review_records_fail_closed(self):
+        disputes = '.ai/reviews/disputes.md'
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled,
+                                      MOCK_LIMIT_APPEND=disputes)
+        self.assertIn(disputes, self.porcelain())
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes() for name in ('preserved.txt', disputes)}
+        self.armed_resume(expected=1)
+        self.assert_armed_stop('preserved task work carries uncommitted review records', head, contents, sessions=2)
+        self.assertEqual(self.recovery_calls(), [])
+
+    # ------------------------------- a stop while armed is terminal for recovery (T018)
+    def assert_terminal_armed(self, reason, head, contents, task_id='T001'):
+        # One ⛔ with the stop's REASON and the armed rule's wording; no decision session, no
+        # commit, CONTENTS byte-identical, the arm kept, the marker gone.
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        stop = notes.splitlines()[-1]
+        self.assertIn(reason, stop)
+        self.assertIn(f'the resumed run stopped on the preserved work of {task_id} before continuing it; '
+                      'nothing was committed.', stop)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('recovery checkpoint', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual(self.git_head(), head)
+        self.assertEqual({path: path.read_bytes() for path in contents}, contents)
+        self.assertIn('limit_resume', self.manifest())
+        self.assertNotIn('🔧', notes)
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_limit_relaunch_terminal_uncommitted_review_records_with_recovery_on(self):
+        # Round 7 P16: the re-check stop of the armed tree hands over to ai-recover with
+        # auto-recovery on; it must neither decide nor commit. (T015's host-only `pending`
+        # re-check state has no fixture yet: T015 adds that variant.)
+        disputes = '.ai/reviews/disputes.md'
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled,
+                                      MOCK_LIMIT_APPEND=disputes)
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes() for name in ('preserved.txt', disputes)}
+        self.relaunch(expected=1, MOCK_RECOVER='commit_and_rerun')
+        self.assert_terminal_armed('preserved task work carries uncommitted review records', head, contents,
+                                   task_id='T002')
+        self.assertNotIn('▶', self.notifications().split('⛔')[1])  # nothing resumed after the stop
+        self.assertEqual(self.sessions_run(), 2)
+
+    def armed_by_hand(self):
+        # An approved run with auto-recovery on, then a dirty tree armed at helper level for T001.
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        self.helper('run-manifest', 'clear-attempts')
+        edits = self.project / 'CLAUDE.md'
+        edits.write_bytes(edits.read_bytes() + b'preserved edit\n')
+        (self.project / 'preserved.txt').write_text('preserved\n')
+        self.helper('run-manifest', 'task-set', 'T001')
+        self.helper('run-manifest', 'limit-schedule', '100', '2', 'implementation')
+        self.helper('run-manifest', 'limit-arm')
+        self.manifest(limit_relaunch_at=None)  # claimed, as the relaunch does before it arms
+        return {path: path.read_bytes() for path in (edits, self.project / 'preserved.txt')}
+
+    def test_limit_relaunch_terminal_any_reason_at_helper_level(self):
+        contents = self.armed_by_hand()
+        calls = self.recovery_calls()  # the setup run's own decision
+        for moved in (False, True):
+            with self.subTest(moved=moved):
+                if moved:  # presence decides, not the match
+                    self.manifest(limit_resume=dict(self.manifest()['limit_resume'], head='a' * 40))
+                self.manifest(attempts=0)
+                (self.project / '.ai/local/last-error').write_text('a plain stop with no usage limit\n')
+                head, before = self.git_head(), self.notifications().count('⛔')
+                self.tool('ai-recover', '--stage', 'implementation', expected=1,
+                          AI_AUTO_RECOVER='1', MOCK_RECOVER='commit_and_rerun')
+                notes = self.notifications()
+                self.assertEqual(notes.count('⛔'), before + 1)
+                stop = notes.splitlines()[-1]
+                self.assertIn('a plain stop with no usage limit', stop)
+                self.assertIn('stopped on the preserved work of T001', stop)
+                self.assertIn('nothing was committed', stop)
+                self.assertEqual(self.recovery_calls(), calls)
+                self.assertEqual(self.git_head(), head)
+                self.assertEqual({path: path.read_bytes() for path in contents}, contents)
+                self.assertIn('limit_resume', self.manifest())
+                self.assertEqual(self.manifest()['attempts'], 1)  # reserve-attempt ran
+                self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_limit_relaunch_terminal_control_relaunch_with_recovery_on_resumes(self):
+        # The relaunch stage is scheduled, not armed: the rule never catches it.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        result = self.relaunch(MOCK_RECOVER='commit_and_rerun')
+        self.assert_preserved_completed(result)
+
+    def test_limit_relaunch_terminal_control_after_the_disarm_recovery_is_normal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        self.relaunch(expected=1, MOCK_CLAUDE='no-progress')
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', self.notifications())
+
+    def test_limit_relaunch_terminal_disarm_has_one_call_site(self):
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            with self.subTest(root=str(root)):
+                self.assertEqual((root / 'ai-run').read_text().count('limit-disarm'), 1)
+                self.assertNotIn('limit-disarm', (root / 'ai-recover').read_text())
+
+    def deps_preserved(self):
+        # deps_recovery_run's fixture: the gate passes only when vendor-deps/ matches deps.lock.
+        (self.project / '.ai/ci-setup').write_text(DEPS_SETUP)
+        (self.project / 'deps.lock').write_text('dep 1\n')
+        (self.project / 'tracked.txt').write_text('tracked\n')
+        with (self.project / '.gitignore').open('a') as file:
+            file.write('/vendor-deps/\n')
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\ncmp -s deps.lock vendor-deps/deps.lock\n')
+        self.commit('gate that needs installed dependencies')
+
+    def deps_installed_before_the_checkpoint(self, mode):
+        self.limit_relaunch_scheduled(mode=mode, prepare=self.deps_preserved, MOCK_DEPS='ok',
+                                      MOCK_REQUIRE='vendor-deps/deps.lock', MOCK_EXTRA_FILE='deps.lock')
+        before = self.deps_calls()
+        result = self.relaunch(MOCK_DEPS='ok', MOCK_REQUIRE='vendor-deps/deps.lock')
+        self.assert_preserved_completed(result)
+        # The resumed ai-run installed although `tasks next` was none; the gate passing proves
+        # the install preceded the validation.
+        self.assertEqual(self.deps_calls(), before + 1)
+        self.assertEqual(self.sessions_run(), 1)
+        self.assertIn('deps.lock', self.commit_of(self.UNCOMMITTED.format('T001'))[2])
+        self.assertNotIn('vendor-deps/', self.run_cmd(['git', 'ls-files']).stdout)
+
+    def test_limit_relaunch_preserved_done_work_installs_dependencies_first(self):
+        self.deps_installed_before_the_checkpoint('limit-far-done')
+
+    def test_limit_relaunch_preserved_done_committed_work_installs_dependencies_first(self):
+        self.deps_installed_before_the_checkpoint('limit-far-done-committed')
+
+    def deps_failed_before_the_checkpoint(self, mode):
+        self.limit_relaunch_scheduled(mode=mode, prepare=self.deps_preserved, MOCK_DEPS='fail-later',
+                                      MOCK_REQUIRE='vendor-deps/deps.lock', MOCK_EXTRA_FILE='deps.lock')
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes()
+                    for name in ('preserved.txt', 'deps.lock', '.ai/tasks.md')}
+        self.relaunch(expected=1, MOCK_DEPS='fail-later')
+        self.assertEqual(self.recovery_calls(), [])  # a hard rule
+        self.assert_armed_stop('Dependency setup', head, contents)
+
+    def test_limit_relaunch_preserved_done_work_failed_dependency_setup_commits_nothing(self):
+        self.deps_failed_before_the_checkpoint('limit-far-done')
+
+    def test_limit_relaunch_preserved_done_committed_work_failed_dependency_setup_commits_nothing(self):
+        self.deps_failed_before_the_checkpoint('limit-far-done-committed')
+
+    # --------------------- the arm ends at the act: consumer checks run armed (T019)
+    CONSUME = dict(AI_AUTO_RECOVER='1', MOCK_RECOVER='commit_and_rerun')
+
+    def consume_stopped(self, message, names=('preserved.txt', '.ai/tasks.md'), **env):
+        # The relaunch with auto-recovery on stops in ai-run's consumer while armed: T018's
+        # terminal ⛔ with MESSAGE, nothing committed, no recovery decision, the arm kept.
+        self.assertEqual(self.manifest()['env'].get('AI_AUTO_RECOVER'), '1')
+        head = self.git_head()
+        contents = {self.project / name: (self.project / name).read_bytes() for name in names}
+        result = self.relaunch(expected=1, **self.CONSUME, **env)
+        self.assert_terminal_armed(message, head, contents)
+        self.assertNotIn(self.RESUMING.format('T001'), result.stdout + result.stderr)
+        self.assertNotIn('checkpoint T001', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_consume_another_task_done_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:DONE')
+        self.consume_stopped('Preserved work marks another task DONE; inspect it before continuing')
+
+    def test_limit_relaunch_consume_next_task_is_another_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:IN_PROGRESS')
+        self.consume_stopped('Preserved work belongs to T001, but the next task is T002; inspect the queue')
+
+    def test_limit_relaunch_consume_blocked_task_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', MOCK_LIMIT_ALSO='T001:BLOCKED')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.consume_stopped('Blocked task was not checkpointed; inspect and commit before resuming')
+
+    def test_limit_relaunch_consume_task_missing_from_the_queue_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-keep', MOCK_LIMIT_RENAME='T001:T009')
+        self.assertEqual(self.manifest()['limit_task'], 'T001')
+        self.consume_stopped('Preserved work belongs to T001, which is not in the task queue; inspect the queue')
+
+    def test_limit_relaunch_consume_failed_dependency_setup_is_terminal(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', prepare=self.deps_preserved, MOCK_DEPS='fail-later',
+                                      MOCK_REQUIRE='vendor-deps/deps.lock', MOCK_EXTRA_FILE='deps.lock')
+        self.consume_stopped('Dependency setup', names=('preserved.txt', 'deps.lock', '.ai/tasks.md'),
+                             MOCK_DEPS='fail-later')
+
+    def test_limit_relaunch_consume_disarm_is_the_last_statement_before_the_act(self):
+        # From the single limit-disarm call to each act, only the loop head's re-checks and the
+        # iteration-1 session limit may stop. The loop's `none` branch is skipped: the session
+        # route reaches the loop only after `tasks next` printed the bound task under the lock.
+        allowed = {'ai_guard_verify', 'ai_branch', 'ai_helper tasks check',
+                   'active_task=$(ai_helper tasks next)',
+                   "(( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun "
+                   "--approved to continue.'"}
+        stops = re.compile(r'\bai_die\b|\bexit\b|git commit|claude_session')
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            raw = (root / 'ai-run').read_text().splitlines()
+            disarm = next(i for i, line in enumerate(raw) if 'limit-disarm' in line)
+            for act in ('checkpoint_done "$bound"', 'claude_session "$prompt" "${task_model:-$model}"'):
+                with self.subTest(root=str(root), act=act):
+                    end = next(i for i in range(disarm, len(raw)) if raw[i].strip().startswith(act))
+                    skip_until = None
+                    for number in range(disarm + 1, end):
+                        line = raw[number].strip()
+                        if skip_until is not None:
+                            skip_until = None if raw[number] == skip_until else skip_until
+                        elif line == 'if [[ "$active_task" == none ]]; then':
+                            skip_until = raw[number][:len(raw[number]) - len(raw[number].lstrip())] + 'fi'
+                        elif not line.startswith('#') and line not in allowed:
+                            code = re.sub(r"'[^']*'", "''", line)  # quoted text (the prompt) is not a statement
+                            self.assertIsNone(stops.search(code), f'ai-run line {number + 1}: {line}')
+                    self.assertIsNone(skip_until)
+
+    def test_limit_relaunch_consume_control_in_progress_work_with_recovery_on(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assert_preserved_completed(self.relaunch(**self.CONSUME))
+
+    def test_limit_relaunch_consume_control_done_work_with_recovery_on(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done')
+        self.assert_preserved_completed(self.relaunch(**self.CONSUME))
+
+    def test_limit_relaunch_consume_control_incomplete_session_recovers_normally(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.relaunch(expected=1, MOCK_CLAUDE='no-progress', AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        self.assertNotIn('limit_resume', self.manifest())
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', self.notifications())
+
+    def test_limit_relaunch_consume_control_failing_validation_recovers_normally(self):
+        def failing_on_preserved_work():
+            (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
+                                                       '[[ ! -e preserved.txt ]]\n')
+            self.commit('a gate the preserved work fails')
+        self.limit_relaunch_scheduled(mode='limit-far-done', prepare=failing_on_preserved_work)
+        head = self.git_head()
+        self.relaunch(expected=1, AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        notes = self.notifications()
+        self.assertIn('Validation failed; T001 returned to IN_PROGRESS.', notes)
+        self.assertNotIn('limit_resume', self.manifest())  # the act had started
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('stopped on the preserved work', notes)
+        self.assertEqual(self.git_head(), head)  # nothing committed by the runner
+
+    # ------------------------- armed-tree acceptance: a matrix of resume-path states (T015)
+    # Listed by name, not repeated here: the stale plan review after a committed partial checkpoint
+    # (test_limit_relaunch_reenter_partial_checkpoint_*), the bound task DONE in HEAD with trailing
+    # edits (test_limit_relaunch_preserved_done_committed_work_is_checkpointed), a failing gate
+    # after the disarm (test_limit_relaunch_preserved_done_work_failing_validation_commits_nothing),
+    # the consumer's own stops (test_limit_relaunch_consume_*).
+    REFUSALS = ('Re-check of rejected findings', 'Start from a clean checkpoint')
+    WITHDRAWN_M2 = json.dumps({'answers': [{'id': 'M2', 'verdict': 'withdrawn', 'reason': 'the gate covers it'}]})
+
+    def assert_accepted(self, result, scheduled, task_id='T001'):
+        # The admitted resume: completed, the arm consumed once, no refusal anywhere, and nothing
+        # committed between the scheduled HEAD (or the relaunch's stop record) and the task's own
+        # checkpoint.
+        self.assert_preserved_completed(result, task_id)
+        local = self.project / '.ai/local'
+        texts = [self.notifications(), (self.project / '.ai/run-log.md').read_text(), result.stdout, result.stderr]
+        texts += [path.read_text() for path in (local / 'last-error', local / 'observation.json') if path.exists()]
+        for text in texts:
+            for refusal in self.REFUSALS:
+                self.assertNotIn(refusal, text)
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--first-parent', '--format=%s',
+                                 f'{scheduled}..HEAD']).stdout.splitlines()
+        if subjects[0] == 'chore(ai): record stop during usage limit relaunch':
+            subjects = subjects[1:]
+        self.assertIn(subjects[0], {f'implement {task_id}', self.UNCOMMITTED.format(task_id)})
+
+    def accept_recheck(self, answer, disputes):
+        # The reviewer's scenario (round 4 P3): M1 accepted (fix task T002), M2 rejected, the
+        # re-check settled and recorded by reconcile_disputes, the limit during T002's session.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=lambda: self.recheck_settled(answer))
+        self.commit_of('chore(ai): record review re-check')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+        tracked = self.run_cmd(['git', 'ls-files', '--', '.ai/reviews/disputes.md']).stdout.strip()
+        self.assertEqual(bool(tracked), disputes)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'IN_PROGRESS')
+        scheduled, reviews = self.git_head(), self.review_commits()
+        result = self.relaunch()
+        self.assert_accepted(result, scheduled, 'T002')
+        # The checkpointed fix got its own review, then the run finished.
+        self.assertGreater(self.review_commits(), reviews)
+        self.assert_order('implement T002', 'chore(ai): record independent review')
+        self.assertEqual(self.helper('disputes-verify').stdout.strip(), '1' if disputes else '0')
+
+    def review_commits(self):
+        return self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines().count(
+            'chore(ai): record independent review')
+
+    def test_limit_relaunch_accept_reviewer_scenario_verified_with_disputes(self):
+        self.accept_recheck(self.UPHELD_M2, disputes=True)
+
+    def test_limit_relaunch_accept_verified_without_disputes(self):
+        # Every rejection withdrawn on re-check: verified, no disputes file.
+        self.accept_recheck(self.WITHDRAWN_M2, disputes=False)
+
+    def test_limit_relaunch_accept_recheck_status_none(self):
+        self.limit_relaunch_scheduled(mode='limit-far-dirty')
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'none')
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+
+    def accept_untouched_queue(self, *args):
+        # limit-far-keep: the session edited source (preserved.txt) but not .ai/tasks.md, so the
+        # queue is `tasks untouched` and the plan review current; the loop is not entered (T016).
+        self.limit_relaunch_scheduled(mode='limit-far-keep', args=args)
+        self.helper('tasks', 'untouched')
+        self.assertNotIn('.ai/tasks.md', self.porcelain())
+        self.assertIn('preserved.txt', self.porcelain())
+        scheduled, plans, plan_commits = self.git_head(), self.plan_calls(), self.plan_review_commits()
+        result = self.relaunch()
+        self.assert_accepted(result, scheduled)
+        self.assertEqual((self.plan_calls(), self.plan_review_commits()), (plans, plan_commits))
+        self.assertEqual(self.sessions_run(), 2)
+        return plans
+
+    def test_limit_relaunch_accept_untouched_queue_with_plan_review(self):
+        self.assertEqual(self.accept_untouched_queue(), 1)
+
+    def test_limit_relaunch_accept_untouched_queue_with_skip_plan_review(self):
+        self.assertEqual(self.accept_untouched_queue('--skip-plan-review'), 0)
+
+    def test_limit_relaunch_accept_tasks_complete(self):
+        # `tasks complete` true on the armed tree: ai-pipeline still runs ai-run, which consumes it.
+        self.limit_relaunch_scheduled(mode='limit-far-done')
+        self.helper('tasks', 'complete')
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+        self.assertEqual(self.sessions_run(), 1)
+
+    def test_limit_relaunch_accept_tasks_not_complete(self):
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'))
+        self.helper('tasks', 'complete', expected=1)
+        scheduled = self.git_head()
+        self.assert_accepted(self.relaunch(), scheduled)
+        self.assertEqual(self.sessions_run(), 2)
+
+    def refused_review_records(self, plant, recovery, **env):
+        # An inconsistent review record on the armed tree: the run stops before any write, the
+        # tree exactly the armed one (limit-armed still matches), nothing committed, no session.
+        self.limit_relaunch_scheduled(mode='limit-far-dirty', prepare=self.recheck_settled, **env)
+        plant()
+        head = self.git_head()
+        names = ('preserved.txt', '.ai/tasks.md', '.ai/run-log.md', '.ai/reviews/recheck.md')
+        contents = {self.project / name: (self.project / name).read_bytes() for name in names}
+        message = 'preserved task work carries uncommitted review records'
+        if recovery:
+            self.relaunch(expected=1, MOCK_RECOVER='commit_and_rerun')
+            self.assert_terminal_armed(message, head, contents, task_id='T002')
+        else:
+            self.armed_resume(expected=1)
+            self.assert_armed_stop(message, head, contents, sessions=2)
+            self.assertEqual(self.recovery_calls(), [])
+        self.assertIn('Re-check of rejected findings', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.sessions_run(), 2)
+        self.helper('run-manifest', 'limit-armed')
+
+    def drop_recheck_binding(self):
+        # Host state only (limit-verify still passes): the committed re-check no longer verifies.
+        for binding in (self.base / 'host-state').rglob('recheck-*.sha256'):
+            binding.unlink()
+        self.assertEqual(self.helper('recheck-status').stdout.strip(), 'pending')
+
+    def test_limit_relaunch_accept_pending_recheck_fails_closed(self):
+        self.refused_review_records(self.drop_recheck_binding, recovery=False)
+
+    def test_limit_relaunch_accept_pending_recheck_fails_closed_with_recovery_on(self):
+        self.refused_review_records(self.drop_recheck_binding, recovery=True)
+
+    def dirty_recheck(self):
+        # Planted by the limited session (MOCK_LIMIT_APPEND), so the scheduled digest includes it.
+        self.assertIn('.ai/reviews/recheck.md', self.porcelain())
+
+    def test_limit_relaunch_accept_uncommitted_recheck_fails_closed(self):
+        self.refused_review_records(self.dirty_recheck, recovery=False, MOCK_LIMIT_APPEND='.ai/reviews/recheck.md')
+
+    def test_limit_relaunch_accept_uncommitted_recheck_fails_closed_with_recovery_on(self):
+        self.refused_review_records(self.dirty_recheck, recovery=True, MOCK_LIMIT_APPEND='.ai/reviews/recheck.md')
+
+    def test_limit_relaunch_accept_unrecorded_dispute_fails_closed(self):
+        # A verified re-check whose upheld dispute the host would have to (re)write: lost host
+        # dispute records. Admitted only with nothing to record, so it stops before disputes-record.
+        def lose_dispute_records():
+            for store in (self.base / 'host-state').rglob('disputes-*.json'):
+                store.unlink()
+            self.assertEqual(self.helper('recheck-status').stdout.strip(), 'verified')
+            self.helper('disputes-record', '--check', expected=1)
+        self.refused_review_records(lose_dispute_records, recovery=False)
+        self.assertTrue((self.project / '.ai/reviews/disputes.md').exists())
+
+    def test_limit_relaunch_accept_disputes_record_check_writes_nothing(self):
+        self.ready()
+        self.recheck_settled()
+        self.helper('disputes-record', '--check', expected=1)  # D1 to add
+        self.assertFalse((self.project / '.ai/reviews/disputes.md').exists())
+        self.assertEqual(list((self.base / 'host-state').rglob('disputes-*.json')), [])
+        self.assertEqual(self.helper('disputes-record').stdout.strip(), '1')
+        written = (self.project / '.ai/reviews/disputes.md').stat().st_mtime_ns
+        self.assertEqual(self.helper('disputes-record', '--check').stdout.strip(), '0')
+        self.assertEqual(self.helper('disputes-record').stdout.strip(), '0')
+        # Nothing to record: the file is not rewritten either.
+        self.assertEqual((self.project / '.ai/reviews/disputes.md').stat().st_mtime_ns, written)
+        self.helper('disputes-record', '--bogus', expected=1)
+
+    def test_limit_relaunch_accept_consumer_stop_writes_no_tracked_file(self):
+        # ai-run's stop handler logs no run-log line while armed: the tree stays the armed one.
+        self.limit_relaunch_scheduled(mode='limit-far-done', queue=task('T001') + task('T002'),
+                                      MOCK_LIMIT_ALSO='T002:DONE')
+        log = (self.project / '.ai/run-log.md').read_bytes()
+        self.armed_resume(expected=1)
+        self.assertIn('Preserved work marks another task DONE', self.notifications())
+        self.assertEqual((self.project / '.ai/run-log.md').read_bytes(), log)
+        self.helper('run-manifest', 'limit-armed')
+
+    def test_limit_relaunch_accept_one_predicate_and_one_consumer(self):
+        self.ready()  # installs the fixture's copies
+        for root in (ROOT / 'scripts', self.project / '.ai/bin'):
+            with self.subTest(root=str(root)):
+                self.assertEqual((root / 'ai-run').read_text().count('limit-disarm'), 1)
+                common = (root / 'lib/common.sh').read_text()
+                for name in ('armed_resume() {', 'clean_or_armed() {'):
+                    self.assertEqual(common.count(name), 1)
+                    for script in ('ai-pipeline', 'ai-run', 'ai-recover'):
+                        self.assertNotIn(name, (root / script).read_text())
+                pipeline = (root / 'ai-pipeline').read_text()
+                # Every clean-checkout test before ai-run's call goes through the predicate.
+                before = pipeline[:pipeline.index('"$AI_BIN/ai-run" --approved "${run_args[@]}"')]
+                code = [line for line in before.splitlines() if not line.lstrip().startswith('#')]
+                # The start check and both tests of reconcile_disputes.
+                self.assertEqual(sum('clean_or_armed' in line for line in code), 3)
+                self.assertIn('Armed-tree acceptance contract', before)
 
     def test_codex_usage_limit_pauses_then_retries(self):
         self.ready()
@@ -7465,6 +9923,160 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', MOCK_GH_EXISTING='1')
         self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
 
+    # ---------------------------------------------------------------- un-draft (R15)
+    GH_PR_URL = 'https://github.com/example/project/pull/7'
+    UNDRAFT = ['pr', 'ready', 'feature/test']
+
+    def pr_undraft_policy_run(self):
+        """Run 1: a deferred finding makes the new PR a draft for policy; the GitHub draft is
+        simulated by gh-draft (the mock's create doesn't set it)."""
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-always', MOCK_CLAUDE='triage-defer')
+        self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        (self.base / 'gh-draft').touch()
+
+    def pr_undraft_human_commit(self):
+        """A later human change, so the next run gets a fresh (clean) review."""
+        later = self.project / 'later.txt'
+        later.write_text((later.read_text() if later.exists() else '') + 'later\n')
+        self.commit('human follow-up')
+
+    def pr_undraft_get(self, expected=0):
+        return self.helper('pr-draft', 'get', expected=expected).stdout.strip()
+
+    def test_pr_undraft_created_policy_draft_is_made_ready_by_a_clean_run(self):
+        self.pr_undraft_policy_run()
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertFalse((self.base / 'gh-draft').exists())
+        self.pr_undraft_get(expected=1)
+        self.assertIn('Marked the PR ready', result.stdout)
+        self.assertIn('pull request marked ready', (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+
+    def test_pr_undraft_converted_policy_draft_is_made_ready_by_a_clean_run(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.pr_undraft_get(expected=1)
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1',
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-defer')
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.assertEqual(json.loads(self.pr_undraft_record_file().read_text())['how'], 'converted')
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertFalse((self.base / 'gh-draft').exists())
+        self.pr_undraft_get(expected=1)
+
+    def test_pr_undraft_human_draft_stays_a_draft(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        (self.base / 'gh-draft').touch()  # the human drafted it on GitHub
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('PR is a draft set outside the pipeline; left as draft.', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_unknown_state_never_records_ownership(self):
+        """Review round 1 M1: a failed first isDraft lookup on a human draft must not turn it
+        into a pipeline draft that a later clean run un-drafts."""
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        (self.base / 'gh-draft').touch()  # the human drafted it on GitHub
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1',
+                           MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE='1', MOCK_CODEX='major-always',
+                           MOCK_CLAUDE='triage-defer')
+        self.assertTrue((self.base / 'gh-draft-lookup-failed').exists())
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.pr_undraft_get(expected=1)
+        self.assertEqual(list((self.base / 'host-state').rglob('pr-draft/*.json')), [])
+        self.assertIn('draft state was unknown', result.stdout)
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('left as draft', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_draft_flag_is_never_recorded(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft')
+        self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        self.pr_undraft_get(expected=1)
+        (self.base / 'gh-draft').touch()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('left as draft', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_draft_flag_revokes_pipeline_ownership(self):
+        self.pr_undraft_policy_run()
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', MOCK_GH_EXISTING='1')
+        self.pr_undraft_get(expected=1)
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertIn('left as draft', result.stdout)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory modes')
+    def test_pr_undraft_failed_revocation_stops_and_never_undrafts(self):
+        self.pr_undraft_policy_run()
+        record = self.pr_undraft_record_file()
+        record.parent.chmod(0o500)
+        self.addCleanup(record.parent.chmod, 0o700)
+        before = len(self.gh_calls())
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--draft', expected=1,
+                           MOCK_GH_EXISTING='1', AI_AUTO_RECOVER='1')
+        self.assertIn('escalated to the human', result.stderr)
+        last_error = (self.project / '.ai/local/last-error').read_text()
+        self.assertIn('could not revoke the pipeline draft record', last_error)
+        self.assertIn(str(record), last_error)
+        stopped = [line for line in self.notifications().splitlines() if '⛔' in line]
+        self.assertTrue(stopped)
+        self.assertIn('could not revoke the pipeline draft record', stopped[-1])
+        self.assertIn(str(record), stopped[-1])
+        run2 = self.gh_calls()[before:]
+        self.assertEqual([c for c in run2 if c[:2] in (['pr', 'edit'], ['pr', 'ready'])], [])
+        self.assertEqual(self.recovery_calls(), [])
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertTrue((self.base / 'gh-draft').exists())
+        self.assertIn('could not consume the pipeline draft record', result.stdout)
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+
+    def test_pr_undraft_failed_ready_keeps_the_record(self):
+        self.pr_undraft_policy_run()
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1', MOCK_GH_READY_FAIL='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('could not mark the PR ready', result.stdout)
+        self.assertIn('Pull request: ' + self.GH_PR_URL, result.stdout)
+        self.assertEqual(self.pr_undraft_get(), self.GH_PR_URL)
+        self.assertEqual(json.loads(self.pr_undraft_record_file().read_text())['how'], 'created')
+
+    def test_pr_undraft_ready_pr_clears_a_stale_record(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.helper('pr-draft', 'record', self.GH_PR_URL, 'created')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.pr_undraft_get(expected=1)
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+
     def test_current_review_still_requires_fresh_validation(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
@@ -9226,10 +11838,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         shutil.copytree(ROOT / 'templates', old / 'templates')
         for relative in drop:
             (old / relative).unlink()
-            if relative == 'scripts/ai-task':  # the older setup did not know the command either
+            if relative in ('scripts/ai-task', 'scripts/ai-plan'):  # the older setup did not know it either
                 workflow = old / 'scripts/lib/workflow.py'
                 import re
-                workflow.write_text(re.sub(r"'ai-task',\s*", '', workflow.read_text()))
+                name = relative.removeprefix('scripts/')
+                workflow.write_text(re.sub(rf"'{name}',\s*", '', workflow.read_text()))
         for relative in ('scripts/ai-status', 'scripts/lib/workflow.py', 'templates/.ai/prompts/runner.md'):
             with (old / relative).open('a') as file:
                 file.write('\n# older release\n' if not relative.endswith('.md') else '\nolder release\n')
@@ -9350,6 +11963,14 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('recheck.md', json.dumps(self.stamp_files()))
         (self.project / '.ai/tasks.md').write_text(task('T001', status='DONE'))
         self.assertIn('DONE', self.tool('ai-task', 'show', 'T001').stdout)
+
+    def test_toolkit_upgrade_creates_ai_plan_executable(self):
+        self.setup_old(self.old_toolkit(drop=('scripts/ai-plan',)))
+        self.assertFalse((self.project / '.ai/bin/ai-plan').exists())
+        self.assertIn('CREATE .ai/bin/ai-plan', self.upgrade().stdout)
+        self.upgrade('--apply')
+        self.assertEqual((self.project / '.ai/bin/ai-plan').read_bytes(), (ROOT / 'scripts/ai-plan').read_bytes())
+        self.assertTrue(os.access(self.project / '.ai/bin/ai-plan', os.X_OK))
 
     def test_toolkit_upgrade_write_failure_rolls_back_everything(self):
         old = self.old_toolkit(drop=('scripts/ai-task', 'templates/.ai/prompts/recheck.md'))

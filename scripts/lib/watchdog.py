@@ -149,35 +149,54 @@ def units_dir():
     return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd' / 'user'
 
 
-def timer_status(root):
-    """Print installed / missing / unknown for this checkout's timer; exit 0 / 1 / 2."""
+def timer_state(root):
+    """(exit 0 / 1 / 2, installed / missing / unknown, detail or '') of this checkout's timer."""
     name = unit_name(root)
     units = units_dir()
     timer_name = name + '.timer'
     if not (units / (name + '.service')).is_file() or not (units / timer_name).is_file():
-        print(f'missing {timer_name} (no unit files)')
-        return 1
+        return 1, 'missing', 'no unit files'
     answers = {}
     for query in ('is-enabled', 'is-active'):
         try:
             result = subprocess.run(['systemctl', '--user', query, timer_name],
                                     capture_output=True, text=True)
         except OSError as error:
-            print(f'unknown {timer_name} (systemctl unavailable: {error.strerror or error})')
-            return 2
+            return 2, 'unknown', f'systemctl unavailable: {error.strerror or error}'
         answers[query] = result.stdout.strip()
         if result.returncode and not answers[query]:
-            print(f'unknown {timer_name} (systemctl {query} failed: '
-                  f'{result.stderr.strip()[:120] or "exit " + str(result.returncode)})')
-            return 2
+            return 2, 'unknown', (f'systemctl {query} failed: '
+                                  f'{result.stderr.strip()[:120] or "exit " + str(result.returncode)}')
     if answers['is-enabled'] != 'enabled':
-        print(f'missing {timer_name} (not enabled)')
-        return 1
+        return 1, 'missing', 'not enabled'
     if answers['is-active'] != 'active':
-        print(f'missing {timer_name} (not active)')
-        return 1
-    print(f'installed {timer_name}')
-    return 0
+        return 1, 'missing', 'not active'
+    return 0, 'installed', ''
+
+
+def timer_status(root):
+    """Print installed / missing / unknown for this checkout's timer; exit 0 / 1 / 2."""
+    code, state, detail = timer_state(root)
+    print(f'{state} {unit_name(root)}.timer' + (f' ({detail})' if detail else ''))
+    return code
+
+
+def timer_recovers(root):
+    """Exit 0 when the installed timer runs with --recover (it would start a scheduled
+    usage-limit relaunch), else 1; one line on stdout either way."""
+    name = unit_name(root)
+    code, state, detail = timer_state(root)
+    if code:
+        why = f'timer {state}' + (f': {detail}' if detail else '')
+    else:
+        exec_start = [line for line in read(units_dir() / (name + '.service')).splitlines()
+                      if line.startswith('ExecStart=')]
+        if exec_start and '"--recover"' in exec_start[0]:
+            print(f'recovers {name}.timer')
+            return 0
+        why = 'installed without --recover'
+    print(f'no-recover {name}.timer ({why})')
+    return 1
 
 
 def timer(root, args, install):
@@ -290,7 +309,21 @@ def forwarded_env():
             and '\n' not in value}
 
 
-def start_recovery(root, local, marker):
+def relaunch_at(bin_dir):
+    """The approved run's scheduled usage-limit relaunch (epoch ns), or None when none is
+    scheduled (no manifest, never scheduled, claimed or finished). THIS copy's helper reads
+    the host manifest, as start_recovery's gate check does."""
+    try:
+        result = subprocess.run(['python3', str(bin_dir / 'lib' / 'workflow.py'), 'run-manifest', 'limit-at'],
+                                capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode or not re.fullmatch(r'\d{1,12}\n?', result.stdout):
+        return None
+    return int(result.stdout) * 1_000_000_000
+
+
+def start_recovery(root, local, marker, stage='crash (pipeline killed or restarted)'):
     """Start ai-recover outside this (oneshot, soon reaped) service. Returns None when
     recovery confirmed it took over, else the reason it didn't (the human must be told)."""
     # Verify with THIS copy's code (the host copy --install-timer made), never checkout code.
@@ -311,7 +344,7 @@ def start_recovery(root, local, marker):
     if digest.returncode or approved.returncode or digest.stdout.strip() != approved.stdout.strip():
         return 'auto-recovery refused: gate files changed since the run was approved (or no approved run)'
     error = local / 'last-error'
-    if not error.exists():
+    if stage.startswith('crash') and not error.exists():
         save(error, 'ai-pipeline was killed, crashed or the machine restarted\n')
     before = marker_snapshot(marker)
     launched_ns = time.time_ns()
@@ -319,7 +352,7 @@ def start_recovery(root, local, marker):
     command = ['systemd-run', '--user', '--collect', '--quiet', '--service-type=exec', '--unit=' + unit,
                '--working-directory=' + str(root)]
     command += ['--setenv=' + key + '=' + value for key, value in sorted(forwarded_env().items())]
-    command += ['--', str(root / '.ai' / 'bin' / 'ai-recover'), '--stage', 'crash (pipeline killed or restarted)']
+    command += ['--', str(root / '.ai' / 'bin' / 'ai-recover'), '--stage', stage]
     try:
         if subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True).returncode:
             return 'auto-recovery could not be started (systemd-run failed)'
@@ -373,7 +406,7 @@ def main():
     parser.add_argument('--stale-minutes', type=positive, default=45)
     parser.add_argument('--diagnose', action='store_true')
     parser.add_argument('--recover', action='store_true',
-                        help='after a crashed ai-pipeline, start ai-recover (bounded auto-recovery)')
+                        help='after a crashed ai-pipeline or when a usage-limit relaunch is due, start ai-recover (bounded auto-recovery)')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
     parser.add_argument('--diagnosis-agent', choices=('auto', 'codex', 'claude'), default='auto',
                         help='read-only diagnosis: auto (default: Codex, then Claude when Codex fails, '
@@ -385,6 +418,8 @@ def main():
     timer_group.add_argument('--uninstall-timer', action='store_true')
     timer_group.add_argument('--timer-status', action='store_true',
                              help="print installed/missing/unknown for this checkout's timer (exit 0/1/2)")
+    timer_group.add_argument('--timer-recovers', action='store_true',
+                             help='exit 0 when the installed timer runs with --recover, else 1')
     args = parser.parse_args()
     root = Path(args.project).resolve()
     ai = root / '.ai'
@@ -393,6 +428,8 @@ def main():
         parser.error('project must have a real .ai directory and safe .ai/local')
     if args.timer_status:
         return timer_status(root)
+    if args.timer_recovers:
+        return timer_recovers(root)
     if args.install_timer or args.uninstall_timer:
         try:
             return timer(root, args, args.install_timer)
@@ -435,13 +472,33 @@ def main():
         # killed, crashed or rebooted, even if an orphaned ai-run child still runs.
         marker = local / 'pipeline.active'
         died = pipeline_died(marker)
+        # A usage-limit stop beyond the wait budget leaves no process: the host manifest holds
+        # the relaunch time, read only when nothing runs. Three states, never a number compared
+        # with 0: absent (None: no manifest, never scheduled, claimed, finished) → as today;
+        # pending (> now) → the run is waiting, not killed; due (<= now) → with --recover this
+        # probe starts ai-recover for it, and reports once (per AT) when it cannot.
+        scheduled_ns = None
+        if not alive and marker_snapshot(marker) is None:
+            scheduled_ns = relaunch_at(Path(__file__).resolve().parent.parent)
+        if args.recover and scheduled_ns is not None and scheduled_ns <= now:
+            refused = start_recovery(root, local, marker, stage='usage limit relaunch')
+            if refused is not None:  # launched: ai-recover announces itself
+                incidents['relaunch:' + str(scheduled_ns // 1_000_000_000)] = (
+                    f'⛔ STOPPED, needs you: the usage-limit relaunch could not start: {refused}.')
+        # The stall rule is skipped while a usage-limit pause runs, while a relaunch is pending
+        # (the host schedule is the authority, with or without a pauses.log line) and while a
+        # due relaunch is this probe's to handle (--recover: launched, or refused with its own ⛔
+        # above). Absent, or due without --recover (nothing relaunches), it applies as today.
+        relaunch_quiet = (now < paused_until(local)
+                          or (scheduled_ns is not None and scheduled_ns > now)
+                          or (scheduled_ns is not None and scheduled_ns <= now and args.recover))
         stall_seen = None
         if died:
             incidents['died:' + str(died)] = (
                 '⛔ STOPPED, needs you: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
         elif (not alive and not error_time and phase and phase[1] in ('implementing', 'fixing_review')
-              and not planning(root)):
+              and not relaunch_quiet and not planning(root)):
             # With a last-error the stop below explains it; this catches a killed ai-run once a
             # later probe confirms it (the first sighting may be just before a start). A stall
             # an older record (no stall_seen_ns) already announced stays confirmed.

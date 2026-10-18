@@ -235,14 +235,78 @@ Limits bound new agent invocations and validation execution. GNU timeout termina
 timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
-stops and crashes. No infinite loop, boot startup, or monetary spending guarantee is added.
+stops and crashes. A limit beyond the wait budget stops with an unchanged message and first
+records `<Agent> <reset epoch or 0>` in `.ai/local/limit-stop` (`workflow.py limit-stop-write`,
+through the pinned `.ai/local` and an exclusive `O_NOFOLLOW|O_NONBLOCK` temp file, never a
+shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` only when
+`last-error` is exactly that one-line message and `limit-stop` names the same agent and is at
+most 120 s older (relaunch: reset + 60 s, `now + AI_LIMIT_RETRY` for reset 0, `now` once
+passed). The run manifest's optional `limit_relaunches`, `limit_relaunch_at`, `limit_head`,
+`limit_tree` (the `worktree-digest` at scheduling), `limit_task`, `limit_stage` (the stopped
+pipeline stage, 1–40 printable ASCII characters) and `limit_resume` (`{"head", "tree", "task"}`)
+hold the relaunch schedule (`run-manifest limit-schedule AT CAP STAGE`, which records HEAD and
+the digest itself and copies the run's `task` record into `limit_task`,
+`limit-due`, `limit-at`, `limit-hold`, `limit-claim`, `limit-verify`, `limit-arm`,
+`limit-armed`, `limit-task`, `limit-disarm`, `limit-count`; schedule, hold and claim give back
+the attempt `ai-recover` reserved; a human start and `clear-attempts` drop them, and the `task`
+record too; cap
+`AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
+and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
+checkout it stopped with, verified before anything else touches it (see "What a relaunch
+accepts"). No infinite loop, boot startup, or monetary spending guarantee is added.
+
+**What the resumed run does with preserved work.** When the limited session left uncommitted
+task work, the relaunch arms it (`limit_resume`) and the resumed `ai-pipeline` and `ai-run`
+accept exactly that tree through one predicate, `clean_or_armed` (`scripts/lib/common.sh`: a
+clean `git status`, or a resume whose checkout `run-manifest limit-armed` finds equal to the
+arm with no stage open), at every clean-checkout check up to ai-run's `limit-disarm`. A settled
+re-check (status `none`, or `verified` with or without recorded disputes) does not block the
+resume, and neither does a plan review the run already passed: the armed resume re-enters at
+implementation. Nothing is committed and no tracked file is written before ai-run validates:
+the disarm is the last statement before the armed checkpoint (full `ai-check`) or the bound
+task's session, and after it the normal rules apply. Inconsistent review records on the armed
+tree (a `pending` re-check, an uncommitted re-check report or dispute file, a dispute the host
+would still have to record) fail closed with `Re-check of rejected findings: preserved task
+work carries uncommitted review records; inspect them.`: one ⛔, nothing committed, the arm and
+the tree kept, also with auto-recovery on. The contract is the comment block before
+ai-pipeline's start check and is tested as a matrix of resume-path states
+(`test_limit_relaunch_accept_*`; details under "How the resumed run continues preserved work"
+in the recovery contract).
 Git hooks remain active and may consume additional time. Monitor your provider usage;
 logs may contain sensitive source, so `.ai/local/` stays ignored and should be handled
 with the same care as other local transcripts.
 
-## Plan stage (`ai-run --plan`)
+## Plan stage (`ai-plan`, `ai-run --plan`)
 
-`ai-run --plan PROMPT_FILE [--revision]` writes the plan in one headless Claude session before
+`ai-plan PROMPT_FILE [--revision] [--model NAME] [--session-timeout S] [--knowledge-dir DIR]
+[--read-dir DIR]... [--detach]` is the supported way to start a planning session (mission
+control: `ai-plan PROMPT --read-dir ~/zWiki --read-dir ~/Projects/wt/plans --read-dir
+~/Projects/wt/research --detach`; the session limit stays 3600 s). It checks only its own
+arguments: the prompt file exists, is regular and readable, and the prompt, `--knowledge-dir`
+and every `--read-dir` are resolved against the caller's working directory (with `ai-run`'s
+wording for a missing directory) before `ai_root` changes to the checkout root; every other
+option goes to `ai-run` unchanged, in the original order. Like every toolkit command it then
+runs `ai_root` (the `paths` check refuses a symlinked `.ai` or `.ai/local` before anything is
+launched, then `.ai/local` is created: `setup-project` does not create it).
+
+- Foreground: `exec ai-run --plan PROMPT …` (same PID, so the dashboard, watchdog and lock see
+  an `ai-run` runner).
+- `--detach`: `setsid python3 -I workflow.py exec-logged plan-<UTC stamp>-<8 hex>.log --
+  ai-run --plan PROMPT … </dev/null &`. A non-interactive shell's background job is not a
+  process-group leader, so `setsid` execs without forking, and `exec-logged` creates the log
+  exclusively in the pinned `.ai/local` (no symlink or FIFO followed) and execs the runner on
+  it: `$!` is the runner. Then every 0.2 s for at most `AI_PLAN_ACK_SECONDS` (default 20):
+  `.ai/local/observation.json` with `stage: planning`, `state: active` and `pid` equal to the
+  runner's → `Planning session started: pid N, log PATH`, exit 0; the runner exited with 0 and
+  the observation is its own `stage: planning`, `state: done` (the plan finished between two
+  polls) → the same `Planning session started` line, exit 0; the runner exited otherwise →
+  `ai-plan: the planning session ended early (exit N); last lines of PATH:` plus the log's last
+  10 lines (or `(no log was created)`), exit N (at least 1); neither → `ai-plan: could not
+  confirm the planning session started within N s (pid N, log PATH).`, exit 1. The runner is
+  never killed; it is disowned before `ai-plan` exits.
+
+`ai-run --plan PROMPT_FILE [--revision] [--read-dir DIR]...` writes the plan in one headless Claude session before
 any pipeline runs. The prompt file is resolved when the arguments are parsed (a missing,
 unreadable, non-regular or larger than 200 KB file stops before anything else). The run refuses
 `AI_PIPELINE`, `--triage`, `--revise-plan`, `--since`, `--base`, `--sessions` and `--run-timeout`
@@ -262,6 +326,15 @@ objective and a `PLANNING CONTRACT`; its tools are `Read,Glob,Grep,Edit,Write` a
 limit pauses on the `planning` stage and resumes. Just before the session the host copies the
 working-tree `.ai/tasks.md` to a `mktemp` baseline under `$TMPDIR` (outside the checkout and
 the planner's allowlist; removed by the exit handler).
+
+`--read-dir DIR` (repeatable, `--plan` only; elsewhere `--read-dir only applies to --plan.`)
+gives the session read-only reference directories such as plans or research. Each must exist
+(`Read directory not found: …`) and is resolved with `pwd -P`; a resolved path containing `*`,
+`?`, `[`, `]`, `(`, `)`, `,` or a newline stops with `Invalid --read-dir path: …` before any
+session. Each directory adds `--add-dir DIR` (beside the knowledge base's) and the allow entry
+`Read(//DIR/**)` (Claude Code's absolute form); no Edit or Write entry is added, so
+`plan-scope` is unchanged. The contract names them: `Read-only reference directories: <list>.
+Read them as needed; never edit them.` `--knowledge-dir` stays the knowledge base option.
 
 After the session: gate verified, branch unchanged, `plan-scope START` (the run log is also
 allowed, for the exit handler's stop line), `plan-keeps-done START --baseline <copy>` (every
@@ -615,7 +688,18 @@ unpushed content into the PR.
 PR stage: clean tree required; `git push -u origin <feature-branch>` (never force,
 protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when
-significant findings remain after the round limit, or while any dispute is recorded. The
+significant findings remain after the round limit, or while any dispute is recorded.
+Un-draft rule: a policy draft (findings or disputes, not `--draft`) the pipeline created or
+converted is recorded in host state (`pr-draft record`, `binding_dir()/pr-draft/`); a conversion
+is recorded only when the first `isDraft` lookup returned exactly `false` (an unknown prior
+state, e.g. a failed lookup, still converts but never counts as a pipeline draft); a later
+run that needs no draft takes (consumes) that record for the PR's URL first, then runs `gh
+pr ready` and confirms `isDraft == false` (logged "pull request marked ready"). A failed
+ready warns and re-records (best effort); a record that cannot be consumed or no record
+leaves the PR draft ("left as draft"); a ready PR clears a stale record. `--draft` clears
+the record at the start of the PR step, before any `gh` change; a failed clear stops the
+run ("could not revoke the pipeline draft record", a hard rule for recovery). Limitation:
+a human re-draft between two runs is not seen. The
 PR body (starting with "Disputed findings" when there are any) is generated from the
 spec objective, task list, validation stamp, review counts/verdict, and the handoff's
 "Manual testing for the human" section (split into subsections `### Needs you` for steps
@@ -650,7 +734,7 @@ last-error) and before the attempt limit and any stage resume; an open plan-revi
 whose `stage-verify` says `committed` is cleared first, so the run continues once the human's
 answer has a new plan review (the stage would be foreign to it); an unreadable revision store
 (exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
-denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
+denied, branch, review integrity, plan review, a usage limit beyond the wait budget (no relaunch covers it), hook-changed checkpoints,
 `Triage stage`, `Plan revision stage` (including a queue the host could not reorder after a
 revision), `supervision limit reached`, `needs your decision`, and the review base that moved past the branch, whose full recorded reason is printed to
 stderr before the escalation summary);
@@ -671,7 +755,133 @@ start if the gate digest differs from the approved one. Escalation sends one
 the marker. The manifest also stores the run's effective `AI_*` settings (notify command, models,
 budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn't have are
 cleared to their defaults, and the resumed pipeline skips the user config file
-(`AI_SETTINGS_FROM_MANIFEST`). The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
+(`AI_SETTINGS_FROM_MANIFEST`).
+
+**Usage-limit relaunch.** Right after reserving the attempt and restoring the settings,
+before any escalation, `ai-recover` decides on the manifest's relaunch schedule: *pending*
+(`limit-hold`: the run is still waiting, e.g. a watchdog crash recovery after a kill between
+scheduling and its cleanup) → it gives the attempt back, restores the wait (removes
+`last-error`, `limit-stop` and `pipeline.active`, appends the `pauses.log` line, `observe
+relaunch`, ⏸ again), prints `Still waiting for the usage-limit relaunch after <time>.` and
+exits 75; *due* (`limit-claim`) → the schedule is consumed, so whatever this relaunch hits next
+is its one terminal ⛔ and no probe starts it again. A claimed relaunch checks the checkout once,
+right after the gate and branch checks and before anything reads it to decide
+(`relaunch_verify`: `limit-verify` recomputes HEAD and `workflow.py worktree-digest`, which is
+`tree-snapshot`: HEAD, the staged diff, every non-ignored path outside `.ai/local/` with kind,
+mode and bytes, tracked bookkeeping and `.ai/reviews/` included, submodules recursively). The
+relaunch continues exactly the tree it stopped with: any change during the wait (a human edit,
+an added file, a staged change, a commit, a change inside a submodule) escalates `the branch
+moved to another commit while the usage-limit relaunch waited; nothing was committed.` (HEAD)
+or `the checkout changed while the usage-limit relaunch waited; nothing was committed.` (tree)
+and touches nothing. After the plan-revision decision block it then notifies `▶ RESUMED after the
+usage limit (relaunch k/cap): <branch>.` and resumes without a Claude session or an attempt: an
+open stage resumes as above, bookkeeping-only leftovers are committed (`record stop during usage
+limit relaunch`), other uncommitted work is armed (`limit-arm` recomputes both and records
+`limit_resume` only on an exact match; `limit-armed` recomputes against it) and kept, a clean
+tree resumes. `tasks newly-done REV` prints the tasks DONE in the working queue but not at REV.
+A stop whose `last-error` is exactly the limit-beyond-budget message with a matching
+`limit-stop` (`workflow.py limit-stop`) is scheduled before the hard rules: with
+`AI_LIMIT_RELAUNCH_MAX` (0–9, default 2) at 0 the hard rule escalates it as before; without a
+watchdog timer installed with `--recover` (`ai-watchdog --timer-recovers`) it escalates `the
+usage limit resets around <time>, but no watchdog timer with --recover is installed …`; past the
+cap (`limit-schedule` fails) it escalates `usage limit again after N relaunch(es) in this run.`;
+otherwise it records `limit-schedule AT CAP STAGE` (relaunch at reset + 60 s; STAGE is this
+ai-recover's `--stage`, kept as `limit_stage`; HEAD and the tree
+digest are taken here, after the stop's bookkeeping was written and before any commit, and
+after it the host writes only `.ai/local/` and host state), appends `<UTC>
+paused <AT-now>s: <Agent> usage limit relaunch (resume ~<time>)` to `pauses.log`, observes
+`relaunch AT`, notifies `⏸ PAUSED: <branch> stopped at a <Agent> usage limit during <stage>;
+relaunches by itself after <time> (relaunch k/cap).`, removes `last-error`, `limit-stop` and the
+marker, and exits 75 with no ⛔.
+
+**What a relaunch accepts.** One verification, one site: `relaunch_verify` is called exactly
+once in `ai-recover`, after the gate and branch checks and before anything that commits,
+stashes, checks out, writes a tracked file, reads the checkout to decide (the plan-revision
+decision, the open-stage scope check, the leftovers and dirty tests) or starts a session. It
+compares HEAD and the whole tree (`worktree-digest`) with what `limit-schedule` recorded. A
+change anywhere in the checkout during the wait (tracked, untracked, staged, a bookkeeping file
+alone, a commit, a file or a commit inside a submodule, an in-scope edit while a triage or
+plan-revision stage is open) escalates with `nothing was committed.`, `Next: inspect the
+checkout, commit or discard what changed, then rerun ai-pipeline.`, and leaves the checkout
+exactly as found. Only a verified tree is then transformed, in exactly four ways (the table
+after the `▶ RESUMED` notification in `ai-recover`): (a) an open stage → resume (its scope
+check kept); (b) dirty only in `.ai/state.md`, `.ai/run-log.md`, `.ai/handoff.md` → the
+leftovers commit → gate check → resume; (c) dirty otherwise, after an `implementation` stop →
+`limit-arm` → resume; (d) clean → resume. `limit-arm` refusing in (c) escalates with the verify
+wording; no host step between the verification and the arm touches the checkout, and the
+checkout lock is held throughout.
+
+**Which stop can leave preserved work.** Only `ai-run --approved` in ai-pipeline's
+implementation step (`stop implementation`: first tasks and fix rounds alike) legitimately
+leaves uncommitted task work: triage and plan revision run under an open stage (a), and the plan
+and implementation reviews start on a clean tree. `limit-arm` therefore first checks that the
+`limit_stage` recorded at scheduling is `implementation` (read from the manifest, never from the
+relaunch's own `--stage`, which is `usage limit relaunch`); any other stage, or none, exits 1
+and (c) escalates `the usage-limit stop left uncommitted changes outside an implementation
+session; nothing was committed.` with the same `Next:`, the checkout as found. `limit-verify`,
+`limit-armed` and `limit-disarm` do not read the stage.
+
+**Which task the preserved work belongs to.** The relaunch continues the task the limited
+session was working on, named in the host manifest, never inferred from the queue. `ai-run`
+records it (`run-manifest task-set ID`, best effort: a standalone run without a manifest prints
+`Note: could not record the task in the run manifest.`) right before every implementation
+session, clears it (`task-clear`) after the iteration's bookkeeping commit and once before its
+task loop, and leaves it in place when the session stops at a limit. `limit-schedule` copies it
+into `limit_task`; `limit-arm` arms only with a `limit_task` and records it in `limit_resume`
+(`limit-task` prints it, read only). Without one, (c) escalates `the usage-limit stop left
+uncommitted changes with no task recorded; nothing was committed.` with the same `Next:` and
+leaves the checkout as found.
+
+**How the resumed run continues preserved work.** A limit stop keeps the session's uncommitted
+work and the relaunch continues it once, in the normal implementation session or the normal
+validated checkpoint, never in a recovery decision or a recovery commit; any change during the
+wait escalates (above). `ai-pipeline` and `ai-run` admit a dirty tree through one predicate,
+`clean_or_armed`: an empty `git status --porcelain --untracked-files=all`, or `armed_resume`
+(a resume with `AI_RECOVERY_ATTEMPT` set, no stage open, and `run-manifest limit-armed`
+finding HEAD and the tree digest equal to `limit_resume`). It stands at every clean-checkout
+check between the resume and ai-run's first act: ai-pipeline's start, both tests of the dispute
+reconciliation and ai-run's start. A human `ai-pipeline --approved` is never a resume, so it
+refuses a dirty tree with `Start from a clean checkpoint` as before (and its `run-manifest
+start` drops the arm). While armed the host writes nothing: a pending re-check, an
+uncommitted `.ai/reviews/recheck.md`, `disputes.md` or `fallback-log.md`, or a verified
+re-check whose dispute records the host would still have to write (`workflow.py
+disputes-record --check`, which writes nothing and fails unless a real call would write nothing
+either) stops before the re-check or commit (`Re-check of rejected findings: preserved task work
+carries uncommitted review records; inspect them.`), the plan-revision queue repair is skipped,
+and ai-run's stop handler appends no run-log line until the disarm. The armed
+resume re-enters the run at implementation: the plan review loop is not entered while armed
+(the arm exists only after an implementation stop, so this run already passed the plan-approval
+boundary; a partial checkpoint the limited session committed makes the saved plan review stale,
+and `ai-review --plan` cannot run on the preserved tree; that commit is reviewed by the
+implementation review like any task commit). Its path is start checks → dispute reconciliation
+→ base check → `plan_decision_check` → queue check → `plan_decision_check` → implementation, so
+a recorded needs-human plan decision still stops it (arm kept); a clean resume re-reviews a
+stale plan as before. ai-pipeline runs ai-run while armed even when every task is DONE. ai-run then, still armed, reads the bound
+task (`limit-task`), checks that `tasks newly-done HEAD` prints nothing or exactly that task
+(else `Preserved work marks another task DONE; inspect it before continuing.`), runs the
+dependency setup (also when `tasks next` is `none`), and routes by the bound task's status in
+the working queue: DONE (in HEAD or only in the tree) → the armed checkpoint; IN_PROGRESS or
+TODO → its session, which `tasks next` must name (else `Preserved work belongs to T…, but the
+next task is T…; inspect the queue.`); BLOCKED → `Blocked task was not checkpointed`; an ID not
+in the queue stops too. It repeats the loop head's checks, then `limit-disarm` (its only call
+site), prints `Resuming preserved work of the usage-limit stop (T…).`, clears the task record
+and acts: the armed checkpoint is `checkpoint_done`, the same function the loop runs after a
+DONE session (full `ai-check`, failure → task back to IN_PROGRESS and stop; the tier-1 commit
+`chore(ai): checkpoint T… (validated; the session did not commit)` with `checkpoint-guard`,
+stamp and `committed-matches-worktree`; the outcome log's `done` line without an attempt; the
+bookkeeping commit; `verify_checkpoint`), then the queue continues. A stop of the resumed run
+before the preserved work is continued is final: `ai-recover` checks `limit-task` right after
+the relaunch schedule and before every other rule, and while `limit_resume` exists (matching
+the checkout or not) it never decides or commits, whatever `AI_AUTO_RECOVER` says; it sends one
+⛔ with the stop's reason and `the resumed run stopped on the preserved work of T… before
+continuing it; nothing was committed.`, keeping the checkout and the arm. After the disarm the
+normal rules apply unchanged, so a later stop gets ordinary recovery, not the exception.
+So the resumed run checks the preserved work (another task marked DONE, the next task not the
+interrupted one, a blocked or missing task, dependency setup) before it takes the work over,
+and each of those stops is final with nothing committed; only the loop head's re-checks, which
+repeat what the consumer just verified under the lock, stand between the disarm and the act.
+
+The manifest's own location (`AI_STATE_DIR`/`XDG_STATE_HOME`) can't
 live inside it: install the timer with the same state directory the pipeline uses (the
 default unless you changed it). `--install-timer` checks this for the TARGET checkout (the
 `project` argument, not the caller's directory) before writing anything: it refuses (exit 2)
@@ -802,7 +1012,19 @@ Incidents:
   reports it, and any probe that doesn't drops the record (a probe just before a pipeline
   starts stays silent). A checkout whose `.ai/local/observation.json` is at stage
   `planning` is never stalled (read without following symlinks; unreadable counts as
-  absent). A recorded stop is reported as **stop** instead.
+  absent). A recorded stop is reported as **stop** instead. Nor is a checkout waiting for
+  a usage-limit relaunch (below): the rule is skipped while the latest `pauses.log` pause
+  runs, while a relaunch is pending, and while a due one is this `--recover` probe's to
+  handle. With no schedule, or a due one probed without `--recover`, it applies as before.
+- **usage-limit relaunch**: when no runner and no marker exist, the probe asks its own
+  copy's `workflow.py run-manifest limit-at` for the approved run's scheduled relaunch
+  (exit 1 = none scheduled: no manifest, never scheduled, claimed or finished). Pending
+  (`AT > now`): nothing happens and the run counts as waiting, not killed, with or without
+  a `pauses.log` line (the host manifest is the authority). Due, with `--recover`: it
+  starts `ai-recover --stage 'usage limit relaunch'` through `start_recovery` (same host
+  copy, state root and gate checks as crash recovery; no default `last-error` is written).
+  If that is refused it sends one `⛔ STOPPED, needs you: the usage-limit relaunch could not
+  start: <reason>.` per AT (dedupe key `relaunch:<AT>`).
 - **hung**: a live runner whose newest activity is older than `--stale-minutes`
   (default 45). Activity is the newest mtime of `.ai/run-log.md`,
   `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in
@@ -843,6 +1065,9 @@ after the timer starts (`OnActiveSec=2min`: after boot, and after `--install-tim
 never at once); timers installed before this change used `OnBootSec` and need
 `--install-timer` again (host copy and unit). `SuccessExitStatus=1` treats
 an incident as a successful probe. Nothing is installed by `setup-project`.
+`--timer-recovers` exits 0 (`recovers <timer>`) when `--timer-status` would say installed
+and the service's `ExecStart=` contains `"--recover"`, else 1 (`no-recover <timer> (<why>)`).
+`ai-recover` uses it to decide whether a usage-limit stop can wait for a relaunch.
 
 ## Reviewer selection and the Claude fallback
 
@@ -908,6 +1133,13 @@ worktrees), branch and task (kept for readers of the log; the report derives its
 attempt open, or at the append for an attempt without one, from `attempt-seq` beside the log;
 gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
 order key). Failures to write are reported and never stop the run.
+
+A planning session (`ai-run --plan`, so `ai-plan` too) writes one `plan` line: `outcome plan
+RESULT MODEL SECONDS [TASKS] [--revision]`, RESULT `done`, `stopped`, `interrupted` or `timeout`
+(`stopped`, `interrupted` and `timeout` come from the exit handler while the gate is intact;
+SECONDS is 0 when the session never started; TASKS only on `done`). On `done`, `ai-run` also
+appends a `plan written: N tasks (MODEL, first plan|revision)` row to `.ai/run-log.md`, left
+uncommitted beside the plan (`plan-scope` allows the run log). `outcomes_report` ignores the kind.
 
 Every line goes through `append_outcome`: on a read-write `O_APPEND` descriptor it takes
 `flock(LOCK_EX)` (so the tail check and the write are one step for every writer using the
@@ -1004,7 +1236,9 @@ inputs are advisory records in the checkout's `.ai/local/` (ignored by Git, agen
 `observation.json` holds the stage (`planning`, `plan_review`, `plan_revision`, `setup`,
 `build`, `checks`, `review`, `triage`, `recheck`, `pr`; the dashboard draws nine boxes, Plan
 first, and a finished `planning` record is shown as status `planned`), state (`active`,
-`paused`, `recovering`, `stopped`, `done`), detail, note and `since`/`updated` times, plus `pid` and `branch`; written by
+`paused`, `recovering`, `stopped`, `done`), detail, note and `since`/`updated` times, plus `pid` and `branch`
+(and `relaunch_at`, set only by `observe relaunch AT NOTE` while a usage-limit relaunch is
+scheduled; every other action drops it); written by
 `workflow.py observe` from `ai-pipeline`, `ai-run`, `ai-review`, `ai-recover` and the
 pause/resume helpers in `common.sh`. `notifications.log` keeps the last 200 notification
 lines (`notify-log`, also when no `AI_NOTIFY_CMD` is set). Every notification is mirrored
@@ -1020,6 +1254,13 @@ The dashboard only reads these records, and the process table through `/proc` (`
 It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
 semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
 dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+For a `gone` run the status is decided in this order: a `stopped` state or a `last-error`
+newer than the observation is `needs_you`; a `paused` state with an integer `relaunch_at` is
+`paused` (waiting for the scheduled usage-limit relaunch, shown as `⏸ <note>`; a plain
+`paused` state is not evidence of a relaunch, since an in-process wait writes it too); a
+`planning` stage still `active` or `paused` is `needs_you` with the note `planning session
+ended without a plan (killed?)` (the Plan box is drawn stopped); otherwise `planned`,
+`finished` or `idle` as before.
 Each run also reports `pr` (URL from state.md's `Next action:` line or the last `pull request
 ready:` run-log line) and `reviews` (`plan`/`code` finding counts and short reviewed HEAD from
 `.ai/reviews/plan.md` and `current.md`, from the `Plan review of plan digest …; HEAD …;` or

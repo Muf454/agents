@@ -6,7 +6,7 @@ Usage: ai-run --approved [--sessions N] [--session-timeout SECONDS] [--run-timeo
               [--model NAME] [--knowledge-dir DIRECTORY] [--triage [--since COMMIT]]
               [--revise-plan [--since COMMIT] [--base REF]]
        ai-run --plan PROMPT_FILE [--revision] [--model NAME] [--session-timeout SECONDS]
-              [--knowledge-dir DIRECTORY]
+              [--knowledge-dir DIRECTORY] [--read-dir DIRECTORY]...
 Run Claude on the approved plan, one recoverable task per fresh session.
 Defaults: sessions = unfinished tasks + 2 (at least 16; recomputed on every call, so fix-round
 tasks are covered), 1800 seconds/session, 14400 seconds/run. Rerun to resume.
@@ -33,9 +33,13 @@ Edit/Write .ai/project-spec.md, current-plan.md, tasks.md, state.md, handoff.md 
 reviews/dispositions.md (no shell; no project allowlist, so --approved is not needed). The host
 then checks the scope and the task queue, shows the stage on ai-dashboard and leaves the plan
 uncommitted for you to review. --revision says an earlier plan exists (keep DONE tasks).
+--read-dir (repeatable, --plan only) gives the session read-only access to an existing reference
+directory (plans, research); --knowledge-dir stays the knowledge base option.
 --plan runs outside ai-pipeline and refuses --triage, --revise-plan, --since, --base,
 --sessions and --run-timeout.
-Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
+Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume. Inside
+ai-pipeline, a reset beyond that budget is relaunched after the reset by the watchdog timer (--recover),
+at most AI_LIMIT_RELAUNCH_MAX (default 2) times per run.
 Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
 (time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
@@ -43,7 +47,7 @@ EOF
 }
 sessions=''; sessions_given=no; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
 model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
-plan_file=''; plan_revision=no; session_timeout_given=no; run_timeout_given=no
+plan_file=''; plan_revision=no; session_timeout_given=no; run_timeout_given=no; read_dirs=()
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
@@ -73,6 +77,14 @@ while (( $# )); do
       [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
       knowledge_dir=$(cd -- "$2" && pwd -P)
       shift 2 ;;
+    --read-dir)
+      (( $# >= 2 )) && [[ -n "$2" ]] || ai_die 'Missing --read-dir DIRECTORY'
+      [[ -d "$2" ]] || ai_die "Read directory not found: $2"
+      read_dir=$(cd -- "$2" && pwd -P) || ai_die "Read directory not found: $2"
+      # Glob and list characters would widen or split the Read(...) allow entry.
+      [[ "$read_dir" != *[]*?[\(\),$'\n']* ]] || ai_die "Invalid --read-dir path: $read_dir"
+      read_dirs+=("$read_dir")
+      shift 2 ;;
     --sessions|--session-timeout|--run-timeout)
       (( $# >= 2 )) || ai_die "Missing value for $1"
       [[ "$2" =~ ^[1-9][0-9]*$ && ${#2} -le 7 ]] || ai_die "Invalid limit: $2"
@@ -87,6 +99,7 @@ while (( $# )); do
   esac
 done
 [[ "$plan_revision" == no || -n "$plan_file" ]] || ai_die '--revision only applies to --plan.'
+(( ${#read_dirs[@]} == 0 )) || [[ -n "$plan_file" ]] || ai_die '--read-dir only applies to --plan.'
 if [[ -n "$plan_file" ]]; then
   # Refusals use the "given" flags, never the values, so a default can never slip through.
   [[ -z "${AI_PIPELINE:-}" ]] || ai_die 'ai-run --plan runs outside a pipeline.'
@@ -123,6 +136,8 @@ plan_scope() {
     ai_die "$error"
   }
 }
+# `clean_or_armed` (lib/common.sh) admits the armed tree below; AI_ARMED=yes then means the
+# consumer owes the preserved work its route, and stays yes until the consumer's disarm.
 # A task attempt whose runner was killed (SIGKILL, no exit handler) left its marker; log it as
 # `crashed` once, before the clean-checkpoint refusal below: `ai_helper state implementing`
 # dirties tracked .ai/state.md before every session, so a killed runner always leaves a dirty
@@ -144,9 +159,11 @@ if [[ -n "$plan_file" ]]; then
     ai_die "Planning: ${keep_error#Error: }"
 else
   # Triage and plan revision check their own leftovers below (an interrupted one may leave
-  # workflow records).
-  [[ "$triage" == yes || "$revise_plan" == yes || -z "$(git status --porcelain --untracked-files=all)" ]] || \
+  # workflow records). The usage-limit relaunch's resume may start from exactly the preserved
+  # task work it armed (consumed once, below, before the first act).
+  if [[ "$triage" == no && "$revise_plan" == no ]] && ! clean_or_armed; then
     ai_die 'Start from a clean checkpoint. Reconcile/commit interrupted changes first.'
+  fi
   # An interrupted revision's uncommitted queue is repaired as its session's would have been
   # (the helper decides; a committed or non-revision queue is left to the checks).
   if [[ "$revise_plan" == yes ]]; then
@@ -196,13 +213,20 @@ on_exit() {
   fi
   if [[ "$finished" != yes ]]; then
     if [[ "$active_task" == planning && "$gate_ok" == yes ]]; then
+      plan_result=stopped
+      if (( code == 130 || code == 143 )); then plan_result=interrupted
+      elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then plan_result=timeout
+      fi
+      ai_helper outcome plan "$plan_result" "${plan_model:-opus}" "$(( ${plan_started:+SECONDS - plan_started} + 0 ))" \
+        $([[ "${plan_revision:-}" != yes ]] || printf -- '--revision') 2>/dev/null || true
       ai_observe stop plan "$(head -n 1 .ai/local/last-error 2>/dev/null || echo "exit $code")"
     fi
     if [[ -n "${revision_started:-}" && "$gate_ok" == yes ]]; then
       ai_helper outcome plan_revision "$revision_round" stopped "$revision_model" "$(( SECONDS - revision_started ))" \
         2>/dev/null || true
     fi
-    ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
+    # No host write while armed: the preserved tree stays exactly the armed one.
+    [[ "$AI_ARMED" == yes ]] || ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
@@ -349,12 +373,23 @@ if [[ -n "$plan_file" ]]; then
   fi
   prompt+=$(knowledge_prompt)
   mapfile -t plan_allowed < <(ai_helper plan-allowlist)
+  if (( ${#read_dirs[@]} )); then
+    # Read access only: each directory joins the session (beside the knowledge base) with a
+    # Read entry in Claude Code's absolute form (//abs/**); no Edit or Write entry is added.
+    for read_dir in "${read_dirs[@]}"; do
+      knowledge_args+=(--add-dir "$read_dir")
+      plan_allowed+=("Read(/$read_dir/**)")
+    done
+    prompt+=$'\n\n'"Read-only reference directories: $(printf '%s, ' "${read_dirs[@]}")"
+    prompt="${prompt%, }. Read them as needed; never edit them."
+  fi
   # DONE tasks of the working-tree queue (committed or not) are protected too: the host keeps
   # its own copy outside the checkout, where the session cannot edit it (removed on exit).
   plan_baseline=$(mktemp "${TMPDIR:-/tmp}/ai-plan-queue.XXXXXXXX") || ai_die 'Planning: cannot copy the task queue.'
   if [[ -f .ai/tasks.md ]]; then cp -- .ai/tasks.md "$plan_baseline" || ai_die 'Planning: cannot copy the task queue.'
   else rm -f -- "$plan_baseline"
   fi
+  plan_started=$SECONDS
   claude_session "$prompt" "$plan_model" Read,Glob,Grep,Edit,Write "${plan_allowed[@]}"
   ai_branch
   plan_scope "$since"
@@ -371,6 +406,10 @@ if [[ -n "$plan_file" ]]; then
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'
   ai_observe planned "$plan_total tasks"
+  ai_helper outcome plan done "$plan_model" "$(( SECONDS - plan_started ))" "$plan_total" \
+    $([[ "$plan_revision" != yes ]] || printf -- '--revision') || \
+    printf 'Note: could not record the planning outcome.\n' >&2
+  ai_log planning "plan written: $plan_total tasks ($plan_model, $plan_kind)" PASS 'Plan left uncommitted for review'
   ai_notify "📝 Plan ready on $AI_START_BRANCH: $plan_total tasks. Review and commit it, then start ai-pipeline --approved."
   finished=yes
   printf 'Plan ready on %s: %s tasks. Review and commit it, then start ai-pipeline --approved.\n' \
@@ -603,14 +642,121 @@ else
     "$sessions" "$(( budget_total - budget_done ))"
 fi
 
+# Records the runner bookkeeping of TASK's DONE or BLOCKED checkpoint in its own commit (never
+# application files); an accepted DONE checkpoint must hold exactly the validated bytes.
+# Usage: runner_checkpoint TASK STATUS.
+runner_checkpoint() {
+  ai_helper state implementing 'Continue queue; see task results for any blockers'
+  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m "chore(ai): record $1 runner checkpoint" >/dev/null
+  ai_helper run-manifest task-clear 2>/dev/null || true
+  ai_guard_verify
+  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
+  if [[ "$2" == DONE ]]; then
+    verify_checkpoint "$1"
+    ai_notify "✅ Done: $(ai_helper tasks progress "$1")"
+  fi
+}
+
+# TASK is DONE in the working queue: the full gate, then the tier-1 commit of whatever its session
+# left uncommitted, then the runner checkpoint. Used after every session and for the preserved
+# work of a usage-limit stop whose task was DONE before the limit. Usage: checkpoint_done TASK.
+checkpoint_done() {
+  local task=$1 new_files=''
+  remaining=$(remaining_time)
+  (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
+  ai_observe step checks "$task"
+  if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
+    ai_guard_verify
+    task_outcome validation_failed
+    ai_helper tasks set "$task" IN_PROGRESS
+    ai_helper state blocked "Validation failed after $task; inspect validation log"
+    ai_die "Validation failed; $task returned to IN_PROGRESS."
+  fi
+  ai_guard_verify
+  if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
+    ai_observe step build "$task · checkpointed · $counts_done/$counts_total"
+  fi
+  if [[ -n "$(dirty_beyond_records)" ]]; then
+    # Tier-1 recovery: the session finished and the full gate just passed on exactly
+    # this content (gate files verified unchanged), but it didn't commit. Commit it.
+    # The session started from a clean tree, or an armed resume from its own preserved task
+    # work, so everything new is its own output. Stage it all (git still skips ignored
+    # files), but never a secret-looking file.
+    git add --all -- .
+    if ! new_files=$(ai_helper checkpoint-guard); then
+      git reset -q
+      ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
+    fi
+    git commit -q -m "chore(ai): checkpoint $task (validated; the session did not commit)"
+    ai_guard_verify
+    # A commit hook must not have slipped unvalidated content into that checkpoint.
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+      ai_helper committed-matches-worktree || \
+      ai_die "The checkpoint of $task differs from the validated content (commit hook?)."
+    ai_notify "🔧 $task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
+  fi
+  task_outcome done
+  ai_log "$task" 'completed' PASS 'Claude checkpointed; continuing queue'
+  runner_checkpoint "$task" DONE
+}
+
+# Preserved task work of a usage-limit stop (the relaunch armed it; admitted above). Every check
+# here runs while the manifest is still armed, so each stop is terminal for recovery; only the
+# act (the armed checkpoint or the bound task's session) follows the disarm.
+bound='' route=''
+if [[ "$AI_ARMED" == yes ]]; then
+  bound=$(ai_helper run-manifest limit-task 2>/dev/null) || \
+    ai_die 'Cannot read the task of the preserved work in the run manifest.'
+  newly=$(ai_helper tasks newly-done HEAD 2>&1) || ai_die "Cannot compare the task queue with HEAD: ${newly#Error: }"
+  [[ -z "$newly" || "$newly" == "$bound" ]] || \
+    ai_die 'Preserved work marks another task DONE; inspect it before continuing.'
+fi
+
 # Missing/stale dependencies (fresh worktree, changed lockfile) are installed by the host,
-# once, before a task runs. Dependencies a task changes mid-run wait for the next start.
-if [[ "$(ai_helper tasks next)" != none ]]; then
+# once, before a task runs (or the preserved work's checkpoint validates). Dependencies a task
+# changes mid-run wait for the next start.
+if [[ "$(ai_helper tasks next)" != none || -n "$bound" ]]; then
   deps_limit=${AI_DEPS_TIMEOUT:-1200}
   [[ "$deps_limit" =~ ^[1-9][0-9]{0,6}$ ]] || ai_die "Dependency setup: invalid AI_DEPS_TIMEOUT: $deps_limit"
   remaining=$(remaining_time)
   (( deps_limit <= remaining )) || deps_limit=$remaining
   ai_deps "$AI_APPROVED_GATE" "$deps_limit" || ai_die "$AI_DEPS_ERROR"
+fi
+
+if [[ -n "$bound" ]]; then
+  # The route, by the bound task's status in the working queue (DONE in HEAD or only here alike).
+  bound_status=$(ai_helper tasks status "$bound" 2>/dev/null) || \
+    ai_die "Preserved work belongs to $bound, which is not in the task queue; inspect the queue."
+  case "$bound_status" in
+    DONE) route=checkpoint ;;
+    IN_PROGRESS|TODO)
+      next_task=$(ai_helper tasks next)
+      [[ "$next_task" == "$bound" ]] || \
+        ai_die "Preserved work belongs to $bound, but the next task is $next_task; inspect the queue."
+      route=session ;;
+    BLOCKED) ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.' ;;
+    *) ai_die "Preserved work belongs to $bound, whose status $bound_status is unknown; inspect the queue." ;;
+  esac
+  # The loop head's checks, once more while armed.
+  ai_guard_verify
+  ai_branch
+  ai_helper tasks check
+  ai_helper run-manifest limit-disarm || ai_die 'Cannot consume the preserved work in the run manifest.'
+  AI_ARMED=consumed
+  printf 'Resuming preserved work of the usage-limit stop (%s).\n' "$bound"
+fi
+
+# The run's task record (host manifest) names the task a usage-limit stop's preserved work
+# belongs to. A stale one from an interrupted run must never bind a later stop.
+ai_helper run-manifest task-clear 2>/dev/null || true
+
+if [[ "$route" == checkpoint ]]; then
+  # The armed checkpoint: no session; the outcome log gets a `done` line without an attempt.
+  active_task=$bound
+  task_model=$(ai_helper tasks model "$bound")
+  task_started=$SECONDS
+  checkpoint_done "$bound"
 fi
 
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do
@@ -659,6 +805,10 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  # Best effort: a standalone run has no manifest (and no relaunch); in a pipeline a lost record
+  # makes a later limit-arm fail closed. Kept through a limit stop (on_exit leaves it).
+  ai_helper run-manifest task-set "$active_task" 2>/dev/null || \
+    printf '%s\n' 'Note: could not record the task in the run manifest.' >&2
   track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
@@ -666,58 +816,15 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")
   case "$task_status" in
-    DONE)
-      remaining=$(remaining_time)
-      (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
-      ai_observe step checks "$active_task"
-      if ! AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"; then
-        ai_guard_verify
-        task_outcome validation_failed
-        ai_helper tasks set "$active_task" IN_PROGRESS
-        ai_helper state blocked "Validation failed after $active_task; inspect validation log"
-        ai_die "Validation failed; $active_task returned to IN_PROGRESS."
-      fi
-      ai_guard_verify
-      if counts=$(ai_helper tasks counts 2>/dev/null) && read -r counts_done counts_total <<< "$counts"; then
-        ai_observe step build "$active_task · checkpointed · $counts_done/$counts_total"
-      fi
-      if [[ -n "$(dirty_beyond_records)" ]]; then
-        # Tier-1 recovery: the session finished and the full gate just passed on exactly
-        # this content (gate files verified unchanged), but it didn't commit. Commit it.
-        # The session started from a clean tree, so everything new is its own output. Stage it
-        # all (git still skips ignored files), but never a secret-looking file.
-        git add --all -- .
-        if ! new_files=$(ai_helper checkpoint-guard); then
-          git reset -q
-          ai_die "Claude left uncommitted work including secret-looking files; inspect it before continuing."
-        fi
-        git commit -q -m "chore(ai): checkpoint $active_task (validated; the session did not commit)"
-        ai_guard_verify
-        # A commit hook must not have slipped unvalidated content into that checkpoint.
-        [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
-          ai_helper committed-matches-worktree || \
-          ai_die "The checkpoint of $active_task differs from the validated content (commit hook?)."
-        ai_notify "🔧 $active_task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
-      fi
-      task_outcome done
-      ai_log "$active_task" 'completed' PASS 'Claude checkpointed; continuing queue' ;;
+    DONE) checkpoint_done "$active_task" ;;
     BLOCKED)
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
       task_outcome blocked
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
-      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
+      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks"
+      runner_checkpoint "$active_task" BLOCKED ;;
     *) task_outcome no_checkpoint
        ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac
-  ai_helper state implementing 'Continue queue; see task results for any blockers'
-  # Commit runner bookkeeping separately; never stage application files here.
-  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
-  git commit -m "chore(ai): record $active_task runner checkpoint" >/dev/null
-  ai_guard_verify
-  # A BLOCKED task is unvalidated by design; only an accepted DONE checkpoint is checked.
-  if [[ "$task_status" == DONE ]]; then
-    verify_checkpoint "$active_task"
-    ai_notify "✅ Done: $(ai_helper tasks progress "$active_task")"
-  fi
 done

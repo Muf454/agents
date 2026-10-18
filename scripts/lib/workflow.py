@@ -304,7 +304,7 @@ def setup(arguments):
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
     for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
-                 'ai-dashboard', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
+                 'ai-dashboard', 'ai-plan', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     if args.upgrade:
         return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
@@ -639,6 +639,23 @@ def task_command(arguments):
         # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
         if not blocks or any(task['status'] == 'DONE' for task in blocks):
             fail('A task is already DONE (or there are no tasks).')
+    elif action == 'newly-done':
+        # Tasks DONE in the working queue but not (or absent) at REV, in file order.
+        rev = arguments[1] if len(arguments) == 2 else ''
+        if not rev or rev.startswith('-'):
+            fail('Usage: tasks newly-done REV')
+        try:
+            commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
+        except subprocess.CalledProcessError:
+            fail(f'Unknown revision: {rev}')
+        try:
+            before = git('show', f'{commit}:.ai/tasks.md').decode()
+        except subprocess.CalledProcessError:
+            before = ''  # no queue at REV: every DONE task is new
+        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+        for task in blocks:
+            if task['status'] == 'DONE' and task['id'] not in done:
+                print(task['id'])
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -1276,6 +1293,169 @@ def binding_dir():
     return base / 'reviews' / key
 
 
+# Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
+# used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
+# scheduled at and the armed resume binding ({"head", "tree", "task"}).
+LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
+                'limit_stage', 'limit_resume')
+
+
+def limit_stage_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'[ -~]{1,40}', value) is not None
+
+
+def task_id_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'T\d{3,}', value) is not None
+
+
+def limit_fields_valid(data):
+    def hexes(value, size):
+        return isinstance(value, str) and re.fullmatch(f'[0-9a-f]{{{size}}}', value) is not None
+
+    count, at = data.get('limit_relaunches', 0), data.get('limit_relaunch_at', 0)
+    resume = data.get('limit_resume')
+    return (type(count) is int and 0 <= count <= 100 and type(at) is int and at >= 0
+            and ('limit_head' not in data or hexes(data['limit_head'], 40))
+            and ('limit_tree' not in data or hexes(data['limit_tree'], 64))
+            and ('limit_task' not in data or task_id_valid(data['limit_task']))
+            and ('limit_stage' not in data or limit_stage_valid(data['limit_stage']))
+            and ('limit_resume' not in data
+                 or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
+                     and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
+                     and task_id_valid(resume['task']))))
+
+
+def limit_binding():
+    """(HEAD, worktree digest) of the checkout: what a usage-limit relaunch is bound to."""
+    root = checkout_root()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD^{commit}', cwd=root).decode().strip()
+    except subprocess.CalledProcessError:
+        fail('usage limit: the checkout has no commit to bind the relaunch to')
+    return head, worktree_digest(root)
+
+
+def limit_mismatch(head, tree):
+    """The reason the checkout differs from the recorded binding, or None when it is exact."""
+    now_head, now_tree = limit_binding()
+    if now_head != head:
+        return 'the branch moved to another commit'
+    if now_tree != tree:
+        return 'the checkout changed'
+    return None
+
+
+def limit_relaunch(path, data, action, arguments):
+    """run-manifest limit-* actions. A schedule is pending (AT > NOW) until one recovery claims
+    it once it is due, so it is never left due after a recovery saw it. Schedule, hold and claim
+    each give back the attempt `ai-recover` reserved before it could know the stop was a usage
+    limit: waiting for a reset is not a failed recovery."""
+    def number(value, usage):
+        if not re.fullmatch(r'\d{1,12}', value):
+            fail(f'Usage: run-manifest {usage}')
+        return int(value)
+
+    def clock(usage):
+        if len(arguments) > 1:
+            fail(f'Usage: run-manifest {usage}')
+        return number(arguments[0], usage) if arguments else int(time.time())
+
+    def give_back():
+        data['attempts'] = max(0, data['attempts'] - 1)
+
+    at = data.get('limit_relaunch_at')
+    count = data.get('limit_relaunches', 0)
+    if action == 'limit-schedule':
+        usage = 'limit-schedule AT CAP STAGE'
+        if len(arguments) != 3 or not limit_stage_valid(arguments[2]):
+            fail(f'Usage: run-manifest {usage}')
+        when, cap = number(arguments[0], usage), number(arguments[1], usage)
+        if at is not None:
+            fail('usage limit: a relaunch is already scheduled')
+        if count >= min(cap, 100):
+            fail(f'usage limit: already relaunched {count} time(s) in this run')
+        # Verification point: ai-recover schedules after the stop's bookkeeping was written and
+        # before any commit, so this is exactly the checkout the relaunch must find; the
+        # relaunch verifies it before it touches the checkout (ai-recover relaunch_verify).
+        start, tree = limit_binding()
+        # The stage is ai-recover's --stage (host-owned, passed by ai-pipeline's stop()): the arm
+        # reads it from here, never from the relaunch's own arguments.
+        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree,
+                    limit_stage=arguments[2])
+        # The task whose output the stopped tree is (ai-run's record); absent stays absent.
+        data.pop('limit_task', None)
+        if 'task' in data:
+            data['limit_task'] = data['task']
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count + 1)
+    elif action == 'limit-due':
+        if at is None or at > clock('limit-due [NOW]'):
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-at':
+        if arguments:
+            fail('Usage: run-manifest limit-at')
+        if at is None:
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-hold':
+        # Still waiting: the recovery gives its reservation back and restores the wait.
+        if at is None or at <= clock('limit-hold [NOW]'):
+            sys.exit(1)
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(at)
+    elif action == 'limit-claim':
+        # Due: consumed in the same write, so any later stop of this relaunch is terminal.
+        if at is None or at > clock('limit-claim [NOW]'):
+            sys.exit(1)
+        data.pop('limit_relaunch_at')
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count)
+    elif action in ('limit-verify', 'limit-arm'):
+        # Both recompute HEAD and the tree; verify is read only, arm records the exact match.
+        if arguments:
+            fail(f'Usage: run-manifest {action}')
+        if 'limit_head' not in data or 'limit_tree' not in data:
+            fail('no scheduled relaunch')
+        # Only an implementation session legitimately leaves uncommitted task work: the arm is
+        # bound to that stage first, then to the task it belongs to; no record fails closed.
+        if action == 'limit-arm' and data.get('limit_stage') != 'implementation':
+            fail('the usage-limit stop left uncommitted changes outside an implementation session')
+        if action == 'limit-arm' and 'limit_task' not in data:
+            fail('the usage-limit stop left uncommitted changes with no task recorded')
+        why = limit_mismatch(data['limit_head'], data['limit_tree'])
+        if why:
+            fail(why)
+        if action == 'limit-arm':
+            data['limit_resume'] = {'head': data['limit_head'], 'tree': data['limit_tree'],
+                                    'task': data['limit_task']}
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-armed':
+        if arguments:
+            fail('Usage: run-manifest limit-armed')
+        resume = data.get('limit_resume')
+        if resume is None or limit_mismatch(resume['head'], resume['tree']):
+            sys.exit(1)
+    elif action == 'limit-task':
+        # Read only: the task the armed tree belongs to.
+        if arguments:
+            fail('Usage: run-manifest limit-task')
+        if 'limit_resume' not in data:
+            sys.exit(1)
+        print(data['limit_resume']['task'])
+    elif action == 'limit-disarm':
+        if 'limit_resume' in data:
+            data.pop('limit_resume')
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-count':
+        print(count)
+    else:
+        fail('Unknown run-manifest action.')
+
+
 def run_manifest(arguments):
     """Host-side record of the human-approved run (outside the checkout, like review
     bindings): approved gate digest, branch, arguments and the recovery attempt budget.
@@ -1313,11 +1493,15 @@ def run_manifest(arguments):
         valid = (isinstance(data, dict) and isinstance(data.get('gate'), str)
                  and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
                  and all(isinstance(a, str) for a in data['args'])
-                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100)
+                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
+                 and ('task' not in data or task_id_valid(data['task']))
+                 and limit_fields_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
         fail('No valid run manifest; rerun ai-pipeline --approved by hand.')
+    if action.startswith('limit-'):
+        return limit_relaunch(path, data, action, arguments[1:])
     if action == 'gate':
         print(data['gate'])
     elif action == 'branch':
@@ -1336,7 +1520,23 @@ def run_manifest(arguments):
         print(data['attempts'])
     elif action == 'clear-attempts':
         data['attempts'] = 0
+        for key in ('task',) + LIMIT_FIELDS:
+            data.pop(key, None)
         atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-set':
+        # The task of the implementation session about to start. Host state written by ai-run
+        # (host code, like `outcome attempt-open`), never read from the checkout; only
+        # limit-schedule reads it.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest task-set ID')
+        data['task'] = arguments[1]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-clear':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest task-clear')
+        if 'task' in data:
+            data.pop('task')
+            atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
         # current implementation review (triage) or the current plan review (plan-revision).
@@ -1413,6 +1613,93 @@ def current_branch():
 def stage_path(branch):
     """Host-side file holding BRANCH's open stage, beside the run manifest."""
     return binding_dir() / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+PR_DRAFT_URL = re.compile(r'https://\S+/pull/\d+')
+PR_DRAFT_HOW = ('created', 'converted')
+
+
+def pr_draft_path(branch):
+    """Host-side record that the pipeline made BRANCH's pull request a draft. It lives outside
+    every checkout so an agent session cannot forge "the pipeline drafted this", in its own
+    subdirectory so a fault there is confined to it."""
+    return binding_dir() / 'pr-draft' / f'{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def pr_draft_read(branch):
+    """The record for BRANCH as a dict, or None. Anything unreadable or foreign is "not ours":
+    the pipeline never un-drafts a pull request on doubt."""
+    if not branch:
+        return None
+    try:
+        data = json.loads(pr_draft_path(branch).read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(data, dict) or data.get('branch') != branch
+            or not isinstance(data.get('url'), str) or not PR_DRAFT_URL.fullmatch(data['url'])
+            or data.get('how') not in PR_DRAFT_HOW):
+        return None
+    return data
+
+
+def pr_draft_remove(path):
+    """Durably remove the record: unlink, fsync the directory, confirm the path is gone."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    try:
+        fd = os.open(path.parent, os.O_RDONLY)
+    except FileNotFoundError:
+        fd = None
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    if fd is not None:
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            fail(f'cannot remove the draft record {path}: {error.strerror}')
+        finally:
+            os.close(fd)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    fail(f'cannot remove the draft record {path}: still present')
+
+
+def pr_draft(arguments):
+    action, *rest = arguments or ['']
+    branch = current_branch()
+    if action == 'record' and len(rest) == 2:
+        url, how = rest
+        if not PR_DRAFT_URL.fullmatch(url) or how not in PR_DRAFT_HOW:
+            fail('pr-draft record needs a pull request URL and created or converted.')
+        if not branch:
+            fail('pr-draft record needs a branch (HEAD is detached).')
+        path = pr_draft_path(branch)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic(path, json.dumps({'branch': branch, 'url': url, 'how': how, 'at': now()}) + '\n')
+    elif action == 'get' and not rest:
+        record = pr_draft_read(branch)
+        if record is None:
+            sys.exit(1)
+        print(record['url'])
+    elif action == 'clear' and not rest:
+        if branch:
+            pr_draft_remove(pr_draft_path(branch))
+    elif action == 'take' and len(rest) == 1:
+        record = pr_draft_read(branch)
+        if record is None or record['url'] != rest[0]:
+            sys.exit(1)
+        pr_draft_remove(pr_draft_path(branch))
+        print(record['how'])
+    else:
+        fail('Usage: pr-draft record URL created|converted | get | clear | take URL')
 
 
 def load_stage(branch):
@@ -1941,7 +2228,11 @@ def disputes_record(arguments):
     """Append a dispute record for every upheld answer of the verified, current re-check that
     has none yet (keyed by review digest + finding id), then rewrite the file from host state.
     The file may lag behind host state (an interrupted earlier write) but never differ from it.
-    Prints the number of records added."""
+    Prints the number of records added. `--check` writes nothing and fails unless a real call
+    would write nothing either (the armed resume admits only that: no host write while armed)."""
+    if arguments not in ([], ['--check']):
+        fail('Usage: disputes-record [--check]')
+    check = arguments == ['--check']
     records = dispute_records()
     inherited = inherited_disputes()
     actual = DISPUTES.read_text() if DISPUTES.exists() else None
@@ -1966,19 +2257,25 @@ def disputes_record(arguments):
                       'evidence': ' '.join(evidence.split()), 'answer': ' '.join(reason.split()),
                       'date': now()})
     records += added
+    rendered = render_disputes(records, inherited) if records else actual
+    if check:
+        if added or rendered != actual:
+            fail(f'{len(added)} dispute record(s) to add; .ai/reviews/disputes.md would change.')
+        print(0)
+        return
     if added:
         path = disputes_store()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
-    if records:
-        atomic(DISPUTES, render_disputes(records, inherited))
+    if rendered != actual:
+        atomic(DISPUTES, rendered)
     print(len(added))
 
 
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
-                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
+                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RELAUNCH_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                 'AI_SUPERVISE_ESCALATE_MODEL')
@@ -2248,7 +2545,11 @@ def tree_snapshot(root):
     tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
     Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
     under an uninitialised submodule, so its directory is walked on the filesystem instead;
-    a symlink at a submodule path is recorded as a link, never followed."""
+    a symlink at a submodule path is recorded as a link, never followed.
+    The usage-limit relaunch binding (worktree_digest, run-manifest limit-*) relies on this
+    covering everything, tracked bookkeeping (.ai/state.md, run-log, handoff, reviews/)
+    included: a human edit there during the wait must count, so any new skip here needs that
+    binding rethought."""
     digest = hashlib.sha256()
     try:
         head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
@@ -2274,6 +2575,10 @@ def tree_snapshot(root):
         else:
             snapshot_path(digest, name, path)
     return digest.hexdigest()
+
+
+# The tree a usage-limit relaunch resumes: deliberately the same digest, never a second one.
+worktree_digest = tree_snapshot
 
 
 def finish_summary(arguments):
@@ -3468,6 +3773,8 @@ def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
+    | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
+      interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
@@ -3565,6 +3872,14 @@ def outcome(arguments):
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
         record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
+    elif kind == 'plan':
+        revision = '--revision' in rest
+        rest = [a for a in rest if a != '--revision']
+        if len(rest) not in (3, 4) or rest[0] not in ('done', 'stopped', 'interrupted', 'timeout') \
+                or not rest[2].isdigit() or (len(rest) == 4 and not rest[3].isdigit()):
+            fail('Usage: outcome plan done|stopped|interrupted|timeout MODEL SECONDS [TASKS] [--revision]')
+        record.update(result=rest[0], model=rest[1] or 'default', seconds=int(rest[2]),
+                      tasks=int(rest[3]) if len(rest) == 4 else None, revision=revision)
     elif kind == 'catchup':
         if len(rest) != 1 or not rest[0]:
             fail('Usage: outcome catchup BRANCH')
@@ -4001,6 +4316,52 @@ def local_dir_fd(root):
     return fds[2]
 
 
+EXEC_LOG_NAME = re.compile(r'plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log')
+
+
+def exec_logged(arguments):
+    """exec-logged NAME -- CMD [ARGS...]: exec CMD with stdout/stderr on the new log NAME in
+    the pinned `.ai/local` of the current checkout, keeping this process's PID. Not a shell
+    `>"$log"`: that follows a planted symlink or blocks on a FIFO, and a second-resolution name
+    is shared by two launches. The log is created exclusively without following symlinks, so any
+    existing entry (file, symlink, FIFO) fails untouched. Errors before the dup2 reach the
+    caller's stderr; usage errors exit 2 before anything is created."""
+    if len(arguments) < 3 or arguments[1] != '--':
+        print('Usage: workflow.py exec-logged NAME -- CMD [ARGS...]', file=sys.stderr)
+        sys.exit(2)
+    name, command, args = arguments[0], arguments[2], arguments[3:]
+    if not EXEC_LOG_NAME.fullmatch(name):
+        print(f'Error: invalid log name: {name}', file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isabs(command) or not os.path.isfile(command) or not os.access(command, os.X_OK):
+        print(f'Error: not an absolute path to an executable: {command}', file=sys.stderr)
+        sys.exit(2)
+    dir_fd = local_dir_fd(checkout_root())
+    if dir_fd is None:
+        fail('.ai/local is missing or unsafe')
+    try:
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            fail(f'log {name} already exists')
+        except OSError as error:
+            fail(error.strerror or str(error))
+    finally:
+        os.close(dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail(f'log {name} is not a regular file')
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+    os.execv(command, [command, *args])
+
+
 def remove_tree(parent_fd, name):
     """Delete the directory NAME of PARENT_FD and everything below it, walking descriptors
     opened without following symlinks: an inner symlink is unlinked, never entered."""
@@ -4201,6 +4562,13 @@ def observation_update(record, action, values):
     if action == 'pause':
         needs((1, 1), 'pause NOTE')
         return {**record, 'state': 'paused', 'note': values[0]}
+    if action == 'relaunch':
+        # Waiting for a scheduled usage-limit relaunch. previous_observation keeps only the
+        # base fields, so every other action drops `relaunch_at`.
+        needs((2, 2), 'relaunch AT NOTE')
+        if not re.fullmatch(r'\d{1,12}', values[0]):
+            raise RecordError('usage: observe relaunch AT NOTE')
+        return {**record, 'state': 'paused', 'note': values[1], 'relaunch_at': int(values[0])}
     if action == 'resume':
         needs((0, 0), 'resume')
         # Only a pause is lifted: a stop or recovery recorded meanwhile stays visible.
@@ -4281,6 +4649,65 @@ def observe(arguments):
         write_record(local_fd, 'observation.json', json.dumps(record, ensure_ascii=False) + '\n')
     finally:
         close_fds(lock, root_fd, ai_fd, local_fd)
+
+
+LIMIT_STOP_ERROR = (r'(Claude|Codex) usage limit: the reset is beyond the \d+s wait budget\. '
+                    r'Rerun after it resets\.')
+
+
+def limit_stop_write(arguments):
+    """limit-stop-write AGENT RESET: record `AGENT RESET` in .ai/local/limit-stop of AI_ROOT
+    (else the current directory) through the pinned `.ai/local` and write_record, so a symlink
+    or FIFO planted at the temp or final name is replaced, never written through."""
+    if len(arguments) != 2 or not re.fullmatch(r'Claude|Codex', arguments[0]) \
+            or not re.fullmatch(r'\d{1,12}', arguments[1]):
+        fail('Usage: limit-stop-write Claude|Codex RESET')
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None:
+        fail('.ai/local is missing, a symlink or not a directory')
+    try:
+        write_record(local_fd, 'limit-stop', f'{arguments[0]} {arguments[1]}\n')
+    except RecordError as error:
+        fail(str(error))
+    finally:
+        os.close(local_fd)
+
+
+def limit_stop(arguments):
+    """limit-stop [--now EPOCH]: print `<Agent> <relaunch epoch>` when the last stop of this
+    checkout was only a usage limit beyond the wait budget (last-error is exactly that message
+    and limit-stop, written just before it, names the same agent); else exit 1 silently."""
+    if arguments and not (len(arguments) == 2 and arguments[0] == '--now'
+                          and re.fullmatch(r'\d{1,12}', arguments[1])):
+        sys.exit(1)
+    current = int(arguments[1]) if arguments else int(time.time())
+    retry = os.environ.get('AI_LIMIT_RETRY') or '1800'
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None or not re.fullmatch(r'\d{1,9}', retry):
+        close_fds(local_fd)
+        sys.exit(1)
+    try:
+        error = read_record(local_fd, 'last-error', SMALL_LIMIT)
+        record = read_record(local_fd, 'limit-stop', SMALL_LIMIT)
+    finally:
+        os.close(local_fd)
+    if error is None or record is None:
+        sys.exit(1)
+    text = error[0][:-1] if error[0].endswith('\n') else error[0]
+    message = re.fullmatch(LIMIT_STOP_ERROR, text)
+    stop = re.fullmatch(r'(Claude|Codex) (\d{1,12})\n?', record[0])
+    # A record from an earlier stop never qualifies: written just before this last-error.
+    age = error[1].st_mtime - record[1].st_mtime
+    if not message or not stop or message.group(1) != stop.group(1) or not 0 <= age <= 120:
+        sys.exit(1)
+    reset = int(stop.group(2))
+    if reset > current:
+        relaunch = reset + 60
+    elif reset == 0:
+        relaunch = current + int(retry)
+    else:
+        relaunch = current
+    print(f'{stop.group(1)} {relaunch}')
 
 
 def log_entry(line):
@@ -4435,8 +4862,12 @@ def main():
         deps_record(arguments)
     elif command == 'clear-scratch':
         clear_scratch()
+    elif command == 'exec-logged':
+        exec_logged(arguments)
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
+    elif command == 'worktree-digest':
+        print(worktree_digest(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':
@@ -4471,6 +4902,10 @@ def main():
         revision_queue_repair(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
+    elif command == 'limit-stop':
+        limit_stop(arguments)
+    elif command == 'limit-stop-write':
+        limit_stop_write(arguments)
     elif command == 'claude-text':
         claude_text(arguments)
     elif command == 'review-allowlist':
@@ -4483,6 +4918,8 @@ def main():
         outcome(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
+    elif command == 'pr-draft':
+        pr_draft(arguments)
     elif command == 'pr-title':
         pr_title(arguments)
     elif command == 'pr-body':

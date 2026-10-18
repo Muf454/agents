@@ -126,8 +126,29 @@ To write the plan without an interactive session (for example from mission contr
 objective in a file (a regular file of at most 200 KB) and run:
 
 ```bash
-.ai/bin/ai-run --plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS]
+.ai/bin/ai-plan objective.md [--revision] [--model NAME] [--session-timeout SECONDS] \
+  [--knowledge-dir DIR] [--read-dir DIR]... [--detach]
 ```
+
+`ai-plan` is the supported way to start a planning session; without `--detach` it simply becomes
+`ai-run --plan objective.md …` (same options, same process). Paths (the objective,
+`--knowledge-dir`, every `--read-dir`) are resolved against your working directory. With
+`--detach` it starts the session in the background, its output in
+`.ai/local/plan-<UTC stamp>-<8 hex>.log` (created exclusively, never through a symlink), and
+returns only once `ai-dashboard`'s record shows that session planning:
+`Planning session started: pid N, log PATH` (exit 0; also when the plan already finished
+successfully before the first check). If the session ends first otherwise (for example another
+runner holds the checkout) it prints `ended early` with the last lines of the log and exits with
+the session's status (at least 1); if the start cannot be confirmed within `AI_PLAN_ACK_SECONDS`
+(default 20) it exits 1 with `could not confirm …` and leaves the session running. Mission
+control's equivalent of a hand-run launcher is:
+
+```bash
+.ai/bin/ai-plan objective.md --read-dir ~/zWiki --read-dir ~/Projects/wt/plans \
+  --read-dir ~/Projects/wt/research --detach
+```
+
+The session limit stays 3600 seconds unless `--session-timeout` is given.
 
 One Claude session (default model `opus`, default limit 3600 seconds; the watchdog's `hung`
 warning may still fire after 45 quiet minutes) gets `.ai/prompts/plan.md`, the objective and a
@@ -256,10 +277,10 @@ commands not yet authorized. The bounded runner is the no-prompt unattended path
 | Mode | Started by | May do | May not do |
 | --- | --- | --- | --- |
 | Interactive Claude | you, `claude "$(cat .ai/prompts/implement.md)"` | Your normal permissions (may ask); works the whole queue; local checkpoint commits | Merge, deploy, push without your say-so |
-| ai-run --plan | you or mission control, `ai-run --plan objective.md` | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
+| ai-run --plan | you or mission control, `ai-plan objective.md [--detach]` (or `ai-run --plan objective.md`) | One planning session with Read/Glob/Grep and Edit/Write of the six plan records; checks the scope and the queue; dashboard record and notifications | Run a shell, edit anything else, commit, implement |
 | ai-run | you, `ai-run --approved` | One task per fresh session under `dontAsk` and `.ai/permissions.allow`; reruns the gate; commits bookkeeping and validated leftovers (secret-looking files excluded); pauses and resumes on usage limits | Change the gate, push, open PRs, merge, deploy |
 | ai-pipeline | you, `ai-pipeline --approved` | Everything `ai-run` does, plus plan review, Codex review, triage and fixes, pushing the feature branch and opening/updating the PR, notifications, `ai-recover` on a stop | Force-push, push `main`, merge, deploy, change the gate |
-| ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash | Restart or repair anything itself, edit files, push |
+| ai-watchdog | systemd user timer or you | Probes a checkout without AI, notifies, optional read-only diagnosis; `--recover` starts `ai-recover` after a crash or when a usage-limit relaunch is due | Restart or repair anything itself, edit files, push |
 | ai-dashboard | you, `ai-dashboard` | Reads the host registry and each checkout's `.ai/local/` records and shows every pipeline (read-only, advisory) | Write files, take locks, change a run, authorize anything |
 
 ## Hands-off delivery: `ai-pipeline`
@@ -339,7 +360,15 @@ tmux new -s my-app-ai
    the PR body then starts with a "Disputed findings" section, and you resolve them at
    the PR; the pipeline never resolves a dispute itself. Once you merge that PR, its
    disputes are history: a later branch inherits the unchanged file without a draft,
-   and only disputes recorded on that branch count. The PR targets `--pr-base`,
+   and only disputes recorded on that branch count. A later run whose review is clean
+   (no unresolved findings, no dispute) makes the PR ready again, but only when the
+   pipeline drafted it itself (recorded in host state, outside the checkout); a PR you
+   drafted, or one drafted with `--draft`, stays a draft ("left as draft"). An existing
+   PR whose draft state could not be read first is never counted as a pipeline draft. `--draft`
+   also revokes an earlier pipeline draft, so that PR is never made ready automatically;
+   if that record cannot be removed the run stops and names the file to delete. A human
+   re-draft between two runs is not seen: the record still says the pipeline drafted it.
+   The PR targets `--pr-base`,
    inferred from `--base` when that is a local or `origin/` branch, otherwise
    required. The review itself compares against `origin/<base>` when that is strictly
    ahead of your local `<base>` (a stale local `main` would otherwise pull already merged
@@ -397,7 +426,7 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    3 times. Usage limits pause and resume.
 2. **A Claude decision, host action.** When `ai-pipeline` stops, `ai-recover` takes over
    the same process. Hard rules escalate at once (gate, permissions, branch, review
-   integrity, plan-review findings, weekly limit, a changed gate digest). A stop during
+   integrity, plan-review findings, a usage limit beyond the wait budget that no relaunch covers, a changed gate digest). A stop during
    **review triage** is never committed as leftover work: if only workflow records changed
    since the triage started, `ai-recover` reruns and the pipeline first finishes that
    triage (checks the review it belongs to, the scope and the dispositions, then records
@@ -420,7 +449,7 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    human action over 300 characters is cut at a sentence or word boundary (never mid-word);
    the full text is then in `.ai/local/recovery-decision.txt` and the ⛔ says so.
 3. **Crashes**: `ai-watchdog --recover` starts `ai-recover` via `systemd-run` when the
-   pipeline was killed or the machine restarted.
+   pipeline was killed or the machine restarted, and when a usage-limit relaunch (below) is due.
 
 At most `AI_RECOVER_MAX` (default 2) attempts per human-started run; resumes keep the
 approved gate digest from the original `--approved` start and refuse a changed gate.
@@ -432,9 +461,23 @@ Codex never steers: it diagnoses (`--diagnose`) and reviews. Disable with
 A Claude or Codex usage/rate-limit failure doesn't end the run. The scripts read
 the reset time from the error (or wait `AI_LIMIT_RETRY`, default 1800 s), notify,
 sleep, and retry the same step. Total waiting per command is capped by
-`AI_LIMIT_MAX_WAIT` (default 28800 s); a weekly limit beyond that stops with a
-notification so you can rerun after the reset. Pauses are logged in the ignored
-`.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
+`AI_LIMIT_MAX_WAIT` (default 28800 s). A usage limit whose reset is beyond that, inside
+`ai-pipeline` with auto-recovery on, pauses instead of stopping: `ai-recover` schedules a
+relaunch for just after the reset (⏸, exit 75) and the watchdog timer installed with
+`--recover` starts it then (▶ RESUMED, no Claude decision, no recovery attempt), at most
+`AI_LIMIT_RELAUNCH_MAX` (0–9, default 2; any other value counts as 2) times per run. Past that cap, without such a timer, with
+`AI_LIMIT_RELAUNCH_MAX=0` or outside the pipeline it stops with a notification so you can rerun
+after the reset (it records the agent and reset time in `.ai/local/limit-stop`). A relaunch
+first checks that HEAD and the whole checkout (submodules included) are exactly as the stop left
+them: any change during the wait, even to a bookkeeping file, stops it with nothing committed.
+A limit stop of an implementation session keeps its uncommitted work, and the relaunch continues it
+once, going straight back to implementation (no plan review re-run on the preserved work): the task's
+own session reconciles it, or, when the task was already DONE, the runner validates and commits
+it (`checkpoint T… (validated; the session did not commit)`), never a recovery commit; a stop
+before that, including the resumed run's own checks of the preserved work (queue, task status,
+dependency setup), is final (⛔, nothing committed, even with auto-recovery on). Every start check
+of the resumed run accepts exactly that preserved tree, so a settled re-check or recorded disputes
+don't block it; only inconsistent uncommitted review records stop it, before anything is written. Pauses are logged in the ignored `.ai/local/pauses.log`. Most usage is Claude's (implementation); Codex mostly reviews.
 A Codex limit on a review doesn't pause by default: see "Claude fallback reviewer".
 
 ### Claude fallback reviewer
@@ -503,7 +546,10 @@ implementation attempts, and a checkout never started again keeps its record pen
 (epoch seconds, informational); for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
 line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
-`reviewed_head` instead (omitted when the re-check report cannot be verified).
+`reviewed_head` instead (omitted when the re-check report cannot be verified). Each planning
+session (`ai-plan`, `ai-run --plan`) appends a `plan` line (result done, stopped, interrupted or
+timeout; model, seconds, task count when it wrote a plan, `revision`); a written plan also adds a
+`plan written:` row to `.ai/run-log.md`, left uncommitted with the plan. The report ignores `plan` lines.
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
 category (per task) and per model and model/category (per attempt, each credited to the
 model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks
@@ -541,6 +587,11 @@ run (a recovery resume keeps the approved values):
 | `AI_SUPERVISE_ESCALATE_ROUND` | `3` | `1`-`9` |
 | `AI_SUPERVISE_ESCALATE_MODEL` | `claude-fable-5-1` | `[A-Za-z0-9._:-]{1,64}` |
 
+Limits and planning (not supervisor settings): `AI_LIMIT_RELAUNCH_MAX` (config or environment;
+`0`-`9`, default `2`, `0` turns the usage-limit relaunch off; see Usage limits) and
+`AI_PLAN_ACK_SECONDS` (environment only, not read from the config file; `1`-`999999`, default `20`:
+how long `ai-plan --detach` waits for the planning session to start, see Plan).
+
 ### Notifications
 
 Set `AI_NOTIFY_CMD` to any command; it runs via `bash -c` with the message as `$1`
@@ -549,7 +600,7 @@ subscribe to a hard-to-guess topic, and put this in
 `~/.config/ai-toolkit/config` (read, never sourced; only `AI_NOTIFY_CMD`, `AI_MODEL`,
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
-`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
+`AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_LIMIT_RELAUNCH_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
 `AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
 
 ```bash
@@ -824,6 +875,7 @@ Outside `ai-pipeline`, nothing in this toolkit pushes. The pipeline pushes the f
 | `scripts/ai-status` | Compact status derived from records, task queue, Git, validation |
 | `scripts/ai-check` | Bounded full gate, logs, and content-bound evidence |
 | `scripts/ai-run` | Bounded fresh-session implementation loop and checkpoint checks |
+| `scripts/ai-plan` | Starts a headless planning session (`ai-run --plan`), in the foreground or `--detach`ed with a confirmed start (the detached log is written by `scripts/lib/workflow.py exec-logged`) |
 | `scripts/ai-review` | Revision-bound, read-only Codex review (Claude fallback at its limit) and report preservation |
 | `scripts/ai-pipeline` | Hands-off implement → review → triage/fix → PR → notify, resumable |
 | `scripts/ai-dashboard` | Read-only view of every pipeline on the machine (TUI, `--once`, `--json`, `--all`); see [Watch all pipelines](#watch-all-pipelines) |
