@@ -2286,3 +2286,76 @@ DONE 2026-10-18 (claude, runner session). Audit against the code; wording fixed,
 - Validation: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `.ai/bin/ai-check` PASS (962 tests, 617.3 s,
   exit 0; the call passed the 600 s foreground limit and finished in the background).
 
+## T020 — Draft ownership only from a confirmed ready PR (R15, review round 1 M1)
+Status: TODO
+Dependencies: T009
+Model: opus
+
+### Goal
+The pipeline records `pr-draft … converted` only when it established that the existing PR was
+ready (`isDraft == false`) before it converted it. An unknown initial draft state never creates
+ownership, so a human draft can never be un-drafted later because of a failed lookup.
+
+### Implementation notes
+- `scripts/ai-pipeline` ~667–674: the initial `is_draft` lookup suppresses failure (`|| true`);
+  an empty or unparsable result currently takes the convert branch and records `converted`.
+- Keep the fail-toward-draft behaviour: with `make_draft=yes` and an unknown state the pipeline
+  may still run `gh pr ready --undo` and confirm draft, but it records ownership only when the
+  initial lookup succeeded and returned exactly `false`. Print a short note when ownership is not
+  recorded because the prior state was unknown.
+- Check the other branches (`make_draft=no`) for the same unknown-state path: an unknown state
+  must neither take nor clear the record.
+- README / `docs/workflow.md`: the un-draft rule mentions that an unknown prior state never
+  counts as a pipeline draft (only where that rule is described).
+
+### Likely affected modules
+scripts/ai-pipeline, tests/test_workflow.py, README.md, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_pr_undraft_unknown_state_never_records_ownership`: a human-drafted existing
+  PR, the first `isDraft` lookup fails, a policy-draft run → no `pr-draft` record; a later clean
+  run leaves the PR draft (`left as draft`) and never calls `gh pr ready` without `--undo`.
+- Existing `test_pr_undraft_*` still pass (a confirmed-ready PR converted by policy is still
+  recorded and later made ready).
+- Mutation: restoring the record on an unknown state fails the new test.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k pr_undraft` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T021 — `ai-plan --detach` reports a plan that finished before acknowledgement as success (DB-04, review round 1 N1)
+Status: TODO
+Dependencies: T006
+Model: opus
+
+### Goal
+A detached planning session that completes successfully between two acknowledgement polls is
+reported as started (PID and log, exit 0), not as "ended early".
+
+### Implementation notes
+- `scripts/ai-plan` ~72–87: `started` accepts only `planning/active` for the PID. When the
+  child has exited, `wait` returned 0 and the observation is `stage == planning`,
+  `state == done` with the same `pid`, print the PID and log as on a confirmed start and exit 0.
+- A non-zero exit, or exit 0 without a matching `planning/done` observation, stays an
+  "ended early" failure (exit status unchanged).
+- Same plan-review history: P21 (plan review round 9).
+
+### Likely affected modules
+scripts/ai-plan, tests/test_workflow.py, README.md (only if the ai-plan row describes the exit)
+
+### Acceptance criteria
+- Regression `test_ai_plan_detach_finished_before_ack_is_success`: the fake runner writes
+  `planning/done` with its PID and exits 0 before the parent's first poll → exit 0, output names
+  the PID and the log.
+- Regression `test_ai_plan_detach_exit_zero_without_done_is_failure`: exit 0 with no matching
+  observation → exit 1 with `ended early`.
+- Existing `test_ai_plan_*` still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k ai_plan` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
