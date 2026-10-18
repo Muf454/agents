@@ -260,8 +260,10 @@ def observation_of(local_fd, seen):
     if not isinstance(data, dict) or data.get('stage') not in STAGES \
             or data.get('state') not in OBSERVATION_STATES:
         return None
+    relaunch = data.get('relaunch_at')
     return {'stage': data['stage'], 'state': data['state'], 'detail': text_field(data.get('detail')),
-            'note': text_field(data.get('note'), 400), 'since': text_field(data.get('since'), 40)}
+            'note': text_field(data.get('note'), 400), 'since': text_field(data.get('since'), 40),
+            'relaunch_at': relaunch if isinstance(relaunch, int) and not isinstance(relaunch, bool) else None}
 
 
 def events_of(local_fd, seen):
@@ -386,6 +388,11 @@ def inspect(checkout, runners, now, source=None):
             status = state if state in ('paused', 'recovering') else 'running'
         elif state == 'stopped' or errored:
             status = 'needs_you'
+        elif state == 'paused' and observation['relaunch_at'] is not None:
+            status = 'paused'  # waiting for the scheduled usage-limit relaunch
+        elif observation and observation['stage'] == 'planning' and state in ('active', 'paused'):
+            status = 'needs_you'
+            run['last_error'] = 'planning session ended without a plan (killed?)'
         elif state == 'done':
             status = 'planned' if observation['stage'] == 'planning' else 'finished'
         else:

@@ -1200,6 +1200,13 @@ The dashboard only reads these records, and the process table through `/proc` (`
 It writes no file, takes no lock and changes no run. Liveness follows the watchdog's marker
 semantics (`pipeline.active` PID with its start time): `alive`, `crashed` (the marker names a
 dead process) or `gone`. Text from the records is sanitised before it reaches the terminal.
+For a `gone` run the status is decided in this order: a `stopped` state or a `last-error`
+newer than the observation is `needs_you`; a `paused` state with an integer `relaunch_at` is
+`paused` (waiting for the scheduled usage-limit relaunch, shown as `⏸ <note>`; a plain
+`paused` state is not evidence of a relaunch, since an in-process wait writes it too); a
+`planning` stage still `active` or `paused` is `needs_you` with the note `planning session
+ended without a plan (killed?)` (the Plan box is drawn stopped); otherwise `planned`,
+`finished` or `idle` as before.
 Each run also reports `pr` (URL from state.md's `Next action:` line or the last `pull request
 ready:` run-log line) and `reviews` (`plan`/`code` finding counts and short reviewed HEAD from
 `.ai/reviews/plan.md` and `current.md`, from the `Plan review of plan digest …; HEAD …;` or

@@ -1685,7 +1685,7 @@ contract; README "Recovery"; vault flow chart node ("through every start check o
 run").
 
 ## T004 — Dashboard: a run waiting for its limit relaunch shows paused; a killed planning session shows as a stop (MC-01, DB-04)
-Status: TODO
+Status: DONE
 Dependencies: T003
 Model: sonnet
 
@@ -1743,6 +1743,11 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard_plan` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+`observation_of` returns `relaunch_at`; `inspect` (scripts/lib/dashboard.py) now maps a gone run with
+`paused` + int `relaunch_at` to `paused` and a gone planning session still `active`/`paused` to
+`needs_you` with the "ended without a plan (killed?)" note, after the stopped/errored rule. Tests:
+3 `dashboard_limit_relaunch_*`, 13 `dashboard_plan*` (6 new, all pass); gate `ai-check` PASS (923
+tests). docs/workflow.md updated. Vault flow chart mentions the dashboard once, not its statuses; flow unchanged.
 
 
 ## T005 — `ai-run --plan --read-dir DIR`: read-only reference directories for the planning session (DB-04)

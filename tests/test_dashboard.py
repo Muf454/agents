@@ -1169,6 +1169,59 @@ class RenderTest(DashboardTest):
         self.assertEqual((runs['live']['status'], runs['live']['stage']), ('running', 'planning'))
         self.assertIn('║ Plan ║', self.run_cli('--once').stdout)
 
+    RELAUNCH = ('relaunch', '1700000000', 'Claude limit · relaunch after Sat 09:05')
+
+    def test_dashboard_limit_relaunch_gone_run_is_paused_with_note(self):
+        checkout = self.planned_checkout('waiting', ('step', 'build', 'T003'), self.RELAUNCH)
+        run = self.json_runs()['waiting']
+        self.assertEqual((run['status'], run['stage']), ('paused', 'build'))
+        view = self.run_cli('--once').stdout
+        self.assertIn('⏸', view)
+        self.assertIn('Claude limit · relaunch after Sat 09:05', view)
+        self.assertEqual(run['observation']['relaunch_at'], 1700000000)
+        self.assertTrue(checkout.exists())
+
+    def test_dashboard_limit_relaunch_newer_error_wins(self):
+        checkout = self.planned_checkout('errored', ('step', 'build', 'T003'), self.RELAUNCH)
+        error = checkout / '.ai/local/last-error'
+        error.write_text('relaunch refused: tree changed\n')
+        future = time.time() + 60
+        os.utime(error, (future, future))
+        run = self.json_runs()['errored']
+        self.assertEqual(run['status'], 'needs_you')
+        self.assertEqual(run['last_error'], 'relaunch refused: tree changed')
+
+    def test_dashboard_limit_relaunch_in_process_pause_without_schedule_stays_idle(self):
+        self.planned_checkout('inproc', ('step', 'build', 'T003'), ('pause', 'Claude until Sat 09:05'))
+        self.assertEqual(self.json_runs()['inproc']['status'], 'idle')
+
+    def test_dashboard_plan_killed_in_pause_needs_you(self):
+        self.planned_checkout('pplan', ('step', 'planning', 'opus · first plan'),
+                              ('pause', 'Claude until Sat 09:05'))
+        run = self.json_runs()['pplan']
+        self.assertEqual(run['status'], 'needs_you')
+        self.assertIn('planning session ended without a plan', run['last_error'])
+
+    def test_dashboard_plan_killed_session_shows_stop_on_plan_box(self):
+        self.planned_checkout('killed', ('step', 'planning', 'opus · first plan'))
+        run = self.json_runs()['killed']
+        self.assertEqual((run['status'], run['stage']), ('needs_you', 'planning'))
+        self.assertIn('planning session ended without a plan', run['last_error'])
+        lines = self.view(run)
+        self.assertIn(('║ Plan ║', 'stopped'), styles(lines))
+        self.assertTrue(any('⛔' in line and 'planning session ended without a plan' in line
+                            for line in plain(lines)))
+        self.assertTrue(plain(self.view(run, 119))[3].startswith('  ✗Plan ·PlanCheck'))
+
+    def test_dashboard_plan_killed_and_relaunch_runs_fit_every_width(self):
+        self.planned_checkout('waiting', ('step', 'build', 'T003'), self.RELAUNCH)
+        self.planned_checkout('killed', ('step', 'planning', 'opus · first plan'))
+        for name, run in self.json_runs().items():
+            for width in range(40, 201):
+                for line in plain(render_lines(run, width, expanded=frozenset({run['checkout']}))):
+                    self.assertLessEqual(dash.cols(line), width, (name, width, line))
+            self.assertNotIn('…', ''.join(plain(self.view(run, 120))[3:6]))
+
     def test_dashboard_plan_recheck_stays_in_the_triage_box(self):
         lines = self.view(fake_run('recheck'))
         self.assertIn(('║ Re-check ║', 'active_codex'), styles(lines))
