@@ -50,6 +50,7 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T013: `-k exec_logged` 7 OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s).
 T019: `-k limit_relaunch_consume` 10 OK, `-k limit_relaunch` 85 OK, `-k recovery` 70 OK,
 `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (902 tests, 561.5 s). Mutation: moving
 `limit-disarm` to the top of the consumer fails the five terminal cases and the span test.
@@ -127,7 +128,7 @@ the task named).
 - `test_limit_relaunch_terminal_*` (T018: a stop of the resumed run while the tree is armed is one ⛔ with nothing committed and no recovery decision session, also with auto-recovery on; the relaunch itself and stops after the disarm are unaffected).
 - `test_limit_relaunch_consume_*` (T019: ai-run's own checks of the preserved work, another task newly DONE, a wrong next task, a blocked or unknown bound task, a failing dependency setup, stop terminal with auto-recovery on and the arm retained; the disarm is the last statement before the checkpoint or the session).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
-- `test_exec_logged_*` (T013: detached log created exclusively, no symlink/FIFO followed).
+- `test_exec_logged_*` (T013: both streams in a new 0600 log in `.ai/local` with the launcher's PID kept; an existing symlink, FIFO (no blocking) or file at the name exits 1 untouched and the command never runs; a symlinked or missing `.ai/local` exits 1; two concurrent launches get their own logs; a bad name or relative command exits 2 with nothing created).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
 - `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006, incl. first use in a fresh install where `.ai/local` does not exist yet, and relative `--read-dir`/`--knowledge-dir` from a subdirectory), `test_plan_outcome_*` (T007).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
@@ -154,4 +155,5 @@ ai-run's consumer (every check armed, `limit-disarm` last before the act; no cod
 pinned it with `test_limit_relaunch_consume_*`. T015: the armed-tree acceptance contract (comment
 block before ai-pipeline's start check), `armed_resume`/`clean_or_armed` shared in
 `lib/common.sh`, no tracked write while armed (ai-run's stop handler, `disputes-record --check`),
-the `test_limit_relaunch_accept_*` matrix. Next: the queue's next task.
+the `test_limit_relaunch_accept_*` matrix. T013: `workflow.py exec-logged NAME -- CMD` (the
+detached log for T006's `ai-plan --detach`). Next: the queue's next task.

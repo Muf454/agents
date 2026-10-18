@@ -1807,7 +1807,7 @@ Ran 12 OK; `.ai/bin/ai-check` Ran 926 tests OK. Flow chart unchanged (T006 owns 
 
 
 ## T013 — `workflow.py exec-logged`: a detached runner's log created exclusively in the pinned `.ai/local` (DB-04, plan review round 2 P8)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -1855,7 +1855,17 @@ Targeted: `python3 -m unittest discover -s tests -k exec_logged` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-
+DONE 2026-10-18. `exec_logged` in scripts/lib/workflow.py (next to `local_dir_fd`), registered
+in `main()` as `exec-logged`. Usage errors (no `--`, NAME not matching `EXEC_LOG_NAME`, CMD not an
+absolute executable path) exit 2 before `.ai/local` is opened; a missing/unsafe `.ai/local`, an
+existing entry (`FileExistsError`: file, symlink, FIFO) or another `OSError` exit 1 through
+`fail`; the fd is checked regular, `O_NONBLOCK` cleared, dup2'd to 1 and 2, then `execv`.
+Tests: 7 `test_exec_logged_*` in tests/test_workflow.py (success with PID and mode 0600,
+symlink to an outside sentinel, FIFO within `SHORT_TIMEOUT`, symlinked and missing `.ai/local`,
+existing file not truncated, two concurrent launches, `../x.log` / `plan-x.log` / `sub/…` names,
+relative and missing CMD). Validation: `python3 -m unittest discover -s tests -k exec_logged`
+Ran 7 tests OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s). No ai-plan change (T006), flow
+unchanged.
 
 ## T006 — `ai-plan PROMPT_FILE` command with a confirmed `--detach` start (DB-04)
 Status: TODO

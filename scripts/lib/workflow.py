@@ -4219,6 +4219,52 @@ def local_dir_fd(root):
     return fds[2]
 
 
+EXEC_LOG_NAME = re.compile(r'plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log')
+
+
+def exec_logged(arguments):
+    """exec-logged NAME -- CMD [ARGS...]: exec CMD with stdout/stderr on the new log NAME in
+    the pinned `.ai/local` of the current checkout, keeping this process's PID. Not a shell
+    `>"$log"`: that follows a planted symlink or blocks on a FIFO, and a second-resolution name
+    is shared by two launches. The log is created exclusively without following symlinks, so any
+    existing entry (file, symlink, FIFO) fails untouched. Errors before the dup2 reach the
+    caller's stderr; usage errors exit 2 before anything is created."""
+    if len(arguments) < 3 or arguments[1] != '--':
+        print('Usage: workflow.py exec-logged NAME -- CMD [ARGS...]', file=sys.stderr)
+        sys.exit(2)
+    name, command, args = arguments[0], arguments[2], arguments[3:]
+    if not EXEC_LOG_NAME.fullmatch(name):
+        print(f'Error: invalid log name: {name}', file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isabs(command) or not os.path.isfile(command) or not os.access(command, os.X_OK):
+        print(f'Error: not an absolute path to an executable: {command}', file=sys.stderr)
+        sys.exit(2)
+    dir_fd = local_dir_fd(checkout_root())
+    if dir_fd is None:
+        fail('.ai/local is missing or unsafe')
+    try:
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            fail(f'log {name} already exists')
+        except OSError as error:
+            fail(error.strerror or str(error))
+    finally:
+        os.close(dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail(f'log {name} is not a regular file')
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+    os.execv(command, [command, *args])
+
+
 def remove_tree(parent_fd, name):
     """Delete the directory NAME of PARENT_FD and everything below it, walking descriptors
     opened without following symlinks: an inner symlink is unlinked, never entered."""
@@ -4719,6 +4765,8 @@ def main():
         deps_record(arguments)
     elif command == 'clear-scratch':
         clear_scratch()
+    elif command == 'exec-logged':
+        exec_logged(arguments)
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
     elif command == 'worktree-digest':

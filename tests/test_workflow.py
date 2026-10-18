@@ -2304,6 +2304,104 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.stdout + result.stderr, '')
         self.assertFalse(scratch.exists())
 
+    EXEC_LOG = 'plan-20261018T120000Z-0123abcd.log'
+
+    def exec_logged_fixture(self):
+        """A checkout with `.ai/local` and an executable script that leaves a marker, prints its
+        PID to stdout and a line to stderr."""
+        (self.project / '.ai/local').mkdir(parents=True)
+        self.exec_marker = self.base / 'exec-ran'
+        script = self.base / 'exec-script'
+        script.write_text(f'#!/bin/sh\ntouch "{self.exec_marker}"\necho "pid $$"\necho "to stderr" >&2\n')
+        os.chmod(script, 0o700)
+        return script
+
+    def exec_logged(self, name, script, expected=1):
+        return self.helper('exec-logged', name, '--', str(script), expected=expected)
+
+    def test_exec_logged_writes_both_streams_and_keeps_the_pid(self):
+        script = self.exec_logged_fixture()
+        process = subprocess.Popen(['python3', str(HELPER), 'exec-logged', self.EXEC_LOG, '--', str(script)],
+                                   cwd=self.project, env=self.env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        out, err = process.communicate(timeout=COMMAND_TIMEOUT)
+        self.assertEqual(process.returncode, 0, out + err)
+        self.assertEqual(out + err, '')
+        log = self.project / '.ai/local' / self.EXEC_LOG
+        self.assertEqual(log.read_text().splitlines(), [f'pid {process.pid}', 'to stderr'])
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_exec_logged_refuses_a_symlink_without_following_it(self):
+        script = self.exec_logged_fixture()
+        sentinel = self.base / 'sentinel'
+        sentinel.write_bytes(b'keep me\n')
+        (self.project / '.ai/local' / self.EXEC_LOG).symlink_to(sentinel)
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('already exists', result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b'keep me\n')
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_refuses_a_fifo_without_blocking(self):
+        script = self.exec_logged_fixture()
+        os.mkfifo(self.project / '.ai/local' / self.EXEC_LOG)
+        started = time.monotonic()
+        result = self.run_cmd(['python3', str(HELPER), 'exec-logged', self.EXEC_LOG, '--', str(script)],
+                              expected=1, timeout=SHORT_TIMEOUT)
+        self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+        self.assertIn('already exists', result.stderr)
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_refuses_a_symlinked_local(self):
+        script = self.exec_logged_fixture()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        local = self.project / '.ai/local'
+        local.rmdir()
+        local.symlink_to(outside)
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('.ai/local is missing or unsafe', result.stderr)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.exec_marker.exists())
+        local.unlink()
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('.ai/local is missing or unsafe', result.stderr)
+
+    def test_exec_logged_never_truncates_an_existing_file(self):
+        script = self.exec_logged_fixture()
+        log = self.project / '.ai/local' / self.EXEC_LOG
+        log.write_text('earlier run\n')
+        result = self.exec_logged(self.EXEC_LOG, script)
+        self.assertIn('already exists', result.stderr)
+        self.assertEqual(log.read_text(), 'earlier run\n')
+        self.assertFalse(self.exec_marker.exists())
+
+    def test_exec_logged_concurrent_launches_get_their_own_logs(self):
+        script = self.exec_logged_fixture()
+        names = ('plan-20261018T120000Z-00000001.log', 'plan-20261018T120000Z-00000002.log')
+        processes = [subprocess.Popen(['python3', str(HELPER), 'exec-logged', name, '--', str(script)],
+                                      cwd=self.project, env=self.env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL) for name in names]
+        for process in processes:
+            self.assertEqual(process.wait(timeout=COMMAND_TIMEOUT), 0)
+        for name, process in zip(names, processes):
+            lines = (self.project / '.ai/local' / name).read_text().splitlines()
+            self.assertEqual(lines, [f'pid {process.pid}', 'to stderr'])
+
+    def test_exec_logged_rejects_bad_names_and_a_relative_command(self):
+        script = self.exec_logged_fixture()
+        local = self.project / '.ai/local'
+        for name in ('../x.log', 'plan-x.log', f'sub/{self.EXEC_LOG}'):
+            result = self.exec_logged(name, script, expected=2)
+            self.assertIn('invalid log name', result.stderr)
+        (self.project / 'exec-script').write_bytes(script.read_bytes())
+        os.chmod(self.project / 'exec-script', 0o700)
+        result = self.exec_logged(self.EXEC_LOG, 'exec-script', expected=2)
+        self.assertIn('not an absolute path', result.stderr)
+        self.exec_logged(self.EXEC_LOG, self.base / 'missing', expected=2)
+        self.assertEqual(list(local.iterdir()), [])
+        self.assertFalse((self.base / 'x.log').exists())
+        self.assertFalse(self.exec_marker.exists())
+
     def test_scratch_clear_runs_before_and_after_each_session(self):
         self.ready()
         scratch = self.project / '.ai/local/scratch'
