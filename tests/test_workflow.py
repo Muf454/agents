@@ -266,6 +266,8 @@ if 'PLANNING CONTRACT' in prompt:
         pathlib.Path('.ai/tasks.md').write_text(queue.rstrip('\n') + '\n\n' + template.replace('TXXX', new_id))
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
+    if mode == 'plan-timeout':
+        time.sleep(30)
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
     if mode == 'plan-missing-sections':
         second = drop_sections(second)
@@ -3525,6 +3527,40 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('keep DONE tasks', self.plan_prompt())
         self.assertEqual(self.seen()[-1]['detail'], 'sonnet · revision')
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def plan_outcomes(self):
+        path = self.base / 'host-state/outcomes.jsonl'
+        records = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in records if r['kind'] == 'plan']
+
+    def test_plan_outcome_done_records_the_session_and_the_run_log_line(self):
+        self.plan_ready()
+        self.plan()
+        (record,) = self.plan_outcomes()
+        self.assertEqual((record['result'], record['model'], record['tasks'], record['revision']),
+                         ('done', 'opus', 2, False))
+        self.assertIsInstance(record['seconds'], int)
+        rows = [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if 'plan written:' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('plan written: 2 tasks (opus, first plan)', rows[0])
+        self.helper('plan-scope', self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip())
+        self.plan('--revision')
+        self.assertTrue(self.plan_outcomes()[-1]['revision'])
+        self.tool('ai-status', '--outcomes')
+
+    def test_plan_outcome_stopped_when_the_queue_is_invalid(self):
+        self.plan_ready()
+        self.plan(expected=1, MOCK_CLAUDE='plan-bad-queue')
+        (record,) = self.plan_outcomes()
+        self.assertEqual((record['result'], record['tasks']), ('stopped', None))
+        self.assertNotIn('plan written:', (self.project / '.ai/run-log.md').read_text())
+
+    def test_plan_outcome_timeout(self):
+        self.plan_ready()
+        self.plan('--session-timeout', '1', expected=1, MOCK_CLAUDE='plan-timeout')
+        (record,) = self.plan_outcomes()
+        self.assertEqual(record['result'], 'timeout')
 
     def test_plan_session_prompt_file_paths(self):
         self.plan_ready()

@@ -50,6 +50,7 @@ on 2026-10-17 (Claude planning session, unattended):
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T007: `-k plan_outcome` 3 OK, `-k outcome` 85 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (948 tests, 569.5 s).
 T006: `-k ai_plan` 12 OK, `-k setup` 30 OK, `-k Docs` 3 OK, `-k script_modes` 1 OK;
 `.ai/bin/ai-check` PASS (945 tests, 591.1 s).
 T013: `-k exec_logged` 7 OK; `.ai/bin/ai-check` PASS (933 tests, 558.9 s).
@@ -93,8 +94,7 @@ continues uncommitted task work in its own session or the validated checkpoint; 
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
 stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
 every start check of the resumed run"; T006: the plan node says `ai-plan objective.md` with
-`--detach` for mission control, the 📝 notifications row names `ai-plan`). Still to be updated by T007 (outcome log bullet)
-and T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
+`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. Still to be updated by T009 (un-draft rule) in `~/zWiki/zWiki/20 Projects/agents/agents-flow.md`; T010 audits it.
 
 ## Manual testing for the human
 
@@ -133,7 +133,7 @@ the task named).
 - `test_limit_relaunch_accept_*` (T015: the resumed run admits the armed tree in every start-path state: re-check `none`, `verified` with and without disputes (the reviewer's scenario: one accepted, one rejected finding, the fix task limited, then reviewed and finished), an untouched queue with plan review on and off, `tasks complete` true and false; it commits nothing before ai-run consumes the arm; a `pending` re-check, an uncommitted re-check report or lost host dispute records fail closed with the tree still exactly the armed one, with auto-recovery off and on; a stop in ai-run's consumer writes no run-log line; `disputes-record --check` writes nothing; one predicate in `lib/common.sh`, one `limit-disarm`).
 - `test_exec_logged_*` (T013: both streams in a new 0600 log in `.ai/local` with the launcher's PID kept; an existing symlink, FIFO (no blocking) or file at the name exits 1 untouched and the command never runs; a symlinked or missing `.ai/local` exits 1; two concurrent launches get their own logs; a bad name or relative command exits 2 with nothing created).
 - `test_dashboard_limit_relaunch_*`, `test_dashboard_plan_killed_*` (T004).
-- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007).
+- `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007: a successful plan appends one `plan` outcome `done` with model, seconds, task count and one `plan written:` run-log row, `plan-scope` and `ai-status --outcomes` still fine; an invalid queue records `stopped`; a session timeout records `timeout`).
 - `test_pr_undraft_record_*` (T008), `test_pr_undraft_*` (T009).
 
 ## Human todos

@@ -1121,6 +1121,13 @@ attempt open, or at the append for an attempt without one, from `attempt-seq` be
 gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
 order key). Failures to write are reported and never stop the run.
 
+A planning session (`ai-run --plan`, so `ai-plan` too) writes one `plan` line: `outcome plan
+RESULT MODEL SECONDS [TASKS] [--revision]`, RESULT `done`, `stopped`, `interrupted` or `timeout`
+(`stopped`, `interrupted` and `timeout` come from the exit handler while the gate is intact;
+SECONDS is 0 when the session never started; TASKS only on `done`). On `done`, `ai-run` also
+appends a `plan written: N tasks (MODEL, first plan|revision)` row to `.ai/run-log.md`, left
+uncommitted beside the plan (`plan-scope` allows the run log). `outcomes_report` ignores the kind.
+
 Every line goes through `append_outcome`: on a read-write `O_APPEND` descriptor it takes
 `flock(LOCK_EX)` (so the tail check and the write are one step for every writer using the
 helper, across checkouts), then one `write`, prefixed with a newline when the log does not end

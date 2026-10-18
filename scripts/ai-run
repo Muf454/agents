@@ -211,6 +211,12 @@ on_exit() {
   fi
   if [[ "$finished" != yes ]]; then
     if [[ "$active_task" == planning && "$gate_ok" == yes ]]; then
+      plan_result=stopped
+      if (( code == 130 || code == 143 )); then plan_result=interrupted
+      elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then plan_result=timeout
+      fi
+      ai_helper outcome plan "$plan_result" "${plan_model:-opus}" "$(( ${plan_started:+SECONDS - plan_started} + 0 ))" \
+        $([[ "${plan_revision:-}" != yes ]] || printf -- '--revision') 2>/dev/null || true
       ai_observe stop plan "$(head -n 1 .ai/local/last-error 2>/dev/null || echo "exit $code")"
     fi
     if [[ -n "${revision_started:-}" && "$gate_ok" == yes ]]; then
@@ -381,6 +387,7 @@ if [[ -n "$plan_file" ]]; then
   if [[ -f .ai/tasks.md ]]; then cp -- .ai/tasks.md "$plan_baseline" || ai_die 'Planning: cannot copy the task queue.'
   else rm -f -- "$plan_baseline"
   fi
+  plan_started=$SECONDS
   claude_session "$prompt" "$plan_model" Read,Glob,Grep,Edit,Write "${plan_allowed[@]}"
   ai_branch
   plan_scope "$since"
@@ -397,6 +404,10 @@ if [[ -n "$plan_file" ]]; then
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'
   ai_observe planned "$plan_total tasks"
+  ai_helper outcome plan done "$plan_model" "$(( SECONDS - plan_started ))" "$plan_total" \
+    $([[ "$plan_revision" != yes ]] || printf -- '--revision') || \
+    printf 'Note: could not record the planning outcome.\n' >&2
+  ai_log planning "plan written: $plan_total tasks ($plan_model, $plan_kind)" PASS 'Plan left uncommitted for review'
   ai_notify "📝 Plan ready on $AI_START_BRANCH: $plan_total tasks. Review and commit it, then start ai-pipeline --approved."
   finished=yes
   printf 'Plan ready on %s: %s tasks. Review and commit it, then start ai-pipeline --approved.\n' \

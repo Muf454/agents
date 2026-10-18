@@ -3686,6 +3686,8 @@ def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
+    | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
+      interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
@@ -3783,6 +3785,14 @@ def outcome(arguments):
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
         record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
+    elif kind == 'plan':
+        revision = '--revision' in rest
+        rest = [a for a in rest if a != '--revision']
+        if len(rest) not in (3, 4) or rest[0] not in ('done', 'stopped', 'interrupted', 'timeout') \
+                or not rest[2].isdigit() or (len(rest) == 4 and not rest[3].isdigit()):
+            fail('Usage: outcome plan done|stopped|interrupted|timeout MODEL SECONDS [TASKS] [--revision]')
+        record.update(result=rest[0], model=rest[1] or 'default', seconds=int(rest[2]),
+                      tasks=int(rest[3]) if len(rest) == 4 else None, revision=revision)
     elif kind == 'catchup':
         if len(rest) != 1 or not rest[0]:
             fail('Usage: outcome catchup BRANCH')

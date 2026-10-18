@@ -537,7 +537,10 @@ implementation attempts, and a checkout never started again keeps its record pen
 (epoch seconds, informational); for reviews: mode, reviewer
 (codex, claude-fallback, claude), model, effort, finding counts, duration; a re-check
 line carries `upheld_blocker`, `upheld_major`, `withdrawn_blocker`, `withdrawn_major` and
-`reviewed_head` instead (omitted when the re-check report cannot be verified).
+`reviewed_head` instead (omitted when the re-check report cannot be verified). Each planning
+session (`ai-plan`, `ai-run --plan`) appends a `plan` line (result done, stopped, interrupted or
+timeout; model, seconds, task count when it wrote a plan, `revision`); a written plan also adds a
+`plan written:` row to `.ai/run-log.md`, left uncommitted with the plan. The report ignores `plan` lines.
 `.ai/bin/ai-status --outcomes [FILE...]` prints first-time pass rates and attempts per
 category (per task) and per model and model/category (per attempt, each credited to the
 model that ran it), findings per reviewer and model, upheld/withdrawn totals of re-checks

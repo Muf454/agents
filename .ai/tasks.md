@@ -2003,7 +2003,7 @@ all plan-stage tests pass in the gate. Gate:
 945 tests, 1 failure = the script-mode test above (nothing else).
 
 ## T007 — Planning sessions in the outcome log and the run log (DB-04, logging)
-Status: TODO
+Status: DONE
 Dependencies: T006
 Model: sonnet
 
@@ -2049,6 +2049,11 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE. `outcome plan RESULT MODEL SECONDS [TASKS] [--revision]` in workflow.py; ai-run records
+`done` + a `plan written:` run-log row on success and `stopped`/`interrupted`/`timeout` from
+on_exit (gate intact only). Docs: README Outcome log, docs/workflow.md Outcome log, vault
+agents-flow.md bullet. Tests `test_plan_outcome_*` (3; mock gained `plan-timeout`).
+`-k plan_outcome` 3 OK, `-k outcome` 85 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (948 tests, 569.5 s).
 
 
 ## T008 — Host record of a PR the pipeline drafted (R15, helper)
