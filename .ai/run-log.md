@@ -449,3 +449,4 @@
 | 2026-10-18T07:06:08Z | runner | T020 | completed | PASS | 447e5b0 | Claude checkpointed; continuing queue |
 | 2026-10-18T07:19:30Z | claude (opus) | T021 | DONE: `ai-plan --detach` treats exit 0 plus its own `planning/done` after the child exits as a confirmed start (PID and log, exit 0); other early exits unchanged; usage, README, docs/workflow.md | PASS (ai-check 965 tests, 600.1 s, finished in the background past the 600 s tool timeout; -k ai_plan 14 OK) | parent 777e1d5 | Fake ai-run never writes `planning/active`, so the exit branch is always exercised; flow chart unchanged |
 | 2026-10-18T07:30:19Z | runner | T021 | completed | PASS | 82f4abb | Claude checkpointed; continuing queue |
+| 2026-10-18T07:40:16Z | runner | none | queue complete; ready for independent review | PASS | d9b9504 | Human acceptance remains |
