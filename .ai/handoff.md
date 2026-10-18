@@ -17,7 +17,14 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
   checkout, claims `timeout-rerun`, and then commits the work through `commit_validated` (the
   former `commit_and_rerun` body: deps, full gate, checkpoint guard, recovery checkpoint, verify)
   and resumes, without a decision session. A second timeout of that task in the run is ⛔ `timed
-  out again after one commit-and-rerun`. Docs and flow chart: T026.
+  out again after one commit-and-rerun`.
+- T026: six `test_timeout_rerun_unchanged_*` tests pin the neighbouring cases (gate fails on the
+  partial work, task not marked, non-timeout exit, `AI_AUTO_RECOVER=0`, spent attempt budget,
+  only bookkeeping left): all keep today's behaviour. One fix in `ai-recover`: the rule's WHY now
+  reads `the T session timed out with uncommitted partial work`, because it also prefixes the
+  failing-gate ⛔, which used to say "its partial work passed the full gate; but … fails
+  validation". README "Recovery", docs/workflow.md (recovery contract paragraph, one sentence in
+  "Interruption, limits, and recovery") and the vault flow chart describe the rule.
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
@@ -41,6 +48,8 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
+After T026: `.ai/bin/ai-check` PASS (986 tests, 630.2 s); `-k timeout_rerun` 12 OK, `-k Docs` 3 OK,
+`-k flow_this_repo` 1 OK.
 After T025: `.ai/bin/ai-check` PASS (980 tests, 661.3 s); `-k timeout_rerun` 6 OK, `-k recovery` 72 OK.
 After T024: `.ai/bin/ai-check` PASS (978 tests, 618.6 s); `-k timeout_rerun_manifest` 4 OK,
 `-k limit_relaunch_record` 7 OK. After T023: `-k session_gate_allowance` 5 OK, `-k flow_this_repo` 1 OK,
@@ -60,7 +69,8 @@ After T024: `.ai/bin/ai-check` PASS (978 tests, 618.6 s); `-k timeout_rerun_mani
 
 ## Flow chart
 Flow chart updated (T023: vault `agents-flow.md` "Inside one task" (session limit with the gate allowance,
-timed host gate)). T026 (timeout rerun) changes the flow next. T026 sets this line to "Flow chart updated (…)".
+timed host gate); T026: "When something goes wrong" (session timeout on an IN_PROGRESS task: gate →
+recovery checkpoint → rerun once per task, else ⛔, before the Claude decision)).
 
 ## Manual testing for the human
 
@@ -95,8 +105,8 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 - After merge: the upgrades and timer reinstall above; tick FL-28 to FL-31 in the vault backlog
   (sessions never tick it).
 - Vault: this planning session could edit only `.ai/` files, so it left no hub Log line. T023,
-  T026 and T033 add theirs.
+  T026 and T033 add theirs (T026's is in).
 
 ## Next action
-T022–T025 are DONE; T026 is next (or any task without dependencies: T027, T029, T030, T031). FL-28 runs
-T022 → T023 and T024 → T025 → T026. T032 waits for T030 and T031. T033 comes last.
+T022–T026 are DONE (FL-28 complete); next is any task without dependencies: T027, T029, T030,
+T031. T028 waits for T027, T032 for T030 and T031. T033 comes last.

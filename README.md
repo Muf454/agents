@@ -445,6 +445,10 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    questions for you (needs-human) always escalates with those questions, even after a
    crash and before the attempt limit, and so do a failed plan-revision stage and the
    supervision limit (`AI_SUPERVISE_PLAN_ROUNDS` revisions per human-started run).
+   A **session timeout** of an implementation task that is IN_PROGRESS with uncommitted
+   work needs no decision: the host commits that work as a recovery checkpoint only if the
+   full gate passes on it, and reruns, once per task per human-started run; a failing gate or
+   a second timeout of the same task escalates.
    Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full

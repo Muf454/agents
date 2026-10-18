@@ -448,6 +448,15 @@ if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT' in prompt:
         pathlib.Path('partial.txt').write_text(f'partial work of session {count + 1}\n')
         time.sleep(30)
     mode = 'success'
+if mode in ('error-in-progress', 'timeout-committed') and 'RUNNER CONTRACT' in prompt:
+    # T001 marked IN_PROGRESS, then: -error-in-progress leaves partial work and exits 1 (not a
+    # timeout); -timeout-committed commits the mark, leaves nothing else and runs past the timeout.
+    subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'IN_PROGRESS'], check=True, stdout=subprocess.DEVNULL)
+    if mode == 'error-in-progress':
+        pathlib.Path('partial.txt').write_text('partial work of a failed session\n')
+        sys.exit(1)
+    subprocess.run(['git', 'commit', '-qm', 'start T001', '--', '.ai/tasks.md'], check=True)
+    time.sleep(30)
 if mode == 'self-kill':
     os.kill(os.getpid(), signal.SIGKILL)
 if mode == 'sigkill-runner':
@@ -5171,6 +5180,85 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('timed out again after one commit-and-rerun', notes)
         self.assertEqual(self.recovery_checkpoints(), 1)
         self.assertEqual(self.recovery_calls(), [])
+
+    # The neighbours of the timeout rule keep today's behaviour.
+    def timeout_reruns(self):
+        return json.loads(next((self.base / 'host-state').rglob('run.json')).read_text()).get('timeout_reruns')
+
+    def assert_partial_uncommitted(self):
+        self.assertEqual(self.recovery_checkpoints(), 0)
+        self.assertTrue((self.project / 'partial.txt').exists())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--', 'partial.txt']).stdout, '?? partial.txt\n')
+
+    def test_timeout_rerun_unchanged_gate_fails_on_the_partial_work(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntest ! -e partial.txt\n')
+        self.commit('a gate the partial work fails')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-once')
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('fails validation', notes)
+        self.assertNotIn('partial work passed the full gate', notes)
+        self.assert_partial_uncommitted()
+        self.assertEqual(self.timeout_reruns(), ['T001'])  # spent before the gate ran
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_timeout_rerun_unchanged_task_not_marked_in_progress(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout', MOCK_RECOVER='escalate')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('Claude exited 124 (', self.recovery_calls()[0])
+        self.assert_partial_uncommitted()
+        self.assertIsNone(self.timeout_reruns())
+
+    def test_timeout_rerun_unchanged_non_timeout_stop(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-in-progress', MOCK_RECOVER='escalate')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('Claude exited 1 (', self.recovery_calls()[0])
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        self.assert_partial_uncommitted()
+        self.assertIsNone(self.timeout_reruns())
+
+    def test_timeout_rerun_unchanged_auto_recovery_off(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='0', MOCK_CLAUDE='timeout-once')
+        self.assertIn('Claude exited 124 (', self.notifications())
+        # The watchdog's crash recovery with the run's own setting (off) and ai-run's reason.
+        (self.project / '.ai/local/last-error').write_text(
+            'Claude exited 124 (timeout/interruption/error). Preserve partial work; see .ai/local/claude-x.json.\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('auto-recovery is off', self.notifications())
+        self.assert_partial_uncommitted()
+        self.assertIsNone(self.timeout_reruns())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_timeout_rerun_unchanged_attempt_budget_spent(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='0', MOCK_CLAUDE='timeout-once')
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('already tried 0 time(s)', notes)
+        self.assert_partial_uncommitted()
+        self.assertIsNone(self.timeout_reruns())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_timeout_rerun_unchanged_only_bookkeeping_left(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-committed', MOCK_RECOVER='escalate')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertIn('Claude exited 124 (', self.recovery_calls()[0])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertEqual(self.recovery_checkpoints(), 0)
+        self.assertIsNone(self.timeout_reruns())
 
     def test_recovery_decision_parsing_is_strict(self):
         log = self.base / 'decision.json'

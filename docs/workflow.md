@@ -235,7 +235,9 @@ Limits bound new agent invocations and validation execution. GNU timeout termina
 timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
-stops and crashes. A limit beyond the wait budget stops with an unchanged message and first
+stops and crashes. A timed-out implementation session whose task is IN_PROGRESS with
+uncommitted work gets its work committed (only if the full gate passes) and one rerun per task
+per run, without a decision session (see "Session timeout on an IN_PROGRESS task"). A limit beyond the wait budget stops with an unchanged message and first
 records `<Agent> <reset epoch or 0>` in `.ai/local/limit-stop` (`workflow.py limit-stop-write`,
 through the pinned `.ai/local` and an exclusive `O_NOFOLLOW|O_NONBLOCK` temp file, never a
 shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` only when
@@ -761,6 +763,25 @@ the marker. The manifest also stores the run's effective `AI_*` settings (notify
 budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn't have are
 cleared to their defaults, and the resumed pipeline skips the user config file
 (`AI_SETTINGS_FROM_MANIFEST`).
+
+**Session timeout on an IN_PROGRESS task.** After the hard rules, the attempt limit, an open
+stage and the bookkeeping-only leftovers commit, and before the Claude decision session,
+`ai-recover` handles one case itself when all of these hold: `--stage implementation`; the
+reason starts with ai-run's `Claude exited 124 (` or `Claude exited 137 (`; `run-manifest task`
+names the session's task; `tasks status` says that task is `IN_PROGRESS`; and the checkout is
+still dirty. It first spends the task's one rerun (`run-manifest timeout-rerun TASK`), so a
+failing gate uses it too. Once per task per run: `timeout_reruns` survives resumes
+(`clear-attempts` keeps it) and only a human start drops it. A refusal escalates `the TASK
+session timed out again after one commit-and-rerun in this run.` with `Next: split the task or
+raise --session-timeout, then rerun ai-pipeline.`. Otherwise it notifies `🔧 Recovering (n/max):
+<branch>: the TASK session timed out; committing its validated partial work once and
+rerunning.` and commits exactly as `commit_and_rerun` does (dependencies, a passing `ai-check`,
+no secret-looking files, the committed tree matches the validation stamp) as `chore(ai):
+recovery checkpoint (validated leftover work)`, then resumes. A failing gate escalates `the TASK
+session timed out with uncommitted partial work; but the leftover work fails validation.` with
+the work left uncommitted. Every neighbouring case keeps the decision session or its
+escalation: a timeout before the task was marked, a non-timeout exit, a tree clean after the
+leftovers commit, `AI_AUTO_RECOVER=0` and a spent attempt budget (`test_timeout_rerun_unchanged_*`).
 
 **Usage-limit relaunch.** Right after reserving the attempt and restoring the settings,
 before any escalation, `ai-recover` decides on the manifest's relaunch schedule: *pending*

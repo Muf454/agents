@@ -334,7 +334,8 @@ if [[ $stage == implementation ]] && \
     escalate "the $task session timed out again after one commit-and-rerun in this run." \
       'split the task or raise --session-timeout, then rerun ai-pipeline.'
   ai_notify "🔧 Recovering ($attempt/$max): $branch: the $task session timed out; committing its validated partial work once and rerunning."
-  commit_validated "the $task session timed out; its partial work passed the full gate" \
+  # WHY also prefixes commit_validated's escalations ("…; but the leftover work fails validation").
+  commit_validated "the $task session timed out with uncommitted partial work" \
     'fix or discard the uncommitted work, then rerun ai-pipeline.'
   resume "the $task session timed out; its validated partial work was committed."
 fi

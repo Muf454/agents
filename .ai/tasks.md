@@ -2690,7 +2690,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
   accessible from this session).
 
 ## T026 — Timeout rerun: the cases that stay as today, docs and flow chart (FL-28 part 2, contract)
-Status: TODO
+Status: DONE
 Dependencies: T025
 Model: opus
 
@@ -2738,6 +2738,25 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+- Tests `test_timeout_rerun_unchanged_{gate_fails_on_the_partial_work,task_not_marked_in_progress,
+  non_timeout_stop,auto_recovery_off,attempt_budget_spent,only_bookkeeping_left}` (new mock modes
+  `error-in-progress`: IN_PROGRESS + `partial.txt`, exit 1; `timeout-committed`: IN_PROGRESS
+  committed, nothing else left, sleeps past the timeout). `auto_recovery_off` runs the pipeline
+  with `AI_AUTO_RECOVER=0`, then `ai-recover` as the watchdog would, with ai-run's exact reason:
+  the manifest's setting gives ⛔ `auto-recovery is off`. All cases kept today's behaviour; the
+  predicate is unchanged.
+- One narrow fix in `scripts/ai-recover`: the rule's WHY was `the T session timed out; its
+  partial work passed the full gate`, which also prefixes commit_validated's escalations, so the
+  failing-gate ⛔ read "…passed the full gate; but the leftover work fails validation". It is now
+  `the T session timed out with uncommitted partial work` (also the recovery commit's `Recovery:`
+  line). The gate-fail test asserts the old wording is gone (it failed before the fix).
+- Docs: README "Recovery" item 2 (one paragraph), docs/workflow.md "Session timeout on an
+  IN_PROGRESS task" in the recovery contract and one sentence in "Interruption, limits, and
+  recovery". Vault `agents-flow.md` "When something goes wrong": timeout decision node before the
+  Claude decision, a dated bullet, `updated: 2026-10-19`; hub Log line added. Handoff "## Flow
+  chart" line updated.
+- Evidence: `-k timeout_rerun` 12 OK; `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `.ai/bin/ai-check`
+  PASS (986 tests, 630.2 s, finished in the background past the 600 s tool timeout).
 
 
 ## T027 — The host restores a tracked script's recorded executable bit after a session (FL-29, runner)
