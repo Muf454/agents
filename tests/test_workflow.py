@@ -664,6 +664,9 @@ if args[:2] == ['pr', 'view']:
     if not os.environ.get('MOCK_GH_EXISTING'):
         sys.exit(1)
     if 'isDraft' in args:
+        failed = draft.with_name('gh-draft-lookup-failed')
+        if os.environ.get('MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE') and not failed.exists():
+            failed.touch(); sys.exit(1)
         print('true' if draft.exists() else 'false'); sys.exit(0)
     print('https://github.com/example/project/pull/7'); sys.exit(0)
 if args[:2] == ['pr', 'ready']:
@@ -9945,6 +9948,28 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
         self.assertNotIn(self.UNDRAFT, self.gh_calls())
         self.assertIn('PR is a draft set outside the pipeline; left as draft.', result.stdout)
+        self.assertTrue((self.base / 'gh-draft').exists())
+
+    def test_pr_undraft_unknown_state_never_records_ownership(self):
+        """Review round 1 M1: a failed first isDraft lookup on a human draft must not turn it
+        into a pipeline draft that a later clean run un-drafts."""
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        (self.base / 'gh-draft').touch()  # the human drafted it on GitHub
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1',
+                           MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE='1', MOCK_CODEX='major-always',
+                           MOCK_CLAUDE='triage-defer')
+        self.assertTrue((self.base / 'gh-draft-lookup-failed').exists())
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.pr_undraft_get(expected=1)
+        self.assertEqual(list((self.base / 'host-state').rglob('pr-draft/*.json')), [])
+        self.assertIn('draft state was unknown', result.stdout)
+        self.pr_undraft_human_commit()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertNotIn(self.UNDRAFT, self.gh_calls())
+        self.assertIn('left as draft', result.stdout)
         self.assertTrue((self.base / 'gh-draft').exists())
 
     def test_pr_undraft_draft_flag_is_never_recorded(self):

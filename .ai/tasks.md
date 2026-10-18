@@ -2287,7 +2287,7 @@ DONE 2026-10-18 (claude, runner session). Audit against the code; wording fixed,
   exit 0; the call passed the 600 s foreground limit and finished in the background).
 
 ## T020 — Draft ownership only from a confirmed ready PR (R15, review round 1 M1)
-Status: TODO
+Status: DONE
 Dependencies: T009
 Model: opus
 
@@ -2324,6 +2324,17 @@ Targeted: `python3 -m unittest discover -s tests -k pr_undraft` (must say `Ran N
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+2026-10-18 (claude opus): `scripts/ai-pipeline` records `pr-draft … converted` only when
+`pipeline_drafted=yes` and the first `isDraft` lookup returned exactly `false`; with an unknown
+state the conversion still runs (fail toward draft) and prints "Note: the PR draft state was
+unknown before; not recorded as a pipeline draft …". Audit of the `make_draft=no` branches: they
+compare `is_draft` with exactly `true`/`false`, so an unknown state neither takes nor clears the
+record (no change). Mock gh gained `MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE` (first `isDraft` query exits
+1). New `test_pr_undraft_unknown_state_never_records_ownership`. README and docs/workflow.md
+un-draft rule mention the unknown state; vault flow chart unchanged (its detail level does not
+cover the record). Evidence: `-k pr_undraft` Ran 15 OK; mutation (record on `pipeline_drafted`
+alone) fails the new test (`0 != 1` on `pr-draft get`); `.ai/bin/ai-check` PASS (963 tests,
+609.4 s; past the 600 s tool limit, finished in the background, exit 0).
 
 ## T021 — `ai-plan --detach` reports a plan that finished before acknowledgement as success (DB-04, review round 1 N1)
 Status: TODO

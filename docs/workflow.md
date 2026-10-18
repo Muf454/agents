@@ -688,7 +688,9 @@ protected branches are refused earlier); `gh pr view` decides create vs. edit;
 `--base` is passed when the base is a local branch; draft when `--draft` or when
 significant findings remain after the round limit, or while any dispute is recorded.
 Un-draft rule: a policy draft (findings or disputes, not `--draft`) the pipeline created or
-converted is recorded in host state (`pr-draft record`, `binding_dir()/pr-draft/`); a later
+converted is recorded in host state (`pr-draft record`, `binding_dir()/pr-draft/`); a conversion
+is recorded only when the first `isDraft` lookup returned exactly `false` (an unknown prior
+state, e.g. a failed lookup, still converts but never counts as a pipeline draft); a later
 run that needs no draft takes (consumes) that record for the PR's URL first, then runs `gh
 pr ready` and confirms `isDraft == false` (logged "pull request marked ready"). A failed
 ready warns and re-records (best effort); a record that cannot be consumed or no record

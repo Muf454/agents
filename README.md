@@ -362,7 +362,8 @@ tmux new -s my-app-ai
    and only disputes recorded on that branch count. A later run whose review is clean
    (no unresolved findings, no dispute) makes the PR ready again, but only when the
    pipeline drafted it itself (recorded in host state, outside the checkout); a PR you
-   drafted, or one drafted with `--draft`, stays a draft ("left as draft"). `--draft`
+   drafted, or one drafted with `--draft`, stays a draft ("left as draft"). An existing
+   PR whose draft state could not be read first is never counted as a pipeline draft. `--draft`
    also revokes an earlier pipeline draft, so that PR is never made ready automatically;
    if that record cannot be removed the run stops and names the file to delete. A human
    re-draft between two runs is not seen: the record still says the pipeline drafted it.

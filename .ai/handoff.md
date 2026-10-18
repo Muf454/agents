@@ -47,9 +47,14 @@ unattended). All 19 tasks are DONE (T010 is the last, the audit). The plan, by i
 - **R15** (T008–T009): the PR step un-drafts an existing draft PR only when host state records
   that the pipeline drafted it; human drafts and `--draft` runs stay draft.
 - T010: docs, flow chart and handoff audit (2026-10-18): wording fixes only, flow chart unchanged.
+- T020 (review round 1 M1): a `converted` draft record is written only when the first `isDraft`
+  lookup returned exactly `false`; an unknown prior state still converts but prints a note and
+  records nothing. T021 (N1) is next.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T020: `-k pr_undraft` 15 OK; mutation (record on an unknown state) fails the new test on the
+record assertion; `.ai/bin/ai-check` see the task result.
 T010: `-k Docs` 3 OK, `-k flow_this_repo` 1 OK; `.ai/bin/ai-check` PASS (962 tests, 617.3 s; the call passed
 the 600 s foreground limit and finished in the background, exit 0).
 T009: `-k pr_undraft` 14 OK, `-k draft` 25 OK; `.ai/bin/ai-check` PASS (962 tests, 612.9 s).
@@ -139,9 +144,10 @@ the task named).
 - `test_plan_read_dir_*` (T005: two read dirs, one through a symlink, give `--add-dir` and `Read(//…/**)` each and no Edit/Write entry, the prompt names them; a missing dir or one with `*?[]()`, `,` or a newline stops before any session; refused without `--plan`), `test_ai_plan_*` (T006: foreground equals `ai-run --plan`; `--detach` confirms the started runner's PID and log, the plan lands when it ends; a held lock gives `ended early` with the lock message; an unconfirmable start exits 1 with `could not confirm` and leaves the session running; two simultaneous launches keep separate logs; a symlinked `.ai/local` is refused before any launch and nothing outside is written; first use in a fresh install where `.ai/local` does not exist yet, foreground and detached; missing prompt and `--help`; relative `--read-dir`/`--knowledge-dir` from a subdirectory; `setup-project` installs it executable), `test_toolkit_upgrade_creates_ai_plan_executable` (T006), `test_plan_outcome_*` (T007: a successful plan appends one `plan` outcome `done` with model, seconds, task count and one `plan written:` run-log row, `plan-scope` and `ai-status --outcomes` still fine; an invalid queue records `stopped`; a session timeout records `timeout`).
 - `test_pr_undraft_record_*` (T008: record/get/clear/take round trip in the host `pr-draft` directory, per branch, unreadable means not ours, bad arguments, a directory fault keeps the record and fails).
 - `test_pr_undraft_*` (T009: a created or converted policy draft is made ready by a later clean run and the record consumed; a human draft and a `--draft` PR stay draft (`left as draft`); `--draft` revokes the record; a failed revocation stops with a hard-rule ⛔ naming the file, no `gh` change, no recovery session, and a later clean run still leaves the PR draft; a failed `gh pr ready` finishes and keeps the record; a ready PR clears a stale record).
-- Review round 1 fixes (TODO): `test_pr_undraft_unknown_state_never_records_ownership` (T020: a
-  failed initial draft lookup never records pipeline ownership, so a human draft stays draft),
-  `test_ai_plan_detach_finished_before_ack_is_success` and
+- `test_pr_undraft_unknown_state_never_records_ownership` (T020, review round 1 M1: a human
+  draft whose first `isDraft` lookup fails is still converted under policy but gets no `pr-draft`
+  record, and a later clean run leaves it draft without `gh pr ready`).
+- Review round 1 fix (TODO): `test_ai_plan_detach_finished_before_ack_is_success` and
   `test_ai_plan_detach_exit_zero_without_done_is_failure` (T021).
 
 ## Human todos

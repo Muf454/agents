@@ -445,3 +445,4 @@
 | 2026-10-18T06:35:31Z | runner | none | queue complete; ready for independent review | PASS | 143b3fc | Human acceptance remains |
 | 2026-10-18T06:39:48Z | runner | triage | stopped (exit 1); inspect state/diff before resuming | see local logs | 2a2fefa | No merge or deployment performed |
 | 2026-10-18T06:40:43Z | runner | triage | review triaged into dispositions/tasks | n/a | b895cc9 | Fix tasks run next |
+| 2026-10-18T06:55:31Z | claude (opus) | T020 | DONE: `converted` pr-draft record only after a first `isDraft` lookup of exactly `false`; unknown state still converts, prints a note, records nothing; `make_draft=no` branches audited (no change); mock `MOCK_GH_DRAFT_LOOKUP_FAIL_ONCE`; README, docs/workflow.md | PASS (ai-check 963 tests, 609.4 s, finished in the background past the 600 s tool timeout; -k pr_undraft 15 OK) | parent 89c9213 | Mutation (record without the `false` check) fails the new test; flow chart unchanged |

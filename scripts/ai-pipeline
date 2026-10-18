@@ -670,8 +670,12 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
     gh pr ready --undo "$branch" >/dev/null 2>&1 && \
       [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
       { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
-    if [[ "$pipeline_drafted" == yes ]]; then
+    # Ownership only from a confirmed ready PR: an unknown prior state (failed lookup) may have
+    # been a human draft, so it never counts as a pipeline draft.
+    if [[ "$pipeline_drafted" == yes && "$is_draft" == false ]]; then
       ai_helper pr-draft record "$url" converted || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
+    elif [[ "$pipeline_drafted" == yes ]]; then
+      printf '%s\n' 'Note: the PR draft state was unknown before; not recorded as a pipeline draft, so a later clean run leaves it draft.'
     fi
   elif [[ "$make_draft" == no && "$is_draft" == true ]]; then
     # Ready again only when the pipeline drafted it itself: the record is consumed first, so
