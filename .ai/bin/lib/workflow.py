@@ -4,6 +4,7 @@
 The shell scripts own the workflow. This module never invokes an AI agent.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -303,7 +304,7 @@ def setup(arguments):
         fail('Use setup-project from the toolkit checkout, not a target project.')
     copies = {str(p.relative_to(template_root)): p for p in sorted(template_root.rglob('*')) if p.is_file()}
     for name in ('ai-run', 'ai-pipeline', 'ai-check', 'ai-status', 'ai-review', 'ai-watchdog', 'ai-recover', 'ai-task',
-                 'ai-dashboard', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
+                 'ai-dashboard', 'ai-plan', 'lib/common.sh', 'lib/workflow.py', 'lib/watchdog.py', 'lib/dashboard.py'):
         copies[f'.ai/bin/{name}'] = toolkit / 'scripts' / name
     if args.upgrade:
         return upgrade(root, toolkit, copies, args.apply and not args.dry_run, args.force)
@@ -399,12 +400,18 @@ def task_blocks(text):
                 fence = value
             elif value[0] == fence[0] and len(value) >= len(fence):
                 fence = None
+            if current is not None:
+                current['raw'].append(line)
             continue
         if fence:
+            if current is not None:
+                current['raw'].append(line)
             continue
         heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
         if heading:
-            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': []}
+            # raw: every source line of the block, fenced lines included (plan-keeps-done).
+            current = {'id': heading.group(1), 'title': heading.group(2), 'lines': [],
+                       'heading': line, 'raw': []}
             blocks.append(current)
         elif re.match(r'^##\s+T\d', line):
             fail(f'Malformed task heading: {line}')
@@ -412,16 +419,22 @@ def task_blocks(text):
             current = None
         elif current is not None:
             current['lines'].append(line)
+            current['raw'].append(line)
     return blocks
 
 
-def tasks():
-    blocks = task_blocks(Path('.ai/tasks.md').read_text())
+REQUIRED_SECTIONS = ('Goal', 'Implementation notes', 'Likely affected modules',
+                     'Acceptance criteria', 'Validation', 'Result / notes')
+# The content-free sections `tasks fill-sections` may add, with the body inserted under the heading.
+FILLABLE_SECTIONS = {'Likely affected modules': ['(not listed)\n'], 'Result / notes': []}
+
+
+def tasks(text=None):
+    blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
         fail('Duplicate task IDs.')
-    required = ('Goal', 'Implementation notes', 'Likely affected modules',
-                'Acceptance criteria', 'Validation', 'Result / notes')
+    required = REQUIRED_SECTIONS
     for task in blocks:
         for field in ('Status', 'Dependencies'):
             values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith(field + ':')]
@@ -455,7 +468,165 @@ def tasks():
     return blocks
 
 
+def queue_segments(text):
+    """Split the queue into ('pre'|'task'|'section', key, lines) segments, same heading and fence rules as task_blocks."""
+    segments = [('pre', '', [])]
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence:
+            heading = re.match(r'^##\s+(T\d{3,})\s+[—-]\s+(.+?)\s*$', line)
+            if heading:
+                segments.append(('task', heading.group(1), []))
+            elif re.match(r'^##\s', line):
+                segments.append(('section', line.strip(), []))
+        segments[-1][2].append(line)
+    return segments
+
+
+def tasks_reorder():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    blocks = task_blocks(text)
+    ids = [task['id'] for task in blocks]
+    if len(ids) != len(set(ids)):
+        fail('Duplicate task IDs.')
+    deps = {}
+    for task in blocks:
+        values = [line.split(':', 1)[1].strip() for line in task['lines'] if line.startswith('Dependencies:')]
+        if len(values) != 1:
+            fail(f"{task['id']}: expected exactly one Dependencies: line")
+        value = values[0]
+        if value != 'none' and not re.fullmatch(r'T\d{3,}(\s*,\s*T\d{3,})*', value):
+            fail(f'{task["id"]}: Dependencies: must be "none" or task IDs separated by commas, found "{value}"')
+        listed = [] if value == 'none' else [x.strip() for x in value.split(',')]
+        for dep in listed:
+            if dep not in ids:
+                fail(f"{task['id']}: dependency {dep} is not a task in the queue")
+        if len(listed) != len(set(listed)):
+            fail(f"{task['id']}: duplicate dependencies")
+        deps[task['id']] = sorted(listed, key=ids.index)
+    order, state, stack = [], {}, []
+
+    def visit(task_id):
+        if state.get(task_id) == 'done':
+            return
+        if state.get(task_id) == 'active':
+            cycle = stack[stack.index(task_id):] + [task_id]
+            fail('dependency cycle: ' + ' -> '.join(cycle))
+        state[task_id] = 'active'
+        stack.append(task_id)
+        for dep in deps[task_id]:
+            visit(dep)
+        stack.pop()
+        state[task_id] = 'done'
+        order.append(task_id)
+
+    for task_id in ids:
+        visit(task_id)
+    if order == ids:
+        return
+    segments = queue_segments(text)
+    positions = [index for index, segment in enumerate(segments) if segment[0] == 'task']
+    first, last = positions[0], positions[-1]
+    for segment in segments[first:last]:
+        if segment[0] == 'section':
+            fail(f'cannot reorder: section "{segment[1]}" sits between tasks')
+    by_id = {key: lines for kind, key, lines in segments if kind == 'task'}
+    # Everything before the first task (including ordinary ## sections) is the preamble, kept as is.
+    out = [line for segment in segments[:first] for line in segment[2]]
+    for position, task_id in enumerate(order):
+        lines = list(by_id[task_id])
+        if position < len(order) - 1 or last < len(segments) - 1:
+            if not lines[-1].endswith('\n'):
+                lines[-1] += '\n'
+            if lines[-1].strip():
+                lines.append('\n')
+        out.extend(lines)
+    for segment in segments[last + 1:]:
+        out.extend(segment[2])
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue reordered (dependencies first): ' + ' '.join(order))
+
+
+def section_positions(lines):
+    """Line index of each exact `### <required section>` heading outside code fences."""
+    found, fence = {}, None
+    for index, line in enumerate(lines):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+        elif not fence and line.rstrip('\n') in {f'### {name}' for name in REQUIRED_SECTIONS}:
+            found.setdefault(line.rstrip('\n')[4:], index)
+    return found, fence
+
+
+def fill_task_sections(lines):
+    """Return (new lines, names added) for one TODO task block; other blocks are the caller's to skip."""
+    lines, added = list(lines), []
+    for name, body in FILLABLE_SECTIONS.items():
+        found, fence = section_positions(lines)
+        if name in found or fence:
+            continue
+        later = [found[n] for n in REQUIRED_SECTIONS[REQUIRED_SECTIONS.index(name) + 1:] if n in found]
+        if later:
+            at = min(later)
+            new = [f'### {name}\n', *body, '\n']
+            if lines[at - 1].strip():
+                new.insert(0, '\n')
+        else:
+            at = len(lines)
+            while at > 0 and not lines[at - 1].strip():
+                at -= 1
+            if lines[at - 1] and not lines[at - 1].endswith('\n'):
+                lines[at - 1] += '\n'
+            new = ['\n', f'### {name}\n', *body]
+        lines[at:at] = new
+        added.append(name)
+    return lines, added
+
+
+def tasks_fill_sections():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    out, report = [], []
+    for kind, key, lines in queue_segments(text):
+        if kind == 'task':
+            # Fenced Status: lines don't count; task_blocks ignores them too.
+            block = next((b for b in task_blocks(''.join(lines)) if b['id'] == key), None)
+            statuses = [line for line in block['lines'] if line.startswith('Status:')] if block else []
+            if len(statuses) == 1 and statuses[0].split(':', 1)[1].strip() == 'TODO':
+                lines, added = fill_task_sections(lines)
+                if added:
+                    report.append(f"{key} ({', '.join(added)})")
+        out.extend(lines)
+    if not report:
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, ''.join(out))
+    path.chmod(mode)
+    print('Task queue: added missing sections: ' + ', '.join(report))
+
+
 def task_command(arguments):
+    if arguments[0] == 'reorder':
+        tasks_reorder()
+        return
+    if arguments[0] == 'fill-sections':
+        tasks_fill_sections()
+        return
     blocks = tasks()
     action = arguments[0]
     if action == 'check':
@@ -468,6 +639,23 @@ def task_command(arguments):
         # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
         if not blocks or any(task['status'] == 'DONE' for task in blocks):
             fail('A task is already DONE (or there are no tasks).')
+    elif action == 'newly-done':
+        # Tasks DONE in the working queue but not (or absent) at REV, in file order.
+        rev = arguments[1] if len(arguments) == 2 else ''
+        if not rev or rev.startswith('-'):
+            fail('Usage: tasks newly-done REV')
+        try:
+            commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
+        except subprocess.CalledProcessError:
+            fail(f'Unknown revision: {rev}')
+        try:
+            before = git('show', f'{commit}:.ai/tasks.md').decode()
+        except subprocess.CalledProcessError:
+            before = ''  # no queue at REV: every DONE task is new
+        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+        for task in blocks:
+            if task['status'] == 'DONE' and task['id'] not in done:
+                print(task['id'])
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -809,8 +997,42 @@ def review_format_check(arguments):
         sys.exit(2)
 
 
-DISPOSITION_ROW = re.compile(r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)(?:\s*\((?:BLOCKER|MAJOR|MINOR)\))?\s*\|\s*(accepted|rejected|deferred)\s*\|'
-                             r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+# A table cell: a backslash is only ever consumed together with the character after it, so `\|`
+# can never be split into a cell ending in `\` plus a separator (letting `[^|\n]` eat the
+# backslash on backtracking would do that). An unescaped `|` still ends the cell.
+TABLE_CELL = r'((?:\\.|[^\\|\n])*?)'
+
+
+def table_cell(text):
+    """A captured table cell as a value: `\\\\` is a backslash, `\\|` a pipe (one left-to-right
+    pass, other backslashes kept), surrounding space is dropped."""
+    return re.sub(r'\\([\\|])', r'\1', text).strip()
+
+
+# The finding cell of a disposition row (FL-16: sessions write `ID (SEVERITY) title`). One
+# capturing group, the ID; a row only ever counts for its first ID. Optional severity suffix,
+# then optional title text after a separator: whitespace, or `:` right after the ID/suffix; a
+# dash (`—`, `–`, `-`) counts only after whitespace or the suffix. The title may not start with
+# `(` (so `M1 (CRITICAL)` stays unmatched) and has no unescaped `|` or newline.
+FINDING_CELL = (r'([A-Z][A-Z0-9]{0,4}-?\d+)(?:[ \t]*\((?:BLOCKER|MAJOR|MINOR)\))?'
+                r'(?:(?:[ \t]+|:[ \t]*|(?<=\))(?=[—–-]))(?![ \t]*\()(?:\\.|[^\\|\n])+)?')
+
+# `[ \t]*`, not `\s*`: a row's match must never cross a newline into the next row.
+DISPOSITION_ROW = re.compile(r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|deferred)[ \t]*\|'
+                             r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
+
+
+def unmatched_cell_hint(text, finding, row=None):
+    """For a finding without a row: name the first table line whose first cell mentions it but
+    that does not match the row pattern, and the row to write. Diagnostic only."""
+    row = row or DISPOSITION_ROW
+    mention = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(finding) + r'(?!\d)')
+    for line in text.splitlines():
+        cell = re.match(r'\|((?:\\.|[^\\|])*)', line)
+        if cell and mention.search(cell.group(1)) and not row.match(line):
+            return (f' (the row starting "| {cell.group(1).strip()[:60]} |" does not match; '
+                    f'write "| {finding} | <disposition> | <evidence> | <task> |")')
+    return ''
 # Text on the same line: `\s` would cross the newline into the table.
 CONVERGENCE_LINE = re.compile(r'^Convergence:[ \t]*[^ \t\r\n]', re.M)
 
@@ -825,7 +1047,8 @@ def start_dispositions(arguments):
 
 Review HEAD: {head}
 
-<!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
+<!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
+e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
 explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
 with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
@@ -849,13 +1072,14 @@ def triage_check(arguments):
     bound = re.search(r'^Review HEAD:\s*([0-9a-f]{7,40})\s*$', text, re.M)
     if not bound or bound.group(1) != head.group(1):
         fail('Dispositions belong to a different review.')
-    rows = {m.group(1): (m.group(2).lower(), m.group(3), m.group(4)) for m in DISPOSITION_ROW.finditer(text)}
+    rows = {m.group(1): (m.group(2).lower(), table_cell(m.group(3)), table_cell(m.group(4)))
+            for m in DISPOSITION_ROW.finditer(text)}
     queue = {t['id']: t['status'] for t in tasks()}
     accepted = deferred = 0
     for level in ('BLOCKER', 'MAJOR'):
         for finding in finding_ids(review, level):
             if finding not in rows:
-                fail(f'{level} finding {finding} has no disposition.')
+                fail(f'{level} finding {finding} has no disposition.' + unmatched_cell_hint(text, finding))
             disposition, evidence, task_ref = rows[finding]
             if disposition == 'accepted':
                 refs = set(re.findall(r'T\d{3,}', task_ref))
@@ -924,7 +1148,7 @@ def review_rounds(base, head):
                            'rows': None})
         elif subject == TRIAGE_SUBJECT and rounds and rounds[-1]['rows'] is None:
             text = committed_file(sha, '.ai/reviews/dispositions.md')
-            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), m.group(4))
+            rounds[-1]['rows'] = {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                   for m in DISPOSITION_ROW.finditer(text)}
     return rounds
 
@@ -1069,6 +1293,169 @@ def binding_dir():
     return base / 'reviews' / key
 
 
+# Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
+# used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
+# scheduled at and the armed resume binding ({"head", "tree", "task"}).
+LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
+                'limit_stage', 'limit_resume')
+
+
+def limit_stage_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'[ -~]{1,40}', value) is not None
+
+
+def task_id_valid(value):
+    return isinstance(value, str) and re.fullmatch(r'T\d{3,}', value) is not None
+
+
+def limit_fields_valid(data):
+    def hexes(value, size):
+        return isinstance(value, str) and re.fullmatch(f'[0-9a-f]{{{size}}}', value) is not None
+
+    count, at = data.get('limit_relaunches', 0), data.get('limit_relaunch_at', 0)
+    resume = data.get('limit_resume')
+    return (type(count) is int and 0 <= count <= 100 and type(at) is int and at >= 0
+            and ('limit_head' not in data or hexes(data['limit_head'], 40))
+            and ('limit_tree' not in data or hexes(data['limit_tree'], 64))
+            and ('limit_task' not in data or task_id_valid(data['limit_task']))
+            and ('limit_stage' not in data or limit_stage_valid(data['limit_stage']))
+            and ('limit_resume' not in data
+                 or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
+                     and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
+                     and task_id_valid(resume['task']))))
+
+
+def limit_binding():
+    """(HEAD, worktree digest) of the checkout: what a usage-limit relaunch is bound to."""
+    root = checkout_root()
+    try:
+        head = git('rev-parse', '--verify', '-q', 'HEAD^{commit}', cwd=root).decode().strip()
+    except subprocess.CalledProcessError:
+        fail('usage limit: the checkout has no commit to bind the relaunch to')
+    return head, worktree_digest(root)
+
+
+def limit_mismatch(head, tree):
+    """The reason the checkout differs from the recorded binding, or None when it is exact."""
+    now_head, now_tree = limit_binding()
+    if now_head != head:
+        return 'the branch moved to another commit'
+    if now_tree != tree:
+        return 'the checkout changed'
+    return None
+
+
+def limit_relaunch(path, data, action, arguments):
+    """run-manifest limit-* actions. A schedule is pending (AT > NOW) until one recovery claims
+    it once it is due, so it is never left due after a recovery saw it. Schedule, hold and claim
+    each give back the attempt `ai-recover` reserved before it could know the stop was a usage
+    limit: waiting for a reset is not a failed recovery."""
+    def number(value, usage):
+        if not re.fullmatch(r'\d{1,12}', value):
+            fail(f'Usage: run-manifest {usage}')
+        return int(value)
+
+    def clock(usage):
+        if len(arguments) > 1:
+            fail(f'Usage: run-manifest {usage}')
+        return number(arguments[0], usage) if arguments else int(time.time())
+
+    def give_back():
+        data['attempts'] = max(0, data['attempts'] - 1)
+
+    at = data.get('limit_relaunch_at')
+    count = data.get('limit_relaunches', 0)
+    if action == 'limit-schedule':
+        usage = 'limit-schedule AT CAP STAGE'
+        if len(arguments) != 3 or not limit_stage_valid(arguments[2]):
+            fail(f'Usage: run-manifest {usage}')
+        when, cap = number(arguments[0], usage), number(arguments[1], usage)
+        if at is not None:
+            fail('usage limit: a relaunch is already scheduled')
+        if count >= min(cap, 100):
+            fail(f'usage limit: already relaunched {count} time(s) in this run')
+        # Verification point: ai-recover schedules after the stop's bookkeeping was written and
+        # before any commit, so this is exactly the checkout the relaunch must find; the
+        # relaunch verifies it before it touches the checkout (ai-recover relaunch_verify).
+        start, tree = limit_binding()
+        # The stage is ai-recover's --stage (host-owned, passed by ai-pipeline's stop()): the arm
+        # reads it from here, never from the relaunch's own arguments.
+        data.update(limit_relaunches=count + 1, limit_relaunch_at=when, limit_head=start, limit_tree=tree,
+                    limit_stage=arguments[2])
+        # The task whose output the stopped tree is (ai-run's record); absent stays absent.
+        data.pop('limit_task', None)
+        if 'task' in data:
+            data['limit_task'] = data['task']
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count + 1)
+    elif action == 'limit-due':
+        if at is None or at > clock('limit-due [NOW]'):
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-at':
+        if arguments:
+            fail('Usage: run-manifest limit-at')
+        if at is None:
+            sys.exit(1)
+        print(at)
+    elif action == 'limit-hold':
+        # Still waiting: the recovery gives its reservation back and restores the wait.
+        if at is None or at <= clock('limit-hold [NOW]'):
+            sys.exit(1)
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(at)
+    elif action == 'limit-claim':
+        # Due: consumed in the same write, so any later stop of this relaunch is terminal.
+        if at is None or at > clock('limit-claim [NOW]'):
+            sys.exit(1)
+        data.pop('limit_relaunch_at')
+        give_back()
+        atomic(path, json.dumps(data) + '\n')
+        print(count)
+    elif action in ('limit-verify', 'limit-arm'):
+        # Both recompute HEAD and the tree; verify is read only, arm records the exact match.
+        if arguments:
+            fail(f'Usage: run-manifest {action}')
+        if 'limit_head' not in data or 'limit_tree' not in data:
+            fail('no scheduled relaunch')
+        # Only an implementation session legitimately leaves uncommitted task work: the arm is
+        # bound to that stage first, then to the task it belongs to; no record fails closed.
+        if action == 'limit-arm' and data.get('limit_stage') != 'implementation':
+            fail('the usage-limit stop left uncommitted changes outside an implementation session')
+        if action == 'limit-arm' and 'limit_task' not in data:
+            fail('the usage-limit stop left uncommitted changes with no task recorded')
+        why = limit_mismatch(data['limit_head'], data['limit_tree'])
+        if why:
+            fail(why)
+        if action == 'limit-arm':
+            data['limit_resume'] = {'head': data['limit_head'], 'tree': data['limit_tree'],
+                                    'task': data['limit_task']}
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-armed':
+        if arguments:
+            fail('Usage: run-manifest limit-armed')
+        resume = data.get('limit_resume')
+        if resume is None or limit_mismatch(resume['head'], resume['tree']):
+            sys.exit(1)
+    elif action == 'limit-task':
+        # Read only: the task the armed tree belongs to.
+        if arguments:
+            fail('Usage: run-manifest limit-task')
+        if 'limit_resume' not in data:
+            sys.exit(1)
+        print(data['limit_resume']['task'])
+    elif action == 'limit-disarm':
+        if 'limit_resume' in data:
+            data.pop('limit_resume')
+            atomic(path, json.dumps(data) + '\n')
+    elif action == 'limit-count':
+        print(count)
+    else:
+        fail('Unknown run-manifest action.')
+
+
 def run_manifest(arguments):
     """Host-side record of the human-approved run (outside the checkout, like review
     bindings): approved gate digest, branch, arguments and the recovery attempt budget.
@@ -1106,11 +1493,15 @@ def run_manifest(arguments):
         valid = (isinstance(data, dict) and isinstance(data.get('gate'), str)
                  and isinstance(data.get('branch'), str) and isinstance(data.get('args'), list)
                  and all(isinstance(a, str) for a in data['args'])
-                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100)
+                 and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
+                 and ('task' not in data or task_id_valid(data['task']))
+                 and limit_fields_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
         fail('No valid run manifest; rerun ai-pipeline --approved by hand.')
+    if action.startswith('limit-'):
+        return limit_relaunch(path, data, action, arguments[1:])
     if action == 'gate':
         print(data['gate'])
     elif action == 'branch':
@@ -1129,7 +1520,23 @@ def run_manifest(arguments):
         print(data['attempts'])
     elif action == 'clear-attempts':
         data['attempts'] = 0
+        for key in ('task',) + LIMIT_FIELDS:
+            data.pop(key, None)
         atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-set':
+        # The task of the implementation session about to start. Host state written by ai-run
+        # (host code, like `outcome attempt-open`), never read from the checkout; only
+        # limit-schedule reads it.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest task-set ID')
+        data['task'] = arguments[1]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'task-clear':
+        if len(arguments) != 1:
+            fail('Usage: run-manifest task-clear')
+        if 'task' in data:
+            data.pop('task')
+            atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
         # current implementation review (triage) or the current plan review (plan-revision).
@@ -1206,6 +1613,93 @@ def current_branch():
 def stage_path(branch):
     """Host-side file holding BRANCH's open stage, beside the run manifest."""
     return binding_dir() / f'stage-{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+PR_DRAFT_URL = re.compile(r'https://\S+/pull/\d+')
+PR_DRAFT_HOW = ('created', 'converted')
+
+
+def pr_draft_path(branch):
+    """Host-side record that the pipeline made BRANCH's pull request a draft. It lives outside
+    every checkout so an agent session cannot forge "the pipeline drafted this", in its own
+    subdirectory so a fault there is confined to it."""
+    return binding_dir() / 'pr-draft' / f'{hashlib.sha256(branch.encode()).hexdigest()[:16]}.json'
+
+
+def pr_draft_read(branch):
+    """The record for BRANCH as a dict, or None. Anything unreadable or foreign is "not ours":
+    the pipeline never un-drafts a pull request on doubt."""
+    if not branch:
+        return None
+    try:
+        data = json.loads(pr_draft_path(branch).read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(data, dict) or data.get('branch') != branch
+            or not isinstance(data.get('url'), str) or not PR_DRAFT_URL.fullmatch(data['url'])
+            or data.get('how') not in PR_DRAFT_HOW):
+        return None
+    return data
+
+
+def pr_draft_remove(path):
+    """Durably remove the record: unlink, fsync the directory, confirm the path is gone."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    try:
+        fd = os.open(path.parent, os.O_RDONLY)
+    except FileNotFoundError:
+        fd = None
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    if fd is not None:
+        try:
+            os.fsync(fd)
+        except OSError as error:
+            fail(f'cannot remove the draft record {path}: {error.strerror}')
+        finally:
+            os.close(fd)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        fail(f'cannot remove the draft record {path}: {error.strerror}')
+    fail(f'cannot remove the draft record {path}: still present')
+
+
+def pr_draft(arguments):
+    action, *rest = arguments or ['']
+    branch = current_branch()
+    if action == 'record' and len(rest) == 2:
+        url, how = rest
+        if not PR_DRAFT_URL.fullmatch(url) or how not in PR_DRAFT_HOW:
+            fail('pr-draft record needs a pull request URL and created or converted.')
+        if not branch:
+            fail('pr-draft record needs a branch (HEAD is detached).')
+        path = pr_draft_path(branch)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic(path, json.dumps({'branch': branch, 'url': url, 'how': how, 'at': now()}) + '\n')
+    elif action == 'get' and not rest:
+        record = pr_draft_read(branch)
+        if record is None:
+            sys.exit(1)
+        print(record['url'])
+    elif action == 'clear' and not rest:
+        if branch:
+            pr_draft_remove(pr_draft_path(branch))
+    elif action == 'take' and len(rest) == 1:
+        record = pr_draft_read(branch)
+        if record is None or record['url'] != rest[0]:
+            sys.exit(1)
+        pr_draft_remove(pr_draft_path(branch))
+        print(record['how'])
+    else:
+        fail('Usage: pr-draft record URL created|converted | get | clear | take URL')
 
 
 def load_stage(branch):
@@ -1371,7 +1865,7 @@ def rejected_rows():
     for match in DISPOSITION_ROW.finditer(text):
         if match.group(1) in rows:
             fail(f'Finding {match.group(1)} has more than one disposition.')
-        rows[match.group(1)] = (match.group(2).lower(), match.group(3))
+        rows[match.group(1)] = (match.group(2).lower(), table_cell(match.group(3)))
     rejected = [(finding, level, rows[finding][1])
                 for level in ('BLOCKER', 'MAJOR') for finding in finding_ids(review, level)
                 if finding in rows and rows[finding][0] == 'rejected']
@@ -1461,7 +1955,7 @@ def publish_recheck(arguments):
     if tuple(current) != (head, digest, rows_hash):
         fail('Re-check: the review or the rejected rows changed during the re-check; run it again.')
     answers, notes = parse_recheck(Path(source).read_text(), [finding for finding, _, _ in rows])
-    cell = lambda value: ' '.join(value.split()).replace('|', '\\|')
+    cell = lambda value: ' '.join(value.split()).replace('\\', '\\\\').replace('|', '\\|')
     lines = [f'<!-- Host evidence: re-check of review {digest}; rejected rows {rows_hash}; '
              f'reviewed HEAD {head}; saved {now()}. -->', '',
              f"# Re-check of rejected findings ({os.environ.get('AI_REVIEW_BY') or 'Codex'})", '',
@@ -1734,7 +2228,11 @@ def disputes_record(arguments):
     """Append a dispute record for every upheld answer of the verified, current re-check that
     has none yet (keyed by review digest + finding id), then rewrite the file from host state.
     The file may lag behind host state (an interrupted earlier write) but never differ from it.
-    Prints the number of records added."""
+    Prints the number of records added. `--check` writes nothing and fails unless a real call
+    would write nothing either (the armed resume admits only that: no host write while armed)."""
+    if arguments not in ([], ['--check']):
+        fail('Usage: disputes-record [--check]')
+    check = arguments == ['--check']
     records = dispute_records()
     inherited = inherited_disputes()
     actual = DISPUTES.read_text() if DISPUTES.exists() else None
@@ -1759,19 +2257,25 @@ def disputes_record(arguments):
                       'evidence': ' '.join(evidence.split()), 'answer': ' '.join(reason.split()),
                       'date': now()})
     records += added
+    rendered = render_disputes(records, inherited) if records else actual
+    if check:
+        if added or rendered != actual:
+            fail(f'{len(added)} dispute record(s) to add; .ai/reviews/disputes.md would change.')
+        print(0)
+        return
     if added:
         path = disputes_store()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic(path, json.dumps(records, ensure_ascii=False, indent=1) + '\n')
-    if records:
-        atomic(DISPUTES, render_disputes(records, inherited))
+    if rendered != actual:
+        atomic(DISPUTES, rendered)
     print(len(added))
 
 
 RECOVER_ACTIONS = ('rerun', 'commit_and_rerun', 'escalate')
 # Settings captured with the approved run and restored for its resumes.
 RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFORT', 'AI_RECHECK_EFFORT',
-                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
+                'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RELAUNCH_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                 'AI_SUPERVISE_ESCALATE_MODEL')
@@ -1784,13 +2288,69 @@ def _no_duplicate_keys(pairs):
     return dict(pairs)
 
 
+# Recovery answer scanner. Prose around a decision may hide it inside an enclosing container
+# (`Diagnostic: [` ... `]`, or a bracket inside a JSON string fooling a count), and prose has
+# unbalanced quotes, so no string-aware count over it is well defined. A container needs an
+# opening bracket before the object and a closing one after it, so the prose around the one
+# candidate may contain no '{', '}', '[' or ']' at all; inside the object the JSON parser decides.
+# The object must start a line and end its last line (inline, quoted or backticked objects are
+# prose). No character counting and no string parsing happen outside the object.
+_PROSE_BRACKETS = re.compile(r'[{}\[\]]')
+
+
+def _scan_decision(text):
+    """The one line-start object inside bracket-free prose, or None."""
+    start = text.find('{')
+    if start < 0 or _PROSE_BRACKETS.search(text, 0, start) \
+            or text[text.rfind('\n', 0, start) + 1:start].strip():
+        return None
+    try:
+        decision, end = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys).raw_decode(text, start)
+    except ValueError:
+        return None
+    line_end = text.find('\n', end)
+    if not isinstance(decision, dict) or _PROSE_BRACKETS.search(text, end) \
+            or text[end:len(text) if line_end < 0 else line_end].strip():
+        return None
+    return decision
+
+
+def shorten(text, cap):
+    """Whitespace collapsed; longer than cap is cut at a sentence end (if that keeps at least
+    half of cap), else at a word boundary, else hard, plus '…' (total at most cap)."""
+    text = ' '.join(text.split())
+    if len(text) <= cap:
+        return text
+    room = text[:cap - 1]
+    ends = [i + 1 for i in range(len(room)) if room[i] in '.!?' and text[i + 1] == ' ']
+    if ends and ends[-1] >= cap // 2:
+        cut = room[:ends[-1]]
+    elif ' ' in room or text[cap - 1] == ' ':
+        cut = room[:room.rfind(' ')] if text[cap - 1] != ' ' else room
+    else:
+        cut = room
+    return cut.rstrip() + '…'
+
+
+RECOVERY_DECISION_FILE = '.ai/local/recovery-decision.txt'
+
+
 def recover_decision(arguments):
     """Parse the recovery session's verdict: 'action<TAB>reason<TAB>human_action'.
     Only a successful claude exit, a success envelope and exactly ONE complete decision
-    object (no duplicate keys; the span from the first '{' to the last '}') count.
-    Everything else escalates."""
+    object (no duplicate keys; the whole answer, or one line-start object inside prose
+    that has no '{', '}', '[' or ']') count. Everything else escalates; when the session
+    wrote something, the reason quotes the start of it."""
     log, exit_code = arguments[0], arguments[1]
     escalate = 'escalate\tthe recovery session gave no valid decision\tinspect the stop yourself'
+    Path(RECOVERY_DECISION_FILE).unlink(missing_ok=True)
+    cut = []
+
+    def clean(value):
+        short = shorten(value, 300)
+        if short != ' '.join(value.split()):
+            cut.append(True)
+        return short
     try:
         envelope = json.loads(Path(log).read_text(), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
@@ -1799,12 +2359,15 @@ def recover_decision(arguments):
             or envelope.get('subtype') != 'success' or not isinstance(envelope.get('result'), str):
         print(escalate)
         return
-    # The answer must be exactly one JSON object (optionally in a ```json fence), nothing else.
+    if envelope['result'].strip():
+        escalate = ('escalate\t' + shorten('the recovery session gave no valid decision; it wrote: '
+                                           + envelope['result'], 300) + '\tinspect the stop yourself')
+    # The answer is one JSON object (optionally in a ```json fence), or prose plus one object.
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', envelope['result'].strip())
     try:
         decision = json.loads(text, object_pairs_hook=_no_duplicate_keys)
     except ValueError:
-        decision = None
+        decision = _scan_decision(text)
     if not isinstance(decision, dict):
         print(escalate)
         return
@@ -1813,8 +2376,11 @@ def recover_decision(arguments):
             or not fields[1].strip():
         print(escalate)
         return
-    clean = lambda value: ' '.join(value.split())[:300]
-    print(f'{fields[0]}\t{clean(fields[1])}\t{clean(fields[2])}')
+    reason, human_action = clean(fields[1]), clean(fields[2])
+    if cut:
+        full = lambda value: ' '.join(value.split())[:4000]
+        atomic(RECOVERY_DECISION_FILE, f'reason: {full(fields[1])}\nhuman_action: {full(fields[2])}\n')
+    print(f'{fields[0]}\t{reason}\t{human_action}')
 
 
 def committed_matches_worktree(arguments):
@@ -1979,7 +2545,11 @@ def tree_snapshot(root):
     tracked or untracked project file, mode, index entry or commit, also on a dirty tree.
     Ignored paths (installed dependencies) are deliberately not covered. Git lists nothing
     under an uninitialised submodule, so its directory is walked on the filesystem instead;
-    a symlink at a submodule path is recorded as a link, never followed."""
+    a symlink at a submodule path is recorded as a link, never followed.
+    The usage-limit relaunch binding (worktree_digest, run-manifest limit-*) relies on this
+    covering everything, tracked bookkeeping (.ai/state.md, run-log, handoff, reviews/)
+    included: a human edit there during the wait must count, so any new skip here needs that
+    binding rethought."""
     digest = hashlib.sha256()
     try:
         head = git('rev-parse', '--verify', '-q', 'HEAD', cwd=root)
@@ -2005,6 +2575,10 @@ def tree_snapshot(root):
         else:
             snapshot_path(digest, name, path)
     return digest.hexdigest()
+
+
+# The tree a usage-limit relaunch resumes: deliberately the same digest, never a second one.
+worktree_digest = tree_snapshot
 
 
 def finish_summary(arguments):
@@ -2228,8 +2802,8 @@ def plan_rounds(arguments):
 PLAN_DISPOSITIONS = '.ai/reviews/plan-dispositions.md'
 PLAN_SECTION = re.compile(r'^## Plan review round (\d+) \(report ([0-9a-f]{64})\)[ \t]*$', re.M)
 PLAN_DISPOSITION_ROW = re.compile(
-    r'^\|\s*([A-Z][A-Z0-9]{0,4}-?\d+)\s*\|\s*(accepted|rejected|needs-human)\s*\|'
-    r'\s*(.*?)\s*\|\s*(.*?)\s*\|', re.M | re.I)
+    r'^\|[ \t]*' + FINDING_CELL + r'[ \t]*\|[ \t]*(accepted|rejected|needs-human)[ \t]*\|'
+    r'[ \t]*' + TABLE_CELL + r'[ \t]*\|[ \t]*' + TABLE_CELL + r'[ \t]*\|', re.M | re.I)
 
 
 def plan_history(arguments):
@@ -2264,7 +2838,7 @@ def plan_history(arguments):
                     seen.add(match.group(1))
                     findings.append((match.group(1), level, finding_title(body, match)))
         body = sections.get(record['report_digest'])
-        rows = None if body is None else {m.group(1): (m.group(2).lower(), m.group(4))
+        rows = None if body is None else {m.group(1): (m.group(2).lower(), table_cell(m.group(4)))
                                           for m in PLAN_DISPOSITION_ROW.finditer(body)}
         rounds.append({'head': record['commit'], 'findings': findings, 'rows': rows})
     if rounds:
@@ -2278,7 +2852,8 @@ PLAN_DISPOSITIONS_PREAMBLE = """# Plan review dispositions (Claude)
 
 <!-- The host appends one section per plan-review round; fill only the last one and never edit
 earlier sections or .ai/reviews/plan.md. One row per BLOCKER/MAJOR finding of that round's plan
-review (MINOR optional). Disposition: accepted (Task: the new TODO task IDs that answer it),
+review (MINOR optional), the finding ID alone in the first cell, e.g. "| P1 | accepted | evidence | T012 |".
+Disposition: accepted (Task: the new TODO task IDs that answer it),
 rejected (concrete evidence) or needs-human (the question for the human in the Evidence column).
 From plan-review round 3 on, the section also needs a line starting with "Convergence:". -->
 """
@@ -2348,7 +2923,7 @@ def task_statuses(text):
 
 def bounded_questions(questions):
     """At most three questions, each on one line of at most 300 characters, plus a pointer to the rest."""
-    lines = [' '.join(re.sub(r'<br\s*/?>', ' ', question, flags=re.I).split())[:QUESTION_CAP]
+    lines = [shorten(re.sub(r'<br\s*/?>', ' ', question, flags=re.I), QUESTION_CAP)
              for question in questions[:QUESTION_LIMIT]]
     if len(questions) > QUESTION_LIMIT:
         lines.append(f'(+{len(questions) - QUESTION_LIMIT} more in {PLAN_DISPOSITIONS})')
@@ -2412,10 +2987,11 @@ def plan_dispositions_check(arguments):
             fail(f'Row for {finding}, which is not a finding of plan review round {number}.')
         if finding in rows:
             fail(f'Finding {finding} has more than one row in the round {number} section.')
-        rows[finding] = (row.group(2).lower(), row.group(3), row.group(4))
+        rows[finding] = (row.group(2).lower(), table_cell(row.group(3)), table_cell(row.group(4)))
     for finding in required:
         if finding not in rows:
-            fail(f'Finding {finding} has no row in the round {number} section.')
+            fail(f'Finding {finding} has no row in the round {number} section.'
+                 + unmatched_cell_hint(body, finding, PLAN_DISPOSITION_ROW))
     queue = {task['id']: task['status'] for task in tasks()}
     counts = {'accepted': 0, 'rejected': 0, 'needs-human': 0}
     questions = []
@@ -2476,6 +3052,69 @@ def plan_revision_allowlist(arguments):
     """--allowedTools entries for the plan revision session, one per line: read tools and Edit
     of the editable plan records. Nothing from .ai/permissions.allow, no Bash, no Write."""
     print('\n'.join(['Read', 'Glob', 'Grep'] + [f'Edit(./{path})' for path in PLAN_REVISION_EDITABLE]))
+
+
+# The records a planning session may edit (Edit and Write, no Bash). run-log.md is written by
+# ai-run's exit handler, never by the session, so only the scope check allows it.
+PLAN_EDITABLE = ('.ai/project-spec.md', '.ai/current-plan.md', '.ai/tasks.md', '.ai/state.md',
+                 '.ai/handoff.md', '.ai/reviews/dispositions.md')
+
+
+def plan_allowlist(arguments):
+    """--allowedTools entries for the planning session, one per line: read tools and Edit/Write
+    of the plan records. Nothing from .ai/permissions.allow, no Bash."""
+    entries = ['Read', 'Glob', 'Grep']
+    for path in PLAN_EDITABLE:
+        entries += [f'Edit(./{path})', f'Write(./{path})']
+    print('\n'.join(entries))
+
+
+def plan_scope(arguments):
+    """Since START, only the plan records (and the run log) changed (committed or not)."""
+    if len(arguments) != 1:
+        fail('Usage: plan-scope START')
+    records_scope(arguments[0], PLAN_EDITABLE + ('.ai/run-log.md',), 'Planning')
+
+
+def plan_keeps_done(arguments):
+    """Every task DONE in START's .ai/tasks.md, or in BASELINE (the host's copy of the working-tree
+    queue when planning started, committed or not), is still in the working tree, block unchanged.
+    A task DONE in both must match the BASELINE block, the queue the session actually started from."""
+    if len(arguments) not in (1, 3) or (len(arguments) == 3 and arguments[1] != '--baseline'):
+        fail('Usage: plan-keeps-done START [--baseline FILE]')
+    start = arguments[0]
+    try:
+        git('rev-parse', '--verify', '--quiet', f'{start}^{{commit}}')
+    except subprocess.CalledProcessError:
+        fail(f'Unknown commit: {start}')
+    queues = []
+    if subprocess.run(['git', 'cat-file', '-e', f'{start}:.ai/tasks.md'],
+                      stderr=subprocess.DEVNULL).returncode == 0:
+        queues.append(git('show', f'{start}:.ai/tasks.md').decode(errors='replace'))
+    if len(arguments) == 3 and Path(arguments[2]).is_file():
+        queues.append(Path(arguments[2]).read_text(errors='replace'))
+    done = {}
+    for before in [task_blocks(text) for text in queues]:
+        for task in before:
+            if any(line.startswith('Status:') and line.split(':', 1)[1].strip() == 'DONE'
+                   for line in task['lines']):
+                done[task['id']] = task
+    if not done:
+        return
+    path = Path('.ai/tasks.md')
+    after = {}
+    for task in task_blocks(path.read_text()) if path.is_file() else []:
+        after.setdefault(task['id'], task)
+
+    def block(task):
+        raw = list(task['raw'])
+        while raw and not raw[-1].strip():
+            raw.pop()
+        return [task['heading'], *raw]
+
+    for task in done.values():
+        if task['id'] not in after or block(after[task['id']]) != block(task):
+            fail(f"DONE task {task['id']} was changed or removed")
 
 
 def plan_revisions_store():
@@ -2583,6 +3222,28 @@ def plan_revisions(arguments):
         print(record['round'], record['accepted'], record['rejected'], record['needs_human'])
 
 
+def revision_queue_repair(arguments):
+    """Reorder the uncommitted queue of an interrupted plan revision (as `tasks reorder`) before
+    any queue check, only when: .ai/tasks.md differs from HEAD's, only plan revision records are
+    dirty, HEAD's queue is valid with no DONE task, and the verified current plan review is not
+    revised yet. Otherwise do nothing: the usual checks reject the queue as before."""
+    if arguments:
+        fail('Usage: revision-queue-repair')
+    path = Path('.ai/tasks.md')
+    committed = committed_file('HEAD', str(path))
+    if not path.is_file() or path.read_text() == committed:
+        return
+    try:
+        records_scope('HEAD', PLAN_REVISION_RECORDS, 'Plan revision')
+        before = tasks(committed)
+        record, verified, _ = plan_revision_lookup()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        return
+    if not before or any(task['status'] == 'DONE' for task in before) or not verified or record:
+        return
+    tasks_reorder()
+
+
 def plan_stage_verify(start, digest):
     """stage-verify for an open plan-revision stage: 'committed' once a host revision record
     for this plan review names a commit in START..HEAD (the record carries the outcome, so
@@ -2644,7 +3305,7 @@ def fallback_record(arguments):
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
         branch = 'detached'
-    cell = lambda value: ' '.join(str(value).split()).replace('|', '\\|') or '-'
+    cell = lambda value: ' '.join(str(value).split()).replace('\\', '\\\\').replace('|', '\\|') or '-'
     text = FALLBACK_LOG.read_text() if FALLBACK_LOG.exists() else (
         '# Claude fallback reviews (Codex catch-up pending)\n\n'
         'Reviews written by the Claude fallback while Codex could not review. Codex reviews all of\n'
@@ -2681,21 +3342,405 @@ def task_category(title):
     return 'feature'
 
 
-def read_outcomes(paths):
+def decode_outcome_lines(data):
+    """(line index, record) for every valid JSON object line of an outcome log's bytes.
+    Each line is decoded on its own: a torn tail can end inside a multibyte character, and a
+    whole-file decode raised before any line was parsed. Splitting on b'\\n' only, because
+    str.splitlines also splits on U+2028 inside ensure_ascii=False records."""
     records = []
-    for path in paths:
+    for line_index, line in enumerate(data.split(b'\n')):
         try:
-            lines = Path(path).read_text().splitlines()
-        except OSError:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError:  # UnicodeDecodeError is a ValueError
             continue
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                records.append(record)
+        if isinstance(record, dict):
+            records.append((line_index, record))
     return records
+
+
+def read_outcomes(paths, strict=False):
+    """Records in file order; each carries `_at` = (file index, line index), its write position.
+    Lenient by default (an unreadable file is skipped: reports and attempt numbering). With
+    `strict`, only a missing file counts as empty and any other OSError propagates: a transient
+    read failure must not look like "no record yet", or reconcile appends a duplicate."""
+    records = []
+    for file_index, path in enumerate(paths):
+        try:
+            data = Path(path).read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if strict:
+                raise
+            continue
+        for line_index, record in decode_outcome_lines(data):
+            record['_at'] = (file_index, line_index)
+            records.append(record)
+    return records
+
+
+def fsync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def make_dirs(directory):
+    """Create `directory` with its missing ancestors; returns the ones created, deepest first.
+    The caller syncs each one's parent (`sync_created`) once the new entries matter."""
+    directory = Path(directory)
+    created = []
+    for candidate in (directory, *directory.parents):
+        if candidate.exists():
+            break
+        created.append(candidate)
+    directory.mkdir(parents=True, exist_ok=True)
+    return created
+
+
+def sync_created(created):
+    for directory in created:  # deepest first
+        fsync_dir(directory.parent)
+
+
+def append_outcome(path, record):
+    """Append one record as one line; False when the write was short. OSError propagates,
+    including one from a file or directory sync: True means the line is durable."""
+    path = Path(path)
+    created = make_dirs(path.parent)
+    # Read-write: the newline guard reads the last byte, and os.pread on O_WRONLY raises EBADF.
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # The lock makes "tail check, then write" one step for every writer using this helper,
+        # in any checkout on the host; os.close in the finally releases it. Known limit: an
+        # older installed copy (path.open('a'), no lock) can still interleave until upgraded;
+        # its buffered write only leaves a partial line on a crash or a full disk.
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        # A torn earlier line (no final newline) must not swallow this record.
+        prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
+        data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+        # One write call; a short write is a failure, never success. No retry of the remainder:
+        # another checkout may have appended in between, and the next append's newline guard
+        # isolates the fragment instead.
+        if os.write(fd, data) != len(data):
+            return False
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # A file fsync does not persist a new directory entry: sync the log's directory on every
+    # append (no race over who created the file) and the parent of every directory created.
+    fsync_dir(path.parent)
+    sync_created(created)
+    return True
+
+
+def attempt_seq_path():
+    """The host-wide attempt counter, beside the log in the same state root."""
+    return state_root() / 'attempt-seq'
+
+
+def next_attempt_seq():
+    """Allocate the next attempt sequence number: max(counter, highest recorded seq) + 1,
+    persisted before it is returned. Every OSError propagates.
+    The lock is the log's (the one every writer takes, append_outcome), not the counter's: the
+    counter is replaced atomically, and a lock on a replaced inode no longer excludes later
+    lockers. Self-heal: a lost counter continues after the highest seq recorded in the log;
+    markers allocated but not yet recorded may then duplicate one, and `_at` breaks that tie.
+    Cost: one log read, what `outcome task` already pays for its `attempt` count."""
+    path = outcomes_path()
+    counter = attempt_seq_path()
+    created = make_dirs(path.parent)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = int(counter.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            current = 0
+        recorded = max((r['seq'] for r in read_outcomes([path], strict=True)
+                        if r.get('kind') == 'task' and attempt_seq(r) is not None), default=0)
+        n = max(current, recorded) + 1
+        temp = counter.with_name(counter.name + '.tmp')
+        try:
+            temp_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                data = str(n).encode()
+                if os.write(temp_fd, data) != len(data):
+                    raise OSError(f'Short write of attempt counter {temp}')
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+            os.replace(temp, counter)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                temp.unlink()
+            raise
+        fsync_dir(counter.parent)
+        sync_created(created)
+    finally:
+        os.close(fd)  # releases the lock
+    return n
+
+
+def attempt_seq(record):
+    """The record's attempt sequence number, or None (missing, a bool, or not an int)."""
+    seq = record.get('seq')
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
+def ordered_attempts(task_rows):
+    """{(project, branch, task): [record, ...]} in attempt order: rows without a seq first in
+    `_at` order, then the rest by (seq, `_at`). Round 6: every row the current helper writes has
+    a seq, so rows without one are pre-upgrade rows, all older than any new row and appended in
+    attempt order by one writer per checkout, so file order is exact for them; `_at` orders two
+    new rows only when the counter was lost. The sequence is host-wide (one counter per state
+    root), so a task's numbers have gaps: an order key, not a count."""
+    groups = {}
+    for r in task_rows:
+        groups.setdefault((r.get('project'), r.get('branch'), r.get('task')), []).append(r)
+    for rows in groups.values():
+        rows.sort(key=lambda r: (0, 0, r['_at']) if attempt_seq(r) is None else (1, r['seq'], r['_at']))
+    return groups
+
+
+def confirm_recorded(path, attempt_id):
+    """True when the log holds a task record with `attempt_id` and the file and its directory
+    were synced just now; False when it holds none (a missing log is not created). Other
+    OSErrors propagate. A complete write whose file or directory sync failed leaves a readable
+    line and a kept marker: this retry must finish the sync before the marker may go. Residual:
+    after a failed fsync the kernel may already have marked the dirty pages clean, so this
+    persists what is still dirty; it guarantees a successful sync attempt before removal, not
+    recovery of dropped data (advisory telemetry).
+    Removal rule: a marker is removed only after append_outcome returned True for a record
+    carrying its id, or after this returned True. This and a following append_outcome lock
+    separately; that is safe because a checkout's attempts are sequential under its lock, so
+    no other writer appends that id in between."""
+    path = Path(path)
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a writer mid-append finishes its line first
+        chunks = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        if not any(record.get('kind') == 'task' and record.get('attempt_id') == attempt_id
+                   for _, record in decode_outcome_lines(b''.join(chunks))):
+            return False
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_dir(path.parent)
+    return True
+
+
+def attempts_dir():
+    """Host-side attempt markers, one file per attempt, never overwritten."""
+    return binding_dir() / 'attempts'
+
+
+MARKER_ID = re.compile(r'^[0-9a-f]{16}$')
+
+
+def marker_path(attempt_id):
+    if not isinstance(attempt_id, str) or not MARKER_ID.match(attempt_id):
+        raise ValueError(f'Invalid attempt id: {attempt_id!r}')
+    return attempts_dir() / f'{attempt_id}.json'
+
+
+def write_marker(record):
+    """Publish one attempt marker: complete, fsynced tmp file, then a hard link to the final
+    name (fails if it exists, so a marker is never overwritten), then a directory sync."""
+    final = marker_path(record.get('id'))
+    created = make_dirs(final.parent)
+    sync_created(created)
+    temp = final.with_name(final.name + '.tmp')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            data = (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+            if os.write(fd, data) != len(data):
+                raise OSError(f'Short write of attempt marker {temp}')
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(temp, final)  # FileExistsError propagates
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+    fsync_dir(final.parent)
+    return final
+
+
+MARKER_FIELDS = ('id', 'task', 'model', 'project', 'branch', 'started', 'seq', 'pid', 'pid_start')
+
+
+def read_marker(path):
+    """(record, error): the record of a valid marker; the OSError when opening or reading it
+    failed (the marker is the only evidence of an unrecorded attempt, so a transient EIO or
+    EACCES must never look like garbage); (None, None) for content read completely but not a
+    marker. Invalid content may be discarded: our writer links only complete, fsynced files,
+    so invalid content under the final name is foreign or corrupt, never a torn marker of ours."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as error:
+        return None, error
+    try:
+        record = json.loads(data.decode('utf-8'))
+    except ValueError:
+        return None, None
+    if not isinstance(record, dict) or any(field not in record for field in MARKER_FIELDS) \
+            or record['id'] != Path(path).stem or not MARKER_ID.match(str(record['id'])) \
+            or not isinstance(record['started'], (int, float)) or isinstance(record['started'], bool) \
+            or attempt_seq(record) is None:
+        return None, None
+    return record, None
+
+
+def marker_sort_key(entry):
+    path, record, _ = entry
+    return (1, record['seq'], path.name) if record else (0, 0, path.name)
+
+
+def list_markers():
+    """[(path, record, error)] for every `*.json` marker, oldest attempt first; see read_marker.
+    One file's failure never raises; a failing directory listing does (the caller notes it
+    and touches nothing)."""
+    directory = attempts_dir()
+    try:
+        with os.scandir(directory) as listing:
+            paths = [directory / entry.name for entry in listing if entry.name.endswith('.json')]
+    except FileNotFoundError:
+        return []
+    return sorted(((path, *read_marker(path)) for path in paths), key=marker_sort_key)
+
+
+def process_start(pid):
+    """Field 22 of /proc/PID/stat (start in clock ticks since boot), or None. Read as bytes and
+    split after the last ')': the command name can hold spaces, parentheses or non-UTF-8."""
+    try:
+        return int(Path(f'/proc/{int(pid)}/stat').read_bytes().rsplit(b')', 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+class AttemptSeqError(OSError):
+    """next_attempt_seq failed inside open_attempt: nothing was printed or published."""
+
+
+def open_attempt(task, model, pid, out=None):
+    """Print a new attempt id, then publish its marker; returns the id.
+    Contract (P13): the id reaches the caller BEFORE the marker can exist, so a marker whose id
+    the runner lacks is impossible (a failed write to the pipe raises before the link, and
+    such a marker would later be logged as a false `crashed`). An id without a marker is
+    harmless: the outcome line carries it, remove_marker of a missing file is a no-op, and
+    nothing reconciles it. An OSError from write_marker propagates after the print, the
+    marker possibly present; `outcome attempt-open` (T003) turns it into a stderr note and
+    exit 1, and reconciles leftovers before calling this (this does not reconcile).
+    Runner side (T004) keeps every valid printed id whatever the exit status:
+      attempt_id=$(ai_helper outcome attempt-open … 2>/dev/null) || true
+      [[ "$attempt_id" =~ ^[0-9a-f]{16}$ ]] || attempt_id=
+    Residual: a marker whose directory sync failed after the link may not survive a power
+    loss; that loses at most a `crashed` record, never produces a false one.
+    The attempt's seq is allocated before the print: an OSError from next_attempt_seq
+    propagates with nothing printed and nothing published (the attempt runs untracked)."""
+    try:
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+    except subprocess.CalledProcessError:
+        branch = 'detached'
+    attempt_id = os.urandom(8).hex()
+    record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
+              'branch': branch, 'started': int(time.time()), 'pid': int(pid),
+              'pid_start': process_start(pid)}
+    try:
+        record['seq'] = next_attempt_seq()
+    except OSError as error:
+        raise AttemptSeqError(*error.args) from error
+    print(attempt_id, file=out or sys.stdout, flush=True)
+    write_marker(record)
+    return attempt_id
+
+
+def remove_marker(path):
+    path = Path(path)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    with contextlib.suppress(FileNotFoundError):  # no directory: no entry to persist
+        fsync_dir(path.parent)
+
+
+def note(message):
+    print(f'Note: {message}', file=sys.stderr)
+
+
+def runner_alive(record):
+    """The marker's runner still runs: its pid exists with the recorded start time (a reused
+    pid has another), or with any start time when none was recorded."""
+    try:
+        pid = int(record['pid'])
+    except (TypeError, ValueError):
+        return False
+    if record['pid_start'] is None:
+        return pid > 0 and Path(f'/proc/{pid}').exists()
+    start = process_start(pid)
+    return start is not None and start == record['pid_start']
+
+
+def reconcile_marker(log, marker, record, own_pid):
+    """Turn one valid marker of a runner that is gone (or of the caller itself) into exactly
+    one task record, then remove it. OSError propagates with the marker kept."""
+    if runner_alive(record) and record['pid'] != own_pid:
+        return  # another runner's attempt in progress
+    # A marker of own_pid with a matching start is an earlier, finished attempt of the calling
+    # runner whose outcome append failed: attempts are sequential under the checkout lock (P6).
+    if confirm_recorded(log, record['id']):
+        remove_marker(marker)  # recorded, and its interrupted sync is finished now (P9)
+        return
+    # Strict: a transient read failure must not number (or duplicate) anything (P10).
+    earlier = [r for r in read_outcomes([log], strict=True) if r.get('kind') == 'task'
+               and (r.get('project'), r.get('branch'), r.get('task'))
+               == (record['project'], record['branch'], record['task'])]
+    title = outcome_title(record['task'])
+    row = {'time': now(), 'kind': 'task', 'project': record['project'], 'branch': record['branch'],
+           'task': record['task'], 'title': title, 'category': task_category(title),
+           'model': record['model'] or 'default', 'result': 'crashed', 'attempt': len(earlier) + 1,
+           'first_pass': False, 'seconds': None, 'started': record['started'], 'seq': record['seq'],
+           'attempt_id': record['id']}
+    if not append_outcome(log, row):
+        note('could not log the crashed attempt completely; will retry at the next start.')
+        return
+    remove_marker(marker)
+    note(f"logged a crashed attempt of {record['task']} (the runner was killed without its exit handler).")
+
+
+def reconcile_attempts(own_pid=None):
+    """Log every attempt whose runner died without its exit handler as `crashed`, once. Each
+    marker is handled on its own and kept on any failure; never raises (best effort at start).
+    Removal rule (T009): a readable marker goes only after its record is durably in the log.
+    Known limit: a short write of a normal `outcome task --attempt` line keeps its marker, so
+    that attempt is logged as `crashed` here (storage was full; the conservative record)."""
+    try:
+        entries = list_markers()
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        note('could not list the attempt markers.')
+        return
+    log = outcomes_path()
+    for marker, record, error in entries:
+        if error is not None:
+            note('could not read an attempt marker; keeping it.')  # transient: retried next start
+            continue
+        try:
+            if record is None:
+                remove_marker(marker)  # complete content, but not ours (see read_marker)
+                note('discarded an invalid attempt marker.')
+                continue
+            reconcile_marker(log, marker, record, own_pid)
+        except (OSError, ValueError):
+            note('could not read or sync the outcome log; keeping the attempt marker.')
 
 
 def outcome_title(task_id):
@@ -2727,8 +3772,42 @@ def recheck_counts(answers, levels):
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
     task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
-    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)"""
+    | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
+    | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
+      interrupted or timeout; not part of outcomes_report)
+    | catchup BRANCH (the human recorded a Codex catch-up of that branch)
+    | attempt-dir (prints the attempt marker directory)
+    | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
+    | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
+    `task … --attempt ID` takes seq and started from that attempt's marker and removes the
+    marker once the line is durably appended."""
     kind, *rest = arguments
+    if kind == 'attempt-dir':
+        if rest:
+            fail('Usage: outcome attempt-dir')
+        print(attempts_dir())
+        return
+    if kind == 'attempt-reconcile':
+        if len(rest) > 1 or (rest and not rest[0].isdigit()):
+            fail('Usage: outcome attempt-reconcile [OWN_PID]')
+        reconcile_attempts(int(rest[0]) if rest else None)
+        return
+    if kind == 'attempt-open':
+        if len(rest) != 3 or not rest[2].isdigit():
+            fail('Usage: outcome attempt-open TASK MODEL PID')
+        task_id, model, pid = rest[0], rest[1], int(rest[2])
+        reconcile_attempts(pid)
+        try:
+            open_attempt(task_id, model, pid)
+        except AttemptSeqError:
+            print('Note: could not allocate the attempt sequence.', file=sys.stderr)
+            sys.exit(1)
+        except OSError:
+            # The id is printed already: the runner keeps it, and its outcome line removes the
+            # marker if the link happened (open_attempt, P13).
+            print('Note: could not publish the attempt marker.', file=sys.stderr)
+            sys.exit(1)
+        return
     try:
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
     except subprocess.CalledProcessError:
@@ -2736,15 +3815,40 @@ def outcome(arguments):
     path = outcomes_path()
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    marker = None
     if kind == 'task':
-        task_id, result, model, seconds = rest
+        if len(rest) not in (4, 6) or (len(rest) == 6 and rest[4] != '--attempt'):
+            fail('Usage: outcome task TASK RESULT MODEL SECONDS [--attempt ID]')
+        task_id, result, model, seconds = rest[:4]
+        attempt_id = rest[5] if len(rest) == 6 else None
         title = outcome_title(task_id)
         earlier = [r for r in read_outcomes([path]) if r.get('kind') == 'task' and r.get('task') == task_id
                    and r.get('project') == record['project'] and r.get('branch') == branch]
+        # `attempt` and `first_pass` are counted at append time and kept for readers of the log;
+        # the report no longer reads them (it derives both from the seq order).
         attempt = len(earlier) + 1
+        # The attempt's start as the runner measured it (epoch seconds; informational, never an order key).
+        started = int(time.time()) - int(seconds)
+        seq = None
+        if attempt_id is not None:
+            marker = marker_path(attempt_id)
+            opened, _ = read_marker(marker)
+            if opened:
+                # The marker's order key and open time: this row, its marker and a `crashed` row
+                # reconciled from the same marker agree. Absent or unreadable (P13): fresh seq.
+                seq, started = opened['seq'], opened['started']
+        if seq is None:
+            # A row is never written without seq: one without would sort as a pre-upgrade row,
+            # before every real attempt of the task.
+            try:
+                seq = next_attempt_seq()
+            except OSError:
+                fail(f'Could not allocate the attempt sequence: {attempt_seq_path()}.')
         record.update(task=task_id, title=title, category=task_category(title), model=model or 'default',
                       result=result, attempt=attempt, first_pass=result == 'done' and attempt == 1,
-                      seconds=int(seconds))
+                      seconds=int(seconds), started=started, seq=seq)
+        if attempt_id is not None:
+            record['attempt_id'] = attempt_id
     elif kind == 'review':
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
@@ -2768,11 +3872,31 @@ def outcome(arguments):
     elif kind == 'plan_revision':
         round_number, result, model, seconds = rest
         record.update(round=int(round_number), result=result, model=model or 'default', seconds=int(seconds))
+    elif kind == 'plan':
+        revision = '--revision' in rest
+        rest = [a for a in rest if a != '--revision']
+        if len(rest) not in (3, 4) or rest[0] not in ('done', 'stopped', 'interrupted', 'timeout') \
+                or not rest[2].isdigit() or (len(rest) == 4 and not rest[3].isdigit()):
+            fail('Usage: outcome plan done|stopped|interrupted|timeout MODEL SECONDS [TASKS] [--revision]')
+        record.update(result=rest[0], model=rest[1] or 'default', seconds=int(rest[2]),
+                      tasks=int(rest[3]) if len(rest) == 4 else None, revision=revision)
+    elif kind == 'catchup':
+        if len(rest) != 1 or not rest[0]:
+            fail('Usage: outcome catchup BRANCH')
+        record['branch'] = rest[0]
     else:
         fail(f'Unknown outcome kind: {kind}')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as log:
-        log.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n')
+    try:
+        complete = append_outcome(path, record)
+    except OSError:
+        complete = False
+    if not complete:
+        fail(f'Could not append the outcome line completely: {path}.')  # the marker stays
+    if marker is not None:
+        # Only this attempt's marker, only after a durable append. A failed directory sync of
+        # the removal is harmless: a resurrected marker's record is found by confirm_recorded.
+        with contextlib.suppress(OSError):
+            remove_marker(marker)
 
 
 def outcomes_report(arguments):
@@ -2782,33 +3906,30 @@ def outcomes_report(arguments):
         print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
         return
     task_rows = [r for r in records if r.get('kind') == 'task']
-    final, spent = {}, {}
-    for r in task_rows:  # a task's last line is its result; its time is the sum of its attempts
-        key = (r.get('project'), r.get('branch'), r.get('task'))
-        final[key] = r
-        spent[key] = spent.get(key, 0) + (r.get('seconds') or 0)
+    ordered = ordered_attempts(task_rows)
+    # A task's last attempt in sequence order is its result; a crashed attempt may be appended
+    # late; rows without `seq` are pre-upgrade rows in file order. Its time is the sum of its attempts.
+    final = {key: rows[-1] for key, rows in ordered.items()}
+    first_row = {key: rows[0] for key, rows in ordered.items()}
+    spent = {key: sum(r.get('seconds') or 0 for r in rows) for key, rows in ordered.items()}
 
     def table(title, key):
         groups = {}
         for task_key, r in final.items():
-            groups.setdefault(key(r), []).append((r, spent[task_key]))
+            groups.setdefault(key(r), []).append(task_key)
         lines = [f'## Tasks by {title}', '',
                  f'| {title} | tasks | first-time pass | done | not done | avg attempts | avg minutes |',
                  '| --- | --- | --- | --- | --- | --- | --- |']
         for name in sorted(groups, key=str):
-            rows = groups[name]
-            count = len(rows)
-            first = sum(bool(r.get('first_pass')) for r, _ in rows)
-            done = sum(r.get('result') == 'done' for r, _ in rows)
-            attempts = sum(r.get('attempt', 1) for r, _ in rows) / count
-            minutes = sum(seconds for _, seconds in rows) / count / 60
+            keys = groups[name]
+            count = len(keys)
+            first = sum(first_row[k].get('result') == 'done' for k in keys)
+            done = sum(final[k].get('result') == 'done' for k in keys)
+            attempts = sum(len(ordered[k]) for k in keys) / count
+            minutes = sum(spent[k] for k in keys) / count / 60
             lines.append(f'| {name} | {count} | {first}/{count} ({100 * first // count}%) | {done} | '
                          f'{count - done} | {attempts:.1f} | {minutes:.1f} |')
         return lines + ['']
-
-    first_row = {}  # a task's first line in file order is its attempt 1, whatever its `attempt` says
-    for r in task_rows:
-        first_row.setdefault((r.get('project'), r.get('branch'), r.get('task')), r)
 
     def attempts_table(title, key):
         groups = {}
@@ -2822,7 +3943,7 @@ def outcomes_report(arguments):
             rows = groups[name]
             done = sum(r.get('result') == 'done' for r, _ in rows)
             starts = [r for r, is_first in rows if is_first]
-            first = sum(bool(r.get('first_pass')) for r in starts)
+            first = sum(r.get('result') == 'done' for r in starts)
             rate = f'{first}/{len(starts)} ({100 * first // len(starts)}%)' if starts else '-'
             minutes = sum(r.get('seconds') or 0 for r, _ in rows) / len(rows) / 60
             lines.append(f'| {name} | {len(rows)} | {done} | {len(rows) - done} | {rate} | {minutes:.1f} |')
@@ -2864,11 +3985,32 @@ def outcomes_report(arguments):
                          f'{total("seconds") / len(rows) / 60:.1f} |')
         lines.append('')
     fallback = [r for r in reviews if str(r.get('reviewer', '')).startswith('claude')]
-    if fallback:
+    # Codex mode -> Claude modes it covers; a targeted re-check never covers a full code review
+    covers = {'plan': ('plan',), 'code': ('code', 'recheck'), 'recheck': ('recheck',)}
+
+    def covered(claude):
+        for later in records:
+            if (later.get('project'), later.get('branch')) != (claude.get('project'), claude.get('branch')):
+                continue
+            is_codex = later.get('kind') == 'review' and later.get('reviewer') == 'codex' \
+                and claude.get('mode') in covers.get(later.get('mode'), ())
+            if not (is_codex or later.get('kind') == 'catchup'):
+                continue
+            if str(later.get('time')) > str(claude.get('time')) or (
+                    later.get('time') == claude.get('time') and later['_at'][0] == claude['_at'][0]
+                    and later['_at'][1] > claude['_at'][1]):
+                return True
+        return False
+
+    pending = [r for r in fallback if not covered(r)]
+    if pending:
         lines += ['## Claude-only reviews (Codex catch-up pending)', '']
         lines += [f"- {r.get('time')} {r.get('project')} {r.get('branch')} {r.get('mode')} "
-                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in fallback]
+                  f"HEAD {str(r.get('head', ''))[:12]} ({r.get('model')})" for r in pending]
         lines.append('')
+    if len(fallback) > len(pending):
+        lines += [f'{len(fallback) - len(pending)} Claude review(s) covered by a later Codex review or '
+                  'catch-up record.', '']
     print('\n'.join(lines).rstrip('\n'))
 
 
@@ -3095,12 +4237,13 @@ NOTIFICATIONS_LIMIT = 256 * 1024
 NOTIFICATIONS_KEEP = 200
 SMALL_LIMIT = 4 * 1024
 TASKS_LIMIT = 1024 * 1024
-BOX_KEYS = ('plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
+BOX_KEYS = ('planning', 'plan_review', 'plan_revision', 'setup', 'build', 'checks', 'review', 'triage',
             'recheck', 'pr')
 OBSERVATION_STATES = ('active', 'paused', 'recovering', 'stopped', 'done')
 # ai-pipeline's stop labels: (box keys the label covers, stage when the recorded one is outside).
 STOP_LABELS = {
     'start': ((), 'none'),
+    'plan': (('planning',), 'planning'),
     'plan review': (('plan_review', 'plan_revision'), 'plan_review'),
     'plan revision': (('plan_revision',), 'plan_revision'),
     'implementation': (('setup', 'build', 'checks'), 'build'),
@@ -3171,6 +4314,94 @@ def local_dir_fd(root):
         return None
     close_fds(fds[0], fds[1])
     return fds[2]
+
+
+EXEC_LOG_NAME = re.compile(r'plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log')
+
+
+def exec_logged(arguments):
+    """exec-logged NAME -- CMD [ARGS...]: exec CMD with stdout/stderr on the new log NAME in
+    the pinned `.ai/local` of the current checkout, keeping this process's PID. Not a shell
+    `>"$log"`: that follows a planted symlink or blocks on a FIFO, and a second-resolution name
+    is shared by two launches. The log is created exclusively without following symlinks, so any
+    existing entry (file, symlink, FIFO) fails untouched. Errors before the dup2 reach the
+    caller's stderr; usage errors exit 2 before anything is created."""
+    if len(arguments) < 3 or arguments[1] != '--':
+        print('Usage: workflow.py exec-logged NAME -- CMD [ARGS...]', file=sys.stderr)
+        sys.exit(2)
+    name, command, args = arguments[0], arguments[2], arguments[3:]
+    if not EXEC_LOG_NAME.fullmatch(name):
+        print(f'Error: invalid log name: {name}', file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isabs(command) or not os.path.isfile(command) or not os.access(command, os.X_OK):
+        print(f'Error: not an absolute path to an executable: {command}', file=sys.stderr)
+        sys.exit(2)
+    dir_fd = local_dir_fd(checkout_root())
+    if dir_fd is None:
+        fail('.ai/local is missing or unsafe')
+    try:
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            fail(f'log {name} already exists')
+        except OSError as error:
+            fail(error.strerror or str(error))
+    finally:
+        os.close(dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail(f'log {name} is not a regular file')
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+    os.execv(command, [command, *args])
+
+
+def remove_tree(parent_fd, name):
+    """Delete the directory NAME of PARENT_FD and everything below it, walking descriptors
+    opened without following symlinks: an inner symlink is unlinked, never entered."""
+    fd = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as entries:
+            children = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        for child, is_dir in children:
+            if is_dir:
+                remove_tree(fd, child)
+            else:
+                os.unlink(child, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def clear_scratch():
+    """clear-scratch: empty .ai/local/scratch of AI_ROOT (else the current directory) between
+    agent sessions. Never a path-based delete: a session may have replaced `.ai`, `.ai/local`
+    or `scratch` by a symlink, so everything goes through the pinned `.ai/local` descriptor.
+    Warns and never fails the caller."""
+    root = os.environ.get('AI_ROOT') or os.getcwd()
+    local_fd = local_dir_fd(root)
+    if local_fd is None:
+        return warn('could not clear .ai/local/scratch: unsafe or missing .ai/local')
+    try:
+        try:
+            info = os.stat('scratch', dir_fd=local_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(info.st_mode):
+            remove_tree(local_fd, 'scratch')
+        else:
+            # A symlink is removed itself, never followed.
+            os.unlink('scratch', dir_fd=local_fd)
+    except (OSError, RecursionError) as error:
+        warn(f'could not clear .ai/local/scratch: {error}')
+    finally:
+        os.close(local_fd)
 
 
 def read_record(dir_fd, name, limit, tail=False):
@@ -3331,6 +4562,13 @@ def observation_update(record, action, values):
     if action == 'pause':
         needs((1, 1), 'pause NOTE')
         return {**record, 'state': 'paused', 'note': values[0]}
+    if action == 'relaunch':
+        # Waiting for a scheduled usage-limit relaunch. previous_observation keeps only the
+        # base fields, so every other action drops `relaunch_at`.
+        needs((2, 2), 'relaunch AT NOTE')
+        if not re.fullmatch(r'\d{1,12}', values[0]):
+            raise RecordError('usage: observe relaunch AT NOTE')
+        return {**record, 'state': 'paused', 'note': values[1], 'relaunch_at': int(values[0])}
     if action == 'resume':
         needs((0, 0), 'resume')
         # Only a pause is lifted: a stop or recovery recorded meanwhile stays visible.
@@ -3351,6 +4589,9 @@ def observation_update(record, action, values):
     if action == 'done':
         needs((1, 1), 'done NOTE')
         return {**record, 'stage': 'pr', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
+    if action == 'planned':
+        needs((1, 1), 'planned NOTE')
+        return {**record, 'stage': 'planning', 'state': 'done', 'detail': '', 'note': values[0], 'since': stamp}
     raise RecordError(f'unknown observe action: {action}')
 
 
@@ -3408,6 +4649,65 @@ def observe(arguments):
         write_record(local_fd, 'observation.json', json.dumps(record, ensure_ascii=False) + '\n')
     finally:
         close_fds(lock, root_fd, ai_fd, local_fd)
+
+
+LIMIT_STOP_ERROR = (r'(Claude|Codex) usage limit: the reset is beyond the \d+s wait budget\. '
+                    r'Rerun after it resets\.')
+
+
+def limit_stop_write(arguments):
+    """limit-stop-write AGENT RESET: record `AGENT RESET` in .ai/local/limit-stop of AI_ROOT
+    (else the current directory) through the pinned `.ai/local` and write_record, so a symlink
+    or FIFO planted at the temp or final name is replaced, never written through."""
+    if len(arguments) != 2 or not re.fullmatch(r'Claude|Codex', arguments[0]) \
+            or not re.fullmatch(r'\d{1,12}', arguments[1]):
+        fail('Usage: limit-stop-write Claude|Codex RESET')
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None:
+        fail('.ai/local is missing, a symlink or not a directory')
+    try:
+        write_record(local_fd, 'limit-stop', f'{arguments[0]} {arguments[1]}\n')
+    except RecordError as error:
+        fail(str(error))
+    finally:
+        os.close(local_fd)
+
+
+def limit_stop(arguments):
+    """limit-stop [--now EPOCH]: print `<Agent> <relaunch epoch>` when the last stop of this
+    checkout was only a usage limit beyond the wait budget (last-error is exactly that message
+    and limit-stop, written just before it, names the same agent); else exit 1 silently."""
+    if arguments and not (len(arguments) == 2 and arguments[0] == '--now'
+                          and re.fullmatch(r'\d{1,12}', arguments[1])):
+        sys.exit(1)
+    current = int(arguments[1]) if arguments else int(time.time())
+    retry = os.environ.get('AI_LIMIT_RETRY') or '1800'
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is None or not re.fullmatch(r'\d{1,9}', retry):
+        close_fds(local_fd)
+        sys.exit(1)
+    try:
+        error = read_record(local_fd, 'last-error', SMALL_LIMIT)
+        record = read_record(local_fd, 'limit-stop', SMALL_LIMIT)
+    finally:
+        os.close(local_fd)
+    if error is None or record is None:
+        sys.exit(1)
+    text = error[0][:-1] if error[0].endswith('\n') else error[0]
+    message = re.fullmatch(LIMIT_STOP_ERROR, text)
+    stop = re.fullmatch(r'(Claude|Codex) (\d{1,12})\n?', record[0])
+    # A record from an earlier stop never qualifies: written just before this last-error.
+    age = error[1].st_mtime - record[1].st_mtime
+    if not message or not stop or message.group(1) != stop.group(1) or not 0 <= age <= 120:
+        sys.exit(1)
+    reset = int(stop.group(2))
+    if reset > current:
+        relaunch = reset + 60
+    elif reset == 0:
+        relaunch = current + int(retry)
+    else:
+        relaunch = current
+    print(f'{stop.group(1)} {relaunch}')
 
 
 def log_entry(line):
@@ -3560,8 +4860,14 @@ def main():
         deps_status(arguments)
     elif command == 'deps-record':
         deps_record(arguments)
+    elif command == 'clear-scratch':
+        clear_scratch()
+    elif command == 'exec-logged':
+        exec_logged(arguments)
     elif command == 'tree-snapshot':
         print(tree_snapshot(checkout_root()))
+    elif command == 'worktree-digest':
+        print(worktree_digest(checkout_root()))
     elif command == 'finish-summary':
         finish_summary(arguments)
     elif command == 'plan-digest':
@@ -3584,10 +4890,22 @@ def main():
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':
         plan_revision_allowlist(arguments)
+    elif command == 'plan-allowlist':
+        plan_allowlist(arguments)
+    elif command == 'plan-scope':
+        plan_scope(arguments)
+    elif command == 'plan-keeps-done':
+        plan_keeps_done(arguments)
     elif command == 'plan-revisions':
         plan_revisions(arguments)
+    elif command == 'revision-queue-repair':
+        revision_queue_repair(arguments)
     elif command == 'limit-check':
         limit_check(arguments)
+    elif command == 'limit-stop':
+        limit_stop(arguments)
+    elif command == 'limit-stop-write':
+        limit_stop_write(arguments)
     elif command == 'claude-text':
         claude_text(arguments)
     elif command == 'review-allowlist':
@@ -3600,6 +4918,8 @@ def main():
         outcome(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
+    elif command == 'pr-draft':
+        pr_draft(arguments)
     elif command == 'pr-title':
         pr_title(arguments)
     elif command == 'pr-body':

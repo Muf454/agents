@@ -15,6 +15,9 @@ Authority comes from the host-side run manifest written when the human started t
 (approved gate digest, branch, arguments, attempt budget), never from checkout files.
 At most AI_RECOVER_MAX (default 2) attempts per human-started run. Gate files are never
 changed: a changed gate always escalates. Disable with AI_AUTO_RECOVER=0.
+A stop whose only reason is a usage limit beyond the wait budget is not a failure: it schedules
+a relaunch after the reset (exit 75) that the watchdog timer (--recover) starts, at most
+AI_LIMIT_RELAUNCH_MAX (default 2, 0 = off) times per run, without a Claude session or an attempt.
 EOF
 }
 stage=''
@@ -30,6 +33,8 @@ ai_root
 # The lock first: a rejected second process must not touch the live run's marker.
 AI_LOCK_QUIET=1 ai_lock
 export AI_LOCK_HELD=$$
+# Escalations before recover-decision must never point at a previous invocation's full text.
+rm -f -- .ai/local/recovery-decision.txt
 branch=$(git symbolic-ref --quiet --short HEAD || printf 'detached HEAD')
 reason=$(tr '\n' ' ' < .ai/local/last-error 2>/dev/null || true)
 reason=${reason:-unknown (no last-error recorded)}
@@ -37,7 +42,7 @@ reason=${reason:-unknown (no last-error recorded)}
 escalate() {
   AI_STOP_NOTIFIED=1
   ai_observe stop '' "${reason% } (stopped during $stage)"
-  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}"
+  ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}$([[ -f .ai/local/recovery-decision.txt ]] && printf ' Full text: .ai/local/recovery-decision.txt')"
   printf '%s\n' "$reason" > .ai/local/last-error
   touch .ai/local/last-error.notified 2>/dev/null || true
   # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.
@@ -47,8 +52,10 @@ escalate() {
   exit 1
 }
 
+# resume WHY [NOTE]: NOTE replaces the 🔧 notification (empty: none, the relaunch said ▶).
 resume() {
-  ai_notify "🔧 Recovered ($attempt/$max): $1 Resuming the pipeline."
+  local note=${2-"🔧 Recovered ($attempt/$max): $1 Resuming the pipeline."}
+  [[ -z "$note" ]] || ai_notify "$note"
   rm -f .ai/local/last-error
   trap - EXIT
   exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"
@@ -69,13 +76,47 @@ attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3
   escalate 'the run manifest is unreadable.' 'rerun ai-pipeline --approved by hand.'
 # Restore the approved run's settings (notifications, budgets, models); settings the run
 # didn't have fall back to their defaults instead of inheriting this environment's.
-unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RELAUNCH_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
 while IFS= read -r -d '' setting; do
   case "${setting%%=*}" in
-    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL)
+    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL)
       export "$setting" ;;
   esac
 done < <(ai_helper run-manifest env)
+cap=${AI_LIMIT_RELAUNCH_MAX:-2}
+[[ "$cap" =~ ^[0-9]$ ]] || cap=2
+
+# The usage-limit wait: a pauses.log line (the watchdog's hung-rule quiet time and the history),
+# the dashboard's relaunch evidence and one ⏸ line. Usage: relaunch_wait AT LIMIT WHAT COUNT
+# (LIMIT e.g. "Claude usage limit", WHAT completes "⏸ PAUSED: <branch> ...").
+relaunch_wait() {
+  local at=$1 when now
+  when=$(date -d "@$at" '+%a %H:%M')
+  now=$(date +%s)
+  # Same clock for the stamp and the length: the line ends exactly at AT (watchdog paused_until).
+  printf '%s paused %ss: %s relaunch (resume ~%s)\n' \
+    "$(date -u -d "@$now" +%FT%TZ)" "$(( at > now ? at - now : 0 ))" "$2" "$when" >> .ai/local/pauses.log
+  ai_observe relaunch "$at" "$2 · relaunch after $when"
+  ai_notify "⏸ PAUSED: $branch $3; relaunches by itself after $when (relaunch $4/$cap)."
+  # The stopped run's records: nothing is left for the watchdog to report as a stop or a crash.
+  rm -f .ai/local/last-error .ai/local/limit-stop .ai/local/pipeline.active
+  RELAUNCH_WHEN=$when
+}
+# The relaunch schedule decides first, before any escalation (each one would be terminal):
+# pending → still waiting (this recovery started early, e.g. the watchdog's crash recovery after
+# a kill between scheduling and its cleanup): restore the wait, nothing else; due → claim it,
+# so whatever this relaunch hits next is its one terminal stop and no probe starts it again.
+relaunch=no
+if at=$(ai_helper run-manifest limit-hold 2>/dev/null); then
+  relaunch_wait "$at" 'usage limit' 'is waiting for the usage-limit relaunch' \
+    "$(ai_helper run-manifest limit-count)"
+  printf 'Still waiting for the usage-limit relaunch after %s.\n' "$RELAUNCH_WHEN"
+  exit 75
+fi
+if count=$(ai_helper run-manifest limit-claim 2>/dev/null); then
+  relaunch=yes
+  [[ -f .ai/local/last-error ]] || reason='stopped at a usage limit; relaunched after the reset'
+fi
 # Any unexpected exit (set -e, kill, Ctrl-C) still tells the human, exactly once.
 on_exit() {
   local code=$?
@@ -98,6 +139,14 @@ max=${AI_RECOVER_MAX:-2}
 # Shell variable only: resume execs ai-pipeline with explicit variables, so it never reaches it.
 AI_OBSERVE_RECOVERY="$attempt/$max"
 ai_observe recovering "$AI_OBSERVE_RECOVERY"
+# The resumed run stopped while the preserved task work was still armed (before ai-run
+# consumed the arm): terminal whatever the reason and the settings. No decision session, no commit,
+# the checkout and the arm as found. Presence decides, not the match: only ai-run's disarm or a
+# human start removes the arm. A relaunch is never caught here (scheduled, not armed yet).
+if bound=$(ai_helper run-manifest limit-task 2>/dev/null); then
+  escalate "the resumed run stopped on the preserved work of $bound before continuing it; nothing was committed." \
+    'inspect the checkout and .ai/local/last-error, commit or discard the preserved work, then rerun ai-pipeline.'
+fi
 [[ "${AI_AUTO_RECOVER:-1}" != 0 ]] || escalate 'auto-recovery is off (AI_AUTO_RECOVER=0).' 'fix the cause, then rerun ai-pipeline.'
 ai_guard_digest >/dev/null || { AI_GATE_BROKEN=1
   escalate 'the workflow gate is missing or unsafe.' 'inspect .ai/bin, .ai/validate and permissions.'; }
@@ -106,6 +155,21 @@ ai_gate_check "$approved_gate" || \
   escalate 'gate files changed since you approved the run.' 'review the change and rerun ai-pipeline --approved yourself.'
 [[ "$branch" == "$(ai_helper run-manifest branch)" ]] || \
   escalate "the checkout is on $branch, not the approved run's branch." 'switch back or rerun ai-pipeline --approved yourself.'
+# A claimed relaunch accepts only the checkout its schedule recorded (HEAD and the whole tree,
+# submodules included): escalate with the helper's reason (nothing committed, nothing touched).
+# Usage: relaunch_moved REASON.
+relaunch_moved() {
+  escalate "${1#Error: } while the usage-limit relaunch waited; nothing was committed." \
+    'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
+}
+relaunch_verify() {
+  local why
+  [[ "$relaunch" == yes ]] || return 0
+  why=$(ai_helper run-manifest limit-verify 2>&1) || relaunch_moved "$why"
+}
+# The ONE verification site: nothing before it commits, stashes, checks out, writes a tracked
+# file or starts a session, and every later step transforms a VERIFIED tree.
+relaunch_verify
 mapfile -d '' -t args < <(ai_helper run-manifest args)
 # A plan revision waiting for the human's answer (host record), whatever the recorded stop
 # reason (a crash leaves none): checked before the attempt limit and any stage resume.
@@ -125,6 +189,90 @@ case "$decision_rc" in
   1) ;;
   *) escalate "the plan revision records are unreadable (${questions#Error: })." 'inspect them, then rerun ai-pipeline --approved by hand.' ;;
 esac
+
+# An interrupted review triage or plan revision (this branch's host-side stage record, also
+# after a crash): never commit its leftovers here. Rerun: the pipeline verifies the stage and
+# records it exactly once, or escalates. Leftovers outside the stage's records escalate now.
+# Usage: resume_open_stage [quiet] (quiet: the relaunch already announced itself).
+resume_open_stage() {
+  local stage_name stage_start scope_helper stage_label scope
+  open_stage=$(ai_helper run-manifest stage 2>/dev/null) || \
+    escalate 'the stage record is unreadable or invalid.' 'rerun ai-pipeline --approved by hand.'
+  [[ -n "$open_stage" ]] || return 0
+  read -r stage_name stage_start _ <<< "$open_stage"
+  if [[ "$stage_name" == plan-revision ]]; then
+    scope_helper=plan-revision-scope; stage_label='plan revision'
+  else
+    scope_helper=triage-scope; stage_label='review triage'
+  fi
+  scope=$(ai_helper "$scope_helper" "$stage_start" 2>&1) || \
+    escalate "the interrupted $stage_label left changes outside its scope (${scope#Error: }); nothing was committed." \
+      'inspect and discard them, then rerun ai-pipeline.'
+  if [[ "${1:-}" == quiet ]]; then resume '' ''; fi
+  ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage ($stage_label): $reason"
+  resume "the resumed pipeline completes the interrupted $stage_label."
+}
+# A stop always leaves runner bookkeeping (run log, state, handoff) behind; record it.
+record_stop_leftovers() {
+  if [[ -n "$(git status --porcelain --untracked-files=all)" && \
+        -z "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md')" ]]; then
+    git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
+    git commit -q -m "chore(ai): record stop during $stage" || escalate 'recording the stop failed (commit hook?).' 'inspect the checkout.'
+    ai_gate_check "$approved_gate" || escalate 'gate files changed after recording the stop (hook?).' 'inspect the diff.'
+  fi
+}
+
+if [[ "$relaunch" == yes ]]; then
+  # The claimed relaunch resumes the approved run: no Claude decision, no recovery attempt.
+  ai_notify "▶ RESUMED after the usage limit (relaunch $count/$cap): $branch."
+  # The only transitions of the VERIFIED tree (relaunch_verify passed; the lock is held):
+  #   (a) an open stage → resume (its scope check kept);
+  #   (b) dirty only in .ai/state.md, .ai/run-log.md, .ai/handoff.md → the leftovers commit →
+  #       ai_gate_check → resume;
+  #   (c) dirty otherwise, and the stop's recorded stage is `implementation` → limit-arm →
+  #       resume (a refusal escalates with the verify wording; a stop outside an
+  #       implementation session or no task recorded at the stop → ⛔ with that reason,
+  #       nothing committed);
+  #   (d) clean → resume.
+  # And before this table, for any recovery: `limit_resume` present at entry → terminal,
+  # nothing touched (the armed rule above).
+  # Nothing else is permitted: a new branch here needs this table (and docs/workflow.md) changed.
+  resume_open_stage quiet
+  record_stop_leftovers
+  if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    # Preserved task work: kept uncommitted; the resumed run accepts exactly this tree once.
+    # Nothing touched the checkout since the verification (we hold the lock): a refusal is an
+    # inconsistency, reported as the verification would. The arm is bound to an implementation
+    # stop (the stage recorded at scheduling) and names the task the work belongs to; a stop
+    # of another stage or without a recorded task fails closed.
+    if ! why=$(ai_helper run-manifest limit-arm 2>&1); then
+      why=${why#Error: }
+      [[ "$why" != *'outside an implementation session'* && "$why" != *'no task recorded'* ]] || \
+        escalate "$why; nothing was committed." 'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
+      relaunch_moved "$why"
+    fi
+  fi
+  resume '' ''
+fi
+# A stop whose only reason is a usage limit beyond the wait budget: schedule a relaunch after
+# the reset instead of escalating. Off (cap 0): the hard rule below escalates it as before.
+if (( cap > 0 )) && limit=$(ai_helper limit-stop 2>/dev/null); then
+  read -r agent at <<< "$limit"
+  if ! "$AI_BIN/ai-watchdog" "$AI_ROOT" --timer-recovers >/dev/null 2>&1 </dev/null; then
+    escalate "the usage limit resets around $(date -d "@$at" '+%a %H:%M'), but no watchdog timer with --recover is installed to relaunch the run." \
+      'install it (ai-watchdog --install-timer --recover) or rerun ai-pipeline after the reset.'
+  fi
+  # Records HEAD and the tree digest now: the stop's bookkeeping is written and nothing is
+  # committed yet, and after this the host writes nothing tracked (only .ai/local/, host state).
+  # The stop's stage is recorded too: only an implementation stop's tree can be armed later.
+  count=$(ai_helper run-manifest limit-schedule "$at" "$cap" "$stage" 2>/dev/null) || \
+    escalate "usage limit again after $cap relaunch(es) in this run." 'rerun ai-pipeline after the reset.'
+  relaunch_wait "$at" "$agent usage limit" "stopped at a $agent usage limit during $stage" "$count"
+  AI_STOP_NOTIFIED=1
+  trap - EXIT
+  printf 'Paused at a %s usage limit; the watchdog relaunches the run after %s.\n' "$agent" "$RELAUNCH_WHEN"
+  exit 75
+fi
 # Hard rules: never let an AI talk the workflow past its own gate, policy or integrity checks.
 case "$reason" in
   *'moved past the branch'*)
@@ -136,37 +284,13 @@ case "$reason" in
   *gate*|*[Pp]ermission*|*[Pp]rotected*|*denied*|*'Branch changed'*|*'Detached HEAD'*|*current.md*|\
   *integrity*|*'beyond the'*'wait budget'*|*'Another runner'*|*'review provenance'*|*'plan review found'*|\
   *'differs from the validated content'*|*'Triage stage'*|*'Dependency setup'*|*'Plan revision stage'*|\
-  *'supervision limit reached'*|*'needs your decision'*)
+  *'supervision limit reached'*|*'needs your decision'*|*'Task queue is invalid'*|*'pipeline draft record'*)
     escalate 'this kind of stop always needs a human.' 'inspect it, fix it, then rerun ai-pipeline.' ;;
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
 
-# An interrupted review triage or plan revision (this branch's host-side stage record, also
-# after a crash): never commit its leftovers here. Rerun: the pipeline verifies the stage and
-# records it exactly once, or escalates. Leftovers outside the stage's records escalate now.
-open_stage=$(ai_helper run-manifest stage 2>/dev/null) || \
-  escalate 'the stage record is unreadable or invalid.' 'rerun ai-pipeline --approved by hand.'
-if [[ -n "$open_stage" ]]; then
-  read -r stage_name stage_start _ <<< "$open_stage"
-  if [[ "$stage_name" == plan-revision ]]; then
-    scope_helper=plan-revision-scope; stage_label='plan revision'
-  else
-    scope_helper=triage-scope; stage_label='review triage'
-  fi
-  scope=$(ai_helper "$scope_helper" "$stage_start" 2>&1) || \
-    escalate "the interrupted $stage_label left changes outside its scope (${scope#Error: }); nothing was committed." \
-      'inspect and discard them, then rerun ai-pipeline.'
-  ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage ($stage_label): $reason"
-  resume "the resumed pipeline completes the interrupted $stage_label."
-fi
-
-# A stop always leaves runner bookkeeping (run log, state, handoff) behind; record it.
-if [[ -n "$(git status --porcelain --untracked-files=all)" && \
-      -z "$(git status --porcelain --untracked-files=all -- . ':!.ai/state.md' ':!.ai/run-log.md' ':!.ai/handoff.md')" ]]; then
-  git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
-  git commit -q -m "chore(ai): record stop during $stage" || escalate 'recording the stop failed (commit hook?).' 'inspect the checkout.'
-  ai_gate_check "$approved_gate" || escalate 'gate files changed after recording the stop (hook?).' 'inspect the diff.'
-fi
+resume_open_stage
+record_stop_leftovers
 [[ -f .ai/prompts/recover.md ]] || escalate 'missing .ai/prompts/recover.md.' 'copy it from the toolkit templates.'
 command -v claude >/dev/null || escalate 'claude is not installed.' 'rerun ai-pipeline by hand.'
 ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage: $reason"

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
+usage() {
+  cat <<'EOF'
+Usage: ai-plan PROMPT_FILE [--revision] [--model NAME] [--session-timeout SECONDS]
+               [--knowledge-dir DIRECTORY] [--read-dir DIRECTORY]... [--detach]
+Start a headless planning session (ai-run --plan) from the objective in PROMPT_FILE. The options
+are ai-run --plan's (see ai-run --help); paths are resolved against your working directory.
+Without --detach it runs in the foreground (it becomes the ai-run --plan process).
+--detach starts it in the background with its output in .ai/local/plan-<UTC stamp>-<hex>.log and
+returns once the session has really started (ai-dashboard shows it planning):
+"Planning session started: pid N, log PATH" (also when the plan already finished with exit 0). If
+the session ends first otherwise, the last lines of its log are printed and ai-plan exits with its
+status (1 for exit 0); if it cannot be confirmed within
+AI_PLAN_ACK_SECONDS (default 20) it exits 1 and leaves the session running.
+EOF
+}
+prompt=''; detach=no; rest=()
+while (( $# )); do
+  case "$1" in
+    --detach) detach=yes; shift ;;
+    -h|--help) usage; exit 0 ;;
+    # Directories are resolved here, against the caller's working directory: ai_root below
+    # changes to the checkout root, so ai-run would otherwise resolve them from there.
+    --knowledge-dir)
+      (( $# >= 2 )) || ai_die 'Missing knowledge directory'
+      [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
+      rest+=("$1" "$(cd -- "$2" && pwd -P)"); shift 2 ;;
+    --read-dir)
+      (( $# >= 2 )) && [[ -n "$2" ]] || ai_die 'Missing --read-dir DIRECTORY'
+      [[ -d "$2" ]] || ai_die "Read directory not found: $2"
+      dir=$(cd -- "$2" && pwd -P) || ai_die "Read directory not found: $2"
+      rest+=("$1" "$dir"); shift 2 ;;
+    # Every other option is ai-run's to validate; a value is passed with its option.
+    --model|--session-timeout)
+      rest+=("$1"); shift
+      if (( $# )); then rest+=("$1"); shift; fi ;;
+    -*) rest+=("$1"); shift ;;
+    *)
+      if [[ -n "$prompt" ]]; then rest+=("$1"); shift; continue; fi
+      [[ -n "$1" && -f "$1" && -r "$1" ]] || ai_die "Prompt file not found or unreadable: $1"
+      prompt=$(cd -- "$(dirname -- "$1")" && pwd -P)/$(basename -- "$1")
+      shift ;;
+  esac
+done
+[[ -n "$prompt" ]] || { usage >&2; ai_die 'Missing PROMPT_FILE'; }
+ack=${AI_PLAN_ACK_SECONDS:-20}
+[[ "$ack" =~ ^[1-9][0-9]{0,5}$ ]] || ai_die "Invalid AI_PLAN_ACK_SECONDS: $ack"
+# As every toolkit command: the `paths` safety check refuses a symlinked .ai or .ai/local before
+# anything is launched, then .ai/local is created (setup-project does not create it). The
+# detached exec-logged rechecks the pinned .ai/local in the child; it never creates it.
+ai_root
+if [[ "$detach" == no ]]; then
+  exec "$AI_BIN/ai-run" --plan "$prompt" "${rest[@]}"
+fi
+name=plan-$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').log
+log=.ai/local/$name
+# Never a shell redirection to the log: exec-logged creates it exclusively in the pinned
+# .ai/local (no symlink or FIFO is followed) and execs the runner on that descriptor. A
+# non-interactive shell's background job is not a process-group leader, so setsid execs without
+# forking: $! is the ai-run runner itself. Errors before the exec reach this command's stderr.
+setsid python3 -I "$AI_BIN/lib/workflow.py" exec-logged "$name" -- \
+  "$AI_BIN/ai-run" --plan "$prompt" "${rest[@]}" </dev/null &
+pid=$!
+# observed STATE: the observation is this session's planning record in STATE.
+observed() {
+  python3 -I -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as file:
+        record = json.load(file)
+except (OSError, ValueError):
+    sys.exit(1)
+ok = isinstance(record, dict) and record.get("stage") == "planning" and \
+    record.get("state") == sys.argv[3] and record.get("pid") == int(sys.argv[2])
+sys.exit(0 if ok else 1)' .ai/local/observation.json "$pid" "$1"
+}
+for (( i = 0; i < ack * 5; i++ )); do
+  if observed active; then
+    disown "$pid" 2>/dev/null || true
+    printf 'Planning session started: pid %s, log %s\n' "$pid" "$log"
+    exit 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    code=0
+    wait "$pid" || code=$?
+    # A plan that finished between two polls started too: its own planning/done and exit 0.
+    if (( code == 0 )) && observed done; then
+      printf 'Planning session started: pid %s, log %s\n' "$pid" "$log"
+      exit 0
+    fi
+    printf 'ai-plan: the planning session ended early (exit %s); last lines of %s:\n' "$code" "$log" >&2
+    if [[ -f "$log" && ! -L "$log" ]]; then tail -n 10 -- "$log" >&2; else echo '(no log was created)' >&2; fi
+    exit $(( code > 0 ? code : 1 ))
+  fi
+  sleep 0.2
+done
+# Never kill the session: it may still start; the human decides.
+disown "$pid" 2>/dev/null || true
+printf 'ai-plan: could not confirm the planning session started within %s s (pid %s, log %s).\n' \
+  "$ack" "$pid" "$log" >&2
+exit 1

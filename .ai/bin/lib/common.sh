@@ -37,7 +37,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -97,8 +97,13 @@ ai_limit_pause() {
   local max=${AI_LIMIT_MAX_WAIT:-28800} retry=${AI_LIMIT_RETRY:-1800}
   now=$(date +%s)
   if (( reset > now )); then wait=$(( reset - now + 60 )); else wait=$retry; fi
-  (( AI_WAITED + wait <= max )) || \
+  if (( AI_WAITED + wait > max )); then
+    # Machine-readable record for ai-recover (`workflow.py limit-stop`). Written through the
+    # pinned .ai/local, never a redirection: a planted symlink or FIFO there is not followed.
+    (( reset > now )) || reset=0
+    ai_helper limit-stop-write "$agent" "$reset" 2>/dev/null || true
     ai_die "$agent usage limit: the reset is beyond the ${max}s wait budget. Rerun after it resets."
+  fi
   until=$(date -d "@$(( now + wait ))" '+%a %H:%M')
   printf '%s usage limit reached; pausing %ss (until %s), then resuming.\n' "$agent" "$wait" "$until"
   # Pauses go to an ignored local log: touching tracked files would dirty the checkpoint.
@@ -118,6 +123,22 @@ ai_root() {
   mkdir -p .ai/local
 }
 ai_helper() { python3 "$AI_BIN/lib/workflow.py" "$@"; }
+# The armed-tree acceptance contract (ai-pipeline, before its start check): one predicate for
+# ai-pipeline and ai-run. A resume (a human start drops the arm), the checkout exactly the armed
+# tree, no stage open.
+armed_resume() {
+  local stage
+  [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && stage=$(ai_helper run-manifest stage 2>/dev/null) && \
+    [[ -z "$stage" ]] && ai_helper run-manifest limit-armed 2>/dev/null
+}
+# The one acceptance of a dirty tree between the resume and ai-run's disarm; AI_ARMED=yes records
+# that the arm admitted it (never inherited from the environment).
+AI_ARMED=no
+clean_or_armed() {
+  [[ -n "$(git status --porcelain --untracked-files=all)" ]] || return 0
+  armed_resume || return 1
+  AI_ARMED=yes
+}
 ai_guard_digest() {
   # Inline verifier is loaded before Claude starts. Never ask a potentially
   # modified project helper to verify its own integrity.
@@ -243,8 +264,35 @@ ai_lock() {
   if ! flock -n 9; then
     # A second recovery must not overwrite the real stop reason in last-error.
     [[ -z "${AI_LOCK_QUIET:-}" ]] || { printf '%s\n' 'Another runner owns this checkout; nothing to recover.' >&2; exit 1; }
-    ai_die 'Another runner/reviewer owns this checkout.'
+    # Not ai_die: a rejected process owns nothing, so it writes nothing (no last-error,
+    # marker, observation or notification); the owner's records stay intact.
+    printf 'Error: Another runner/reviewer owns this checkout%s\n' "$(ai_lock_owner_hint)" >&2
+    exit 1
   fi
+}
+# Best-effort hint naming the lock owner from pipeline.active (a regular file only, so a
+# FIFO or symlink can never block us). Prints '.' when the owner is unknown.
+ai_lock_owner_hint() {
+  local marker=.ai/local/pipeline.active pid='' name='' arg argv=()
+  if [[ -f "$marker" && ! -L "$marker" ]]; then
+    { IFS= read -r -n 32 pid < "$marker"; } 2>/dev/null || true
+  fi
+  if [[ "$pid" =~ ^[0-9]+$ ]] && { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null \
+     && (( ${#argv[@]} )); then
+    # Runner identity as dashboard.is_runner: argv[0], or a shell's first non-option argument.
+    name=${argv[0]##*/}
+    if [[ "$name" == bash || "$name" == sh ]]; then
+      name=''
+      for arg in "${argv[@]:1}"; do
+        [[ -z "$arg" || "$arg" == -* ]] || { name=${arg##*/}; break; }
+      done
+    fi
+  fi
+  case "$name" in
+    ai-recover) printf ': auto-recovery (PID %s) is deciding whether to resume the pipeline itself. Wait for its 🔧 Recovered or ⛔ STOPPED notification (ai-dashboard shows it as recovering), or stop it with kill %s before relaunching.' "$pid" "$pid" ;;
+    ai-pipeline) printf ': a pipeline (PID %s) is running here; watch it with ai-dashboard or stop it first.' "$pid" ;;
+    *) printf '.' ;;
+  esac
 }
 ai_branch() {
   local branch
