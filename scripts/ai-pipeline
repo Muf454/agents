@@ -22,7 +22,8 @@ origin/B is strictly ahead of it (never fetched), and the resolved base is print
 The human tests and merges the PR. Nothing is merged or deployed. Rerun to resume:
 an interrupted review triage is verified and recorded once, and pending re-checks of
 rejected findings run, before anything else.
-Usage limits pause and resume (see ai-run). Notifications use AI_NOTIFY_CMD.
+Usage limits pause and resume (see ai-run); a reset beyond AI_LIMIT_MAX_WAIT is relaunched by the
+watchdog timer (--recover), at most AI_LIMIT_RELAUNCH_MAX times per run. Notifications use AI_NOTIFY_CMD.
 EOF
 }
 orig_args=("$@")

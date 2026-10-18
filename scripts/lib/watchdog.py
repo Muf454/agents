@@ -406,7 +406,7 @@ def main():
     parser.add_argument('--stale-minutes', type=positive, default=45)
     parser.add_argument('--diagnose', action='store_true')
     parser.add_argument('--recover', action='store_true',
-                        help='after a crashed ai-pipeline, start ai-recover (bounded auto-recovery)')
+                        help='after a crashed ai-pipeline or when a usage-limit relaunch is due, start ai-recover (bounded auto-recovery)')
     parser.add_argument('--diagnosis-timeout', type=positive, default=120, help='seconds (default 120)')
     parser.add_argument('--diagnosis-agent', choices=('auto', 'codex', 'claude'), default='auto',
                         help='read-only diagnosis: auto (default: Codex, then Claude when Codex fails, '

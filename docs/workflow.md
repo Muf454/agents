@@ -730,7 +730,7 @@ last-error) and before the attempt limit and any stage resume; an open plan-revi
 whose `stage-verify` says `committed` is cleared first, so the run continues once the human's
 answer has a new plan review (the stage would be foreign to it); an unreadable revision store
 (exit 2) escalates too; hard-rule escalation by reason (gate, permissions,
-denied, branch, review integrity, plan review, weekly limit, hook-changed checkpoints,
+denied, branch, review integrity, plan review, a usage limit beyond the wait budget (no relaunch covers it), hook-changed checkpoints,
 `Triage stage`, `Plan revision stage` (including a queue the host could not reorder after a
 revision), `supervision limit reached`, `needs your decision`, and the review base that moved past the branch, whose full recorded reason is printed to
 stderr before the escalation summary);

@@ -1,9 +1,9 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet on this branch: this is the plan. Branch `feature/limits-plan-stage` (from
-`fix/flow-batch-5` at edc3dc6; PR #30 on PR #29, neither merged) plans three items Zack decided
-on 2026-10-17 (Claude planning session, unattended):
+Branch `feature/limits-plan-stage` (from `fix/flow-batch-5` at edc3dc6; PR #30 on PR #29, neither
+merged) implements three items Zack decided on 2026-10-17 (planned in a Claude planning session,
+unattended). All 19 tasks are DONE (T010 is the last, the audit). The plan, by item:
 - **MC-01 part 1** (T001–T004): a pipeline stop whose only reason is a usage limit beyond the
   wait budget schedules a relaunch in host state and pauses (⏸, exit 75) instead of ⛔; the
   watchdog timer (`--recover`) starts `ai-recover` once the reset has passed and the run resumes
@@ -46,10 +46,12 @@ on 2026-10-17 (Claude planning session, unattended):
   dashboard with the Plan box already exists).
 - **R15** (T008–T009): the PR step un-drafts an existing draft PR only when host state records
   that the pipeline drafted it; human drafts and `--draft` runs stay draft.
-- T010: docs, flow chart and handoff audit.
+- T010: docs, flow chart and handoff audit (2026-10-18): wording fixes only, flow chart unchanged.
 See `.ai/project-spec.md`, `.ai/current-plan.md`, `.ai/tasks.md`.
 
 ## Validation run
+T010: `-k Docs` 3 OK, `-k flow_this_repo` 1 OK; `.ai/bin/ai-check` PASS (962 tests, 617.3 s; the call passed
+the 600 s foreground limit and finished in the background, exit 0).
 T009: `-k pr_undraft` 14 OK, `-k draft` 25 OK; `.ai/bin/ai-check` PASS (962 tests, 612.9 s).
 T007: `-k plan_outcome` 3 OK, `-k outcome` 85 OK, `-k Docs` 3 OK; `.ai/bin/ai-check` PASS (948 tests, 569.5 s).
 T006: `-k ai_plan` 12 OK, `-k setup` 30 OK, `-k Docs` 3 OK, `-k script_modes` 1 OK;
@@ -95,7 +97,7 @@ continues uncommitted task work in its own session or the validated checkpoint; 
 is for implementation stops only and the armed resume re-enters at implementation; T018: a
 stop while armed is terminal; T019: "checks first, then the arm ends"; T015: "continued through
 every start check of the resumed run"; T006: the plan node says `ai-plan objective.md` with
-`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. T009: the PR node and the "draft after two fix rounds" bullet say a clean PR is made ready again only when the pipeline drafted it itself. T010 audits the chart.
+`--detach` for mission control, the 📝 notifications row names `ai-plan`). T007: the outcome log bullet names planning sessions. T009: the PR node and the "draft after two fix rounds" bullet say a clean PR is made ready again only when the pipeline drafted it itself. T010 (2026-10-18) audited the chart against the code: no gap, no node changed.
 
 ## Manual testing for the human
 
@@ -165,4 +167,11 @@ detached log for T006's `ai-plan --detach`). T006: `scripts/ai-plan` (foreground
 `ai-run --plan`; `--detach` with a confirmed start printing PID and log), installed by
 `setup-project`. T007: planning sessions in the outcome log and run log. T008: host `pr-draft`
 record. T009: the PR step un-drafts only a recorded pipeline draft (`--draft` revokes it; a
-failed revocation is a hard-rule stop). Next: T010 (docs, flow chart and handoff audit).
+failed revocation is a hard-rule stop). T010: audit of README, docs/workflow.md, the usage texts and the
+vault chart; wording fixed ("weekly limit" → the "beyond the wait budget" escalation; relaunch in the
+`--help` of ai-run, ai-pipeline and ai-watchdog; AI_LIMIT_RELAUNCH_MAX in the README settings note,
+AI_PLAN_ACK_SECONDS as environment only).
+Recorded mismatch (not fixed, a behaviour change): `ai-recover` (line 87) silently uses 2 for an
+`AI_LIMIT_RELAUNCH_MAX` outside `^[0-9]$`, while the T001 spec asked for validation next to `max`
+(`AI_RECOVER_MAX` is validated). The README now says so. Next: all tasks are DONE; the full gate
+result (see Validation run) decides `ready_for_review`. Human acceptance is still open.

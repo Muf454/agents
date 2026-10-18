@@ -2232,7 +2232,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
   with exit 0).
 
 ## T010 — Docs, flow chart and handoff audit (all items)
-Status: TODO
+Status: DONE
 Dependencies: T011, T014, T017, T016, T018, T019, T015, T004, T007, T009
 Model: haiku
 
@@ -2267,4 +2267,22 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE 2026-10-18 (claude, runner session). Audit against the code; wording fixed, flow unchanged.
+- README: the "weekly limit" hard rule is the code's `beyond the wait budget` escalation (fixed in
+  Recovery and Usage limits); ai-watchdog `--recover` row and crash bullet cover a due usage-limit
+  relaunch; `AI_LIMIT_RELAUNCH_MAX` (0–9, default 2, other values count as 2) and `AI_PLAN_ACK_SECONDS`
+  (environment only, 1–999999, default 20) in a settings note; `exec-logged` named in the ai-plan row.
+- docs/workflow.md: hard-rule list says "a usage limit beyond the wait budget (no relaunch covers it)".
+- Usage texts: `ai-run` and `ai-pipeline` `--help` describe the watchdog relaunch; `watchdog.py --recover`
+  help names a due usage-limit relaunch. No behaviour change.
+- Vault `agents-flow.md`: audited, no gap, unchanged (`updated:` already 2026-10-18); the `agents.md`
+  Log line is written for the batch.
+- Handoff: "What has been implemented?" now says all 19 tasks DONE (was "this is the plan"); T010 in
+  the validation run and the next-action; the test prefixes listed in "Covered by automated tests"
+  all exist in tests/ (verified by name); human steps unchanged (upgrade, watchdog reinstall,
+  retire launch-plan.sh, mission control to ai-plan).
+- Mismatch recorded, not fixed (behaviour): `scripts/ai-recover` uses 2 for an `AI_LIMIT_RELAUNCH_MAX`
+  outside `^[0-9]$` without a message; T001 asked for validation next to `max`.
+- Validation: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `.ai/bin/ai-check` PASS (962 tests, 617.3 s,
+  exit 0; the call passed the 600 s foreground limit and finished in the background).
 

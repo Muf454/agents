@@ -37,7 +37,9 @@ uncommitted for you to review. --revision says an earlier plan exists (keep DONE
 directory (plans, research); --knowledge-dir stays the knowledge base option.
 --plan runs outside ai-pipeline and refuses --triage, --revise-plan, --since, --base,
 --sessions and --run-timeout.
-Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume.
+Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume. Inside
+ai-pipeline, a reset beyond that budget is relaunched after the reset by the watchdog timer (--recover),
+at most AI_LIMIT_RELAUNCH_MAX (default 2) times per run.
 Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
 (time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
