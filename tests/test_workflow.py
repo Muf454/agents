@@ -11654,6 +11654,43 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('start-dispositions', head)
         self.assertIn('| M1 | accepted |', (self.project / '.ai/reviews/dispositions.md').read_text())
 
+    def test_finding_cell_plan_dispositions_incident_row(self):
+        start = self.open_plan_section()
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        path.write_text(path.read_text() + '| P1 (MAJOR) dev proxy vs Origin check | accepted | real | T002 |\n'
+                        '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n')
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        result = self.helper('plan-dispositions-check', '--since', start, '--base', 'main')
+        self.assertEqual(result.stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+
+    def test_finding_cell_plan_revision_restart_records_decorated_rows(self):
+        start = self.revise_ready('P1|Gap in tests;P2|Unclear rollback')
+        self.assertIn('Claude session failed', self.revise(expected=1, MOCK_CLAUDE='revise-error').stderr)
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        head, mark, section = path.read_text().rpartition('\n## Plan review round')  # the preamble is read-only
+        self.assertIn('| P1 | accepted |', section)
+        path.write_text(head + mark + section.replace('| P1 |', '| P1 (MAJOR) Gap in tests |')
+                        .replace('| P2 |', '| P2: Unclear rollback |'))
+        self.assertEqual(self.revision_commits(), 0)
+        self.plan_check(start)
+        result = self.revise()
+        self.assertIn('already complete; recording the revision', result.stdout)
+        self.assertEqual(len(self.revision_args()), 1)  # the restart made no Claude call
+        self.assertEqual(self.revision_commits(), 1)
+        self.assertEqual(self.run_cmd(['git', 'log', '--format=%s', f'{start}..HEAD']).stdout.splitlines(),
+                         ['chore(ai): record plan revision', 'chore(ai): open plan dispositions'])
+        self.assertIn('plan revised (round 1): accepted 2, rejected 0, needs-human 0',
+                      (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+
+    def test_finding_cell_prompts_show_the_table(self):
+        text = (ROOT / 'templates/.ai/prompts/plan-revision.md').read_text()
+        self.assertIn('| Finding | Disposition | Evidence / reason | Task |', text)
+        for disposition in ('accepted', 'rejected', 'needs-human'):
+            self.assertRegex(text, rf'(?m)^\| P\d \| {disposition} \| [^|]+ \| (?:T\d+ )?\|$')
+        host = (ROOT / 'scripts/lib/workflow.py').read_text()
+        self.assertIn("'| Finding | Disposition | Evidence / reason | Task |", host)
+
     def test_triage_severity_suffix_rejected_row_is_rechecked_and_counted(self):
         self.rejected_review(['| M1 (MAJOR) | rejected | T001.txt is a fixture; the finding misreads it | none |\n',
                               '| M2 (MAJOR) | accepted | real defect | T002 |\n'], fix_task=True)

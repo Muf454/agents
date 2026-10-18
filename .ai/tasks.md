@@ -2858,7 +2858,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T029 — Plan dispositions: regression for the family-budget row and the restart path; prompt shows the table (FL-30)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -2907,6 +2907,12 @@ Targeted: `python3 -m unittest discover -s tests -k plan_revision` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+BLOCKED on the gate timeout, not on a failure. Implementation is complete and the targeted checks pass:
+`-k finding_cell` Ran 10 OK, `-k plan_revision` Ran 15 OK, `-k plan_dispositions` Ran 12 OK.
+`.ai/bin/ai-check` run in the foreground with timeout 600000 ms did not finish within 600 s (same
+condition as T027). No parser change was needed: `FINDING_CELL` already accepts the incident cell.
+Added the three tests in tests/test_workflow.py and the table header plus three example rows in
+`templates/.ai/prompts/plan-revision.md`. Flow unchanged. Needs a full gate run with a longer limit.
 
 
 ## T030 — Self-check prints progress, a stop summary and the tests over the per-test budget (FL-31, runner output)
