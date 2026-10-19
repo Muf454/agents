@@ -45,7 +45,7 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
   converted (the result lists every audited test and why it stays).
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
-in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
+in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T036).
 T001–T021 are batch 6's DONE tasks (merged in #31). They stay in the queue unchanged because the
 host refuses a plan that removes DONE blocks.
 - **FL-28** (T022–T026, opus): an implementation session gets room for two measured gate runs
@@ -72,6 +72,7 @@ host refuses a plan that removes DONE blocks.
   `ai-recover`'s timeout commit-and-rerun gate sees the restored bit.
 
 ## Validation run
+After T036 (docs only; parent 8c79a8d): `-k Docs` 3 OK; `-k flow_this_repo` 1 OK. The full `.ai/bin/ai-check` hit the 600 s tool limit (47/48 batches, 985 tests, 0 failing at 605 s) and was still running in the background; no final result, so no PASS is claimed.
 After T035 (parent 440feb4): `.ai/bin/ai-check` PASS (1005 tests, 668.5 s, finished in the background past the 600 s tool timeout, tree unchanged during the run); `-k exec_bits -k timeout_rerun` 20 OK.
 After T034 (parent 81ca76a): `.ai/bin/ai-check` PASS (1003 tests, 654.9 s, finished in the background past the 600 s tool timeout, tree unchanged during the run); `-k exec_bits` 6 OK; `-k Docs` 3 OK.
 After T028 (the last full gate on the branch, parent 01f8197, which includes T027, T029 and T030): `.ai/bin/ai-check` PASS (1002 tests, 634.3 s, run in the background); `-k exec_bits_prompts` 1 OK; `-k prompt` 17 OK; `-k Docs` 3 OK. The T027, T029 and T030 gate blocks were a tool-limit issue (FL-32): mission control ran the full gate on c797cd3 without a tool timeout (1001 tests, 637.5 s, OK). T031: `ai-check` PASS (1001 tests, 633.5 s). T032 changed no code.
@@ -97,7 +98,9 @@ After T024: `.ai/bin/ai-check` PASS (978 tests, 618.6 s); `-k timeout_rerun_mani
 ## Flow chart
 Flow chart updated (T023: vault `agents-flow.md` "Inside one task" (session limit with the gate allowance,
 timed host gate); T026: "When something goes wrong" (session timeout on an IN_PROGRESS task: gate →
-recovery checkpoint → rerun once per task, else ⛔, before the Claude decision)).
+recovery checkpoint → rerun once per task, else ⛔, before the Claude decision); T036: "Inside one task"
+(exec-bits step after the session and before the host checks, also on a timeout, error or signal stop),
+the "Executable bits" bullet, and the timeout bullet (the repair runs first, T035)).
 
 ## Manual testing for the human
 
@@ -139,4 +142,8 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 T022–T033 are DONE (T033 on mission control's full gate pass, 1002 tests). Review round 1
 (Codex, HEAD b651970) found M2 (exec-bits follows a symlinked parent directory), M3 (exec-bits
 does not run after a timed-out session), N3 and N4; all accepted in
-`.ai/reviews/dispositions.md`. T034 and T035 are DONE. Next: T036 (handoff and flow chart). Remaining: the human acceptance steps above, then PR review and merge (not done here).
+`.ai/reviews/dispositions.md`. T034 and T035 are DONE. T036 (handoff and flow chart) is BLOCKED only on the
+full gate: its docs are done and `-k Docs` and `-k flow_this_repo` pass, but the foreground `ai-check` hit the
+600 s tool limit at 47/48 batches with 0 failing, and its final result was not seen. Next: a full
+`.ai/bin/ai-check` on the checkpoint without a tool timeout, then mark T036 DONE with that evidence. Remaining: the
+human acceptance steps above, then PR review and merge (not done here).

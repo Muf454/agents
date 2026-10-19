@@ -3284,7 +3284,7 @@ finished in the background past the 600 s tool timeout, tree unchanged during th
 docs/workflow.md say the repair also runs on a timed-out session. Flow chart: T036.
 
 ## T036 — State, handoff and flow chart after the review fixes (review N3, N4)
-Status: TODO
+Status: BLOCKED
 Dependencies: T034, T035
 Model: haiku
 
@@ -3318,3 +3318,8 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+BLOCKED on the gate only; the docs work is done. The full `.ai/bin/ai-check` has not finished in this session.
+- Done: handoff "Next action" and the flow-chart line rewritten (T033 DONE; T034–T036 named, with `test_exec_bits_skips_a_symlinked_parent_directory` and `test_exec_bits_restored_after_a_session_timeout` under "Covered by automated tests"). Vault `agents-flow.md` "Inside one task" shows the exec-bits step between the session and the host checks, with the timeout/error/signal path; plus the "Executable bits" bullet and the timeout bullet. Hub Log line added. No code changed.
+- Targeted: `python3 -m unittest discover -s tests -k Docs` → Ran 3 tests, OK; `-k flow_this_repo` → Ran 1 test, OK.
+- Gate: the foreground `.ai/bin/ai-check` hit the 600000 ms tool limit and moved to the background (task bab5c28ty). Its last progress line was `Progress: 47/48 batches, 985 tests, 0 failing, 605 s`; no final result was seen, so no PASS is claimed. Needed: a full gate run on this checkpoint without a tool timeout (FL-32).
+- `.ai/state.md` counts are runner-managed and were not edited.
