@@ -147,7 +147,12 @@ permission/settings files. Existing project settings need those rules merged.
 Claude's runner uses `dontAsk` and explicit `.ai/permissions.allow` entries. It loads
 project settings and disables MCP integrations for that invocation. Necessary commands
 outside the allowlist become denials. The template allows `chmod +x` (and no other chmod
-form) so a session can make a script it created executable. Denials are logged and the run continues
+form) so a session can make a script it created executable. After every implementation session, including
+one that timed out or failed (before that stop, so `ai-recover`'s rerun gate sees the bit), the
+host also gives back the executable bit git records (`100755`) to a tracked script that lost it
+(`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`, and only a
+regular file reached without following any symlink, so a directory a session swapped for a
+symlink never leads outside the checkout). Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
 and the run stops there. Inspect the log and adjust permissions yourself.
 
@@ -235,7 +240,9 @@ Limits bound new agent invocations and validation execution. GNU timeout termina
 timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
-stops and crashes. A limit beyond the wait budget stops with an unchanged message and first
+stops and crashes. A timed-out implementation session whose task is IN_PROGRESS with
+uncommitted work gets its work committed (only if the full gate passes) and one rerun per task
+per run, without a decision session (see "Session timeout on an IN_PROGRESS task"). A limit beyond the wait budget stops with an unchanged message and first
 records `<Agent> <reset epoch or 0>` in `.ai/local/limit-stop` (`workflow.py limit-stop-write`,
 through the pinned `.ai/local` and an exclusive `O_NOFOLLOW|O_NONBLOCK` temp file, never a
 shell redirection). `workflow.py limit-stop` prints `<Agent> <relaunch epoch>` only when
@@ -250,7 +257,12 @@ the digest itself and copies the run's `task` record into `limit_task`,
 `limit-armed`, `limit-task`, `limit-disarm`, `limit-count`; schedule, hold and claim give back
 the attempt `ai-recover` reserved; a human start and `clear-attempts` drop them, and the `task`
 record too; cap
-`AI_LIMIT_RELAUNCH_MAX`). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+`AI_LIMIT_RELAUNCH_MAX`). `run-manifest task` prints the recorded `task` (exit 1 silently when
+there is none). The optional `timeout_reruns` (unique task IDs, at most 200; any other shape
+invalidates the manifest) holds the tasks whose timed-out session was committed and rerun once:
+`run-manifest timeout-rerun ID` appends ID, or fails `session timeout: ID was already committed
+and rerun once in this run` and writes nothing. A human start drops the list; `clear-attempts`
+keeps it, so a resumed pipeline never resets "once per task". A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch
@@ -757,6 +769,25 @@ budgets, `AI_AUTO_RECOVER`), which `ai-recover` restores; settings the run didn'
 cleared to their defaults, and the resumed pipeline skips the user config file
 (`AI_SETTINGS_FROM_MANIFEST`).
 
+**Session timeout on an IN_PROGRESS task.** After the hard rules, the attempt limit, an open
+stage and the bookkeeping-only leftovers commit, and before the Claude decision session,
+`ai-recover` handles one case itself when all of these hold: `--stage implementation`; the
+reason starts with ai-run's `Claude exited 124 (` or `Claude exited 137 (`; `run-manifest task`
+names the session's task; `tasks status` says that task is `IN_PROGRESS`; and the checkout is
+still dirty. It first spends the task's one rerun (`run-manifest timeout-rerun TASK`), so a
+failing gate uses it too. Once per task per run: `timeout_reruns` survives resumes
+(`clear-attempts` keeps it) and only a human start drops it. A refusal escalates `the TASK
+session timed out again after one commit-and-rerun in this run.` with `Next: split the task or
+raise --session-timeout, then rerun ai-pipeline.`. Otherwise it notifies `🔧 Recovering (n/max):
+<branch>: the TASK session timed out; committing its validated partial work once and
+rerunning.` and commits exactly as `commit_and_rerun` does (dependencies, a passing `ai-check`,
+no secret-looking files, the committed tree matches the validation stamp) as `chore(ai):
+recovery checkpoint (validated leftover work)`, then resumes. A failing gate escalates `the TASK
+session timed out with uncommitted partial work; but the leftover work fails validation.` with
+the work left uncommitted. Every neighbouring case keeps the decision session or its
+escalation: a timeout before the task was marked, a non-timeout exit, a tree clean after the
+leftovers commit, `AI_AUTO_RECOVER=0` and a spent attempt budget (`test_timeout_rerun_unchanged_*`).
+
 **Usage-limit relaunch.** Right after reserving the attempt and restoring the settings,
 before any escalation, `ai-recover` decides on the manifest's relaunch schedule: *pending*
 (`limit-hold`: the run is still waiting, e.g. a watchdog crash recovery after a kill between
@@ -1031,7 +1062,8 @@ Incidents:
   `.ai/local/`, or `.ai/`'s mtime, and never earlier than the oldest live runner's
   start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
   its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
-  `--session-timeout` (default 30 minutes), which stays below the default.
+  `--session-timeout` (default 30 minutes), which stays below the default; an implementation
+  session's gate allowance can lengthen it up to double (see `gate-seconds`).
 - **stop**: a `last-error` newer than the watchdog's last notification. The
   acknowledged stop remains an incident until removed or replaced.
 
@@ -1224,6 +1256,24 @@ minutes by category, and every attempt by the model that ran it ("Attempts by mo
 "Attempts by model and category": attempts, done, not done, first-time pass over tasks
 whose first attempt ran on that model, average minutes per attempt), and reviews by
 reviewer/model/mode.
+
+`outcome gate pass|fail|timeout SECONDS` records one host gate run (`kind: gate`, project,
+branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` prints this
+project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
+log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
+overlaps the checkout (exit 1), so agents cannot write the record it reads.
+
+`ai-run` times every host `ai-check` (after a task's session in `checkpoint_done`, and the final
+check) and, only after `ai_guard_verify` passed, appends `outcome gate pass|fail|timeout`
+(exit 124 or 137 is `timeout`); a failed append is only a note. An implementation session (one
+that opens a task attempt; never triage, plan revision or `--plan`) then gets
+`session_timeout + min(2 × gate-seconds, session_timeout)`, capped by the remaining run time,
+computed once per session (a limit-pause retry keeps it). The allowance is room for the two gate
+runs a task session usually makes (its own `.ai/bin/ai-check`, plus a rerun after a fix), so a slow
+gate no longer uses up the session. It is bounded at double the base so a corrupt or hostile log
+can at most double a session; a helper output outside `^[0-9]{1,7}$` counts as 0. With no
+allowance the `Session:` line is unchanged; otherwise it reads `(limit 1600s: 1000s + 600s for two
+gate runs of 300s; log …)`.
 
 ## Observation records and the dashboard
 

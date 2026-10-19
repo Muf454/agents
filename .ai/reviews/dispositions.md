@@ -1,13 +1,16 @@
 # Review dispositions (Claude)
 
-Review HEAD: da84933830d7f33769adfcdd35c9ca276a803006
+Review HEAD: b651970c55b64ff3fccec2e4a9cd702d576da372
 
-<!-- One row per BLOCKER/MAJOR finding (MINOR optional). Disposition: accepted (needs a
+<!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
+e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
 fix task ID), rejected (needs concrete evidence), or deferred (real but out of scope;
 explain the risk; makes the PR a draft). From review round 3 on, also add a line starting
 with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. -->
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
-| M1 | accepted | Confirmed in `scripts/ai-pipeline:667-674`: the `is_draft` lookup swallows a failure with an OR-`true` fallback and so leaves `is_draft` empty on a failed lookup, `"$is_draft" != true` then takes the convert branch, and with `pipeline_drafted=yes` it runs `pr-draft record "$url" converted` after `gh pr ready --undo` (a no-op on an already-draft PR in the test mock, `tests/test_workflow.py:672`) and the confirming query. Ownership is then derived from an unknown prior state, and a later clean run's `pr-draft take` un-drafts a human draft, breaking R15. Still converting to draft on an unknown state is fine (fails toward draft); only the record is wrong. | T020 |
-| N1 | accepted | Confirmed in `scripts/ai-plan:72-87`: `started` accepts only `state == "active"`; ai-run writes `planning/done` with the same record (`scripts/lib/workflow.py:4594`, `{**record, …}` keeps the pid), so a plan that finishes between two 0.2 s polls reaches the `kill -0` branch, `wait` returns 0 and `exit $(( code > 0 ? code : 1 ))` exits 1 with "ended early (exit 0)". Cheap, in scope (T006's contract), and unresolved plan-review P21. | T021 |
+| M2 | accepted | Confirmed in scripts/lib/workflow.py exec_bits(): os.lstat(root / name) rejects only a symlink leaf, and os.chmod(root / name) follows parent-directory symlinks, so a session-planted directory symlink lets the host chmod an external file. Fix: pinned no-follow descriptor walk plus fchmod, with an external-directory regression. | T034 |
+| M3 | accepted | Confirmed in scripts/ai-run: claude_session calls ai_die for any non-zero exit (line 360) before returning, and exec-bits runs only after it returns (line 842), so exits 124 and 137 stop the run unrepaired and ai-recover's timeout commit-and-rerun can fail its gate on a lost bit. Fix: repair before the stop, with a timeout regression. | T035 |
+| N3 | accepted | Handoff "Next action" and T033 lines still say T033 is BLOCKED although tasks.md has it DONE on mission control's gate pass. state.md counts are runner-managed and refresh at the next runner checkpoint. Cheap and in scope; folded into the post-fix docs task. | T036 |
+| N4 | accepted | AGENTS.md requires the flow chart to show every flow step; exec-bits (ai-run line 842) is a new host mutation and T035 changes where it runs, so the chart is updated after that fix. | T036 |

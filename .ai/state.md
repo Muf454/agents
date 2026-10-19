@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: feature/limits-plan-stage
+Branch: fix/flow-batch-7
 Phase: ready_for_acceptance
 Current task: none
-Last completed task: T021
-Tasks complete: 21
+Last completed task: T036
+Tasks complete: 36
 Tasks remaining: 0
-Last validation: PASS at 2026-10-18T07:40:16Z
+Last validation: PASS at 2026-10-19T03:02:55Z
 Blocked: no
-Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/31
-Last updated: 2026-10-18T07:43:06Z
+Next action: Human: test and merge the pull request https://github.com/Muf454/agents/pull/34
+Last updated: 2026-10-19T03:06:03Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

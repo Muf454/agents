@@ -1295,7 +1295,8 @@ def binding_dir():
 
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
 # used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
-# scheduled at and the armed resume binding ({"head", "tree", "task"}).
+# scheduled at and the armed resume binding ({"head", "tree", "task"}). The other optional
+# field, `timeout_reruns`, is checked beside them (timeout_reruns_valid).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
                 'limit_stage', 'limit_resume')
 
@@ -1323,6 +1324,15 @@ def limit_fields_valid(data):
                  or (isinstance(resume, dict) and set(resume) == {'head', 'tree', 'task'}
                      and hexes(resume['head'], 40) and hexes(resume['tree'], 64)
                      and task_id_valid(resume['task']))))
+
+
+def timeout_reruns_valid(data):
+    """The optional `timeout_reruns` field: the tasks whose timed-out session was committed and
+    rerun in this run, unique valid IDs, at most 200. Any other shape invalidates the manifest,
+    as a wrong limit field does."""
+    reruns = data.get('timeout_reruns', [])
+    return (isinstance(reruns, list) and len(reruns) <= 200
+            and all(task_id_valid(task) for task in reruns) and len(set(reruns)) == len(reruns))
 
 
 def limit_binding():
@@ -1495,7 +1505,7 @@ def run_manifest(arguments):
                  and all(isinstance(a, str) for a in data['args'])
                  and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
                  and ('task' not in data or task_id_valid(data['task']))
-                 and limit_fields_valid(data))
+                 and limit_fields_valid(data) and timeout_reruns_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
@@ -1519,6 +1529,8 @@ def run_manifest(arguments):
         atomic(path, json.dumps(data) + '\n')
         print(data['attempts'])
     elif action == 'clear-attempts':
+        # Keeps `timeout_reruns`: a resumed pipeline must not reset "once per task" (only
+        # `start`, a human-approved run, does).
         data['attempts'] = 0
         for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
@@ -1537,6 +1549,25 @@ def run_manifest(arguments):
         if 'task' in data:
             data.pop('task')
             atomic(path, json.dumps(data) + '\n')
+    elif action == 'task':
+        # Read only: the task of the implementation session ai-run recorded, if any.
+        if len(arguments) != 1:
+            fail('Usage: run-manifest task')
+        if 'task' not in data:
+            sys.exit(1)
+        print(data['task'])
+    elif action == 'timeout-rerun':
+        # Claims the one commit-and-rerun of a timed-out session allowed per task in this run.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest timeout-rerun ID')
+        task = arguments[1]
+        reruns = data.get('timeout_reruns', [])
+        if task in reruns:
+            fail(f'session timeout: {task} was already committed and rerun once in this run')
+        if len(reruns) >= 200:
+            fail('session timeout: too many timeout reruns in this run')
+        data['timeout_reruns'] = reruns + [task]
+        atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
         # current implementation review (triage) or the current plan review (plan-revision).
@@ -3776,6 +3807,8 @@ def outcome(arguments):
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
+    | gate pass|fail|timeout SECONDS (one host gate run of ai-run; read by gate-seconds,
+      not part of outcomes_report)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
     | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
@@ -3884,6 +3917,10 @@ def outcome(arguments):
         if len(rest) != 1 or not rest[0]:
             fail('Usage: outcome catchup BRANCH')
         record['branch'] = rest[0]
+    elif kind == 'gate':
+        if len(rest) != 2 or rest[0] not in ('pass', 'fail', 'timeout') or not rest[1].isdigit():
+            fail('Usage: outcome gate pass|fail|timeout SECONDS')
+        record.update(result=rest[0], seconds=int(rest[1]))
     else:
         fail(f'Unknown outcome kind: {kind}')
     try:
@@ -3899,9 +3936,25 @@ def outcome(arguments):
             remove_marker(marker)
 
 
+def gate_seconds(arguments):
+    """Prints this project's gate time: the largest seconds among its last 3 passing host gate
+    runs (`outcome gate pass`), or 0 without any. Torn or foreign lines are ignored; a missing or
+    unreadable log is 0. The log sits in the host state root, which agents cannot write."""
+    if arguments:
+        fail('Usage: gate-seconds')
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    project = project_name()
+    passes = [r['seconds'] for r in read_outcomes([outcomes_path()])
+              if r.get('kind') == 'gate' and r.get('result') == 'pass' and r.get('project') == project
+              and type(r.get('seconds')) is int and r['seconds'] >= 0]
+    print(max(passes[-3:], default=0))
+
+
 def outcomes_report(arguments):
     """Summary of the outcome log(s) for tuning the model rules."""
-    records = read_outcomes(arguments or [outcomes_path()])
+    # Gate runs are runner timing (gate_seconds), not outcomes: a log of only gate lines still
+    # reports "No outcomes recorded yet".
+    records = [r for r in read_outcomes(arguments or [outcomes_path()]) if r.get('kind') != 'gate']
     if not records:
         print('No outcomes recorded yet (' + ', '.join(str(x) for x in (arguments or [outcomes_path()])) + ').')
         return
@@ -4404,6 +4457,55 @@ def clear_scratch():
         os.close(local_fd)
 
 
+def exec_bits():
+    """exec-bits: give back the execute bit git records (index mode 100755) to a regular file
+    that lost it in the working tree. Gate files and symlinks are never touched: every path
+    component is opened below the pinned root without following a symlink, so a directory
+    replaced by a symlink never leads outside the checkout. Prints the restored relative
+    paths, one per line."""
+    root = checkout_root()
+    gate = ('.ai/validate', '.ai/ci-setup')
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        for entry in git('ls-files', '-s', '-z', cwd=root).split(b'\0'):
+            meta, _, raw = entry.partition(b'\t')
+            if not meta.startswith(b'100755 '):
+                continue
+            name = raw.decode()
+            if name.startswith('.ai/bin/') or name in gate:
+                continue
+            if exec_bit_restored(root_fd, name):
+                print(name)
+    finally:
+        os.close(root_fd)
+
+
+def exec_bit_restored(root_fd, name):
+    """True when the regular file NAME below ROOT_FD, reached without following any symlink,
+    lacked every execute bit and got them back for each read bit."""
+    parent, _, leaf = name.rpartition('/')
+    if leaf in ('', '.', '..'):
+        return False
+    dir_fd = open_dir(root_fd, parent)
+    if dir_fd is None:
+        return False
+    fd = None
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode) or mode & 0o111:
+            return False
+        os.fchmod(fd, stat.S_IMODE(mode) | ((mode & 0o444) >> 2))
+        return True
+    except OSError:
+        return False
+    finally:
+        close_fds(fd, dir_fd)
+
+
 def read_record(dir_fd, name, limit, tail=False):
     """(text, stat) of the regular file NAME in DIR_FD, at most LIMIT bytes, or None. Never
     follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines."""
@@ -4862,6 +4964,8 @@ def main():
         deps_record(arguments)
     elif command == 'clear-scratch':
         clear_scratch()
+    elif command == 'exec-bits':
+        exec_bits()
     elif command == 'exec-logged':
         exec_logged(arguments)
     elif command == 'tree-snapshot':
@@ -4916,6 +5020,8 @@ def main():
         fallback_record(arguments)
     elif command == 'outcome':
         outcome(arguments)
+    elif command == 'gate-seconds':
+        gate_seconds(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
     elif command == 'pr-draft':

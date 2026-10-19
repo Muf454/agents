@@ -8,15 +8,20 @@ changes the flow updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` and i
 date in the same task and appends a dated line to the Log of `agents.md`; never tick vault
 checkboxes. If the vault edit is denied, record it in the result and in the handoff's
 "## Flow chart" section.
-Source: vault `agents-backlog.md` (MC-01 part 1, DB-04, R15; Zack's decisions of 2026-10-17 in
+Current batch (batch 7, `fix/flow-batch-7` from `master` at 1423b60, planned 2026-10-18): T022–T033,
+from vault `agents-backlog.md` FL-28, FL-29, FL-30 and FL-31. Design: `.ai/current-plan.md`; scope
+and assumptions: `.ai/project-spec.md`. Line references for T022–T033 are at 1423b60; re-check
+them before editing. T001–T021 are batch 6's DONE tasks (merged in #31), kept unchanged because
+the host protects DONE blocks; their line references are historical.
+Batch 6 source: vault `agents-backlog.md` (MC-01 part 1, DB-04, R15; Zack's decisions of 2026-10-17 in
 the `agents.md` Log), planned 2026-10-17 on `feature/limits-plan-stage` (from `fix/flow-batch-5`
-at edc3dc6, PR #30 on PR #29, neither merged). Design: `.ai/current-plan.md`.
-Line references are at edc3dc6 and verified by the planner; re-check them before editing.
+at edc3dc6, PR #30 on PR #29, neither merged).
+Line references in T001–T021 are at edc3dc6.
 Every behaviour change gets an offline regression test in the existing style; every task
 leaves `.ai/bin/ai-check` passing and updates README.md / `docs/workflow.md` where the
 behaviour it changes is described.
 Gate note: `.ai/validate` runs the shell syntax checks and then `tests/run_parallel.py`
-(about 7 min), inside the 600 s Bash tool limit. Should `.ai/bin/ai-check` still time out in
+(about 9–10 min on this machine, often past the 600 s Bash tool limit). Should `.ai/bin/ai-check` still time out in
 the session, run the task's targeted tests, record the timeout in the result, and leave the
 full gate to the host's post-task `ai-check`. Tests with time bounds run in parallel: assert
 "returns within N s" with generous bounds scaled by `tests/timeouts.py`, never a tight
@@ -2380,3 +2385,941 @@ exit with its own `done` → exit 3). `-k ai_plan`: Ran 14 tests OK. `.ai/bin/ai
 tests OK (600.1 s; finished in the background past the 600 s tool timeout, exit 0). Flow chart
 unchanged (the detached launch already ends in "started").
 
+
+## T022 — Host gate-time record: `outcome gate` and `gate-seconds` (FL-28 part 1, helper)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+The host outcome log records every host gate run with its measured seconds and result, and one
+helper answers "how long does this project's gate take?" from that agent-unwritable record.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-28 part 1", bullet "Record".
+- `scripts/lib/workflow.py` `outcome()` (~3772): new kind `gate RESULT SECONDS`. RESULT must be
+  `pass`, `fail` or `timeout`, and SECONDS all digits; anything else fails with `Usage: outcome
+  gate pass|fail|timeout SECONDS`. `record.update(result=…, seconds=int(…))` (project, branch and
+  time come from the common code). Extend the docstring.
+- New command `gate-seconds` (register in `main()`): call `check_state_root` as `outcome` does,
+  read `outcomes_path()` with the existing reader (`read_outcomes`; torn lines ignored), keep
+  records with `kind == 'gate'`, `result == 'pass'`, `project == project_name()` and an int
+  `seconds >= 0`, then print `max(seconds of the last 3)`, or `0` when there are none or no log
+  exists. Extra arguments → usage error.
+- `outcomes_report` (~3902, `ai-status --outcomes`): check that it skips unknown kinds. If it
+  does not, filter `gate` out there; the report output must stay unchanged.
+- No ai-run change here (T023). Flow unchanged in this task.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_gate_time_*` in tests/test_workflow.py (fixture `AI_STATE_DIR` as the
+  outcome tests use):
+  - `outcome gate pass 300` appends one JSON line with `kind` `gate`, `result` `pass`, `seconds`
+    300 and `project`, `branch` and `time` set; `outcome gate maybe 3`, `outcome gate pass x` and
+    `outcome gate pass` exit non-zero with the usage text and append nothing;
+  - `gate-seconds` prints `0` with no log, `0` with only `fail` and `timeout` lines, `300` after
+    one pass of 300, and `500` after passes of 100, 500 and 200. After further passes of 120, 130
+    and 140 it prints `140` (only the last 3 count). A pass line from another project (written
+    with a different `project` value) is ignored, and a torn last line is ignored;
+  - `ai-status --outcomes` output is byte-identical with and without gate lines in the log.
+- All existing `test_*outcome*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+Done 2026-10-18. `scripts/lib/workflow.py`: `outcome gate pass|fail|timeout SECONDS` (exactly two
+arguments, SECONDS `isdigit`, else `Usage: outcome gate pass|fail|timeout SECONDS`, nothing
+appended) records `result` and int `seconds` with the common time/project/branch. New
+`gate_seconds` (command `gate-seconds`, no arguments): `check_state_root` as `outcome` does,
+lenient `read_outcomes`, keeps `kind gate`, `result pass`, `project == project_name()` and an
+int (not bool) `seconds >= 0`, prints `max` of the last 3, default 0. `outcomes_report` did NOT
+skip unknown kinds at its "No outcomes recorded yet" check (a log of only gate lines printed a
+report header), so it now drops `gate` records first. docs/workflow.md describes both.
+Tests `test_gate_time_*` (4): record + usage errors (incl. `-1` and 3 args), last-3 max
+(0/0/300/500/140, extra argument → exit 1), other project / non-int seconds / torn tail
+ignored, `ai-status --outcomes` byte-identical with gate lines (empty log and task+review log).
+Evidence: `-k gate_time` Ran 4 OK; `-k outcome` Ran 86 OK; `.ai/bin/ai-check` PASS (969 tests,
+618.5 s, finished in the background past the 600 s tool timeout). Flow unchanged.
+
+
+## T023 — ai-run records its gate runs and gives implementation sessions room for the gate (FL-28 part 1, runner)
+Status: DONE
+Dependencies: T022
+Model: opus
+
+### Goal
+An implementation session's limit grows with this project's measured gate time (room for two
+gate runs, at most double the base), so a slow gate no longer uses up the session. Every host gate
+run of `ai-run` is measured and recorded.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-28 part 1", bullet "Runner". File `scripts/ai-run`.
+- `checkpoint_done` (~664–702) and the final check (~774–783): `gate_started=$SECONDS` before
+  `AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"`, capturing its exit code without
+  `set -e` surprises. After `ai_guard_verify` (never a helper before that check: the gate may have
+  changed), add `ai_helper outcome gate <pass|fail|timeout> "$(( SECONDS - gate_started ))"
+  2>/dev/null || printf '%s\n' 'Note: could not record the gate time.' >&2`. The result is
+  `timeout` for exit 124 or 137, `pass` for 0, `fail` otherwise. One small function
+  `record_gate CODE STARTED` serves both sites. The existing failure handling after it is unchanged.
+- `claude_session` (~291–345): when `track_attempt == yes`, `gate=$(ai_helper gate-seconds
+  2>/dev/null)`; a value not matching `^[0-9]{1,7}$` counts as 0. Then `allowance=$(( 2 * gate ))`,
+  capped at `session_timeout`, and `limit=$(( session_timeout + allowance ))`, before the existing
+  `remaining` cap. Compute it once per `claude_session` call, before the `while` loop (a limit
+  pause retry keeps it). Triage, plan-revision and `--plan` sessions are untouched
+  (`track_attempt` is `no` there; check).
+- `Session:` line (~303): with allowance 0 it stays byte-identical. Otherwise it reads `Session: T001
+  [model x] (limit 1600s: 1000s + 600s for two gate runs of 300s; log …)`. When the remaining-time
+  cap cut the limit, the printed limit is the capped value; the breakdown may still name the
+  allowance.
+- Usage text (~11–12): "1800 seconds/session (an implementation session also gets twice the
+  measured gate time, at most another session_timeout)". README (run defaults, wherever
+  `--session-timeout` is described) and docs/workflow.md (session limits): the rule, the source
+  (host outcome log, `gate` lines, last 3 passes) and why it is bounded.
+- Flow chart (vault `agents-flow.md`, "One task" section): the session node notes "limit = base
+  + room for two measured gate runs (max double)", plus its `updated:` date and a hub Log line.
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md
+
+### Acceptance criteria
+- Tests named `test_session_gate_allowance_*` in tests/test_workflow.py (fixture `ready()`;
+  gate lines seeded through `python3 HELPER outcome gate pass N` in the fixture env):
+  - no gate lines: `ai-run --approved --session-timeout 1000` prints exactly today's
+    `(limit 1000s; log` form;
+  - `gate pass 300` seeded: the same run prints `limit 1600s` and `1000s + 600s`; with
+    `gate pass 900` seeded it prints `limit 2000s` (cap: allowance ≤ 1000);
+  - `--run-timeout 1200` with `gate pass 300` seeded prints a limit ≤ 1200 (remaining-time cap);
+  - a triage session (`ai-run --approved --triage`, as the existing triage tests start it) with
+    gate lines seeded prints no allowance;
+  - after a run where the task's checkpoint ran the host gate, the outcome log has exactly one
+    new `gate` line with `result` `pass` and int `seconds` ≥ 0 (two when the final check also ran);
+    a fixture `.ai/validate` that exits 1 records `fail`;
+  - mutation evidence in the result: dropping the `track_attempt` condition makes the triage
+    case fail.
+- Existing tests asserting the `Session:` line or session timeouts (`-k session_timeout`,
+  `-k timeout`, `-k outcome`) pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k session_gate_allowance` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k timeout` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+Done 2026-10-18. `scripts/ai-run`: `record_gate CODE STARTED` (pass for 0, timeout for 124/137,
+else fail; a failed append is only a note) runs after `ai_guard_verify` at both host gate sites
+(`checkpoint_done`, final check), which now capture the exit code (`|| gate_code=$?`) and keep
+their failure handling. `claude_session` computes the allowance once, before its loop, only when
+`track_attempt == yes`: `gate-seconds` checked against `^[0-9]{1,7}$` (else 0), `min(2 × G,
+session_timeout)`, limit = base + allowance, then the remaining-time cap. `Session:` line is
+byte-identical with allowance 0, else `(limit 1600s: 1000s + 600s for two gate runs of 300s; log …)`.
+Usage text, README (after the session budget), docs/workflow.md (after `gate-seconds`; the
+watchdog "hung" note), vault flow "Inside one task".
+Tests `test_session_gate_allowance_*` (5): plain/1600/2000 limits, run-timeout cap, triage plain,
+one `pass` gate line per checkpoint gate (three after the second run: checkpoint + final), failing
+`.ai/validate` records `fail`. Mutation: `if true` instead of the `track_attempt` check fails the
+triage test (`limit 2400s: 1800s + 600s …`).
+Three existing tests read every outcome line and now see the runner's gate lines, so they filter
+them (`test_runner_logs_task_outcomes_and_report`, `test_runner_logs_blocked_and_failed_validation_attempts`,
+`test_outcome_crash_killed_runner_logged_once_at_next_start`); their assertions are otherwise unchanged.
+Evidence: `-k session_gate_allowance` Ran 5 OK; `-k timeout` Ran 12 OK; `-k Docs` Ran 3 OK;
+`-k outcome` Ran 86 OK after the filter; `.ai/bin/ai-check` PASS (974 tests, 610.2 s, finished in the
+background past the 600 s tool timeout).
+The runner's post-checkpoint gate then failed only on `test_pr_body_flow_this_repo_declares_the_flow_chart`
+(the handoff "## Flow chart" line did not start with "Flow chart updated (…)"); mission control fixed
+the line in 0166a48. Re-verified in a fresh session: `-k flow_this_repo -k session_gate_allowance`
+Ran 6 OK; `.ai/bin/ai-check` PASS (974 tests, 608.9 s, finished in the background past the 600 s tool timeout).
+
+
+## T024 — Run manifest: read the session's task, record a timeout rerun once per task (FL-28 part 2, helper)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+`ai-recover` can ask the host manifest which task the stopped session worked on, and can claim
+the one timeout commit-and-rerun allowed per task per human-started run.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-28 part 2", bullet "Helper". File `scripts/lib/workflow.py`
+  `run_manifest` (task-set ~1526, task-clear ~1534, `LIMIT_FIELDS`/`limit_fields_valid` ~1299–1325
+  as the model for validation).
+- `task` (read only, no arguments): print `data['task']` and exit 0 when present; else exit 1 with
+  no output.
+- `timeout-rerun TASK`: `task_id_valid(TASK)` or a usage error. The optional field
+  `timeout_reruns` is a list of unique `task_id_valid` strings, at most 200 entries; any other
+  shape makes the manifest invalid, as a wrong limit field does (extend the validity check, and
+  name it in the comment above `LIMIT_FIELDS` or beside it). TASK already present →
+  `fail(f'session timeout: {task} was already committed and rerun once in this run')`, nothing
+  written. Otherwise append and write atomically, exit 0.
+- `start` writes a fresh dict (check it drops the field). `clear-attempts` keeps
+  `timeout_reruns`. Find its callers and comment at the site why: a resumed pipeline must not
+  reset "once per task" (spec A3).
+- No ai-recover change here (T025). Flow unchanged in this task.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_timeout_rerun_manifest_*` in tests/test_workflow.py (after `run-manifest
+  start` as `approve_run` does):
+  - `run-manifest task` exits 1 with empty output before `task-set`; prints `T003` after
+    `task-set T003`; exits 1 again after `task-clear`;
+  - `timeout-rerun T003` exits 0 and the manifest holds `timeout_reruns: ["T003"]`; a second
+    `timeout-rerun T003` exits 1 with `already committed and rerun once` and the manifest bytes
+    are unchanged; `timeout-rerun T004` then exits 0 (per task); `timeout-rerun bad` and no
+    argument exit non-zero with usage;
+  - `clear-attempts` keeps `timeout_reruns`; a new `start` drops it;
+  - a manifest with `timeout_reruns: "T003"`, `["T003", "T003"]` or `["x"]` is invalid (an
+    action that validates, e.g. `gate`, fails as for a wrong limit field).
+- All `test_limit_relaunch_record_*` and `run-manifest` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun_manifest` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch_record` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+- `workflow.py`: `run-manifest task` (read only; exit 1 silently without a record) and
+  `timeout-rerun ID` (usage error unless `task_id_valid`; a repeat fails `session timeout: ID was
+  already committed and rerun once in this run` with the manifest bytes unchanged; else one atomic
+  append). `timeout_reruns_valid` (list, ≤ 200, unique valid IDs) joins the manifest validity
+  check, named in the comment above `LIMIT_FIELDS`. `start` writes a fresh dict (verified by test);
+  `clear-attempts` keeps the field, commented there and at its only caller, `finish()` in
+  `scripts/ai-pipeline`. docs/workflow.md describes both actions and the field. Flow unchanged.
+- Tests: `test_timeout_rerun_manifest_{task_reads_the_recorded_task,once_per_task,
+  kept_on_resume_dropped_on_start,wrong_shape_is_invalid}`.
+- Validation: `-k timeout_rerun_manifest` Ran 4 OK; `-k limit_relaunch_record` Ran 7 OK
+  (unchanged); `-k run_manifest` Ran 4 OK; `.ai/bin/ai-check` PASS (978 tests, 618.6 s; finished in
+  the background past the 600 s tool timeout).
+
+
+## T025 — ai-recover commits a timed-out IN_PROGRESS task's validated work once and reruns (FL-28 part 2, recovery)
+Status: DONE
+Dependencies: T024
+Model: opus
+
+### Goal
+A pipeline stopped by a session timeout on an IN_PROGRESS task with uncommitted work resumes on
+its own: the host validates and commits the partial work and reruns, without a Claude decision,
+the first time for that task in the run. A second timeout of the same task escalates.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-28 part 2" (chart and bullet "ai-recover"). File
+  `scripts/ai-recover`.
+- Move the body of the `commit_and_rerun)` case (~322–344) unchanged into `commit_validated()`.
+  WHY and HUMAN become `$1` and `$2`; it keeps the `ai_observe recovering … checks` step. The
+  case becomes `commit_and_rerun) commit_validated "$why" "$human" ;;`. Behaviour is identical:
+  the existing `test_recovery_*` tests are the proof.
+- New rule right after the second `record_stop_leftovers` call (~293), before the `recover.md`
+  check (~294). All of these must hold: `[[ $stage == implementation ]]`; the reason matches
+  `'Claude exited 124 ('*` or `'Claude exited 137 ('*`; `task=$(ai_helper run-manifest task
+  2>/dev/null)`; `[[ "$(ai_helper tasks status "$task" 2>/dev/null)" == IN_PROGRESS ]]`; and
+  `git status --porcelain --untracked-files=all` is non-empty. Then:
+  - `why_once=$(ai_helper run-manifest timeout-rerun "$task" 2>&1)` fails → `escalate "the $task
+    session timed out again after one commit-and-rerun in this run." 'split the task or raise
+    --session-timeout, then rerun ai-pipeline.'`;
+  - else `ai_notify "🔧 Recovering ($attempt/$max): $branch: the $task session timed out;
+    committing its validated partial work once and rerunning."`, then `commit_validated "the $task
+    session timed out; its partial work passed the full gate" 'fix or discard the uncommitted
+    work, then rerun ai-pipeline.'`, then `resume "the $task session timed out; its validated
+    partial work was committed."`.
+  Comment the rule: why it is deterministic (no decision session), why once per task (the record
+  is spent before the gate runs, so a failing gate also uses it), and that the attempt budget was
+  already checked above.
+- The match is on ai-run's existing message (`claude_session`, `ai_die "Claude exited $code
+  (timeout/interruption/error)…"`); do not change that message. Check that no hard-rule pattern
+  matches it.
+- The usage text (~5–21) gets one sentence. Docs and the flow chart are T026's (say so in the
+  result).
+
+### Likely affected modules
+scripts/ai-recover, tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_timeout_rerun_recover_*` in tests/test_workflow.py, with pipeline fixtures as
+  `test_recovery_never_passes_a_changed_gate_or_hard_stop` and `AI_AUTO_RECOVER=1`. Add a mock
+  claude mode (e.g. `timeout-once`, using a counter file in `MOCK_STATE_DIR`). On its first call
+  it runs `.ai/bin/ai-task set T001 IN_PROGRESS`, writes a tracked-path file such as
+  `partial.txt`, and sleeps past `--session-timeout 1`. Later calls behave as the normal mock
+  (complete T001):
+  - first timeout: the pipeline resumes and completes; `recovery_calls()` is empty (no decision
+    session); git log has a `chore(ai): recovery checkpoint (validated leftover work)` commit
+    containing `partial.txt`, before T001's DONE checkpoint; the notifications contain
+    `the T001 session timed out; committing its validated partial work once` and no `⛔`; the
+    manifest has `timeout_reruns` `["T001"]`;
+  - second timeout of the same task (a mode that always times out after marking IN_PROGRESS, with
+    `AI_RECOVER_MAX=2`): exactly one `⛔` containing `timed out again after one commit-and-rerun`;
+    exactly one recovery checkpoint commit; `recovery_calls()` empty.
+- All `test_recovery_*`, `test_limit_relaunch_*` and `test_usage_limit_*` tests pass unchanged.
+- Mutation evidence in the result: without the `timeout-rerun` call the second case loops until
+  the attempt budget and fails the test.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+- `scripts/ai-recover`: the `commit_and_rerun)` body moved unchanged into `commit_validated WHY
+  HUMAN` (`$why`/`$human` → `$1`/`$2`, keeps `ai_observe recovering … checks`); the case calls it.
+  New rule after the second `record_stop_leftovers`, before the `recover.md` check, with the exact
+  predicate from the notes (stage implementation, reason `Claude exited 124 (`/`137 (`,
+  `run-manifest task`, `tasks status` IN_PROGRESS, dirty checkout); `timeout-rerun` refusal → ⛔
+  `the T session timed out again after one commit-and-rerun in this run.`; else 🔧 line,
+  `commit_validated`, `resume`. Commented (deterministic, once per task spent before the gate,
+  budget checked above). Usage text: one sentence. ai-run's message unchanged; no hard-rule
+  pattern matches `Claude exited 124 (timeout/interruption/error). Preserve partial work; see
+  .ai/local/claude-XXXXXXXX.json …` (only a random mktemp name containing e.g. `gate` could match).
+- Tests: mock claude modes `timeout-once`/`timeout-always` (counter `timeout-session-calls` in
+  `MOCK_STATE_DIR`; `ai-task set T001 IN_PROGRESS`, `partial.txt`, sleep past `--session-timeout
+  1`); `test_timeout_rerun_recover_commits_the_partial_work_once_and_finishes`,
+  `test_timeout_rerun_recover_second_timeout_of_the_task_escalates`.
+- Mutation: with `timeout-rerun` replaced by `true`, the second test fails: two 🔧 recoveries,
+  then ⛔ `already tried 2 time(s)` (loops to the attempt budget).
+- Evidence: `-k timeout_rerun` 6 OK; `-k recovery` 72 OK; `.ai/bin/ai-check` PASS (980 tests,
+  661.3 s, finished in the background past the 600 s tool timeout), which includes all
+  `test_limit_relaunch_*` and `test_usage_limit_*` (a separate targeted run of those two groups
+  was stopped by the tool's time limit, so the gate is their evidence).
+- README, docs/workflow.md, the flow chart and the vault hub Log line are T026's (vault not
+  accessible from this session).
+
+## T026 — Timeout rerun: the cases that stay as today, docs and flow chart (FL-28 part 2, contract)
+Status: DONE
+Dependencies: T025
+Model: opus
+
+### Goal
+The timeout rule fires only in its exact case. Every neighbouring case keeps today's behaviour,
+pinned by tests. The docs and the flow chart describe both FL-28 changes.
+
+### Implementation notes
+- Tests only, plus docs. If a case fails, fix the predicate in `scripts/ai-recover` narrowly and
+  say so in the result.
+- Docs: README "Recovery" (the list of actions, ~443) gets one bullet for the host's
+  timeout rule. docs/workflow.md "Recovery contract" (~749) gets a paragraph "Session timeout on
+  an IN_PROGRESS task": the predicate, once per task per run (kept across resumes, dropped by a
+  human start), the gate requirement, the ⛔ wording. "Interruption, limits, and recovery" gets one
+  sentence.
+- Flow chart (vault `agents-flow.md`, "When something goes wrong"): before the Claude decision
+  node, add "session timeout, task IN_PROGRESS, dirty → gate passes → recovery checkpoint → rerun
+  (once per task), else ⛔". Update the `updated:` date and add a hub Log line. Then set the handoff's
+  "## Flow chart" line to "Flow chart updated (…)".
+
+### Likely affected modules
+tests/test_workflow.py, scripts/ai-recover (only if a case fails), README.md, docs/workflow.md,
+vault agents-flow.md, .ai/handoff.md
+
+### Acceptance criteria
+- Tests named `test_timeout_rerun_unchanged_*` in tests/test_workflow.py (fixtures as T025's):
+  - the gate fails on the partial work (the fixture `.ai/validate` fails while `partial.txt`
+    exists) → one ⛔ containing `fails validation`, no recovery checkpoint commit, `partial.txt`
+    still uncommitted on disk, `timeout_reruns` `["T001"]` (spent);
+  - the session timed out before marking the task (mock `timeout`: T001 still TODO) → the
+    Claude decision session runs (`recovery_calls()` has one entry) as today;
+  - a non-timeout stop on an IN_PROGRESS task with a dirty tree (e.g. `Claude exited 1 (`) → the
+    decision session runs as today;
+  - `AI_AUTO_RECOVER=0` with the timeout case → ⛔ `auto-recovery is off`, nothing committed;
+  - the attempt budget spent (`AI_RECOVER_MAX=0`) → ⛔ `already tried 0 time(s)`, nothing
+    committed;
+  - a timeout whose only leftovers are the bookkeeping files (clean after the leftovers commit)
+    → the decision session runs, no `timeout_reruns` entry.
+- `-k Docs` passes (README and docs agree with the code).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+- Tests `test_timeout_rerun_unchanged_{gate_fails_on_the_partial_work,task_not_marked_in_progress,
+  non_timeout_stop,auto_recovery_off,attempt_budget_spent,only_bookkeeping_left}` (new mock modes
+  `error-in-progress`: IN_PROGRESS + `partial.txt`, exit 1; `timeout-committed`: IN_PROGRESS
+  committed, nothing else left, sleeps past the timeout). `auto_recovery_off` runs the pipeline
+  with `AI_AUTO_RECOVER=0`, then `ai-recover` as the watchdog would, with ai-run's exact reason:
+  the manifest's setting gives ⛔ `auto-recovery is off`. All cases kept today's behaviour; the
+  predicate is unchanged.
+- One narrow fix in `scripts/ai-recover`: the rule's WHY was `the T session timed out; its
+  partial work passed the full gate`, which also prefixes commit_validated's escalations, so the
+  failing-gate ⛔ read "…passed the full gate; but the leftover work fails validation". It is now
+  `the T session timed out with uncommitted partial work` (also the recovery commit's `Recovery:`
+  line). The gate-fail test asserts the old wording is gone (it failed before the fix).
+- Docs: README "Recovery" item 2 (one paragraph), docs/workflow.md "Session timeout on an
+  IN_PROGRESS task" in the recovery contract and one sentence in "Interruption, limits, and
+  recovery". Vault `agents-flow.md` "When something goes wrong": timeout decision node before the
+  Claude decision, a dated bullet, `updated: 2026-10-19`; hub Log line added. Handoff "## Flow
+  chart" line updated.
+- Evidence: `-k timeout_rerun` 12 OK; `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `.ai/bin/ai-check`
+  PASS (986 tests, 630.2 s, finished in the background past the 600 s tool timeout).
+
+
+## T027 — The host restores a tracked script's recorded executable bit after a session (FL-29, runner)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+After an implementation session, every tracked file that git records as 100755 but whose
+working-tree file lost its execute bit gets that bit back, so the post-session gate sees git's own
+record.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-29", first bullet.
+- `scripts/lib/workflow.py` new command `exec-bits` (no arguments): walk `git ls-files -s -z`
+  (index modes) at the checkout root. For each `100755` entry not under `.ai/bin/` and not
+  `.ai/validate` or `.ai/ci-setup` (gate files: never touched by the host here), `os.lstat` the
+  path. If it is a regular file (`stat.S_ISREG`; symlinks and missing files skipped) with no
+  `0o111` bit, `os.chmod(path, mode | ((mode & 0o444) >> 2))` and print the relative path. Exit 0;
+  a git failure fails as other helpers do.
+- `scripts/ai-run`: after the implementation session's `ai_guard_verify` and `ai_branch`
+  (~815), run `ai_helper exec-bits`. When it prints paths, show `Restored the executable bit
+  recorded in git: <paths>` on stdout. No notification, no commit (the session's commit or the
+  tier-1 checkpoint takes the tree as is).
+- docs/workflow.md (near ~149, where `chmod +x` is described): one sentence on the host restore.
+  Flow unchanged (a host detail inside the task step); say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Tests named `test_exec_bits_*` in tests/test_workflow.py:
+  - helper units on a fixture repository: a committed 100755 script chmodded to 0644 is
+    restored to 0755 and printed; a committed 0644 file stays 0644 and is not printed; a 100755
+    entry that is now a symlink (to a 0644 file) is not followed (the target's mode is unchanged);
+    a deleted 100755 file is skipped; an untracked 0644 file is untouched; a 100755 file under
+    `.ai/bin/` chmodded to 0644 stays 0644; a staged `git add --chmod=+x` file with a 0644
+    worktree is restored;
+  - runner: a mock session that chmods a tracked 100755 script to 0644 and marks the task DONE
+    → ai-run prints `Restored the executable bit`, the host gate passes, the task's checkpoint
+    is accepted, the script's mode at HEAD is still 100755 (`git ls-tree HEAD -- <path>`), no
+    commit of the run has a `mode change` for it (`git log --summary`), and the file is 0755.
+- `test_script_modes_all_shebang_scripts_are_executable` and the existing `ai-run` tests pass.
+- Mutation evidence in the result: without the `ai_helper exec-bits` call the runner test fails.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k script_modes` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+BLOCKED: implementation complete, but the full gate `.ai/bin/ai-check` exceeded the 600000 ms
+foreground timeout in this session, so a green gate is not established.
+Done: `exec-bits` helper (scripts/lib/workflow.py), `ai_helper exec-bits` call plus the
+`Restored the executable bit recorded in git: <paths>` line in scripts/ai-run after `ai_branch`,
+one sentence in docs/workflow.md, 4 `test_exec_bits_*` tests plus a `chmod-tracked` mock mode.
+Evidence: `-k exec_bits` Ran 4 OK; `-k script_modes` Ran 1 OK. Mutation: with the helper call
+replaced by `true`, `test_exec_bits_runner_restores_the_bit_a_session_lost` fails.
+Flow unchanged (a host detail inside the task step).
+Blocker: run `.ai/bin/ai-check` (longer timeout) to confirm; then set DONE.
+
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
+
+## T028 — Prompts: `chmod +x` is the only form and also repairs a tracked script (FL-29, templates)
+Status: DONE
+Dependencies: T027
+Model: haiku
+
+### Goal
+A runner or triage session that needs an executable bit uses the one allowed command, also for
+a tracked script whose bit was lost, and never tries a numeric mode.
+
+### Implementation notes
+- `templates/.ai/prompts/runner.md` (~58–59) and `templates/.ai/prompts/triage.md` (~64): replace
+  the bullet with: "A script must be executable: run `chmod +x <path>` on a file inside this
+  checkout, then `git add -- <path>`. `chmod +x` is the only chmod form allowed (never numeric
+  modes such as `chmod 755`, never paths outside the checkout). It also repairs a tracked script
+  that lost its executable bit (`git diff` shows `old mode 100755` / `new mode 100644`); the
+  runner restores such a bit after the session too."
+- README (~179–181): add "(numeric modes such as `chmod 755` are denied)" and one clause on the
+  host restore (T027).
+- Do not edit `.ai/prompts/` (gate copy): the installed prompts change with the human's upgrade
+  (handoff).
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md, README.md, tests/test_workflow.py
+
+### Acceptance criteria
+- Test `test_exec_bits_prompts_name_the_only_form` in tests/test_workflow.py: both template
+  prompts contain `chmod +x <path>`, `chmod 755` and `old mode 100755`; README contains
+  `chmod 755`.
+- `-k Docs` and every existing prompt test (`-k prompt`) pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits_prompts` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k prompt` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+DONE: `templates/.ai/prompts/runner.md` and `triage.md` bullet now reads "A script must be
+executable: run `chmod +x <path>` on a file inside this checkout ...", names `chmod +x` as the
+only chmod form (numeric modes such as `chmod 755` denied) and says it repairs a tracked script
+whose bit was lost (`old mode 100755` / `new mode 100644`; the runner restores it after the
+session). README (`Bash(chmod +x *)` paragraph) gets the numeric-mode denial and the host restore.
+Test: `test_exec_bits_prompts_name_the_only_form` (both prompts and README).
+Evidence: `-k exec_bits_prompts` Ran 1 OK; `-k prompt` Ran 17 OK; `-k Docs` Ran 3 OK; full
+`.ai/bin/ai-check` Ran 1002 tests in 634.3 s, OK, exit 0 (run in the background after the 600 s
+foreground limit; output read from the completed run).
+Mutation: not run. Flow unchanged (wording inside prompts and README). `.ai/prompts/` not edited.
+
+
+## T029 — Plan dispositions: regression for the family-budget row and the restart path; prompt shows the table (FL-30)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+The exact cell that stopped family-budget (`P1 (MAJOR) dev proxy vs Origin check`) is accepted
+both by the check and by the restarted pipeline's recording of an interrupted revision, and the
+revision prompt shows the whole table shape.
+
+### Implementation notes
+- Verified at 1423b60: `FINDING_CELL` (`scripts/lib/workflow.py` ~1017) already accepts
+  this cell; `test_finding_cell_*` (~11279–11345) covers similar ones. This task adds the incident
+  regression and the restart path. A parser change only if a test proves it necessary; then the
+  narrowest fix, named in the result.
+- Restart path: an interrupted plan revision whose section is complete but uncommitted is
+  recorded without a session (`ai-run --revise-plan`: "a complete but uncommitted section is
+  recorded without a session"; ai-pipeline `complete_plan_stage` ~316). Find the existing test
+  of that path (grep `without a session` / `revise_plan` in tests) and add a variant whose rows
+  use decorated cells.
+- `templates/.ai/prompts/plan-revision.md` (~29–36): after the sentence on the first cell, show
+  the table header as the host writes it (copy it from `plan_section_opened`, do not invent
+  column names) and three example rows: accepted with a task, rejected with evidence and an empty
+  Task cell, needs-human with a question and an empty Task cell. Keep "the finding ID alone in
+  the first cell" and the existing `| P1 | accepted |` text (asserted by
+  `test_finding_cell_prompts_show_the_row`). Never put a pipe inside a cell of the examples.
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+tests/test_workflow.py, templates/.ai/prompts/plan-revision.md, scripts/lib/workflow.py (only if a test proves a gap)
+
+### Acceptance criteria
+- Tests in tests/test_workflow.py:
+  - `test_finding_cell_plan_dispositions_incident_row`: the section with
+    `| P1 (MAJOR) dev proxy vs Origin check | accepted | real | T002 |` and a P2 row passes
+    `plan-dispositions-check` (`accepted=1 rejected=1 needs_human=0`), also with `--fresh`;
+  - `test_finding_cell_plan_revision_restart_records_decorated_rows`: an interrupted revision
+    (stage open, complete section with decorated cells such as `P1 (MAJOR) title` and
+    `P2: title`, uncommitted) is recorded by the restart without a Claude session (the mock
+    records no call), in one `chore(ai): record plan revision` commit;
+  - `test_finding_cell_prompts_show_the_table`: `plan-revision.md` contains the host's header
+    line and one example row each for `accepted`, `rejected` and `needs-human`.
+- All `test_finding_cell_*`, `-k plan_revision` and `-k plan_dispositions` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k finding_cell` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k plan_revision` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+BLOCKED on the gate timeout, not on a failure. Implementation is complete and the targeted checks pass:
+`-k finding_cell` Ran 10 OK, `-k plan_revision` Ran 15 OK, `-k plan_dispositions` Ran 12 OK.
+`.ai/bin/ai-check` run in the foreground with timeout 600000 ms did not finish within 600 s (same
+condition as T027). No parser change was needed: `FINDING_CELL` already accepts the incident cell.
+Added the three tests in tests/test_workflow.py and the table header plus three example rows in
+`templates/.ai/prompts/plan-revision.md`. Flow unchanged. Needs a full gate run with a longer limit.
+
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
+
+## T030 — Self-check prints progress, a stop summary and the tests over the per-test budget (FL-31, runner output)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+A self-check that is cut off shows how far it got and what had failed, and every run lists the
+tests over the per-test budget beside the slowest 15.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-31", bullets "Progress" and "Budget". File
+  `tests/run_parallel.py` (stdlib only). `.ai/validate` is unchanged.
+- Progress: `Dispatcher` gets an optional `on_result` callback, called in `work()` under the lock
+  right after `self.results[number] = result`. `main` passes one that prints `Progress: d/N
+  batches, t tests, f failing, E s` (`flush=True`; d = results so far, t = sum of `ran`, f =
+  batches not OK by the same rule as the final report, E = seconds since start).
+- Stop summary: `main` wraps `dispatcher.run()`. On `SystemExit` (from `terminated`) or
+  `KeyboardInterrupt` it prints, before re-raising, `run_parallel: stopped after E s: d/N batches
+  finished (t tests); running: <batch numbers or none>; failing: <batch numbers or none>`, plus
+  the slowest finished tests (the same `timing_report` lines when timings exist). Then it lets
+  the exception propagate (exit code unchanged). The existing `finally` (tmpdir removal) still
+  runs.
+- Budget: `SLOW_BUDGET` = `AI_TEST_BUDGET` (a float > 0; invalid → `sys.exit` with a message in
+  the style of `worker_count`) else `30 * TIMEOUT_SCALE` (import from `timeouts.py`, same
+  directory). `timing_report` gains the budget: after the slowest list, `Over the per-test budget
+  of B s: n tests` and each name with its seconds (slowest first), only when n > 0. The exit code
+  never depends on it.
+- README (the self-check / `run_parallel` description; grep `run_parallel`): progress and stop
+  lines, the budget, `AI_TEST_BUDGET`, and the rule: "a new or changed test over the budget is
+  made cheaper, or its task result says why".
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py (ParallelRunnerTest), README.md
+
+### Acceptance criteria
+- Tests named `test_parallel_runner_progress_*` in tests/test_workflow.py (`ParallelRunnerTest`
+  fixtures, a small `--start-dir` suite as the existing tests use):
+  - a run of 3 batches prints 3 `Progress:` lines, the last `3/3 batches`, before `Ran N tests`;
+    the final report lines are unchanged (the existing assertions still pass);
+  - SIGTERM to a run whose suite has one fast test and one that sleeps (bounded by
+    `tests/timeouts.py`) prints `run_parallel: stopped after`, `1/2 batches finished` (or the
+    counts the fixture yields) and `running:` naming the sleeping batch, then exits non-zero;
+  - `AI_TEST_BUDGET=0.5` with a test sleeping 1 s prints `Over the per-test budget of 0.5 s: 1
+    tests` and its name, exit 0 when all pass; `AI_TEST_BUDGET=x` exits non-zero with a message;
+    with the default budget and fast tests no `Over the per-test budget` line appears.
+- All existing `test_parallel_runner_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+Implemented: `Dispatcher(on_result=)` and `Progress:` lines, `run_parallel: stopped after …` summary
+(state captured at the start of `stop()`, so batches killed by the stop are not counted as finished),
+`AI_TEST_BUDGET` / `SLOW_BUDGET` default `30 * TIMEOUT_SCALE` and the `Over the per-test budget` list,
+README paragraph. `run_parallel.py` now puts its own directory on `sys.path` before importing
+`timeouts` (the runpy wrapper in the sigint test does not). Five `test_parallel_runner_progress_*`
+tests added. Flow unchanged.
+Evidence: `python3 -m unittest discover -s tests -k parallel_runner` → `Ran 39 tests`, OK.
+BLOCKED: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s
+(moved to background), so the gate result is unknown, same as the earlier tasks blocked on the gate timeout.
+
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
+
+## T031 — Shared fixture template for `ready()` (FL-31, fixtures)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+`ToolkitTest.ready()` copies a per-process template of the bootstrapped project instead of
+running `setup-project` and the bootstrap commit for every test, with an identical result and
+independent copies.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-31", bullet "Fixture template". File
+  `tests/test_workflow.py` (`setUp` ~737, `ready` ~1615).
+- Template: a module-level lazy builder that creates `tempfile.mkdtemp(prefix='ai-ready-template-')`
+  (removed with `atexit`) and a project path whose name matches `'project with spaces'`. It runs
+  `git init -b main` and the same three `git config` calls as `setUp`, then `setup-project`, the
+  `bootstrap` commit and `git switch -c feature/test`, with an env built like `setUp`'s
+  (`git_fixture_env()`, mock PATH not needed for setup; check what `setup-project` reads from the
+  environment and keep it equal). The template is built per process; batches are separate
+  processes.
+- `ready(queue=None, fresh=False)`: when not `fresh` and the project holds only `.git` from
+  setUp's `git init` (no other entries) and `self.config` is empty, remove the project's `.git`,
+  `shutil.copytree(template, self.project, symlinks=True, dirs_exist_ok=True)`, then continue
+  as today (queue, validate, second commit). Otherwise run today's path. Tests that check setup
+  behaviour itself, absolute paths or commit times pass `fresh=True`; find them by running the
+  suite, and list each in the result.
+- Guard: nothing may write `__pycache__` into the template's `.ai/bin` (tests import nothing from
+  there; assert it).
+- Measure: before the change, `python3 -m unittest discover -s tests -k finding_cell` and
+  `-k plan_revision`; after, the same. Record both `Ran N tests in X s` lines in the result.
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+tests/test_workflow.py
+
+### Acceptance criteria
+- Tests named `test_fixture_template_*` in tests/test_workflow.py:
+  - equivalence: a `ready()` project and a `ready(fresh=True)` project in the same test have
+    the same set of tracked and untracked paths outside `.git`, the same file bytes and modes,
+    the same current branch, and the same `git log --format=%s` list;
+  - independence: a test that writes a file into its `ready()` project and commits it, then
+    builds a second `ready()` project (another base dir), finds the second one without that file
+    or commit;
+  - no `__pycache__` under the template's or any copy's `.ai/bin`.
+- The full suite passes with the same discovered test IDs plus the new ones (record before and
+  after counts from `ai-check`'s `collected`).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k fixture_template` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k finding_cell` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+Implemented in `tests/test_workflow.py`: `ready_template()` (lazy, per process, `ai-ready-template-` tempdir
+removed by `atexit`, project dir `project with spaces`) and `ready(queue=None, fresh=False)`, which copies
+the template (`copytree(symlinks=True)`, after removing setUp's `.git`) only when the project holds just
+`.git` and the XDG config dir is empty; otherwise the old path runs. `setup-project` reads nothing from the
+environment, so the template env is `git_fixture_env()`. It records the directory name and a wall-clock
+stamp in `.ai/state.md`, so the equivalence test builds the fresh project in a `project with spaces`
+directory and masks ISO timestamps (the first gate run failed on that; fixed). New tests:
+`test_fixture_template_equivalence`, `_copies_are_independent`, `_has_no_bytecode`. No test needed
+`fresh=True` (the full suite passes without it). Timings after: `-k finding_cell` Ran 10 tests in 8.766s;
+`-k plan_revision` Ran 15 tests in 70.936s. Before-numbers were not taken (avoided stashing or checking
+out the old file in a shared worktree), so no speed-up is claimed. Gate: 1001 collected (998 + 3 new),
+OK, 633.5 s (finished in the background past the 600 s tool timeout). Flow unchanged.
+
+## T032 — Fewer full `ai-pipeline` fixture runs per test (FL-31, slow tests)
+Status: DONE
+Dependencies: T030, T031
+Model: sonnet
+
+### Goal
+Tests that run the full `ai-pipeline` more than once only to build a precondition stop doing so
+where that precondition is already proven by another test, so the suite does less repeated
+pipeline work with the same assertions.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-31", bullet "Pipeline runs". No profiling (denied); measure
+  only with `python3 -m unittest discover -s tests -k <name>` (`Ran N tests in X s`) and the
+  gate's slowest-15 and over-budget lists (T030).
+- Audit by reading: `grep -n "'ai-pipeline'" tests/test_workflow.py` and the helpers that wrap it
+  (e.g. `limit_relaunch_fixture`, `approve_run`, pipeline helpers). For each test with two or
+  more pipeline runs, classify each run as asserted on or only a setup run. Do this for the
+  slowest-15 first.
+- Change a setup run only when (a) another named test already asserts that the pipeline
+  produces exactly that state, and (b) the state can be built with existing helpers (helper
+  calls, git commands, the same files) so that the later assertions see the same inputs. Never
+  change what a test asserts, its name, or the run it is about. Shared host state (run manifest,
+  review bindings) is keyed by the checkout path, so never copy a post-pipeline checkout between
+  tests.
+- Budget: at most about 5 conversions in this task. List every audited test in the result as
+  converted (with the covering test), or kept (with the reason).
+- "No safe candidate" is acceptable when the result shows the audit. The task is then DONE with
+  the list and the timings, stated plainly.
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+tests/test_workflow.py
+
+### Acceptance criteria
+- The result lists the audited tests, the conversions with their covering tests, and before and
+  after `-k` timings for each converted test.
+- Every converted test keeps all its assertions (the diff shows only setup lines changed) and
+  passes. The discovered test IDs are unchanged by this task, collected equals executed, and
+  the full suite passes.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+No safe candidate: 0 conversions, no test file changed (test IDs unchanged; flow unchanged).
+Audit by reading, slowest-15 first (last gate: 969 tests, 618.5 s, 8 workers). The two slowest
+(`test_session_budget_end_to_end_*`, 36.7 s and 34.2 s) run `ai-run` once, not `ai-pipeline`. All
+other slowest-15 tests run `ai-pipeline` once (`test_extra_fix_round_*`, `test_observation_*`,
+`test_convergence_*`, `test_pr_undraft_*`), so no setup run exists to drop. Kept, with reason:
+- `test_fix_round_count_survives_human_restart`: both runs asserted (triage_calls 1 then 2).
+- `test_pipeline_rerun_updates_existing_pr_without_new_review`: run 1 is the setup, but the rerun
+  depends on the review binding and run manifest keyed by the checkout path, which only a real run
+  writes (no helper builds them byte for byte).
+- `test_pipeline_plan_review_gates_implementation`, `test_plan_review_is_bound_and_tracks_the_whole_tree`:
+  every run is asserted (plan-call counts, stops).
+- `test_recovery_is_bounded_per_run`, `test_queue_check_invalid_queue_stops_with_skip_plan_review`:
+  the first run's stop state and recovery-attempt budget are what the second run asserts on.
+- `test_triage_completion_*`, `test_fix_round_count_*`: the second run resumes a stopped stage,
+  so the first run is the thing under test.
+Before/after `-k` timings: not applicable, nothing converted.
+
+
+## T033 — Docs, flow chart and handoff audit (batch 7)
+Status: DONE
+Dependencies: T022, T023, T024, T025, T026, T027, T028, T029, T030, T031, T032
+Model: haiku
+
+### Goal
+README, docs/workflow.md, the usage texts, the vault flow chart and the handoff match the code
+of this batch.
+
+### Implementation notes
+- Check against the code: `ai-run --help` (session limit), `ai-recover --help` (timeout rule),
+  README (session limits, Recovery, chmod, self-check budget and progress) and docs/workflow.md
+  (session limits, Recovery contract, `chmod +x`). Wording fixes only. A behaviour mismatch is
+  recorded in the handoff, not fixed here.
+- Vault `agents-flow.md`: the session-limit note (T023) and the timeout-rerun node (T026) are
+  present and match. Fix the wording if needed (update `updated:` then) and add one hub Log line.
+- `.ai/handoff.md`: "What has been implemented", "Validation run", "## Flow chart" (one line
+  starting `Flow chart updated`), and "Manual testing for the human" with `### Needs you` and
+  `### Covered by automated tests` (each test group with its task).
+
+### Likely affected modules
+README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- `-k Docs` and `-k flow_this_repo` pass; the handoff names every new test group of T022–T032.
+- The result lists every mismatch found and how it was fixed or recorded.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the source of truth):
+- `ai-run` usage (session limit: base, plus twice the gate time, at most the base), `ai-recover`
+  usage (timeout rule), README (session limits, Recovery, chmod paragraph, self-check progress and
+  budget) and docs/workflow.md (outcome gate lines, gate allowance, `Session:` format, chmod, exec-bits):
+  all match the code. No wording change was needed, so no file was edited for them.
+- Vault `agents-flow.md` ("Gate allowance" bullet, timeout branch in "When something goes wrong")
+  matches `ai-run` and `ai-recover`. Its `updated:` date stays as it was.
+- handoff: "What has been implemented" lacked T027–T032 (added); "Validation run" lacked T027–T032
+  (added); "Next action" was stale (rewritten); the Human todos line now names the T023, T026 and T033 log lines.
+- Every test group named in the handoff exists (`test_gate_time_*`, `test_session_gate_allowance_*`,
+  `test_timeout_rerun_*`, `test_exec_bits_*`, `test_finding_cell_*`, `test_parallel_runner_progress_*`,
+  `test_fixture_template_*`).
+- Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
+- Gate: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s; the
+  harness moved it to the background (task ID bkhdtjkke, output in the session's tasks folder). It then
+  finished: `Ran 1002 tests in 634.9s … OK`, but the stamp exited 1 with `Validation modified project
+  content`. Cause: this session edited the record files and committed `1e84615` while the gate was
+  running, so the fingerprint at the end differed from the start (`scripts/lib/workflow.py` `stamp`).
+  No gate pass is established on any tree. A rerun on a clean tree with no edits during the run is needed. Human or mission control: run it without
+  a tool limit (last full gate on the branch: PASS, 1002 tests, parent 01f8197, which includes T027–T030).
+- Flow: unchanged in this task (the audit found no flow change).
+Mission control 2026-10-19: full `.ai/bin/ai-check` on d2614df without a tool timeout: Ran 1002 tests in 638.7s, OK, exit 0. Blocked only by the session's 600 s tool limit (FL-32); set DONE on that evidence.
+
+## T034 — exec-bits never follows a symlinked parent directory (review M2)
+Status: DONE
+Dependencies: T027
+Model: opus
+
+### Goal
+`workflow.py exec-bits` changes the mode only of a regular file inside the checkout, reached
+without following any symlink component, so a session that replaces a tracked directory by a
+symlink cannot make the host chmod a file outside the checkout.
+
+### Implementation notes
+- Today `exec_bits()` (`scripts/lib/workflow.py`, about line 4460) does `os.lstat(root / name)`
+  and `os.chmod(root / name, …)`: `lstat` refuses only a symlink leaf; parent symlinks are
+  followed by both calls.
+- Open the checkout root once, then walk each path component with
+  `os.open(part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=…)`; open the leaf with
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, `fstat` it, skip it unless `S_ISREG` and no
+  execute bit, then `os.fchmod(fd, …)`. Close every descriptor (see `read_record`, `checkout_fds`
+  and `remove_tree` for the existing pinned-descriptor style). Any component that is a symlink,
+  missing or not a directory skips the entry silently, as today.
+- Keep the gate-file exclusions (`.ai/bin/`, `.ai/validate`, `.ai/ci-setup`) and the output
+  format (restored relative paths, one per line).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- New regression `test_exec_bits_skips_a_symlinked_parent_directory`: index records
+  `scripts/tool.sh` as 100755, the working-tree `scripts` is replaced by a symlink to a directory
+  outside the checkout holding a non-executable `tool.sh`; after `exec-bits` the external file's
+  mode is unchanged and nothing is printed for it.
+- The existing `test_exec_bits_*` tests still pass (leaf symlink, deleted, untracked, gate files,
+  staged bit, runner restore).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+DONE (81ca76a). `exec_bits()` pins the checkout root once; new `exec_bit_restored()` opens the
+parent with `open_dir` (every component `O_NOFOLLOW`), the leaf with
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, `fstat`s it and `fchmod`s only a regular file
+with no execute bit; any unsafe component skips silently. Gate exclusions and output unchanged.
+`test_exec_bits_skips_a_symlinked_parent_directory` added; mutation (parent opened following
+symlinks) fails it. `-k exec_bits` Ran 6 tests OK; `-k Docs` 3 OK; `.ai/bin/ai-check` PASS
+(1003 tests, 654.9 s; it outgrew the 600 s tool timeout and finished in the background with the
+tree unchanged, exit 0). docs/workflow.md notes the no-follow rule. Flow unchanged.
+
+## T035 — Restore executable bits before a timed-out session stops the run (review M3)
+Status: DONE
+Dependencies: T027, T025
+Model: opus
+
+### Goal
+A timed-out (124/137) or otherwise failed implementation session still gets its tracked
+executables' bits restored before the runner stops, so `ai-recover`'s timeout commit-and-rerun
+does not fail the gate only because a script lost its bit.
+
+### Implementation notes
+- Today `scripts/ai-run` calls `ai_helper exec-bits` (about line 842) only after
+  `claude_session` returns; `claude_session` calls `ai_die "Claude exited $code …"` (about line
+  360) for any non-zero exit, so the repair never runs on a timeout.
+- Run the repair for implementation sessions only (`track_attempt=yes`) inside `claude_session`
+  after `ai_guard_verify` and the branch check (`ai_branch`), before the non-zero-exit `ai_die`;
+  keep it out of triage, plan revision and `--plan` sessions. Avoid running it twice on success
+  (move it rather than duplicate it). A repair failure must not hide the original exit code in
+  the stop message.
+- Alternative if cleaner: also call `exec-bits` in `ai-recover`'s `commit_validated` before the
+  gate. Pick one place and say why in the result.
+
+### Likely affected modules
+scripts/ai-run, possibly scripts/ai-recover, tests/test_workflow.py
+
+### Acceptance criteria
+- New regression `test_exec_bits_restored_after_a_session_timeout`: a mock session on an
+  IN_PROGRESS task drops the bit of a tracked executable the gate requires and exits 124; the
+  runner output shows `Restored the executable bit recorded in git: …` and the file is executable
+  again after the stop.
+- New regression `test_timeout_rerun_recover_after_lost_exec_bit` (or an extension of an existing
+  `test_timeout_rerun_recover_*` test): `ai-recover` then commits the validated partial work and
+  resumes, as for a timeout without the lost bit.
+- Existing `test_exec_bits_*`, `test_timeout_rerun_*` and `test_session_gate_allowance_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+DONE (implementation 440feb4). Placement: inside `claude_session` (implementation sessions only,
+`track_attempt=yes`), after `ai_guard_verify`, the review-digest check and the limit-pause retry,
+then `ai_branch` and `exec-bits`, before the non-zero-exit `ai_die`. Moved, not duplicated: the
+post-session `ai_branch`/`exec-bits` block in the task loop is gone. Chosen over `ai-recover`'s
+`commit_validated` because the runner is where R3 restores bits for every implementation session
+(also a plain error exit or a human resuming after a stop), and recovery stays a gate-and-commit
+step. A repair failure on a non-zero exit stops with `Claude exited N (…); also cannot restore
+recorded executable bits.`, keeping the `Claude exited 124 (` prefix `ai-recover` matches.
+Tests: `test_exec_bits_restored_after_a_session_timeout`, `test_timeout_rerun_recover_after_lost_exec_bit`
+(gate `test -x scripts/tool.sh`; mock `timeout-once` honours `MOCK_CHMOD_PATH`). Mutation (repair
+only when `code == 0`) fails both. `-k exec_bits -k timeout_rerun` 20 OK; `-k Docs -k
+session_gate_allowance -k exec_bits` 15 OK; `.ai/bin/ai-check` PASS (1005 tests, 668.5 s, exit 0,
+finished in the background past the 600 s tool timeout, tree unchanged during the run). README and
+docs/workflow.md say the repair also runs on a timed-out session. Flow chart: T036.
+
+## T036 — State, handoff and flow chart after the review fixes (review N3, N4)
+Status: DONE
+Dependencies: T034, T035
+Model: haiku
+
+### Goal
+`.ai/handoff.md` and the vault flow chart match the delivered work, including the
+executable-bit repair step and its placement after T035.
+
+### Implementation notes
+- Handoff: "Next action" and the T033 lines still say T033 is BLOCKED and ask for a gate rerun;
+  rewrite them from the queue (T033 DONE on mission control's gate pass) and add T034–T036 to
+  "What has been implemented", "Validation run" and "Covered by automated tests" (with the new
+  test names in backticks). `.ai/state.md` counts are runner-managed; do not hand-edit them, but
+  check they are current after the runner's checkpoint and record a mismatch in the result.
+- Vault `agents-flow.md` "Inside one task": add the host step "restore executable bits git
+  records (exec-bits)" between the session and the host checks, and show that it also runs on a
+  timed-out or failed session (T035's placement). Update `updated:`, keep the handoff's
+  `Flow chart updated` line current, and append one dated hub Log line (never tick checkboxes).
+
+### Likely affected modules
+.ai/handoff.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- The handoff no longer calls T033 BLOCKED and names `test_exec_bits_skips_a_symlinked_parent_directory`
+  and `test_exec_bits_restored_after_a_session_timeout`.
+- The flow chart shows the exec-bits step in the task flow, including the timeout path.
+- `-k Docs` and `-k flow_this_repo` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+DONE. Gate PASS on the unchanged tree at 31e7f7c: `.ai/bin/ai-check` `Ran 1005 tests in 667.7s … OK`, exit 0 (background task bjq3hh48h, past the 600 s tool limit). The earlier run (bab5c28ty) was an exit 1 caused by this session's own edits during the run; see below.
+- Done: handoff "Next action" and the flow-chart line rewritten (T033 DONE; T034–T036 named, with `test_exec_bits_skips_a_symlinked_parent_directory` and `test_exec_bits_restored_after_a_session_timeout` under "Covered by automated tests"). Vault `agents-flow.md` "Inside one task" shows the exec-bits step between the session and the host checks, with the timeout/error/signal path; plus the "Executable bits" bullet and the timeout bullet. Hub Log line added. No code changed.
+- Targeted: `python3 -m unittest discover -s tests -k Docs` → Ran 3 tests, OK; `-k flow_this_repo` → Ran 1 test, OK.
+- Gate: the foreground `.ai/bin/ai-check` hit the 600000 ms tool limit and kept running in the background (task bab5c28ty). It finished with `Ran 1005 tests … OK` (668 s, 0 failing), then exit 1 `Error: Validation modified project content`. Cause: this session's own record edits and the T036 record commit b7fa6f0 were made during the run, which changes the fingerprint (the same cause as T033's FAIL). No clean PASS yet; a rerun on an unchanged tree is needed (FL-32).
+- `.ai/state.md` counts are runner-managed and were not edited.

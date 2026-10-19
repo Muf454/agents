@@ -1,33 +1,42 @@
-<!-- Host evidence: HEAD e3c724e38d7b984219d4c0181094050d8f9db5db; merge-base edc3dc645116166472720cebd2d982b649ab14ff; saved 2026-10-18T07:42:58Z. -->
+<!-- Host evidence: HEAD 92d1e9277994d5701fbf7e9153f90d69fe387bfc; merge-base 1423b6092c4fe6a14d98d5c39f6380d69039141a; saved 2026-10-19T03:05:56Z. -->
 
 # Independent review
 
-Overall verdict: PASS WITH MINOR FINDING — prior findings resolved; one notification requirement remains unmet.
+Overall verdict: APPROVE WITH MINOR FINDING — both prior major findings are fixed; one localized R3 requirement gap remains.
 Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
 
-Reviewed HEAD: `e3c724e38d7b984219d4c0181094050d8f9db5db`
+Reviewed HEAD: `92d1e9277994d5701fbf7e9153f90d69fe387bfc`
 
-Supplied base and verified merge-base: `edc3dc645116166472720cebd2d982b649ab14ff`
+Supplied base and verified merge-base: `1423b6092c4fe6a14d98d5c39f6380d69039141a`
 
 ## Scope and validation
 
-Inspected repository instructions, specification, plan, task records, state, handoff, review dispositions, relevant documentation, Git history, full production-code diff, and selected affected tests. Reviewed changes since `da84933830d7f33769adfcdd35c9ca276a803006` and the broader supplied range. The checkout was clean.
+Inspected repository instructions, specification, plan, tasks, state, handoff, dispositions, relevant documentation, Git history, the full supplied diff, changes since the previous review, and affected source/tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json`: PASS at `2026-10-18T07:40:16Z`, recorded at `d9b95042b9bfcdc7a303ef6740aae4ef0cbadaee`.
-- Referenced log: **965 tests passed in 596.0 seconds**.
-- Independently verified that the validation fingerprint matches the reviewed content.
+- `.ai/local/validation.json`: PASS at `2026-10-19T03:02:55Z`, recorded at `2ff4074`.
+- Referenced log: **1,005 tests passed in 668.0 seconds**, matching 1,005 collected.
+- Independently verified that the validation fingerprint matches the reviewed checkout despite subsequent metadata commits.
 
 Checks independently run:
 
-- Task queue validation.
-- Python AST parsing and shell syntax checks across 14 scripts/templates.
-- Three documentation-consistency tests.
-- `git diff --check`.
-- In-memory executions of the actual cap-exhaustion branch and completed-before-acknowledgement branch, with external behavior mocked.
+- Task queue validation and test discovery: 1,005 tests.
+- Three documentation-consistency tests: passed.
+- Python AST parsing of three affected files and shell syntax checks across 14 files: passed.
+- `git diff --check`: passed.
+- AST comparison against the base: 40 test methods added; none removed.
+- Read-only checks of the actual gate-time selection and timeout-manifest validation functions.
+- Read-only reproductions of executable repair and post-session handling, with mutations intercepted or external behavior stubbed.
 
-The full `./scripts/ai-check` and integration fixtures were not rerun because they require writes. No files were written or network/MCP integrations invoked. Live provider, systemd, and GitHub behavior remain untested.
+The full `./scripts/ai-check` and integration fixtures were not rerun because they require filesystem writes. No project files were changed and no network/MCP integrations were invoked.
+
+## Previous-round verification
+
+- **M2 fixed:** repair uses a pinned root, no-follow directory traversal, a regular-file check, and descriptor-based `fchmod`. The added regression covers an external parent-directory symlink. An independent read-only probe rejected a real parent symlink without requesting chmod.
+- **M3 fixed:** repair runs inside `claude_session` before nonzero-result termination. Independent shell-fragment checks reached repair for exit codes 0, 124, 137 and 1. Added tests cover timeout repair and successful recovery afterward.
+- **N3 fixed:** state reports 36 completed tasks, PASS validation and readiness for review; handoff gives current next actions.
+- **N4 fixed:** the vault chart now includes executable repair before host checks and timeout handling, with `updated: 2026-10-19`.
 
 ## BLOCKER findings
 
@@ -39,56 +48,56 @@ None found in the inspected scope.
 
 ## MINOR findings
 
-### N2 — Cap-exhaustion notification omits the known reset time
+### N5 — Executable repair omits several protected gate paths
 
-**Location:** `scripts/ai-recover:268–269`.
+**Location:** `scripts/lib/workflow.py:4467–4478`; complete protected-path list at `scripts/lib/common.sh:152–154`.
 
-**Requirement:** `.ai/project-spec.md:85` requires escalation after exhausting `AI_LIMIT_RELAUNCH_MAX` to name the reset time.
+**Requirement:** R3 explicitly requires that gate paths are never touched by executable-bit repair.
 
-When `limit-schedule` refuses another relaunch, recovery already holds the parsed timestamp in `at`, but its escalation only says:
+The helper excludes `.ai/bin/`, `.ai/validate` and `.ai/ci-setup`, but does not exclude `.ai/prompts/`, `.ai/permissions.allow`, `.claude/settings.json` or `.github/workflows/ai-validate.yml`.
 
-```text
-usage limit again after 1 relaunch(es) in this run.
-Next: rerun ai-pipeline after the reset.
+**Evidence:** Called the actual `exec_bits()` against this checkout with an intercepted `fchmod` and a mocked index entry equivalent to staging:
+
+```bash
+git add --chmod=+x -- .ai/permissions.allow
 ```
 
-**Impact:** The human receives a stop requiring manual action without the promised time for retrying.
+The helper reported restoring `.ai/permissions.allow` and requested mode `0755`. No permissions were actually changed.
 
-**Evidence:** Executing the actual scheduling branch with `limit-stop` returning `Claude 2000000000`, a recovering timer, and a refused schedule produced the message above. Existing cap-exhaustion coverage checks escalation and schedule consumption, but does not assert that the notification includes the reset time.
+An index-only mode change leaves the working-tree gate digest unchanged, so the pre-repair guard does not prevent this case.
 
-**Recommended direction:** Include the formatted `at` value in the cap-exhaustion escalation and extend its regression test to assert it. This is an incomplete requirement in the newly introduced cap path.
+**Impact:** The host can modify a protected gate file itself, contrary to R3, and cause a subsequent integrity check to stop the run. This is a localized reliability gap; no gate-bypass execution was demonstrated.
 
-## Previous findings re-evaluated
-
-- **M1:** Resolved. Conversion ownership now requires the initial draft-state result to equal `false`. The added regression covers a failed lookup on a human draft followed by a later clean run.
-- **N1:** Resolved. A zero-exit child with its own `planning/done` observation now reports successful launch. Tests cover matching completion, absent observation, another PID, and nonzero completion.
-
-Also inspected schedule hold/claim, tree verification, task-bound preservation, armed-stop handling, startup ordering, dispute reconciliation, detached logging, and draft-record revocation. No rejected finding is re-raised, and no separate pre-existing defect is reported.
+**Recommended direction:** Exclude every protected gate root and descendant. Add regressions using staged executable modes for the omitted protected paths.
 
 ## Missing test coverage
 
-Add an assertion that cap-exhaustion notifications contain the parsed reset time. Broader integration coverage was inspected and its recorded results verified, but was not independently rerun.
+- Repair exclusions need coverage for the complete protected-path set described in N5.
+- Exit 137 reaches repair in the independent fragment check, but the added end-to-end timeout tests exercise exit 124.
+- FL-31’s performance improvement remains unverified: T031 lacks before measurements, and T032 made no pipeline-run conversions. The plan expressly permits an explained no-conversion result.
 
 ## Security concerns
 
-No additional demonstrated security defect found in the inspected changes. The M1 human-draft ownership issue is addressed.
+The prior symlink-containment defect is fixed. N5 permits an unintended protected-file permission change, but subsequent integrity checks remain in place. No additional significant security or authorization defect was found in the inspected changes.
+
+No pre-existing defect is counted among the findings.
 
 ## Architecture concerns
 
-The implementation retains minimal dependencies and host-side authority records. Recovery remains complex, with explicit transition contracts and substantial regression coverage.
+Dependencies remain minimal. Gate timing and timeout-rerun authority remain in host state, and the factored recovery commit retains dependency setup, full validation, checkpoint screening and committed-content verification.
 
-**Flow chart updated:** the vault note has `updated: 2026-10-18` and includes planning, relaunch, and draft-ownership flows. Same-session update timing was not independently established.
+**Flow chart updated:** the required vault note now includes executable repair and timeout recovery.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Verify real usage-limit pause/resume after upgrading installed copies and reinstalling watchdog timers.
-- Verify detached planning and human-draft preservation against actual providers.
+After the normal toolkit upgrade, exercise a real slow-gate run and verify the displayed allowance, timeout notification, validated recovery checkpoint and resumed task. Human acceptance and merge remain outstanding.
 
 ### Covered by automated tests
 
-- Recovery transitions, tree/task binding, planning acknowledgements, safe logging, dashboard states, and draft ownership.
-- Add the reset-time notification assertion described in N2.
+Recorded passing coverage includes gate-time selection, session caps, timeout recovery limits, neighboring recovery cases, executable repair, decorated disposition restart handling, progress reporting, budget reporting and fixture independence.
+
+Add the protected-path regressions from N5 and rerun `./scripts/ai-check`.
 
 Reviewing does not constitute human acceptance.

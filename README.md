@@ -176,9 +176,11 @@ Before leaving an implementation session unattended:
    in `.ai/validation-candidates.md`; inspect scripts before executing them. The
    supplied validation placeholder deliberately fails with exit 78.
 3. Add necessary local commands to `.ai/permissions.allow` after inspecting them.
-   The template already allows `Bash(chmod +x *)` (no other chmod form) so a runner
-   session can make a script it created executable; existing projects add that line by
-   hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
+   The template already allows `Bash(chmod +x *)` (no other chmod form; numeric modes such
+   as `chmod 755` are denied) so a runner session can make a script it created executable,
+   or repair a tracked script that lost its bit; the runner also restores a tracked script's
+   recorded executable bit after each implementation session, even one that timed out. Existing projects add that
+   line by hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
    check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
@@ -226,6 +228,13 @@ For the recoverable bounded runner, start from a clean committed feature branch:
 Without `--sessions` the session budget is `max(16, unfinished tasks + 2)`, recomputed on every
 `ai-run` call (so fix-round tasks added by triage are covered); `Session budget: N` is printed
 first. `--sessions N` sets it explicitly.
+
+An implementation session also gets room for two runs of this project's measured gate: its limit
+is `--session-timeout` plus twice the gate time, at most double the session timeout, and never
+beyond the remaining run time. The gate time is the slowest of the last 3 passing host `ai-check`
+runs, which `ai-run` records as `gate` lines in the host outcome log (where agents cannot write).
+The cap keeps a corrupt log from more than doubling a session. Triage, plan revision and `--plan`
+sessions keep the plain limit.
 
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
@@ -438,6 +447,10 @@ Stops are recovered in tiers, so a hiccup doesn't wait for you:
    questions for you (needs-human) always escalates with those questions, even after a
    crash and before the attempt limit, and so do a failed plan-revision stage and the
    supervision limit (`AI_SUPERVISE_PLAN_ROUNDS` revisions per human-started run).
+   A **session timeout** of an implementation task that is IN_PROGRESS with uncommitted
+   work needs no decision: the host commits that work as a recovery checkpoint only if the
+   full gate passes on it, and reruns, once per task per human-started run; a failing gate or
+   a second timeout of the same task escalates.
    Otherwise a
    read-only Claude session (Read/Glob/Grep, prompt `.ai/prompts/recover.md`) picks one
    action that the script carries out: `rerun`, `commit_and_rerun` (only if the full
@@ -930,7 +943,15 @@ Every run ends with a timing report before the `Ran N tests …` line: on Python
 batches run with `--durations 0` and the runner lists the 15 slowest tests with their
 seconds, then `Test time: <sum> s across <workers> workers; worker busy: <min>–<max> s`
 (the busy range shows how evenly the batches spread). Older Pythons get the busy range
-only. Duration lines that do not parse are ignored.
+only. Duration lines that do not parse are ignored. After each finished batch the runner prints
+`Progress: d/N batches, t tests, f failing, E s`. When a SIGTERM or interrupt stops the run it
+first prints `run_parallel: stopped after E s: d/N batches finished (t tests); running: <batch
+numbers or none>; failing: <batch numbers or none>` and the slowest finished tests, then exits
+as before. The report also lists, after the slowest 15, the tests over the per-test budget
+(`Over the per-test budget of B s: n tests`, slowest first): `AI_TEST_BUDGET` (a number greater
+than 0, otherwise the runner stops with an error), else 30 s times the timeout scale below. The
+list never changes the exit code. A new or changed test over the budget is made cheaper, or its
+task result says why.
 
 Fixture I/O is kept cheap: test fixture repositories run git with `core.fsync=none` and
 `gc.auto=0` (test harness only; the toolkit scripts never set them), and when the caller sets
