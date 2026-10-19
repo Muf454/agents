@@ -2760,7 +2760,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T027 — The host restores a tracked script's recorded executable bit after a session (FL-29, runner)
-Status: BLOCKED
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -2818,6 +2818,8 @@ replaced by `true`, `test_exec_bits_runner_restores_the_bit_a_session_lost` fail
 Flow unchanged (a host detail inside the task step).
 Blocker: run `.ai/bin/ai-check` (longer timeout) to confirm; then set DONE.
 
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
+
 ## T028 — Prompts: `chmod +x` is the only form and also repairs a tracked script (FL-29, templates)
 Status: TODO
 Dependencies: T027
@@ -2858,7 +2860,7 @@ Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600
 
 
 ## T029 — Plan dispositions: regression for the family-budget row and the restart path; prompt shows the table (FL-30)
-Status: BLOCKED
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -2914,9 +2916,10 @@ condition as T027). No parser change was needed: `FINDING_CELL` already accepts 
 Added the three tests in tests/test_workflow.py and the table header plus three example rows in
 `templates/.ai/prompts/plan-revision.md`. Flow unchanged. Needs a full gate run with a longer limit.
 
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
 
 ## T030 — Self-check prints progress, a stop summary and the tests over the per-test budget (FL-31, runner output)
-Status: BLOCKED
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -2978,6 +2981,7 @@ Evidence: `python3 -m unittest discover -s tests -k parallel_runner` → `Ran 39
 BLOCKED: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s
 (moved to background), so the gate result is unknown, same as the earlier tasks blocked on the gate timeout.
 
+Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
 
 ## T031 — Shared fixture template for `ready()` (FL-31, fixtures)
 Status: DONE
