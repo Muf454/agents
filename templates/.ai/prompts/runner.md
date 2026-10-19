@@ -55,8 +55,11 @@ your checkpoint and continues the queue.
   (ignored by Git; the runner empties it before and after every session). Never create them in
   source or test directories, never name them like tests (`*.test.*`, `test_*.py`), and do not
   try to delete files: `rm` is not allowed.
-- A new script must be executable: run `chmod +x <path>` on the file you created inside this
-  checkout (never other modes, never paths outside the checkout), then `git add -- <path>`.
+- A script must be executable: run `chmod +x <path>` on a file inside this checkout, then
+  `git add -- <path>`. `chmod +x` is the only chmod form allowed (never numeric modes such as
+  `chmod 755`, never paths outside the checkout). It also repairs a tracked script that lost its
+  executable bit (`git diff` shows `old mode 100755` / `new mode 100644`); the runner restores
+  such a bit after the session too.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
   it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
 - Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).

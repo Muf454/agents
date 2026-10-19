@@ -12620,6 +12620,16 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
+    def test_exec_bits_prompts_name_the_only_form(self):
+        for name in ('runner', 'triage'):
+            with self.subTest(prompt=name):
+                section = ' '.join(self.prompt_section(name).split())
+                self.assertIn('chmod +x <path>', section)
+                self.assertIn('chmod 755', section)
+                self.assertIn('old mode 100755', section)
+        readme = ' '.join((ROOT / 'README.md').read_text().split())
+        self.assertIn('chmod 755', readme)
+
     def test_script_modes_all_shebang_scripts_are_executable(self):
         scripts_dir = ROOT / 'scripts'
         for script in scripts_dir.glob('*'):

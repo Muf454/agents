@@ -2821,7 +2821,7 @@ Blocker: run `.ai/bin/ai-check` (longer timeout) to confirm; then set DONE.
 Mission control 2026-10-19: full `.ai/bin/ai-check` on c797cd3 (this task's work included), run with no tool timeout: Ran 1001 tests in 637.5s, OK, exit 0. The block was the session's 600 s tool limit (FL-32), not a failure; set DONE on that evidence.
 
 ## T028 — Prompts: `chmod +x` is the only form and also repairs a tracked script (FL-29, templates)
-Status: TODO
+Status: DONE
 Dependencies: T027
 Model: haiku
 
@@ -2857,6 +2857,16 @@ Targeted: `python3 -m unittest discover -s tests -k prompt` (must say `Ran N tes
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE: `templates/.ai/prompts/runner.md` and `triage.md` bullet now reads "A script must be
+executable: run `chmod +x <path>` on a file inside this checkout ...", names `chmod +x` as the
+only chmod form (numeric modes such as `chmod 755` denied) and says it repairs a tracked script
+whose bit was lost (`old mode 100755` / `new mode 100644`; the runner restores it after the
+session). README (`Bash(chmod +x *)` paragraph) gets the numeric-mode denial and the host restore.
+Test: `test_exec_bits_prompts_name_the_only_form` (both prompts and README).
+Evidence: `-k exec_bits_prompts` Ran 1 OK; `-k prompt` Ran 17 OK; `-k Docs` Ran 3 OK; full
+`.ai/bin/ai-check` Ran 1002 tests in 634.3 s, OK, exit 0 (run in the background after the 600 s
+foreground limit; output read from the completed run).
+Mutation: not run. Flow unchanged (wording inside prompts and README). `.ai/prompts/` not edited.
 
 
 ## T029 — Plan dispositions: regression for the family-budget row and the restart path; prompt shows the table (FL-30)

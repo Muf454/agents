@@ -176,9 +176,11 @@ Before leaving an implementation session unattended:
    in `.ai/validation-candidates.md`; inspect scripts before executing them. The
    supplied validation placeholder deliberately fails with exit 78.
 3. Add necessary local commands to `.ai/permissions.allow` after inspecting them.
-   The template already allows `Bash(chmod +x *)` (no other chmod form) so a runner
-   session can make a script it created executable; existing projects add that line by
-   hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
+   The template already allows `Bash(chmod +x *)` (no other chmod form; numeric modes such
+   as `chmod 755` are denied) so a runner session can make a script it created executable,
+   or repair a tracked script that lost its bit; the runner also restores a tracked script's
+   recorded executable bit after each implementation session. Existing projects add that
+   line by hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
    check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
