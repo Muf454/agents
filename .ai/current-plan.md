@@ -1,145 +1,111 @@
-# Plan: Flow batch 7: FL-28, FL-29, FL-30, FL-31
+# Plan: Flow batch 8: FL-32 and N5
 
-## Assessment (verified at 1423b60, 2026-10-18)
-See `.ai/project-spec.md`, "Verified against the code". In short:
-- FL-28 is fully open on both halves.
-- FL-29 is half done: the allowlist and the basic prompt line exist; the exact-form wording and the
-  host-side mode restore are missing.
-- FL-30's parser is done; only a regression for the incident and a fuller prompt example remain.
-- FL-31 is open. `run_parallel.py` is silent until the end and prints nothing on a stop; every
-  `ToolkitTest` rebuilds its project from scratch.
+## Assessment (verified at c32f768, 2026-10-19)
+See `.ai/project-spec.md`, "Verified against the code". In short: the prompts themselves tell a
+session to mark a task BLOCKED when the foreground gate times out, and nothing on the host notices
+that such a block had no failing check. The host gate after a DONE session already is the
+authority, so the fix is mostly to stop the prompts from blocking, plus a narrow host retry for
+sessions that still block (the frozen prompts of installed projects keep saying "mark BLOCKED"
+until each project upgrades). N5 is a missing-list problem: one list must feed the guard and the
+repair.
 
-## Architecture
+## Design
 
-### FL-28 part 1: gate allowance (T022 helper, T023 runner)
-```mermaid
-flowchart LR
-  chk["ai-run host gate<br/>(checkpoint_done, final check)"] -->|"seconds, pass/fail/timeout"| out["outcome gate RESULT SECONDS<br/>(host outcomes.jsonl)"]
-  out --> gs["gate-seconds:<br/>max of the last 3 pass lines of this project, else 0"]
-  gs --> lim["implementation session limit =<br/>session_timeout + min(2 × G, session_timeout),<br/>then min(remaining run time)"]
-```
-- **Record (T022).** `workflow.py outcome gate RESULT SECONDS`: RESULT is `pass|fail|timeout`
-  and SECONDS a non-negative int, otherwise a usage error. The record holds `kind: gate`, project,
-  branch, result and seconds. `outcomes_report` (`ai-status --outcomes`) ignores the kind; check
-  this and keep its output unchanged. `gate-seconds` reads the log with the existing
-  `read_outcomes` and `decode_outcome_lines` (torn lines ignored) and prints the largest seconds
-  among the last 3 `pass` lines of `project_name()`, or `0`. It always exits 0 on a readable or
-  missing log, and exits 1 on an unsafe state root, as `outcome` does.
-- **Runner (T023).** `ai-run` times each host `ai-check` (`SECONDS` before and after) in
-  `checkpoint_done` and in the final check. After `ai_guard_verify` passes (never a helper after a
-  gate change), it appends `outcome gate pass|fail|timeout` (exit 124 or 137 means timeout).
-  Failing to append is only a note. `claude_session` computes the allowance only when
-  `track_attempt == yes`: an implementation session, which is the one that runs the gate. The
-  helper's output is checked against `^[0-9]{1,7}$`; anything else counts as 0. Format: with an
-  allowance of 0 the `Session:` line stays byte-identical. Otherwise it reads `(limit Ls: Bs + As
-  for two gate runs of Gs; log …)`. Usage text and README/docs state the rule. The allowance can
-  only lengthen a session up to double, so a corrupt or hostile log can at most double it. The
-  outcome log sits in the host state root, which agents cannot write (check_state_root).
+### FL-32 part 1: prompts (T037)
+- The shared "How to work here" gate bullet (runner and triage, kept byte-identical) becomes:
+  run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`; wait for
+  the completion notice and read its output (the exit status and the `Ran N tests` / `OK` or
+  `FAILED` lines); make no edits and no commits while it runs (the stamp hashes the tree before and
+  after: an edit makes it fail with `Validation modified project content`); do not end the session
+  while it runs. If the result cannot be obtained, do not mark the task BLOCKED for that: finish the
+  task on its targeted checks, write "full gate result unknown in the session; left to the host
+  gate" in the result, and mark it DONE when everything else is met. The host runs the full gate
+  after the session and sets a DONE task whose gate fails back to IN_PROGRESS. Targeted commands
+  run in the foreground as written.
+- The RUNNER CONTRACT in `scripts/ai-run` gains one sentence: a gate run that outlives a tool call
+  is not a blocker; the host gate after the session decides.
+- README setup step 4: the same rule in one sentence. `.ai/prompts/` (gate copy) is not edited.
 
-### FL-28 part 2: a session timeout on an IN_PROGRESS task (T024 helper, T025/T026 ai-recover)
+### FL-32 part 2: host record and safe stamp reading (T038)
+- `run-manifest gate-unblock TASK`: as `timeout-rerun` (validated ID, list `gate_unblocks` of
+  unique IDs, at most 200, wrong shape = invalid manifest, a repeat fails `gate-only block: TASK
+  was already retried once in this run` with bytes unchanged, kept by `clear-attempts`, dropped
+  by `start`).
+- `stamp outcome`: reads `.ai/local/validation.json` through `local_dir_fd` + `read_record` (no
+  symlink, no FIFO block, size bound) and prints `WORD DIGEST`: WORD `none` (missing, unreadable,
+  not JSON), `running`, `pass`, `changed` (`FAIL`, `exit_code` 0, `unchanged` false) or `fail`
+  (anything else); DIGEST is the sha256 of the bytes read, or `-`.
+
+### FL-32 part 3: the host gate waits for a running gate (T039)
+- `scripts/ai-check`: `AI_CHECK_LOCK_WAIT` (`^[0-9]{1,5}$`, default 0; invalid → `ai_die`). With
+  0: `flock -n` as today. Otherwise try `flock -n`; when held print `Waiting up to Ns for a running
+  validation to finish.` and `flock -w N`; a timeout dies with the same `Validation is already
+  running.` message.
+- `scripts/ai-run`: `checkpoint_done` and the final gate (and T040's retry gate) run
+  `AI_CHECK_LOCK_WAIT=<min(remaining, 900)>`. `ai-recover` and `ai-pipeline` unchanged.
+
+### FL-32 part 4: gate-only block retry (T040, T041)
 ```mermaid
 flowchart TD
-  stop["ai-pipeline stop implementation → ai-recover"] --> pre["state root, reserve attempt, limit hold/claim,<br/>armed rule, AI_AUTO_RECOVER, gate, branch, relaunch_verify,<br/>plan decision, hard rules, attempt budget (all unchanged)"]
-  pre --> lo["resume_open_stage, record_stop_leftovers (unchanged)"]
-  lo --> to{"stage implementation, reason 'Claude exited 124/137 (',<br/>run-manifest task = T, T IN_PROGRESS, checkout dirty?"}
-  to -- no --> dec["read-only Claude decision (unchanged)"]
-  to -- yes --> once{"run-manifest timeout-rerun T<br/>(first time in this run?)"}
-  once -- no --> esc["⛔ the T session timed out again after one commit-and-rerun"]
-  once -- yes --> cv["commit_validated: ai_deps, ai-check, checkpoint-guard,<br/>recovery checkpoint commit, verify (the commit_and_rerun steps)"]
-  cv -- gate fails --> esc2["⛔ leftover work fails validation (nothing committed)"]
-  cv -- ok --> res["🔧 Recovered: resume ai-pipeline (the next session reconciles T)"]
+  s["Session ends, task BLOCKED"] --> clean{"tree clean beyond records?"}
+  clean -- no --> die["today: Blocked task was not checkpointed"]
+  clean -- yes --> ck["runner_checkpoint BLOCKED (today)"]
+  ck --> ran{"validation.json changed during the session<br/>and outcome running, pass or changed?"}
+  ran -- no --> today["today: ⚠ Blocked, next independent task"]
+  ran -- yes --> claim{"run-manifest gate-unblock TASK"}
+  claim -- "fails (repeat, no manifest)" --> today
+  claim -- ok --> gate{"host ai-check (lock wait)"}
+  gate -- fail --> today
+  gate -- pass --> back["tasks set TASK IN_PROGRESS, commit .ai/tasks.md,<br/>🔧 notification, loop runs the task again"]
 ```
-- **Helper (T024).** `run-manifest task` (read only) prints the recorded task and exits 0, or
-  exits 1 silently when there is none. `run-manifest timeout-rerun TASK`: TASK must pass
-  `task_id_valid`. The optional field `timeout_reruns` is a list of unique valid IDs, at most 200;
-  a wrong type makes the manifest invalid, like the limit fields. TASK already in the list →
-  `fail('session timeout: TASK was already committed and rerun once in this run')`, nothing
-  written. Otherwise the ID is appended in one atomic write, exit 0. `start` writes a fresh dict,
-  so the field is dropped. `clear-attempts` KEEPS it (A3): verify where `clear-attempts` is
-  called, and comment why.
-- **ai-recover (T025).** The body of the `commit_and_rerun)` case moves unchanged into a function
-  `commit_validated WHY HUMAN`. The case calls it, so the decision path is byte-for-byte the same
-  behaviour. The new rule sits after `record_stop_leftovers` (the second call, ~293) and before the
-  `recover.md` check: the predicate in the chart, then the `timeout-rerun` result. On success it
-  sends `ai_observe recovering … checks`, the 🔧 line `Recovering (n/max): <branch>: the <T>
-  session timed out; committing its validated partial work once and rerunning.`, then
-  `commit_validated`, then `resume "the <T> session timed out; its validated partial work was
-  committed."`. The rule spends the attempt `ai-recover` already reserved: the attempt budget check
-  runs before it, unchanged. It never runs for a claimed relaunch, which resumed earlier.
-- **Edge cases, docs (T026).** Tests for the cases that must stay as today, the usage text,
-  README "Recovery", docs/workflow.md "Recovery contract", and the flow chart.
+- In the loop, right before `claude_session`, `stamp_before` = the DIGEST of `stamp outcome`.
+- The BLOCKED branch keeps the dirty check and `runner_checkpoint TASK BLOCKED` first (the
+  session's bookkeeping is committed as today), and sends the ⚠ notification only when no retry
+  happens. Then the predicate above; a pass: `ai_helper tasks set TASK IN_PROGRESS`, `git add --
+  .ai/tasks.md .ai/state.md .ai/run-log.md`, commit `chore(ai): retry TASK after a gate-only block`,
+  `ai_guard_verify`, notify `🔧 TASK: blocked without a failing check and the full gate passed;
+  running it once more.`, `ai_log`. A failing host gate is recorded (`record_gate`) and does not
+  stop the run: the task stays BLOCKED with the ⚠ notification. The host gate counts against the
+  run time like the others.
+- The next session's prompt (only for that task, once) adds: "The previous session marked TASK
+  BLOCKED without a failing check; the host's full gate then passed on this tree. If the block was
+  only about the gate result, verify the acceptance criteria and mark it DONE; otherwise block it
+  again with the reason."
+- T040 builds the path and its positive tests; T041 pins every case that stays as today and does
+  the docs and flow chart (the T025/T026 split of batch 7).
 
-### FL-29: executable bits (T027 host, T028 prompts)
-- `workflow.py exec-bits` (host only, run by `ai-run`): for every entry of `git ls-files -s -z`
-  with mode `100755`, outside the gate paths (`.ai/bin/`, `.ai/validate`, `.ai/ci-setup`), whose
-  working-tree path is a regular file (`lstat`, never followed) without any execute bit: chmod it
-  to `mode | ((mode & 0o444) >> 2)` and print the path. It never touches index-644 files,
-  symlinks, missing files or untracked files, and always exits 0 unless git fails. `ai-run` calls
-  it right after each implementation session's `ai_guard_verify`, before the status check and
-  `checkpoint_done`. That re-aligns the tree with git's own record, so the host gate sees what was
-  committed or staged. Printed only, no notification.
-- Prompts (`runner.md`, `triage.md`): "`chmod +x <path>` is the only chmod form allowed (never
-  numeric modes such as `chmod 755`); it also repairs a tracked script whose executable bit was
-  lost: `git diff` then shows `old mode 100755` / `new mode 100644`." README and docs/workflow.md
-  mention the host restore.
-
-### FL-30: incident regression (T029)
-Tests only, plus the `plan-revision.md` example (table header and three rows). No parser change.
-If a test shows the restart path does NOT record the decorated section, the task records it and
-fixes the narrowest cause (sonnet stays: the parser is shared and already covered).
-
-### FL-31: self-check (T030 progress and budget, T031 fixture template, T032 pipeline runs)
-- **Progress (T030).** `Dispatcher.work` calls a `progress(number, result)` hook under the lock
-  after storing a result. `main` prints `Progress: d/N batches, t tests, f failing, E s` with
-  `flush=True`. On a stop (SystemExit from `terminated`, or KeyboardInterrupt) `main` prints
-  `run_parallel: stopped after E s: d/N batches finished (t tests); running: <numbers>; failing:
-  <numbers or none>` before it re-raises. The end-of-run report is unchanged.
-- **Budget (T030).** `SLOW_BUDGET = 30 * TIMEOUT_SCALE` (`AI_TEST_BUDGET` overrides, a positive
-  number; invalid → exit with a message like `AI_TEST_WORKERS`). After the slowest-15 list the
-  report prints `Over the per-test budget of B s: n tests` and their names (all of them, slowest
-  first), or nothing when n = 0. The exit status never depends on it. README (self-check section)
-  states the rule: a new or changed test over budget is made cheaper or its result explains why.
-- **Fixture template (T031).** A module-level, lazily built, per-process template of `ready()`'s
-  bootstrap: `setup_project()`, the `bootstrap` commit and `git switch -c feature/test`, in its own
-  `tempfile.mkdtemp` removed by `atexit`. It is built with the same env shape as a fresh test and
-  used only when the test's project holds nothing but setUp's fresh `git init` and the XDG config
-  dir is empty. Otherwise the existing path runs. `ready()` replaces the project directory's
-  contents with `shutil.copytree(symlinks=True)`, then writes the queue and validate and makes the
-  second commit as today. `ready(fresh=True)` keeps the old path for tests that need it (setup
-  itself, timestamps). No `__pycache__` under any `.ai/bin`.
-- **Pipeline runs (T032).** A static audit (grep and read; no scripts) of tests that call
-  `ai-pipeline` two or more times. A setup run is replaced only when the state it produces is
-  already asserted by another named test and can be built with existing helpers byte for byte (the
-  result names both tests). Otherwise it stays and the result says why. Before and after `-k`
-  timings go in the result. "No candidate is safe" is an acceptable, explained outcome.
+### N5: one protected list (T042)
+- `scripts/lib/common.sh`: arrays `AI_PROTECTED_PATHS` (the seven roots in today's order) and
+  `AI_PROTECTED_OPTIONAL`, defined once near `ai_guard_digest`. The guard heredoc reads them from
+  its arguments (`python3 -I - "${AI_PROTECTED_PATHS[@]}" -- "${AI_PROTECTED_OPTIONAL[@]}"` or an
+  equivalent), with the same loop, so the digest value does not change.
+- `workflow.py exec-bits ROOT...`: no argument → usage error; an index entry equal to a ROOT or
+  below `ROOT/` is skipped. `ai-run` calls `ai_helper exec-bits "${AI_PROTECTED_PATHS[@]}"`.
+  The old hard-coded `gate` tuple and `.ai/bin/` prefix go.
 
 ## Affected components
-scripts/lib/workflow.py, scripts/ai-run, scripts/ai-recover, templates/.ai/prompts/{runner,triage,plan-revision}.md,
-tests/run_parallel.py, tests/test_workflow.py, README.md, docs/workflow.md, vault agents-flow.md and the agents.md Log.
+`templates/.ai/prompts/runner.md`, `templates/.ai/prompts/triage.md`, `scripts/ai-run`,
+`scripts/ai-check`, `scripts/lib/workflow.py`, `scripts/lib/common.sh`, `tests/test_workflow.py`,
+README.md, docs/workflow.md, vault `agents-flow.md` (+ hub Log lines).
 
-## Phases
-1. FL-28: T022 → T023; T024 → T025 → T026.
-2. FL-29: T027 → T028. FL-30: T029.
-3. FL-31: T030, T031 → T032.
-4. T033: docs, flow chart and handoff audit.
+## Phases and order
+T037 (prompts, sonnet) → T038 (helpers, opus) → T039 (lock wait, opus) → T040 (retry path, opus)
+→ T041 (unchanged cases, docs, chart, opus) → T042 (N5, sonnet) → T043 (audit, haiku).
 
 ## Risks
-- **Session limits.** A longer limit means a hung session is noticed later. Bounded at double the
-  base, and the watchdog's hung rule is unchanged.
-- **Committing partial work.** It passes the full gate, the same bar `commit_and_rerun` sets
-  today, and the next session reconciles it (the runner prompt already says so). Once per task
-  stops a loop.
-- **Fixture template.** Tests sharing state through a copied template: copies are independent
-  directories. A `test_fixture_template_*` test writes in one test and checks the next copy is
-  pristine.
-- **Speed gains are uncertain** without profiling (A6). The result records numbers honestly, and
-  the handoff asks the human for a profile if the gain is small.
-- **The self-check runs ~9–10 min,** above the 600 s Bash limit sessions use. Sessions run
-  targeted tests and leave the full gate to the host when the call times out (gate note in the
-  queue).
+- The background wait depends on Claude Code delivering the finished result to a `claude -p`
+  session; batch 7 evidence says it does. If it does not, the prompt's fallback (DONE on targeted
+  evidence, host gate decides) still avoids the block. Needs-you check in the handoff.
+- A session that ends with its background gate still running holds `validation.lock`: T039's wait
+  covers it; the waiting adds up to one gate time.
+- A retry spends one host gate run (~11 min) and one session on a task that really needed a human.
+  Bounded to once per task per run (A1).
+- The installed `.ai/prompts` of this repo stay old during this batch: sessions may still mark
+  BLOCKED on the gate. The task queue header tells them not to.
+- The guard digest refactor must keep the digest value; a test pins it against a reference copy of
+  the old tuples.
 
 ## Validation strategy
-Every task runs its targeted `python3 -m unittest discover -s tests -k <group>` (must print `Ran
-N tests`, N ≥ 1) and `.ai/bin/ai-check` in the foreground with the 600000 ms tool timeout. The
-host's post-task `ai-check` is the authority. `.ai/validate` is unchanged: shell syntax checks,
-then `tests/run_parallel.py`. Mutation checks are named in the risky tasks (T023, T025, T027).
+Every task: its targeted `python3 -m unittest discover -s tests -k <group>` commands (must say
+`Ran N tests`, N ≥ 1), then the full gate `.ai/bin/ai-check` run in the background and waited for
+(see the queue header). The host's post-task `ai-check` is the authority. No profiling commands.

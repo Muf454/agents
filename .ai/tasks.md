@@ -8,11 +8,22 @@ changes the flow updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` and i
 date in the same task and appends a dated line to the Log of `agents.md`; never tick vault
 checkboxes. If the vault edit is denied, record it in the result and in the handoff's
 "## Flow chart" section.
-Current batch (batch 7, `fix/flow-batch-7` from `master` at 1423b60, planned 2026-10-18): T022–T033,
-from vault `agents-backlog.md` FL-28, FL-29, FL-30 and FL-31. Design: `.ai/current-plan.md`; scope
-and assumptions: `.ai/project-spec.md`. Line references for T022–T033 are at 1423b60; re-check
-them before editing. T001–T021 are batch 6's DONE tasks (merged in #31), kept unchanged because
-the host protects DONE blocks; their line references are historical.
+Current batch (batch 8, `fix/flow-batch-8` from `master` at c32f768, planned 2026-10-19): T037–T043,
+from vault `agents-backlog.md` FL-32 and PR #34's final review finding N5. Design:
+`.ai/current-plan.md`; scope and assumptions: `.ai/project-spec.md`. Line references for T037–T043
+are at c32f768; re-check them before editing. T001–T036 are batch 6's and batch 7's DONE tasks
+(merged in #31 and #34), kept unchanged because the host protects DONE blocks; their line
+references and their gate notes are historical.
+BATCH 8 GATE RULE (overrides the gate note below and the installed runner prompt for this batch):
+run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, wait for
+its completion notice and read the result; make no edits and no commits while it runs, and do not
+end the session while it runs. If its result cannot be obtained in the session, do NOT mark the task
+BLOCKED for that reason: finish on the targeted checks, write "full gate result unknown in the
+session; left to the host gate" in the result and mark the task DONE when everything else is met.
+The host runs the full gate after every DONE session and sets the task back to IN_PROGRESS if it
+fails.
+Previous batch (batch 7, `fix/flow-batch-7` from `master` at 1423b60, planned 2026-10-18): T022–T036,
+from FL-28 to FL-31; T001–T021 are batch 6's.
 Batch 6 source: vault `agents-backlog.md` (MC-01 part 1, DB-04, R15; Zack's decisions of 2026-10-17 in
 the `agents.md` Log), planned 2026-10-17 on `feature/limits-plan-stage` (from `fix/flow-batch-5`
 at edc3dc6, PR #30 on PR #29, neither merged).
@@ -20,10 +31,10 @@ Line references in T001–T021 are at edc3dc6.
 Every behaviour change gets an offline regression test in the existing style; every task
 leaves `.ai/bin/ai-check` passing and updates README.md / `docs/workflow.md` where the
 behaviour it changes is described.
-Gate note: `.ai/validate` runs the shell syntax checks and then `tests/run_parallel.py`
-(about 9–10 min on this machine, often past the 600 s Bash tool limit). Should `.ai/bin/ai-check` still time out in
-the session, run the task's targeted tests, record the timeout in the result, and leave the
-full gate to the host's post-task `ai-check`. Tests with time bounds run in parallel: assert
+Gate note (batch 7; batch 8 uses the BATCH 8 GATE RULE above): `.ai/validate` runs the shell
+syntax checks and then `tests/run_parallel.py` (about 11 min on this machine, past the 600 s Bash
+tool limit). Should `.ai/bin/ai-check` still time out in the session, run the task's targeted
+tests, record the timeout in the result, and leave the full gate to the host's post-task `ai-check`. Tests with time bounds run in parallel: assert
 "returns within N s" with generous bounds scaled by `tests/timeouts.py`, never a tight
 duration. No profiling commands (denied). Test helper scripts written into temp dirs use
 `os.chmod` from Python. A new executable script is made executable with `chmod +x` on the path
@@ -3323,3 +3334,395 @@ DONE. Gate PASS on the unchanged tree at 31e7f7c: `.ai/bin/ai-check` `Ran 1005 t
 - Targeted: `python3 -m unittest discover -s tests -k Docs` → Ran 3 tests, OK; `-k flow_this_repo` → Ran 1 test, OK.
 - Gate: the foreground `.ai/bin/ai-check` hit the 600000 ms tool limit and kept running in the background (task bab5c28ty). It finished with `Ran 1005 tests … OK` (668 s, 0 failing), then exit 1 `Error: Validation modified project content`. Cause: this session's own record edits and the T036 record commit b7fa6f0 were made during the run, which changes the fingerprint (the same cause as T033's FAIL). No clean PASS yet; a rerun on an unchanged tree is needed (FL-32).
 - `.ai/state.md` counts are runner-managed and were not edited.
+
+## T037 — Prompts: run the full gate in the background and wait; never block on an unknown gate result (FL-32, templates)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+A runner or triage session runs the ~11-minute gate so that it can read the result, does not
+invalidate the run by editing meanwhile, and never marks finished work BLOCKED only because the
+gate outlived a tool call.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-32 part 1".
+- `templates/.ai/prompts/runner.md` (~49–52) and `templates/.ai/prompts/triage.md` (~55–58): the
+  shared "How to work here" block must stay byte-identical in both
+  (`test_tool_contract_section_is_shared_by_prompts`). Replace the gate bullet with, in substance:
+  "Run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+  wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
+  `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and after;
+  a change fails it with `Validation modified project content`) and do not end the session. Never
+  mark a task BLOCKED only because the gate outlived a tool call or its result could not be read:
+  finish on the targeted checks, write `full gate result unknown in the session; left to the host
+  gate` in the result, and mark the task DONE when everything else is met. The runner runs the full
+  gate after the session and sets a DONE task whose gate fails back to IN_PROGRESS. Run a task's
+  targeted test command as written, in the foreground." Remove "never run it in the background or
+  poll it" and "If it still times out, mark the task BLOCKED".
+- `templates/.ai/prompts/runner.md` intro (~14): keep "run its targeted checks and
+  `.ai/bin/ai-check`" (no change needed unless it contradicts the bullet).
+- `scripts/ai-run` RUNNER CONTRACT string (~842): after "or mark it BLOCKED with evidence." add
+  "A gate run that outlives a tool call is not a blocker: the runner's full gate after the session
+  decides."
+- README setup step 4 (~198–200): replace the foreground sentence with the background rule (one
+  or two sentences; keep "Record/fix any baseline failures rather than suppressing them.").
+- Do not edit `.ai/prompts/` (gate copy).
+- Flow chart (vault `agents-flow.md`, "Inside one task"): the `work` node's "run checks" becomes
+  "run checks (full gate in the background, waited for)"; add one bullet "Session gate runs
+  (FL-32, T037, 2026-10-19)": background + wait, no edits meanwhile, never BLOCKED for an unknown
+  result, the host gate decides. Update `updated:`; append a dated hub Log line in `agents.md`
+  (never tick checkboxes). If the vault edit is denied, record it in the result and in the handoff's
+  "## Flow chart" section.
+
+### Likely affected modules
+templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md, scripts/ai-run, README.md,
+tests/test_workflow.py, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Test `test_gate_background_prompts_tell_the_session_to_wait` in tests/test_workflow.py: the
+  shared block of both template prompts contains `run_in_background`, `Validation modified project
+  content` and `left to the host gate`, and does not contain `never run it in the background` or
+  `mark the task BLOCKED with the evidence instead`; README contains `run_in_background`;
+  `scripts/ai-run` contains `is not a blocker`.
+- `test_tool_contract_section_is_shared_by_prompts`, `-k prompt` and `-k Docs` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_background` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k prompt` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T038 — Host record of a gate-only block retry and a safe reading of the validation stamp (FL-32, helpers)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+The runner can claim the one gate-only block retry allowed per task per human-started run, and can
+read what the session's own gate run left in `.ai/local/validation.json` without following a
+symlink or blocking.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-32 part 2". File `scripts/lib/workflow.py`.
+- `run_manifest` (`timeout-rerun` ~1559 and `timeout_reruns_valid` ~1329 are the model): action
+  `gate-unblock TASK` (`task_id_valid` or usage error); optional field `gate_unblocks`, a list of
+  unique valid IDs, at most 200, any other shape invalidates the manifest (extend the validity
+  check ~1508 and the comment ~1299). A repeat fails `gate-only block: TASK was already retried
+  once in this run` with the bytes unchanged; else one atomic append. `clear-attempts` keeps it
+  (comment beside the `timeout_reruns` one ~1532); `start` writes a fresh dict (check).
+- `stamp outcome` (in `stamp()` ~755): pin `.ai/local` with `local_dir_fd` and read
+  `validation.json` with `read_record` (regular file only, no symlink, no FIFO block; a size bound
+  such as 64 KiB). Print one line `WORD DIGEST`: WORD is `none` (missing, unsafe, unreadable or not
+  a JSON object), `running` (`result` RUNNING), `pass` (`result` PASS), `changed` (`result` FAIL,
+  `exit_code` 0 and `unchanged` false) or `fail` (anything else); DIGEST is the sha256 hex of the
+  bytes read, or `-` when nothing was read. Always exit 0. `stamp verify`/`record`/`invalidate` are
+  unchanged.
+- No ai-run change here (T040). Flow unchanged in this task; say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (the run-manifest field list
+and the stamp description, if they list actions)
+
+### Acceptance criteria
+- Tests named `test_gate_unblock_manifest_*` in tests/test_workflow.py (after `run-manifest start`
+  as `approve_run` does):
+  - `gate-unblock T001` exits 0 and the manifest holds `gate_unblocks: ["T001"]`; a second one
+    exits 1 with `already retried once` and identical manifest bytes; `gate-unblock T002` exits 0;
+    `gate-unblock bad` and no argument exit non-zero with usage;
+  - `clear-attempts` keeps `gate_unblocks`; a new `start` drops it; a manifest with
+    `gate_unblocks` `"T001"`, `["T001", "T001"]` or `["x"]` is invalid (an action that validates
+    fails, as for `timeout_reruns`);
+  - `stamp outcome`: no file → `none -`; after `stamp invalidate` → `running <64 hex>`; a written
+    PASS record → `pass …`; FAIL with exit 0 and `unchanged` false → `changed …`; FAIL with exit 1 →
+    `fail …`; garbage → `none …`; a symlink at `validation.json` to a PASS file outside → `none -`;
+    a FIFO at `validation.json` → `none -` within a bound scaled by `tests/timeouts.py`; the digest
+    equals `hashlib.sha256` of the file bytes.
+- All `test_timeout_rerun_manifest_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_unblock_manifest` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun_manifest` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T039 — The host gate waits for a validation that is still running (FL-32, gate lock)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+A session's background `ai-check` that is still running when the session ends cannot make the
+host's post-session gate fail with `Validation is already running.`; the host waits for it, within
+a bound.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-32 part 3".
+- `scripts/ai-check` (~15–16): `wait=${AI_CHECK_LOCK_WAIT:-0}`, `[[ $wait =~ ^[0-9]{1,5}$ ]]` else
+  `ai_die "Invalid AI_CHECK_LOCK_WAIT: $wait"`. `flock -n 8` first; when it fails and `wait > 0`,
+  print `Waiting up to ${wait}s for a running validation to finish.` (stderr) and `flock -w
+  "$wait" 8`; any failure → `ai_die 'Validation is already running.'` (same message). With 0 the
+  behaviour is today's. The toolkit-repo branch (~4–12) takes no lock; leave it.
+- `scripts/ai-run`: `checkpoint_done` (~702) and the final gate (~813) run
+  `AI_CHECK_LOCK_WAIT=$lock_wait AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check"` with `lock_wait` =
+  min(remaining, 900) (one small function; T040 reuses it for its retry gate). Comment why: a
+  session may end with its own background gate still holding the lock (FL-32). `ai-recover` and
+  `ai-pipeline` keep today's immediate refusal.
+- README (the `ai-check` / configuration description; grep `AI_CHECK_TIMEOUT`) and docs/workflow.md
+  (~1266, host gate timing) get one sentence each.
+- Flow chart (vault `agents-flow.md` "Inside one task"): the `gate` node mentions "waits for a
+  running gate (at most 15 min)". Update `updated:` and append a hub Log line (or record a denied
+  vault edit as in T037).
+
+### Likely affected modules
+scripts/ai-check, scripts/ai-run, tests/test_workflow.py, README.md, docs/workflow.md, vault
+agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_gate_lock_wait_*` in tests/test_workflow.py, on a `ready()` fixture (its
+  `.ai/validate` is fast):
+  - a helper process holds `.ai/local/validation.lock` (`fcntl.flock`) and releases it after about
+    1 s: `.ai/bin/ai-check` with `AI_CHECK_LOCK_WAIT=30` prints `Waiting up to 30s`, then passes and
+    `stamp verify` succeeds; with `AI_CHECK_LOCK_WAIT` unset it exits non-zero with `Validation is
+    already running.` at once (within a scaled bound) while the lock is held;
+  - lock held past the wait (`AI_CHECK_LOCK_WAIT=1`, held for a scaled 10 s) → non-zero with
+    `Validation is already running.` and returns within a scaled bound;
+  - `AI_CHECK_LOCK_WAIT=x` → non-zero with `Invalid AI_CHECK_LOCK_WAIT`;
+  - runner: a mock session that marks its task DONE and leaves a process holding the lock for about
+    2 s (the mock starts a detached `python3 -c` holder; bound its life with `tests/timeouts.py`)
+    → the host gate waits, passes and the task is checkpointed DONE.
+- Existing `-k session_gate_allowance` and `-k gate_time` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T040 — Runner retries a gate-only block once per task (FL-32, recovery)
+Status: TODO
+Dependencies: T038, T039
+Model: opus
+
+### Goal
+When a session marks its task BLOCKED although its own gate run showed no failing check, and the
+host's full gate then passes on the same tree, the runner sets the task back to IN_PROGRESS and
+gives it one more session, without a human, once per task per run.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-32 part 4" (chart and bullets). File `scripts/ai-run`.
+- In the task loop, right before `claude_session` (~850): `stamp_before` = the DIGEST field of
+  `ai_helper stamp outcome` (`-` on any helper failure).
+- BLOCKED branch (~857–863): keep the dirty check and `task_outcome blocked` / `ai_log` /
+  `runner_checkpoint TASK BLOCKED` as today, but send the ⚠ notification only when no retry
+  happens. Then `gate_only_retry TASK` (new function) returns 0 when it set the task back:
+  1. `read -r word digest < <(ai_helper stamp outcome)`; require `digest != stamp_before`,
+     `digest != -` and `word` in `running pass changed`;
+  2. `ai_helper run-manifest gate-unblock TASK 2>/dev/null` succeeds;
+  3. the host gate as in `checkpoint_done` (T039's lock wait, `AI_CHECK_TIMEOUT=$remaining`,
+     `ai_observe step checks TASK`, `ai_guard_verify`, `record_gate`); no remaining time → return 1;
+     a failing gate → print `Gate-only block retry of TASK: the full gate failed; it stays
+     BLOCKED.` and return 1 (never `ai_die`; the run continues as today);
+  4. on a pass: `ai_helper tasks set TASK IN_PROGRESS`; `git add -- .ai/tasks.md .ai/state.md
+     .ai/run-log.md .ai/handoff.md`; commit `chore(ai): retry TASK after a gate-only block`;
+     `ai_guard_verify`; `ai_notify "🔧 TASK: blocked without a failing check and the full gate
+     passed; running it once more."`; `ai_log TASK 'gate-only block; host gate passed; retrying
+     once' PASS 'See task result'`; set `retry_note=TASK`.
+  Comment the rule: deterministic host evidence only, once per task (the claim is spent before the
+  gate runs, so a failing gate spends it too), a forged stamp buys at most one gate run and one
+  session, nothing is accepted without a later DONE checkpoint.
+- Prompt: when `retry_note` equals the task being started, append once to the RUNNER CONTRACT:
+  "The previous session marked TASK BLOCKED without a failing check; the runner's full gate then
+  passed on this tree. If the block was only about the gate result, verify the acceptance criteria
+  and mark it DONE; otherwise block it again with the reason." Clear `retry_note` after use.
+- The loop needs no other change: `tasks next` prefers an IN_PROGRESS task; the session budget
+  counts the extra session.
+- Usage text of `ai-run` (if it lists runner behaviours) gets one sentence. Docs and flow chart are
+  T041's (say so in the result).
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py (mock claude modes)
+
+### Acceptance criteria
+- Tests named `test_gate_only_block_*` in tests/test_workflow.py, pipeline or `ai-run --approved`
+  fixtures as the `blocked-first` mock tests (~542, ~9717), with a run manifest (`approve_run`):
+  - new mock mode `blocked-gate-unknown` (counter in `MOCK_STATE_DIR`): on its first T001 call it
+    runs `.ai/bin/ai-task set T001 BLOCKED`, writes a result line, commits the queue, and leaves
+    `.ai/local/validation.json` as `stamp invalidate` would (RUNNING; e.g. by running
+    `python3 .ai/bin/lib/workflow.py stamp invalidate`); later calls complete the task normally.
+    The run completes; T001 is DONE; notifications contain `blocked without a failing check` and no
+    `⚠ Blocked`; git log has `chore(ai): retry T001 after a gate-only block` before T001's DONE
+    checkpoint; the second session's prompt (mock-recorded) contains `marked T001 BLOCKED without a
+    failing check`; the manifest has `gate_unblocks` `["T001"]`; the host outcome log has one more
+    `gate pass` line than a run without the retry;
+  - mode `blocked-gate-unknown-always` (blocks every time the same way): exactly one retry
+    commit, then T001 stays BLOCKED with the ⚠ notification, and the run continues/ends as the
+    `blocked-first` tests expect today.
+- `-k blocked`, `-k timeout_rerun` and `-k exec_bits` pass unchanged.
+- Mutation evidence in the result: without the `gate-unblock` claim the second case retries more
+  than once (or loops to the session budget) and fails.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_only_block` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k blocked` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T041 — Gate-only block retry: the cases that stay as today, docs and flow chart (FL-32, contract)
+Status: TODO
+Dependencies: T040
+Model: opus
+
+### Goal
+The retry fires only in its exact case; every neighbouring BLOCKED case keeps today's behaviour,
+pinned by tests; the docs and the flow chart describe FL-32.
+
+### Implementation notes
+- Tests only, plus docs. If a case fails, fix the predicate in `scripts/ai-run` narrowly and say so
+  in the result.
+- Docs: docs/workflow.md, where the runner's BLOCKED handling is described (grep `BLOCKED` ~30,
+  ~113, ~896) and the host gate paragraph (~1266): a paragraph "Gate-only block retry" with the
+  predicate, once per task per run (kept across resumes, dropped by a human start), the host gate,
+  the IN_PROGRESS commit and the notification. README "Recovery" (or the runner section): one
+  sentence. README and docs also state the session gate rule of T037 if T037 did not.
+- Flow chart (vault `agents-flow.md`, "Inside one task"): after the session, a BLOCKED branch
+  "BLOCKED, own gate showed no failure → host gate passes → back to IN_PROGRESS, once per task;
+  else ⚠ Blocked"; the notifications table gains the 🔧 line. Update `updated:`; append a hub Log
+  line; set the handoff's "## Flow chart" line (or record a denied vault edit there).
+
+### Likely affected modules
+tests/test_workflow.py, scripts/ai-run (only if a case fails), README.md, docs/workflow.md, vault
+agents-flow.md and agents.md Log, .ai/handoff.md
+
+### Acceptance criteria
+- Tests named `test_gate_only_block_unchanged_*` in tests/test_workflow.py (fixtures and mock
+  modes as T040's; each asserts: T001 stays BLOCKED, the ⚠ notification as today, no `retry`
+  commit, no `blocked without a failing check` notification):
+  - the session's gate failed: the mock leaves a FAIL record with `exit_code` 1 (via `stamp
+    record 1 <log>` on a fixture) → no host gate run for the retry (no extra `gate` outcome line)
+    and no `gate_unblocks` entry;
+  - the session never ran the gate (`blocked-first`: validation.json unchanged since before the
+    session) → no retry, no `gate_unblocks`;
+  - the host gate fails (the fixture `.ai/validate` fails while a marker file exists that the mock
+    creates and commits) → one extra `gate fail` line, `gate_unblocks` `["T001"]` (spent), the run
+    goes on as today and is not stopped by the retry;
+  - no run manifest (plain `ai-run --approved` without `run-manifest start`, if the fixture allows
+    it; otherwise say in the result why this case is not covered) → no retry;
+  - a dirty tree beyond the records → `Blocked task was not checkpointed` as today.
+- `-k Docs` and `-k flow_this_repo` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_only_block` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T042 — One protected-path list for the guard and the executable-bit repair (review N5)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+`exec-bits` never changes the mode of any gate file, because it and the gate guard read the same
+protected-path list, defined once.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "N5: one protected list".
+- `scripts/lib/common.sh` (~142–184): define `AI_PROTECTED_PATHS=(.ai/validate .ai/ci-setup .ai/bin
+  .ai/prompts .ai/permissions.allow .claude/settings.json .github/workflows/ai-validate.yml)` and
+  `AI_PROTECTED_OPTIONAL=(.claude/settings.json .github/workflows/ai-validate.yml)` once, with a
+  comment that this is the only list. `ai_guard_digest` passes them as arguments to the inline
+  `python3 -I -` (e.g. the roots, then `--`, then the optional ones) and the heredoc reads
+  `sys.argv`; the loop, the order and therefore the digest stay the same. The guard still never
+  runs the project helper.
+- `scripts/lib/workflow.py` `exec_bits()` (~4460) and its `main()` entry (~4967): `exec-bits
+  ROOT...`; no ROOT → usage error (exit non-zero, nothing changed); skip an index entry equal to a
+  ROOT or starting with `ROOT/`. Drop the hard-coded `gate` tuple and the `.ai/bin/` prefix; update
+  the docstring.
+- `scripts/ai-run` (~364): `ai_helper exec-bits "${AI_PROTECTED_PATHS[@]}"`.
+- Existing `test_exec_bits_*` unit tests call `helper('exec-bits')` without arguments: pass the
+  list (read it from `scripts/lib/common.sh` with a small test helper, or a constant compared to
+  it once).
+- docs/workflow.md (the exec-bits sentence) and README (the chmod paragraph, if it lists the
+  excluded paths): "never a gate file (the protected-path list)".
+- Flow chart (vault `agents-flow.md`): the "Executable bits" bullet's "Never `.ai/bin/`,
+  `.ai/validate` or `.ai/ci-setup`" becomes "never a gate file (the guard's protected-path list,
+  N5)". Update `updated:`; append a hub Log line (or record a denied vault edit).
+
+### Likely affected modules
+scripts/lib/common.sh, scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py,
+docs/workflow.md, README.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests in tests/test_workflow.py:
+  - `test_exec_bits_skips_every_protected_path`: on a fixture repository, a regular file at each
+    protected root (or one file inside each directory root: `.ai/bin/tool`, `.ai/prompts/x.md`)
+    staged with `git add --chmod=+x` and left 0644 on disk → `exec-bits <list>` prints nothing and
+    every mode stays 0644, while a `scripts/tool.sh` in the same state is restored and printed;
+    a path that only shares a prefix (e.g. `.ai/prompts-extra/x.sh`) IS restored;
+  - `test_exec_bits_requires_the_protected_list`: `exec-bits` without arguments exits non-zero
+    and changes nothing;
+  - `test_exec_bits_protected_list_is_defined_once`: `scripts/lib/common.sh` defines
+    `AI_PROTECTED_PATHS` once, the guard heredoc contains no literal `.ai/permissions.allow`, and
+    `scripts/ai-run` passes `"${AI_PROTECTED_PATHS[@]}"` to `exec-bits`;
+  - `test_exec_bits_guard_digest_unchanged`: on a fixture checkout, `ai_guard_digest` from
+    `scripts/lib/common.sh` equals a reference digest computed in the test with the pre-change
+    algorithm (the old tuples copied into the test).
+- All existing `test_exec_bits_*` tests and the gate-change tests (`-k gate_change`, e.g.
+  `test_runner_detects_gate_changes_made_by_git_hooks`) pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_change` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+
+## T043 — Docs, flow chart and handoff audit (batch 8)
+Status: TODO
+Dependencies: T037, T038, T039, T040, T041, T042
+Model: haiku
+
+### Goal
+README, docs/workflow.md, the prompt templates, the vault flow chart and the handoff match the code
+of this batch.
+
+### Implementation notes
+- Check against the code: README (setup step 4, `ai-check` lock wait, Recovery, chmod paragraph),
+  docs/workflow.md (BLOCKED handling, gate-only block retry, host gate, exec-bits),
+  `templates/.ai/prompts/runner.md` and `triage.md` (gate bullet) and `scripts/ai-run`'s RUNNER
+  CONTRACT. Wording fixes only; a behaviour mismatch is recorded in the handoff, not fixed here.
+- Vault `agents-flow.md`: the T037, T039, T041 and T042 changes are present and agree. Fix the
+  wording if needed (update `updated:` then) and append one hub Log line.
+- `.ai/handoff.md`: "What has been implemented", "Validation run", "## Flow chart" (one line
+  starting `Flow chart updated`), and "Manual testing for the human" with `### Needs you` and
+  `### Covered by automated tests` (each test group with its task). `.ai/state.md` counts are
+  runner-managed; do not hand-edit them.
+
+### Likely affected modules
+README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- `-k Docs` and `-k flow_this_repo` pass; the handoff names every new test group of T037–T042.
+- The result lists every mismatch found and how it was fixed or recorded.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
