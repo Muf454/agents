@@ -3336,7 +3336,7 @@ DONE. Gate PASS on the unchanged tree at 31e7f7c: `.ai/bin/ai-check` `Ran 1005 t
 - `.ai/state.md` counts are runner-managed and were not edited.
 
 ## T037 — Prompts: run the full gate in the background and wait; never block on an unknown gate result (FL-32, templates)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -3394,7 +3394,16 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
-
+Done (2026-10-19; partial work from the timed-out session in 1b2d620, reconciled and kept as is).
+Shared gate bullet in `templates/.ai/prompts/runner.md` and `triage.md` now says background +
+wait, no edits/commits meanwhile, never BLOCKED for an unknown gate result; RUNNER CONTRACT in
+`scripts/ai-run` adds "A gate run that outlives a tool call is not a blocker"; README step 4 uses
+the background rule. Test `test_gate_background_prompts_tell_the_session_to_wait`.
+Evidence: `-k gate_background` Ran 1 OK; `-k prompt` Ran 18 OK; `-k Docs` Ran 3 OK; full gate
+`.ai/bin/ai-check` run in the background and waited for: Ran 1006 tests in 644.5 s, OK, exit 0
+(the earlier session's 2 failing subtests did not recur on this tree). Vault flow chart ("Inside
+one task" `work` node, "Session gate runs" bullet) and hub Log line were already written by the
+earlier session; checked present.
 
 ## T038 — Host record of a gate-only block retry and a safe reading of the validation stamp (FL-32, helpers)
 Status: TODO

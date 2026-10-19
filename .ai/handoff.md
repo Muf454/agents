@@ -1,13 +1,13 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
 - **FL-32** (vault backlog): the ~11-minute gate outlives a session's 600 s foreground tool call,
   and the prompts said to mark the task BLOCKED then (T027, T029, T030 and T033 of batch 7).
-  - T037 (sonnet): the runner and triage prompt templates, the RUNNER CONTRACT and README say to
+  - T037 (DONE): the runner and triage prompt templates, the RUNNER CONTRACT and README say to
     run the gate with `run_in_background`, wait for it, make no edits meanwhile, and never block
     on an unknown gate result (the host gate decides).
   - T038 (opus): `run-manifest gate-unblock TASK` (once per task per run) and `stamp outcome` (a
@@ -24,7 +24,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-None yet on this branch. Last full gate on `master`'s batch 7 tree: PASS (1005 tests, 667.7 s).
+T037 tree: PASS (1006 tests, 644.5 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -39,8 +39,8 @@ None yet on this branch. Last full gate on `master`'s batch 7 tree: PASS (1005 t
   BATCH 8 GATE RULE tells them to run the gate in the background and not to block on it.
 
 ## Flow chart
-Flow unchanged so far (planning only). T037, T039, T041 and T042 update vault `agents-flow.md`
-("Inside one task", the notifications table and the "Executable bits" bullet).
+T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
+T039, T041 and T042 update the notifications table and the "Executable bits" bullet.
 
 ## Manual testing for the human
 
@@ -61,7 +61,7 @@ Flow unchanged so far (planning only). T037, T039, T041 and T042 update vault `a
 
 ### Covered by automated tests
 Planned (group names fixed by the tasks; run with `python3 -m unittest discover -s tests -k <group>`):
-- `test_gate_background_prompts_tell_the_session_to_wait` (T037).
+- `test_gate_background_prompts_tell_the_session_to_wait` (T037, passing).
 - `test_gate_unblock_manifest_*` (T038).
 - `test_gate_lock_wait_*` (T039).
 - `test_gate_only_block_*` (T040), `test_gate_only_block_unchanged_*` (T041).
@@ -76,4 +76,4 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Implement T037–T043 in queue order (T037, T038, T039, T040, T041, T042, T043).
+Implement T038–T043 in queue order (T038, T039, T040, T041, T042, T043).
