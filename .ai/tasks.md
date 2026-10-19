@@ -3178,3 +3178,121 @@ BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the
   a tool limit (last full gate on the branch: PASS, 1002 tests, parent 01f8197, which includes T027–T030).
 - Flow: unchanged in this task (the audit found no flow change).
 Mission control 2026-10-19: full `.ai/bin/ai-check` on d2614df without a tool timeout: Ran 1002 tests in 638.7s, OK, exit 0. Blocked only by the session's 600 s tool limit (FL-32); set DONE on that evidence.
+
+## T034 — exec-bits never follows a symlinked parent directory (review M2)
+Status: TODO
+Dependencies: T027
+Model: opus
+
+### Goal
+`workflow.py exec-bits` changes the mode only of a regular file inside the checkout, reached
+without following any symlink component, so a session that replaces a tracked directory by a
+symlink cannot make the host chmod a file outside the checkout.
+
+### Implementation notes
+- Today `exec_bits()` (`scripts/lib/workflow.py`, about line 4460) does `os.lstat(root / name)`
+  and `os.chmod(root / name, …)`: `lstat` refuses only a symlink leaf; parent symlinks are
+  followed by both calls.
+- Open the checkout root once, then walk each path component with
+  `os.open(part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=…)`; open the leaf with
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, `fstat` it, skip it unless `S_ISREG` and no
+  execute bit, then `os.fchmod(fd, …)`. Close every descriptor (see `read_record`, `checkout_fds`
+  and `remove_tree` for the existing pinned-descriptor style). Any component that is a symlink,
+  missing or not a directory skips the entry silently, as today.
+- Keep the gate-file exclusions (`.ai/bin/`, `.ai/validate`, `.ai/ci-setup`) and the output
+  format (restored relative paths, one per line).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- New regression `test_exec_bits_skips_a_symlinked_parent_directory`: index records
+  `scripts/tool.sh` as 100755, the working-tree `scripts` is replaced by a symlink to a directory
+  outside the checkout holding a non-executable `tool.sh`; after `exec-bits` the external file's
+  mode is unchanged and nothing is printed for it.
+- The existing `test_exec_bits_*` tests still pass (leaf symlink, deleted, untracked, gate files,
+  staged bit, runner restore).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T035 — Restore executable bits before a timed-out session stops the run (review M3)
+Status: TODO
+Dependencies: T027, T025
+Model: opus
+
+### Goal
+A timed-out (124/137) or otherwise failed implementation session still gets its tracked
+executables' bits restored before the runner stops, so `ai-recover`'s timeout commit-and-rerun
+does not fail the gate only because a script lost its bit.
+
+### Implementation notes
+- Today `scripts/ai-run` calls `ai_helper exec-bits` (about line 842) only after
+  `claude_session` returns; `claude_session` calls `ai_die "Claude exited $code …"` (about line
+  360) for any non-zero exit, so the repair never runs on a timeout.
+- Run the repair for implementation sessions only (`track_attempt=yes`) inside `claude_session`
+  after `ai_guard_verify` and the branch check (`ai_branch`), before the non-zero-exit `ai_die`;
+  keep it out of triage, plan revision and `--plan` sessions. Avoid running it twice on success
+  (move it rather than duplicate it). A repair failure must not hide the original exit code in
+  the stop message.
+- Alternative if cleaner: also call `exec-bits` in `ai-recover`'s `commit_validated` before the
+  gate. Pick one place and say why in the result.
+
+### Likely affected modules
+scripts/ai-run, possibly scripts/ai-recover, tests/test_workflow.py
+
+### Acceptance criteria
+- New regression `test_exec_bits_restored_after_a_session_timeout`: a mock session on an
+  IN_PROGRESS task drops the bit of a tracked executable the gate requires and exits 124; the
+  runner output shows `Restored the executable bit recorded in git: …` and the file is executable
+  again after the stop.
+- New regression `test_timeout_rerun_recover_after_lost_exec_bit` (or an extension of an existing
+  `test_timeout_rerun_recover_*` test): `ai-recover` then commits the validated partial work and
+  resumes, as for a timeout without the lost bit.
+- Existing `test_exec_bits_*`, `test_timeout_rerun_*` and `test_session_gate_allowance_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k timeout_rerun` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes
+
+## T036 — State, handoff and flow chart after the review fixes (review N3, N4)
+Status: TODO
+Dependencies: T034, T035
+Model: haiku
+
+### Goal
+`.ai/handoff.md` and the vault flow chart match the delivered work, including the
+executable-bit repair step and its placement after T035.
+
+### Implementation notes
+- Handoff: "Next action" and the T033 lines still say T033 is BLOCKED and ask for a gate rerun;
+  rewrite them from the queue (T033 DONE on mission control's gate pass) and add T034–T036 to
+  "What has been implemented", "Validation run" and "Covered by automated tests" (with the new
+  test names in backticks). `.ai/state.md` counts are runner-managed; do not hand-edit them, but
+  check they are current after the runner's checkpoint and record a mismatch in the result.
+- Vault `agents-flow.md` "Inside one task": add the host step "restore executable bits git
+  records (exec-bits)" between the session and the host checks, and show that it also runs on a
+  timed-out or failed session (T035's placement). Update `updated:`, keep the handoff's
+  `Flow chart updated` line current, and append one dated hub Log line (never tick checkboxes).
+
+### Likely affected modules
+.ai/handoff.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- The handoff no longer calls T033 BLOCKED and names `test_exec_bits_skips_a_symlinked_parent_directory`
+  and `test_exec_bits_restored_after_a_session_timeout`.
+- The flow chart shows the exec-bits step in the task flow, including the timeout path.
+- `-k Docs` and `-k flow_this_repo` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
+
+### Result / notes

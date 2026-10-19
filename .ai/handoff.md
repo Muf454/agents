@@ -127,6 +127,7 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
   T026 and T033 add theirs (T023's, T026's and T033's are in).
 
 ## Next action
-T022–T032 are DONE. T033 (docs and handoff audit) is BLOCKED only on its full gate: the foreground
-run hit the 600 s tool limit, and its targeted checks pass (see its result). Run `.ai/bin/ai-check`
-without a tool limit to finish it. FL-28 to FL-31 are otherwise complete on the branch. Remaining: the human acceptance steps above, then PR review and merge (not done here).
+T022–T033 are DONE (T033 on mission control's full gate pass, 1002 tests). Review round 1
+(Codex, HEAD b651970) found M2 (exec-bits follows a symlinked parent directory), M3 (exec-bits
+does not run after a timed-out session), N3 and N4; all accepted in
+`.ai/reviews/dispositions.md`. Next: T034, T035, then T036 (handoff and flow chart). Remaining: the human acceptance steps above, then PR review and merge (not done here).
