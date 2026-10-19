@@ -4459,26 +4459,51 @@ def clear_scratch():
 
 def exec_bits():
     """exec-bits: give back the execute bit git records (index mode 100755) to a regular file
-    that lost it in the working tree. Gate files and symlinks are never touched. Prints the
-    restored relative paths, one per line."""
+    that lost it in the working tree. Gate files and symlinks are never touched: every path
+    component is opened below the pinned root without following a symlink, so a directory
+    replaced by a symlink never leads outside the checkout. Prints the restored relative
+    paths, one per line."""
     root = checkout_root()
     gate = ('.ai/validate', '.ai/ci-setup')
-    for entry in git('ls-files', '-s', '-z', cwd=root).split(b'\0'):
-        meta, _, raw = entry.partition(b'\t')
-        if not meta.startswith(b'100755 '):
-            continue
-        name = raw.decode()
-        if name.startswith('.ai/bin/') or name in gate:
-            continue
-        path = root / name
-        try:
-            mode = os.lstat(path).st_mode
-            if not stat.S_ISREG(mode) or mode & 0o111:
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        for entry in git('ls-files', '-s', '-z', cwd=root).split(b'\0'):
+            meta, _, raw = entry.partition(b'\t')
+            if not meta.startswith(b'100755 '):
                 continue
-            os.chmod(path, stat.S_IMODE(mode) | ((mode & 0o444) >> 2))
-        except OSError:
-            continue
-        print(name)
+            name = raw.decode()
+            if name.startswith('.ai/bin/') or name in gate:
+                continue
+            if exec_bit_restored(root_fd, name):
+                print(name)
+    finally:
+        os.close(root_fd)
+
+
+def exec_bit_restored(root_fd, name):
+    """True when the regular file NAME below ROOT_FD, reached without following any symlink,
+    lacked every execute bit and got them back for each read bit."""
+    parent, _, leaf = name.rpartition('/')
+    if leaf in ('', '.', '..'):
+        return False
+    dir_fd = open_dir(root_fd, parent)
+    if dir_fd is None:
+        return False
+    fd = None
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode) or mode & 0o111:
+            return False
+        os.fchmod(fd, stat.S_IMODE(mode) | ((mode & 0o444) >> 2))
+        return True
+    except OSError:
+        return False
+    finally:
+        close_fds(fd, dir_fd)
 
 
 def read_record(dir_fd, name, limit, tail=False):

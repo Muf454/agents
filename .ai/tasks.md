@@ -3180,7 +3180,7 @@ BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the
 Mission control 2026-10-19: full `.ai/bin/ai-check` on d2614df without a tool timeout: Ran 1002 tests in 638.7s, OK, exit 0. Blocked only by the session's 600 s tool limit (FL-32); set DONE on that evidence.
 
 ## T034 — exec-bits never follows a symlinked parent directory (review M2)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T027
 Model: opus
 

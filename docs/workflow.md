@@ -149,7 +149,9 @@ project settings and disables MCP integrations for that invocation. Necessary co
 outside the allowlist become denials. The template allows `chmod +x` (and no other chmod
 form) so a session can make a script it created executable. After every implementation session the
 host also gives back the executable bit git records (`100755`) to a tracked script that lost it
-(`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`). Denials are logged and the run continues
+(`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`, and only a
+regular file reached without following any symlink, so a directory a session swapped for a
+symlink never leads outside the checkout). Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
 and the run stops there. Inspect the log and adjust permissions yourself.
 

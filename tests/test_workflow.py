@@ -12602,6 +12602,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse(gone.exists())
         self.assertTrue(link.is_symlink())
 
+    def test_exec_bits_skips_a_symlinked_parent_directory(self):
+        self.exec_bits_file('scripts/tool.sh', 0o755)
+        self.commit('a tracked script')
+        outside = self.base / 'outside'
+        outside.mkdir()
+        external = outside / 'tool.sh'
+        external.write_text('#!/usr/bin/env bash\n')
+        external.chmod(0o644)
+        shutil.rmtree(self.project / 'scripts')
+        (self.project / 'scripts').symlink_to(outside)
+        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.exec_bits_mode(external), 0o644)
+
     def test_exec_bits_restores_a_staged_executable_bit(self):
         script = self.exec_bits_file('scripts/new.sh', 0o644)
         self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/new.sh'])
