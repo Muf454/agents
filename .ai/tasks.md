@@ -3338,7 +3338,7 @@ DONE. Gate PASS on the unchanged tree at 31e7f7c: `.ai/bin/ai-check` `Ran 1005 t
 ## T037 — Prompts: run the full gate in the background and wait; never block on an unknown gate result (FL-32, templates)
 Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 A runner or triage session runs the ~11-minute gate so that it can read the result, does not

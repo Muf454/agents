@@ -1910,6 +1910,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('never prefix commands with `cd`', self.prompt_section('recover'))
         self.assertNotIn('never prefix commands with cd (', (ROOT / 'scripts/ai-run').read_text())
 
+    def test_gate_background_prompts_tell_the_session_to_wait(self):
+        for name in ('runner', 'triage'):
+            section = self.prompt_section(name)
+            for phrase in ('run_in_background', 'Validation modified project content',
+                           'left to the host gate'):
+                self.assertIn(phrase, section, f'{name}.md lacks {phrase!r}')
+            for phrase in ('never run it in the background',
+                           'mark the task BLOCKED with the evidence instead'):
+                self.assertNotIn(phrase, ' '.join(section.split()), f'{name}.md has {phrase!r}')
+        self.assertIn('run_in_background', (ROOT / 'README.md').read_text())
+        self.assertIn('is not a blocker', (ROOT / 'scripts/ai-run').read_text())
+
     def test_task_sections_prompts_show_the_format(self):
         for name in ('triage', 'plan-revision', 'plan'):
             text = (ROOT / f'templates/.ai/prompts/{name}.md').read_text()

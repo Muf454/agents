@@ -492,3 +492,5 @@
 | 2026-10-19T03:02:55Z | runner | none | queue complete; ready for independent review | PASS | 2ff4074 | Human acceptance remains |
 | 2026-10-19T03:06:03Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/34 | PASS | 98aa2fe | Human acceptance and merge remain |
 | 2026-10-19T05:31:44Z | runner | planning | plan written: 43 tasks (opus, first plan) | PASS | c32f768 | Plan left uncommitted for review |
+| 2026-10-19T06:02:18Z | runner | T037 | stopped (exit 1); inspect state/diff before resuming | see local logs | 3bf2529 | No merge or deployment performed |
+| 2026-10-19T07:17:35Z | mission control | T037 | session timed out (exit 124) mid-task; partial work checkpointed as WIP, model raised to opus, run restarted | FAIL (2 subtests, WIP) | 3bf2529 | No merge or deployment performed |
