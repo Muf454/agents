@@ -3180,7 +3180,7 @@ BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the
 Mission control 2026-10-19: full `.ai/bin/ai-check` on d2614df without a tool timeout: Ran 1002 tests in 638.7s, OK, exit 0. Blocked only by the session's 600 s tool limit (FL-32); set DONE on that evidence.
 
 ## T034 — exec-bits never follows a symlinked parent directory (review M2)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T027
 Model: opus
 
@@ -3218,6 +3218,14 @@ Targeted: `python3 -m unittest discover -s tests -k exec_bits` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE (81ca76a). `exec_bits()` pins the checkout root once; new `exec_bit_restored()` opens the
+parent with `open_dir` (every component `O_NOFOLLOW`), the leaf with
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, `fstat`s it and `fchmod`s only a regular file
+with no execute bit; any unsafe component skips silently. Gate exclusions and output unchanged.
+`test_exec_bits_skips_a_symlinked_parent_directory` added; mutation (parent opened following
+symlinks) fails it. `-k exec_bits` Ran 6 tests OK; `-k Docs` 3 OK; `.ai/bin/ai-check` PASS
+(1003 tests, 654.9 s; it outgrew the 600 s tool timeout and finished in the background with the
+tree unchanged, exit 0). docs/workflow.md notes the no-follow rule. Flow unchanged.
 
 ## T035 — Restore executable bits before a timed-out session stops the run (review M3)
 Status: TODO

@@ -64,8 +64,12 @@ host refuses a plan that removes DONE blocks.
   over-budget list (30 s × the timeout scale) beside the slowest 15, a shared `ready()` fixture
   template, and an audit that trims redundant pipeline setup runs. No test is weakened.
 - T033 (haiku): docs, flow chart and handoff audit.
+- T034 (opus, review M2): `exec-bits` walks every path component below the pinned checkout root
+  with `O_NOFOLLOW` and `fchmod`s the leaf, so a directory swapped for a symlink cannot make the
+  host chmod a file outside the checkout.
 
 ## Validation run
+After T034 (parent 81ca76a): `.ai/bin/ai-check` PASS (1003 tests, 654.9 s, finished in the background past the 600 s tool timeout, tree unchanged during the run); `-k exec_bits` 6 OK; `-k Docs` 3 OK.
 After T028 (the last full gate on the branch, parent 01f8197, which includes T027, T029 and T030): `.ai/bin/ai-check` PASS (1002 tests, 634.3 s, run in the background); `-k exec_bits_prompts` 1 OK; `-k prompt` 17 OK; `-k Docs` 3 OK. The T027, T029 and T030 gate blocks were a tool-limit issue (FL-32): mission control ran the full gate on c797cd3 without a tool timeout (1001 tests, 637.5 s, OK). T031: `ai-check` PASS (1001 tests, 633.5 s). T032 changed no code.
 After T026: `.ai/bin/ai-check` PASS (986 tests, 630.2 s); `-k timeout_rerun` 12 OK, `-k Docs` 3 OK,
 `-k flow_this_repo` 1 OK.
@@ -114,7 +118,7 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 - `test_gate_time_*` (T022), `test_session_gate_allowance_*` (T023).
 - `test_timeout_rerun_manifest_*` (T024), `test_timeout_rerun_recover_*` (T025),
   `test_timeout_rerun_unchanged_*` (T026).
-- `test_exec_bits_*` (T027, T028).
+- `test_exec_bits_*` (T027, T028); `test_exec_bits_skips_a_symlinked_parent_directory` (T034).
 - `test_finding_cell_plan_dispositions_incident_row`,
   `test_finding_cell_plan_revision_restart_records_decorated_rows`,
   `test_finding_cell_prompts_show_the_table` (T029).
@@ -130,4 +134,4 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 T022–T033 are DONE (T033 on mission control's full gate pass, 1002 tests). Review round 1
 (Codex, HEAD b651970) found M2 (exec-bits follows a symlinked parent directory), M3 (exec-bits
 does not run after a timed-out session), N3 and N4; all accepted in
-`.ai/reviews/dispositions.md`. Next: T034, T035, then T036 (handoff and flow chart). Remaining: the human acceptance steps above, then PR review and merge (not done here).
+`.ai/reviews/dispositions.md`. T034 is DONE. Next: T035, then T036 (handoff and flow chart). Remaining: the human acceptance steps above, then PR review and merge (not done here).
