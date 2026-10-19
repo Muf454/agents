@@ -72,7 +72,7 @@ host refuses a plan that removes DONE blocks.
   `ai-recover`'s timeout commit-and-rerun gate sees the restored bit.
 
 ## Validation run
-After T036 (docs only; parent 8c79a8d): `-k Docs` 3 OK; `-k flow_this_repo` 1 OK. The full `.ai/bin/ai-check` hit the 600 s tool limit (47/48 batches, 985 tests, 0 failing at 605 s) and was still running in the background; no final result, so no PASS is claimed.
+After T036 (docs only; parent 8c79a8d): `-k Docs` 3 OK; `-k flow_this_repo` 1 OK. The full `.ai/bin/ai-check` ran past the 600 s tool limit: `Ran 1005 tests … OK` (668 s), then exit 1 `Validation modified project content`, because record edits and commit b7fa6f0 were made during the run. No clean PASS; rerun on an unchanged tree.
 After T035 (parent 440feb4): `.ai/bin/ai-check` PASS (1005 tests, 668.5 s, finished in the background past the 600 s tool timeout, tree unchanged during the run); `-k exec_bits -k timeout_rerun` 20 OK.
 After T034 (parent 81ca76a): `.ai/bin/ai-check` PASS (1003 tests, 654.9 s, finished in the background past the 600 s tool timeout, tree unchanged during the run); `-k exec_bits` 6 OK; `-k Docs` 3 OK.
 After T028 (the last full gate on the branch, parent 01f8197, which includes T027, T029 and T030): `.ai/bin/ai-check` PASS (1002 tests, 634.3 s, run in the background); `-k exec_bits_prompts` 1 OK; `-k prompt` 17 OK; `-k Docs` 3 OK. The T027, T029 and T030 gate blocks were a tool-limit issue (FL-32): mission control ran the full gate on c797cd3 without a tool timeout (1001 tests, 637.5 s, OK). T031: `ai-check` PASS (1001 tests, 633.5 s). T032 changed no code.
