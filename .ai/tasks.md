@@ -3124,7 +3124,7 @@ Before/after `-k` timings: not applicable, nothing converted.
 
 
 ## T033 — Docs, flow chart and handoff audit (batch 7)
-Status: BLOCKED
+Status: DONE
 Dependencies: T022, T023, T024, T025, T026, T027, T028, T029, T030, T031, T032
 Model: haiku
 
@@ -3177,4 +3177,4 @@ BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the
   No gate pass is established on any tree. A rerun on a clean tree with no edits during the run is needed. Human or mission control: run it without
   a tool limit (last full gate on the branch: PASS, 1002 tests, parent 01f8197, which includes T027–T030).
 - Flow: unchanged in this task (the audit found no flow change).
-
+Mission control 2026-10-19: full `.ai/bin/ai-check` on d2614df without a tool timeout: Ran 1002 tests in 638.7s, OK, exit 0. Blocked only by the session's 600 s tool limit (FL-32); set DONE on that evidence.

@@ -2,7 +2,7 @@
 
 Project: agents
 Branch: fix/flow-batch-7
-Phase: blocked
+Phase: implementing
 Current task: none
 Last completed task: T032
 Tasks complete: 32
