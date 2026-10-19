@@ -3284,7 +3284,7 @@ finished in the background past the 600 s tool timeout, tree unchanged during th
 docs/workflow.md say the repair also runs on a timed-out session. Flow chart: T036.
 
 ## T036 — State, handoff and flow chart after the review fixes (review N3, N4)
-Status: BLOCKED
+Status: DONE
 Dependencies: T034, T035
 Model: haiku
 
@@ -3318,7 +3318,7 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
-BLOCKED on the gate only; the docs work is done. The full `.ai/bin/ai-check` has not finished in this session.
+DONE. Gate PASS on the unchanged tree at 31e7f7c: `.ai/bin/ai-check` `Ran 1005 tests in 667.7s … OK`, exit 0 (background task bjq3hh48h, past the 600 s tool limit). The earlier run (bab5c28ty) was an exit 1 caused by this session's own edits during the run; see below.
 - Done: handoff "Next action" and the flow-chart line rewritten (T033 DONE; T034–T036 named, with `test_exec_bits_skips_a_symlinked_parent_directory` and `test_exec_bits_restored_after_a_session_timeout` under "Covered by automated tests"). Vault `agents-flow.md` "Inside one task" shows the exec-bits step between the session and the host checks, with the timeout/error/signal path; plus the "Executable bits" bullet and the timeout bullet. Hub Log line added. No code changed.
 - Targeted: `python3 -m unittest discover -s tests -k Docs` → Ran 3 tests, OK; `-k flow_this_repo` → Ran 1 test, OK.
 - Gate: the foreground `.ai/bin/ai-check` hit the 600000 ms tool limit and kept running in the background (task bab5c28ty). It finished with `Ran 1005 tests … OK` (668 s, 0 failing), then exit 1 `Error: Validation modified project content`. Cause: this session's own record edits and the T036 record commit b7fa6f0 were made during the run, which changes the fingerprint (the same cause as T033's FAIL). No clean PASS yet; a rerun on an unchanged tree is needed (FL-32).
