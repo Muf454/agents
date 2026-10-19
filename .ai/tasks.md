@@ -3060,7 +3060,7 @@ out the old file in a shared worktree), so no speed-up is claimed. Gate: 1001 co
 OK, 633.5 s (finished in the background past the 600 s tool timeout). Flow unchanged.
 
 ## T032 — Fewer full `ai-pipeline` fixture runs per test (FL-31, slow tests)
-Status: TODO
+Status: DONE
 Dependencies: T030, T031
 Model: sonnet
 
@@ -3105,6 +3105,22 @@ Targeted: `python3 -m unittest discover -s tests -k limit_relaunch` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+No safe candidate: 0 conversions, no test file changed (test IDs unchanged; flow unchanged).
+Audit by reading, slowest-15 first (last gate: 969 tests, 618.5 s, 8 workers). The two slowest
+(`test_session_budget_end_to_end_*`, 36.7 s and 34.2 s) run `ai-run` once, not `ai-pipeline`. All
+other slowest-15 tests run `ai-pipeline` once (`test_extra_fix_round_*`, `test_observation_*`,
+`test_convergence_*`, `test_pr_undraft_*`), so no setup run exists to drop. Kept, with reason:
+- `test_fix_round_count_survives_human_restart`: both runs asserted (triage_calls 1 then 2).
+- `test_pipeline_rerun_updates_existing_pr_without_new_review`: run 1 is the setup, but the rerun
+  depends on the review binding and run manifest keyed by the checkout path, which only a real run
+  writes (no helper builds them byte for byte).
+- `test_pipeline_plan_review_gates_implementation`, `test_plan_review_is_bound_and_tracks_the_whole_tree`:
+  every run is asserted (plan-call counts, stops).
+- `test_recovery_is_bounded_per_run`, `test_queue_check_invalid_queue_stops_with_skip_plan_review`:
+  the first run's stop state and recovery-attempt budget are what the second run asserts on.
+- `test_triage_completion_*`, `test_fix_round_count_*`: the second run resumes a stopped stage,
+  so the first run is the thing under test.
+Before/after `-k` timings: not applicable, nothing converted.
 
 
 ## T033 — Docs, flow chart and handoff audit (batch 7)
