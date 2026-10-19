@@ -1,33 +1,34 @@
-<!-- Host evidence: HEAD e3c724e38d7b984219d4c0181094050d8f9db5db; merge-base edc3dc645116166472720cebd2d982b649ab14ff; saved 2026-10-18T07:42:58Z. -->
+<!-- Host evidence: HEAD b651970c55b64ff3fccec2e4a9cd702d576da372; merge-base 1423b6092c4fe6a14d98d5c39f6380d69039141a; saved 2026-10-19T01:23:19Z. -->
 
 # Independent review
 
-Overall verdict: PASS WITH MINOR FINDING — prior findings resolved; one notification requirement remains unmet.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
+Overall verdict: CHANGES REQUIRED — executable-bit repair has two correctness gaps; operational records and the workflow chart also need correction.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=2
 
-Reviewed HEAD: `e3c724e38d7b984219d4c0181094050d8f9db5db`
+Reviewed HEAD: `b651970c55b64ff3fccec2e4a9cd702d576da372`
 
-Supplied base and verified merge-base: `edc3dc645116166472720cebd2d982b649ab14ff`
+Supplied base and verified merge-base: `1423b6092c4fe6a14d98d5c39f6380d69039141a`
 
 ## Scope and validation
 
-Inspected repository instructions, specification, plan, task records, state, handoff, review dispositions, relevant documentation, Git history, full production-code diff, and selected affected tests. Reviewed changes since `da84933830d7f33769adfcdd35c9ca276a803006` and the broader supplied range. The checkout was clean.
+Inspected repository instructions, specification, plan, tasks, state, handoff, existing reviews/dispositions, relevant documentation, Git history, the supplied diff, and affected source/tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json`: PASS at `2026-10-18T07:40:16Z`, recorded at `d9b95042b9bfcdc7a303ef6740aae4ef0cbadaee`.
-- Referenced log: **965 tests passed in 596.0 seconds**.
-- Independently verified that the validation fingerprint matches the reviewed content.
+- `.ai/local/validation.json`: PASS at `2026-10-19T01:19:39Z`, recording the reviewed HEAD.
+- Referenced log: **1,002 tests passed in 634.1 seconds**, with 1,002 collected.
+- Independently verified that the validation fingerprint matches current content.
 
 Checks independently run:
 
-- Task queue validation.
-- Python AST parsing and shell syntax checks across 14 scripts/templates.
-- Three documentation-consistency tests.
-- `git diff --check`.
-- In-memory executions of the actual cap-exhaustion branch and completed-before-acknowledgement branch, with external behavior mocked.
+- Task queue validation and test discovery.
+- Three documentation-consistency tests: passed.
+- Python AST parsing of three changed files and shell syntax checks across 14 files.
+- `git diff --check`: passed.
+- AST comparison: 37 test methods added; none removed.
+- Read-only reproductions of the symlink traversal and session-exit behavior below.
 
-The full `./scripts/ai-check` and integration fixtures were not rerun because they require writes. No files were written or network/MCP integrations invoked. Live provider, systemd, and GitHub behavior remain untested.
+The full `./scripts/ai-check` and integration fixtures were not rerun because they require writes. No files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -35,60 +36,93 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-None found in the inspected scope.
+### M2 — Executable-bit repair follows symlinked parent directories outside the checkout
+
+**Location:** `scripts/lib/workflow.py:4473–4478`.
+
+**Requirement:** R3 limits repair to tracked regular files and says symlinks must never be touched. The runner prompt also restricts chmod to paths inside the checkout.
+
+`os.lstat(path)` rejects a symlink only at the final component. Parent-directory symlinks are followed by both `lstat` and `chmod`.
+
+For example, if the index still records executable `scripts/tool.sh`, but the working-tree `scripts` directory is replaced with a symlink to an external directory containing non-executable `tool.sh`, the host changes that external file’s permissions.
+
+**Evidence:** Executed the actual `exec_bits()` with mocked index/root inputs and intercepted `os.chmod`. Using the real parent symlink `/proc/self/root`, the function reported restoring `root/etc/passwd` and requested chmod to `0755` on a path resolving to `/etc/passwd`. The chmod was mocked; nothing was changed.
+
+**Impact:** A checkout-controlled path can cause the host to modify permissions outside the project.
+
+**Recommended direction:** Traverse from a pinned checkout directory without following symlink components, verify the opened leaf is regular, and change permissions through its file descriptor. Add an external-directory symlink regression.
+
+### M3 — Timed-out sessions exit before executable-bit repair runs
+
+**Location:** `scripts/ai-run:838–842`; terminating path at `scripts/ai-run:360`.
+
+**Requirement:** R3 requires restoration after each implementation session. R2 introduces deterministic recovery for timed-out IN_PROGRESS tasks.
+
+Repair runs only after `claude_session` returns successfully. Exit codes 124 and 137 instead call `ai_die` inside that function, even after gate verification succeeds.
+
+**Evidence:** Executed the actual post-session shell fragment and repair call with external behavior stubbed. Exit 0 reached `exec-bits`; exits 124, 137 and 1 did not. Existing repair integration coverage exercises only successful completion.
+
+**Impact:** A timed-out task that loses a tracked script’s executable bit reaches recovery unrepaired. Recovery spends its one rerun allowance, then can fail validation solely because that script remains non-executable, preventing the intended automatic continuation.
+
+**Recommended direction:** Run implementation-session repair after successful gate and branch verification, before terminal session-result handling. Add a timeout regression with a tracked executable whose mode is lost and a gate that requires it.
 
 ## MINOR findings
 
-### N2 — Cap-exhaustion notification omits the known reset time
+### N3 — State and handoff still describe the resolved validation block
 
-**Location:** `scripts/ai-recover:268–269`.
+**Location:** `.ai/handoff.md:130–132`; `.ai/state.md:7–12`.
 
-**Requirement:** `.ai/project-spec.md:85` requires escalation after exhausting `AI_LIMIT_RELAUNCH_MAX` to name the reset time.
+**Requirement:** T033 requires the handoff to match delivered work; workflow documentation defines state as the queue summary and handoff as the next operator’s guide.
 
-When `limit-schedule` refuses another relaunch, recovery already holds the parsed timestamp in `at`, but its escalation only says:
+The queue marks all 33 tasks DONE, and current validation passes. State still reports 32 completed tasks, one remaining, failed validation and a blocked run. Handoff says T033 remains BLOCKED and directs the operator to rerun the gate.
 
-```text
-usage limit again after 1 relaunch(es) in this run.
-Next: rerun ai-pipeline after the reset.
-```
+**Impact:** The next operator receives contradictory completion status and obsolete recovery instructions.
 
-**Impact:** The human receives a stop requiring manual action without the promised time for retrying.
+**Recommended direction:** Synchronize state and handoff with the completed queue and current evidence, while retaining human acceptance as outstanding.
 
-**Evidence:** Executing the actual scheduling branch with `limit-stop` returning `Claude 2000000000`, a recovering timer, and a refused schedule produced the message above. Existing cap-exhaustion coverage checks escalation and schedule consumption, but does not assert that the notification includes the reset time.
+### N4 — The required workflow chart omits executable-bit repair
 
-**Recommended direction:** Include the formatted `at` value in the cap-exhaustion escalation and extend its regression test to assert it. This is an incomplete requirement in the newly introduced cap path.
+**Location:** `~/zWiki/zWiki/20 Projects/agents/agents-flow.md:158–169`; corresponding new step at `scripts/ai-run:841–844`.
 
-## Previous findings re-evaluated
+**Requirement:** AGENTS.md requires every workflow step change to appear in the vault flow chart.
 
-- **M1:** Resolved. Conversion ownership now requires the initial draft-state result to equal `false`. The added regression covers a failed lookup on a human draft followed by a later clean run.
-- **N1:** Resolved. A zero-exit child with its own `planning/done` observation now reports successful launch. Tests cover matching completion, absent observation, another PID, and nonzero completion.
+The chart includes the new gate allowance and timeout-recovery path, but its task flow proceeds directly from the session to host checks without the new permission-restoration step. No executable-bit repair appears elsewhere in the note.
 
-Also inspected schedule hold/claim, tree verification, task-bound preservation, armed-stop handling, startup ordering, dispute reconciliation, detached logging, and draft-record revocation. No rejected finding is re-raised, and no separate pre-existing defect is reported.
+**Impact:** The workflow’s designated overview omits a new host mutation.
+
+**Recommended direction:** Add restoration to the task flow before validation and maintain the note’s `updated:` date in the correction session.
 
 ## Missing test coverage
 
-Add an assertion that cap-exhaustion notifications contain the parsed reset time. Broader integration coverage was inspected and its recorded results verified, but was not independently rerun.
+Add regressions for:
+
+- A tracked executable beneath a parent symlink targeting an external directory.
+- Executable restoration after session timeout, including successful recovery afterward.
+
+Existing leaf-symlink and successful-session tests do not cover these cases.
+
+Performance improvement remains unproven: T031 records no before measurement, and T032 converted no pipeline setup runs.
 
 ## Security concerns
 
-No additional demonstrated security defect found in the inspected changes. The M1 human-draft ownership issue is addressed.
+M2 is a demonstrated containment defect. No additional authentication or authorization defect was found in the inspected changes.
+
+The previously recorded cap-exhaustion notification omission remains unchanged from the supplied base and is not counted as an introduced finding.
 
 ## Architecture concerns
 
-The implementation retains minimal dependencies and host-side authority records. Recovery remains complex, with explicit transition contracts and substantial regression coverage.
+Dependencies remain minimal, and timeout-rerun authority stays in host state. Factoring `commit_validated` preserves the existing validation safeguards.
 
-**Flow chart updated:** the vault note has `updated: 2026-10-18` and includes planning, relaunch, and draft-ownership flows. Same-session update timing was not independently established.
+Executable repair needs stronger filesystem boundaries and placement covering recoverable failures. **Flow chart updated** for gate allowance and timeout recovery; its repair-step omission is N4.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-- Verify real usage-limit pause/resume after upgrading installed copies and reinstalling watchdog timers.
-- Verify detached planning and human-draft preservation against actual providers.
+After fixes and the normal toolkit upgrade, exercise a real timed-out implementation session and verify its notification, validated checkpoint and resumed task.
 
 ### Covered by automated tests
 
-- Recovery transitions, tree/task binding, planning acknowledgements, safe logging, dashboard states, and draft ownership.
-- Add the reset-time notification assertion described in N2.
+Recorded passing coverage includes gate allowance, timeout budgets, manifest persistence, disposition restart handling, progress reporting and fixture independence. Add the two repair regressions above, then rerun `./scripts/ai-check`.
 
 Reviewing does not constitute human acceptance.
