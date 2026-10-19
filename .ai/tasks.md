@@ -3228,7 +3228,7 @@ symlinks) fails it. `-k exec_bits` Ran 6 tests OK; `-k Docs` 3 OK; `.ai/bin/ai-c
 tree unchanged, exit 0). docs/workflow.md notes the no-follow rule. Flow unchanged.
 
 ## T035 — Restore executable bits before a timed-out session stops the run (review M3)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T027, T025
 Model: opus
 
@@ -3268,6 +3268,20 @@ Targeted: `python3 -m unittest discover -s tests -k timeout_rerun` (must say `Ra
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+DONE (implementation 440feb4). Placement: inside `claude_session` (implementation sessions only,
+`track_attempt=yes`), after `ai_guard_verify`, the review-digest check and the limit-pause retry,
+then `ai_branch` and `exec-bits`, before the non-zero-exit `ai_die`. Moved, not duplicated: the
+post-session `ai_branch`/`exec-bits` block in the task loop is gone. Chosen over `ai-recover`'s
+`commit_validated` because the runner is where R3 restores bits for every implementation session
+(also a plain error exit or a human resuming after a stop), and recovery stays a gate-and-commit
+step. A repair failure on a non-zero exit stops with `Claude exited N (…); also cannot restore
+recorded executable bits.`, keeping the `Claude exited 124 (` prefix `ai-recover` matches.
+Tests: `test_exec_bits_restored_after_a_session_timeout`, `test_timeout_rerun_recover_after_lost_exec_bit`
+(gate `test -x scripts/tool.sh`; mock `timeout-once` honours `MOCK_CHMOD_PATH`). Mutation (repair
+only when `code == 0`) fails both. `-k exec_bits -k timeout_rerun` 20 OK; `-k Docs -k
+session_gate_allowance -k exec_bits` 15 OK; `.ai/bin/ai-check` PASS (1005 tests, 668.5 s, exit 0,
+finished in the background past the 600 s tool timeout, tree unchanged during the run). README and
+docs/workflow.md say the repair also runs on a timed-out session. Flow chart: T036.
 
 ## T036 — State, handoff and flow chart after the review fixes (review N3, N4)
 Status: TODO
