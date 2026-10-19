@@ -478,6 +478,8 @@ if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT' in prompt:
     if mode == 'timeout-always' or count == 0:
         subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'IN_PROGRESS'], check=True, stdout=subprocess.DEVNULL)
         pathlib.Path('partial.txt').write_text(f'partial work of session {count + 1}\n')
+        if os.environ.get('MOCK_CHMOD_PATH'):
+            os.chmod(os.environ['MOCK_CHMOD_PATH'], 0o644)  # loses a tracked script's bit too
         time.sleep(30)
     mode = 'success'
 if mode in ('error-in-progress', 'timeout-committed') and 'RUNNER CONTRACT' in prompt:
@@ -12632,6 +12634,38 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('mode change', self.run_cmd(['git', 'log', '--summary', '--format=']).stdout)
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def exec_bits_gated_script(self):
+        # A tracked script the gate requires to be executable.
+        self.ready()
+        script = self.exec_bits_file('scripts/tool.sh', 0o755)
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntest -x scripts/tool.sh\n')
+        self.commit('a tracked script the gate requires')
+        return script
+
+    def test_exec_bits_restored_after_a_session_timeout(self):
+        script = self.exec_bits_gated_script()
+        result = self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1,
+                           MOCK_CLAUDE='timeout-once', MOCK_CHMOD_PATH='scripts/tool.sh')
+        self.assertIn('Restored the executable bit recorded in git: scripts/tool.sh', result.stdout)
+        self.assertIn('Claude exited 124 (', result.stderr)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'IN_PROGRESS')
+        self.assertEqual(self.exec_bits_mode(script), 0o755)
+
+    def test_timeout_rerun_recover_after_lost_exec_bit(self):
+        script = self.exec_bits_gated_script()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1',
+                           AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-once', MOCK_CHMOD_PATH='scripts/tool.sh')
+        self.assertIn('Restored the executable bit recorded in git: scripts/tool.sh', result.stdout)
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.recovery_calls(), [])  # no decision session
+        self.assertEqual(self.recovery_checkpoints(), 1)
+        notes = self.notifications()
+        self.assertIn('the T001 session timed out; committing its validated partial work once', notes)
+        self.assertIn('🏁 FINISHED', notes)
+        self.assertNotIn('⛔', notes)
+        self.assertEqual(self.exec_bits_mode(script), 0o755)
+        self.assertNotIn('mode change', self.run_cmd(['git', 'log', '--summary', '--format=']).stdout)
 
     def test_exec_bits_prompts_name_the_only_form(self):
         for name in ('runner', 'triage'):

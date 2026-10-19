@@ -299,7 +299,7 @@ knowledge_prompt() {
 # One fresh Claude session; a usage/rate-limit error pauses until the reset and retries.
 # Usage: claude_session PROMPT MODEL TOOLS ALLOWED... (the --tools list and --allowedTools entries).
 claude_session() {
-  local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before
+  local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before restored
   local session_allowed=("${@:4}") model_args=() gate=0 allowance=0 breakdown=''
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
   # An implementation session runs the gate itself: room for two measured gate runs, at most
@@ -355,6 +355,18 @@ claude_session() {
       if reset=$(ai_helper limit-check "$log" "$errors"); then
         ai_limit_pause Claude "$reset"
         continue
+      fi
+    fi
+    if [[ "$track_attempt" == yes ]]; then
+      ai_branch
+      # A session cannot always chmod: give back the bit git records for a tracked script. Also
+      # before a timeout or error stops the run, so ai-recover's rerun gate sees the bit.
+      if ! restored=$(ai_helper exec-bits); then
+        (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error); also cannot restore recorded executable bits. Preserve partial work; see $log and $errors."
+        ai_die 'Cannot restore recorded executable bits.'
+      fi
+      if [[ -n "$restored" ]]; then
+        printf 'Restored the executable bit recorded in git: %s\n' "${restored//$'\n'/ }"
       fi
     fi
     (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error). Preserve partial work; see $log and $errors."
@@ -837,12 +849,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
-  ai_branch
-  # A session cannot always chmod: give back the bit git records for a tracked script.
-  restored=$(ai_helper exec-bits) || ai_die 'Cannot restore recorded executable bits.'
-  if [[ -n "$restored" ]]; then
-    printf 'Restored the executable bit recorded in git: %s\n' "${restored//$'\n'/ }"
-  fi
+  # claude_session already checked the branch and restored recorded executable bits.
   ai_helper tasks check
   task_status=$(ai_helper tasks status "$active_task")
   case "$task_status" in

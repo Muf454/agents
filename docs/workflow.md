@@ -147,7 +147,8 @@ permission/settings files. Existing project settings need those rules merged.
 Claude's runner uses `dontAsk` and explicit `.ai/permissions.allow` entries. It loads
 project settings and disables MCP integrations for that invocation. Necessary commands
 outside the allowlist become denials. The template allows `chmod +x` (and no other chmod
-form) so a session can make a script it created executable. After every implementation session the
+form) so a session can make a script it created executable. After every implementation session, including
+one that timed out or failed (before that stop, so `ai-recover`'s rerun gate sees the bit), the
 host also gives back the executable bit git records (`100755`) to a tracked script that lost it
 (`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`, and only a
 regular file reached without following any symlink, so a directory a session swapped for a

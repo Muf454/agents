@@ -3228,7 +3228,7 @@ symlinks) fails it. `-k exec_bits` Ran 6 tests OK; `-k Docs` 3 OK; `.ai/bin/ai-c
 tree unchanged, exit 0). docs/workflow.md notes the no-follow rule. Flow unchanged.
 
 ## T035 — Restore executable bits before a timed-out session stops the run (review M3)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T027, T025
 Model: opus
 
