@@ -3124,7 +3124,7 @@ Before/after `-k` timings: not applicable, nothing converted.
 
 
 ## T033 — Docs, flow chart and handoff audit (batch 7)
-Status: TODO
+Status: BLOCKED
 Dependencies: T022, T023, T024, T025, T026, T027, T028, T029, T030, T031, T032
 Model: haiku
 
@@ -3156,4 +3156,22 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the FOREGROUND with the Bash tool timeout set to 600000 ms (see the gate note above if it times out).
 
 ### Result / notes
+BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the source of truth):
+- `ai-run` usage (session limit: base, plus twice the gate time, at most the base), `ai-recover`
+  usage (timeout rule), README (session limits, Recovery, chmod paragraph, self-check progress and
+  budget) and docs/workflow.md (outcome gate lines, gate allowance, `Session:` format, chmod, exec-bits):
+  all match the code. No wording change was needed, so no file was edited for them.
+- Vault `agents-flow.md` ("Gate allowance" bullet, timeout branch in "When something goes wrong")
+  matches `ai-run` and `ai-recover`. Its `updated:` date stays as it was.
+- handoff: "What has been implemented" lacked T027–T032 (added); "Validation run" lacked T027–T032
+  (added); "Next action" was stale (rewritten); the Human todos line now names the T023, T026 and T033 log lines.
+- Every test group named in the handoff exists (`test_gate_time_*`, `test_session_gate_allowance_*`,
+  `test_timeout_rerun_*`, `test_exec_bits_*`, `test_finding_cell_*`, `test_parallel_runner_progress_*`,
+  `test_fixture_template_*`).
+- Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
+- Gate: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s; the
+  harness moved it to the background (task ID bkhdtjkke, output in the session's tasks folder). Its
+  result is not known, so the gate is not established here. Human or mission control: run it without
+  a tool limit (last full gate on the branch: PASS, 1002 tests, parent 01f8197, which includes T027–T030).
+- Flow: unchanged in this task (the audit found no flow change).
 

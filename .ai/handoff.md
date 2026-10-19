@@ -25,6 +25,24 @@ On `fix/flow-batch-7` (from `master` at 1423b60), done so far:
   failing-gate ⛔, which used to say "its partial work passed the full gate; but … fails
   validation". README "Recovery", docs/workflow.md (recovery contract paragraph, one sentence in
   "Interruption, limits, and recovery") and the vault flow chart describe the rule.
+- T027: `workflow.py exec-bits` (after `ai_branch` in `ai-run`) gives back the executable bit that
+  git records (`100755`) to a tracked script that lost it, after each implementation session; never
+  `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`. Four `test_exec_bits_*` tests and a `chmod-tracked`
+  mock mode.
+- T028: the runner and triage prompts name `chmod +x <path>` as the only chmod form (numeric modes
+  such as `chmod 755` are denied) and cover repairing a tracked script whose bit was lost; README
+  says the same.
+- T029: the plan-revision prompt shows the disposition table header and three example rows
+  (`FINDING_CELL` already accepted the `P1 (MAJOR) title` cell, no parser change); three
+  `test_finding_cell_*` regressions for the family-budget row and the restart path.
+- T030: `tests/run_parallel.py` prints `Progress: d/N batches …` after each batch, a
+  `run_parallel: stopped after …` summary on SIGTERM or interrupt, and lists the tests over the
+  per-test budget (`AI_TEST_BUDGET`, default 30 s × the timeout scale) after the slowest 15; the list
+  never changes the exit code. Five `test_parallel_runner_progress_*` tests; README describes it.
+- T031: `ready()` copies a per-process bootstrapped fixture template (`ready_template()`;
+  `fresh=True` opts out). Three `test_fixture_template_*` tests (equivalence masks wall-clock stamps).
+- T032: audit only. No test runs the full `ai-pipeline` twice merely for setup, so nothing was
+  converted (the result lists every audited test and why it stays).
 
 The plan for batch 7 was written 2026-10-18 in an unattended planning session. See `.ai/project-spec.md` (scope, what was verified
 in the code, assumptions A1–A7), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T022–T033).
@@ -48,6 +66,7 @@ host refuses a plan that removes DONE blocks.
 - T033 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
+After T028 (the last full gate on the branch, parent 01f8197, which includes T027, T029 and T030): `.ai/bin/ai-check` PASS (1002 tests, 634.3 s, run in the background); `-k exec_bits_prompts` 1 OK; `-k prompt` 17 OK; `-k Docs` 3 OK. The T027, T029 and T030 gate blocks were a tool-limit issue (FL-32): mission control ran the full gate on c797cd3 without a tool timeout (1001 tests, 637.5 s, OK). T031: `ai-check` PASS (1001 tests, 633.5 s). T032 changed no code.
 After T026: `.ai/bin/ai-check` PASS (986 tests, 630.2 s); `-k timeout_rerun` 12 OK, `-k Docs` 3 OK,
 `-k flow_this_repo` 1 OK.
 After T025: `.ai/bin/ai-check` PASS (980 tests, 661.3 s); `-k timeout_rerun` 6 OK, `-k recovery` 72 OK.
@@ -105,8 +124,9 @@ Added by the tasks named (each group runs with `python3 -m unittest discover -s 
 - After merge: the upgrades and timer reinstall above; tick FL-28 to FL-31 in the vault backlog
   (sessions never tick it).
 - Vault: this planning session could edit only `.ai/` files, so it left no hub Log line. T023,
-  T026 and T033 add theirs (T026's is in).
+  T026 and T033 add theirs (T023's, T026's and T033's are in).
 
 ## Next action
-T022–T026 and T031 are DONE (FL-28 complete); next is any task without dependencies: T027, T029,
-T030. T028 waits for T027, T032 for T030 and T031. T033 comes last.
+T022–T032 are DONE. T033 (docs and handoff audit) is BLOCKED only on its full gate: the foreground
+run hit the 600 s tool limit, and its targeted checks pass (see its result). Run `.ai/bin/ai-check`
+without a tool limit to finish it. FL-28 to FL-31 are otherwise complete on the branch. Remaining: the human acceptance steps above, then PR review and merge (not done here).
