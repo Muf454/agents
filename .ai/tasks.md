@@ -3170,8 +3170,11 @@ BLOCKED on the full gate, not on a found mismatch. Audit by reading (code is the
   `test_fixture_template_*`).
 - Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
 - Gate: `.ai/bin/ai-check` in the foreground with timeout 600000 ms did not finish within 600 s; the
-  harness moved it to the background (task ID bkhdtjkke, output in the session's tasks folder). Its
-  result is not known, so the gate is not established here. Human or mission control: run it without
+  harness moved it to the background (task ID bkhdtjkke, output in the session's tasks folder). It then
+  finished: `Ran 1002 tests in 634.9s … OK`, but the stamp exited 1 with `Validation modified project
+  content`. Cause: this session edited the record files and committed `1e84615` while the gate was
+  running, so the fingerprint at the end differed from the start (`scripts/lib/workflow.py` `stamp`).
+  No gate pass is established on any tree. A rerun on a clean tree with no edits during the run is needed. Human or mission control: run it without
   a tool limit (last full gate on the branch: PASS, 1002 tests, parent 01f8197, which includes T027–T030).
 - Flow: unchanged in this task (the audit found no flow change).
 
