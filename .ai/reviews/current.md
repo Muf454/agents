@@ -1,34 +1,42 @@
-<!-- Host evidence: HEAD b651970c55b64ff3fccec2e4a9cd702d576da372; merge-base 1423b6092c4fe6a14d98d5c39f6380d69039141a; saved 2026-10-19T01:23:19Z. -->
+<!-- Host evidence: HEAD 92d1e9277994d5701fbf7e9153f90d69fe387bfc; merge-base 1423b6092c4fe6a14d98d5c39f6380d69039141a; saved 2026-10-19T03:05:56Z. -->
 
 # Independent review
 
-Overall verdict: CHANGES REQUIRED — executable-bit repair has two correctness gaps; operational records and the workflow chart also need correction.
-Finding counts: BLOCKER=0 MAJOR=2 MINOR=2
+Overall verdict: APPROVE WITH MINOR FINDING — both prior major findings are fixed; one localized R3 requirement gap remains.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=1
 
-Reviewed HEAD: `b651970c55b64ff3fccec2e4a9cd702d576da372`
+Reviewed HEAD: `92d1e9277994d5701fbf7e9153f90d69fe387bfc`
 
 Supplied base and verified merge-base: `1423b6092c4fe6a14d98d5c39f6380d69039141a`
 
 ## Scope and validation
 
-Inspected repository instructions, specification, plan, tasks, state, handoff, existing reviews/dispositions, relevant documentation, Git history, the supplied diff, and affected source/tests. The checkout was clean.
+Inspected repository instructions, specification, plan, tasks, state, handoff, dispositions, relevant documentation, Git history, the full supplied diff, changes since the previous review, and affected source/tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json`: PASS at `2026-10-19T01:19:39Z`, recording the reviewed HEAD.
-- Referenced log: **1,002 tests passed in 634.1 seconds**, with 1,002 collected.
-- Independently verified that the validation fingerprint matches current content.
+- `.ai/local/validation.json`: PASS at `2026-10-19T03:02:55Z`, recorded at `2ff4074`.
+- Referenced log: **1,005 tests passed in 668.0 seconds**, matching 1,005 collected.
+- Independently verified that the validation fingerprint matches the reviewed checkout despite subsequent metadata commits.
 
 Checks independently run:
 
-- Task queue validation and test discovery.
+- Task queue validation and test discovery: 1,005 tests.
 - Three documentation-consistency tests: passed.
-- Python AST parsing of three changed files and shell syntax checks across 14 files.
+- Python AST parsing of three affected files and shell syntax checks across 14 files: passed.
 - `git diff --check`: passed.
-- AST comparison: 37 test methods added; none removed.
-- Read-only reproductions of the symlink traversal and session-exit behavior below.
+- AST comparison against the base: 40 test methods added; none removed.
+- Read-only checks of the actual gate-time selection and timeout-manifest validation functions.
+- Read-only reproductions of executable repair and post-session handling, with mutations intercepted or external behavior stubbed.
 
-The full `./scripts/ai-check` and integration fixtures were not rerun because they require writes. No files were written or network/MCP integrations invoked.
+The full `./scripts/ai-check` and integration fixtures were not rerun because they require filesystem writes. No project files were changed and no network/MCP integrations were invoked.
+
+## Previous-round verification
+
+- **M2 fixed:** repair uses a pinned root, no-follow directory traversal, a regular-file check, and descriptor-based `fchmod`. The added regression covers an external parent-directory symlink. An independent read-only probe rejected a real parent symlink without requesting chmod.
+- **M3 fixed:** repair runs inside `claude_session` before nonzero-result termination. Independent shell-fragment checks reached repair for exit codes 0, 124, 137 and 1. Added tests cover timeout repair and successful recovery afterward.
+- **N3 fixed:** state reports 36 completed tasks, PASS validation and readiness for review; handoff gives current next actions.
+- **N4 fixed:** the vault chart now includes executable repair before host checks and timeout handling, with `updated: 2026-10-19`.
 
 ## BLOCKER findings
 
@@ -36,93 +44,60 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M2 — Executable-bit repair follows symlinked parent directories outside the checkout
-
-**Location:** `scripts/lib/workflow.py:4473–4478`.
-
-**Requirement:** R3 limits repair to tracked regular files and says symlinks must never be touched. The runner prompt also restricts chmod to paths inside the checkout.
-
-`os.lstat(path)` rejects a symlink only at the final component. Parent-directory symlinks are followed by both `lstat` and `chmod`.
-
-For example, if the index still records executable `scripts/tool.sh`, but the working-tree `scripts` directory is replaced with a symlink to an external directory containing non-executable `tool.sh`, the host changes that external file’s permissions.
-
-**Evidence:** Executed the actual `exec_bits()` with mocked index/root inputs and intercepted `os.chmod`. Using the real parent symlink `/proc/self/root`, the function reported restoring `root/etc/passwd` and requested chmod to `0755` on a path resolving to `/etc/passwd`. The chmod was mocked; nothing was changed.
-
-**Impact:** A checkout-controlled path can cause the host to modify permissions outside the project.
-
-**Recommended direction:** Traverse from a pinned checkout directory without following symlink components, verify the opened leaf is regular, and change permissions through its file descriptor. Add an external-directory symlink regression.
-
-### M3 — Timed-out sessions exit before executable-bit repair runs
-
-**Location:** `scripts/ai-run:838–842`; terminating path at `scripts/ai-run:360`.
-
-**Requirement:** R3 requires restoration after each implementation session. R2 introduces deterministic recovery for timed-out IN_PROGRESS tasks.
-
-Repair runs only after `claude_session` returns successfully. Exit codes 124 and 137 instead call `ai_die` inside that function, even after gate verification succeeds.
-
-**Evidence:** Executed the actual post-session shell fragment and repair call with external behavior stubbed. Exit 0 reached `exec-bits`; exits 124, 137 and 1 did not. Existing repair integration coverage exercises only successful completion.
-
-**Impact:** A timed-out task that loses a tracked script’s executable bit reaches recovery unrepaired. Recovery spends its one rerun allowance, then can fail validation solely because that script remains non-executable, preventing the intended automatic continuation.
-
-**Recommended direction:** Run implementation-session repair after successful gate and branch verification, before terminal session-result handling. Add a timeout regression with a tracked executable whose mode is lost and a gate that requires it.
+None found in the inspected scope.
 
 ## MINOR findings
 
-### N3 — State and handoff still describe the resolved validation block
+### N5 — Executable repair omits several protected gate paths
 
-**Location:** `.ai/handoff.md:130–132`; `.ai/state.md:7–12`.
+**Location:** `scripts/lib/workflow.py:4467–4478`; complete protected-path list at `scripts/lib/common.sh:152–154`.
 
-**Requirement:** T033 requires the handoff to match delivered work; workflow documentation defines state as the queue summary and handoff as the next operator’s guide.
+**Requirement:** R3 explicitly requires that gate paths are never touched by executable-bit repair.
 
-The queue marks all 33 tasks DONE, and current validation passes. State still reports 32 completed tasks, one remaining, failed validation and a blocked run. Handoff says T033 remains BLOCKED and directs the operator to rerun the gate.
+The helper excludes `.ai/bin/`, `.ai/validate` and `.ai/ci-setup`, but does not exclude `.ai/prompts/`, `.ai/permissions.allow`, `.claude/settings.json` or `.github/workflows/ai-validate.yml`.
 
-**Impact:** The next operator receives contradictory completion status and obsolete recovery instructions.
+**Evidence:** Called the actual `exec_bits()` against this checkout with an intercepted `fchmod` and a mocked index entry equivalent to staging:
 
-**Recommended direction:** Synchronize state and handoff with the completed queue and current evidence, while retaining human acceptance as outstanding.
+```bash
+git add --chmod=+x -- .ai/permissions.allow
+```
 
-### N4 — The required workflow chart omits executable-bit repair
+The helper reported restoring `.ai/permissions.allow` and requested mode `0755`. No permissions were actually changed.
 
-**Location:** `~/zWiki/zWiki/20 Projects/agents/agents-flow.md:158–169`; corresponding new step at `scripts/ai-run:841–844`.
+An index-only mode change leaves the working-tree gate digest unchanged, so the pre-repair guard does not prevent this case.
 
-**Requirement:** AGENTS.md requires every workflow step change to appear in the vault flow chart.
+**Impact:** The host can modify a protected gate file itself, contrary to R3, and cause a subsequent integrity check to stop the run. This is a localized reliability gap; no gate-bypass execution was demonstrated.
 
-The chart includes the new gate allowance and timeout-recovery path, but its task flow proceeds directly from the session to host checks without the new permission-restoration step. No executable-bit repair appears elsewhere in the note.
-
-**Impact:** The workflow’s designated overview omits a new host mutation.
-
-**Recommended direction:** Add restoration to the task flow before validation and maintain the note’s `updated:` date in the correction session.
+**Recommended direction:** Exclude every protected gate root and descendant. Add regressions using staged executable modes for the omitted protected paths.
 
 ## Missing test coverage
 
-Add regressions for:
-
-- A tracked executable beneath a parent symlink targeting an external directory.
-- Executable restoration after session timeout, including successful recovery afterward.
-
-Existing leaf-symlink and successful-session tests do not cover these cases.
-
-Performance improvement remains unproven: T031 records no before measurement, and T032 converted no pipeline setup runs.
+- Repair exclusions need coverage for the complete protected-path set described in N5.
+- Exit 137 reaches repair in the independent fragment check, but the added end-to-end timeout tests exercise exit 124.
+- FL-31’s performance improvement remains unverified: T031 lacks before measurements, and T032 made no pipeline-run conversions. The plan expressly permits an explained no-conversion result.
 
 ## Security concerns
 
-M2 is a demonstrated containment defect. No additional authentication or authorization defect was found in the inspected changes.
+The prior symlink-containment defect is fixed. N5 permits an unintended protected-file permission change, but subsequent integrity checks remain in place. No additional significant security or authorization defect was found in the inspected changes.
 
-The previously recorded cap-exhaustion notification omission remains unchanged from the supplied base and is not counted as an introduced finding.
+No pre-existing defect is counted among the findings.
 
 ## Architecture concerns
 
-Dependencies remain minimal, and timeout-rerun authority stays in host state. Factoring `commit_validated` preserves the existing validation safeguards.
+Dependencies remain minimal. Gate timing and timeout-rerun authority remain in host state, and the factored recovery commit retains dependency setup, full validation, checkpoint screening and committed-content verification.
 
-Executable repair needs stronger filesystem boundaries and placement covering recoverable failures. **Flow chart updated** for gate allowance and timeout recovery; its repair-step omission is N4.
+**Flow chart updated:** the required vault note now includes executable repair and timeout recovery.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-After fixes and the normal toolkit upgrade, exercise a real timed-out implementation session and verify its notification, validated checkpoint and resumed task.
+After the normal toolkit upgrade, exercise a real slow-gate run and verify the displayed allowance, timeout notification, validated recovery checkpoint and resumed task. Human acceptance and merge remain outstanding.
 
 ### Covered by automated tests
 
-Recorded passing coverage includes gate allowance, timeout budgets, manifest persistence, disposition restart handling, progress reporting and fixture independence. Add the two repair regressions above, then rerun `./scripts/ai-check`.
+Recorded passing coverage includes gate-time selection, session caps, timeout recovery limits, neighboring recovery cases, executable repair, decorated disposition restart handling, progress reporting, budget reporting and fixture independence.
+
+Add the protected-path regressions from N5 and rerun `./scripts/ai-check`.
 
 Reviewing does not constitute human acceptance.
