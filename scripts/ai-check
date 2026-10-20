@@ -19,8 +19,8 @@ limit=${AI_CHECK_TIMEOUT:-1800}
 wait=$((10#$wait)) limit=$((10#$limit))
 # One deadline: seconds spent waiting for the lock come out of the validator's budget.
 started=$SECONDS
+# The stamp changes only under the lock: a waiter that gives up leaves the running gate's record.
 out_of_time() {
-  ai_helper stamp invalidate
   echo 'Error: Validation time limit reached while waiting for the lock.' >&2
   exit 124
 }
@@ -36,7 +36,10 @@ if ! flock -n 8; then
 fi
 budget=$(( limit - (SECONDS - started) ))
 # GNU timeout treats 0 as no deadline, so never start the validator without time left.
-(( budget > 0 )) || out_of_time
+if (( budget <= 0 )); then
+  ai_helper stamp invalidate
+  out_of_time
+fi
 log=$(mktemp .ai/local/check-XXXXXXXX.log)
 # Remove old evidence first: a failed/interrupted run cannot retain a green stamp.
 ai_helper stamp invalidate

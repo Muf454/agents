@@ -3915,7 +3915,7 @@ Evidence: `-k gate_lock_wait` Ran 11 OK; full `.ai/bin/ai-check` in the backgrou
 meanwhile: 1033 tests OK in 664.2 s, exit 0.
 
 ## T046 — A lock waiter that times out leaves the active gate's stamp alone (review M2)
-Status: TODO
+Status: DONE
 Dependencies: T044
 Model: opus
 
@@ -3966,4 +3966,19 @@ Targeted: `python3 -m unittest discover -s tests -k gate_only` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+Done 2026-10-21 (claude opus). `scripts/ai-check`: `out_of_time` no longer calls
+`stamp invalidate`; only the `budget <= 0` exit (lock held) invalidates before calling it, with
+the comment "The stamp changes only under the lock". New tests
+`test_gate_lock_wait_timeout_keeps_the_active_stamp` (PASS and RUNNING `validation.json` subtests,
+byte-for-byte unchanged after a 124 waiter; holder still alive) and
+`test_gate_lock_wait_timeout_keeps_change_detection` (gate A FAILs with `Validation modified
+project content`, `unchanged: false`, `stamp verify` fails). Mutation check: re-adding
+`ai_helper stamp invalidate` on the `flock -w "$limit"` failure path made both tests fail (3
+failures: change detection `0 == 0`, PASS and RUNNING stamps overwritten); reverted. `host_gate`
+uses only the exit code and `gate_only_retry` reads `stamp outcome` before its gate, so neither
+relied on the waiter invalidating. docs/workflow.md lock-wait paragraph and the vault "One gate
+deadline" bullet updated; hub Log line appended.
+Validation: `-k gate_lock_wait` Ran 13 OK; `-k gate_only` Ran 7 OK; `-k gate_time` Ran 4 OK;
+`-k session_gate_allowance` Ran 5 OK; `.ai/bin/ai-check` PASS (1035 tests, 675.5 s, background
+and waited for).
 

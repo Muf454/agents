@@ -10053,6 +10053,53 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse(marker.exists())
         self.helper('stamp', 'verify', expected=1)
 
+    # The stamp changes only under the lock: a timed-out waiter leaves it alone (review M2, T046).
+    def test_gate_lock_wait_timeout_keeps_the_active_stamp(self):
+        self.ready()
+        self.tool('ai-check')  # a finished gate's PASS evidence
+        stamp = self.project / '.ai/local/validation.json'
+        running = json.dumps({'result': 'RUNNING', 'started': '2026-10-20T00:00:00Z',
+                              'before': 'known-fingerprint'}) + '\n'
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        for name, content in (('pass', stamp.read_text()), ('running', running)):
+            with self.subTest(stamp=name):
+                stamp.write_text(content)
+                result = self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                                   AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+                self.assertIn('Validation time limit reached while waiting for the lock.',
+                              result.stderr)
+                self.assertEqual(stamp.read_text(), content)
+        self.assertIsNone(holder.poll())  # both waiters gave up while the lock was held
+
+    def test_gate_lock_wait_timeout_keeps_change_detection(self):
+        self.ready()
+        started, release = self.base / 'gate-a.started', self.base / 'gate-a.release'
+        (self.project / 'data.txt').write_text('before\n')
+        (self.project / '.ai/validate').write_text(
+            f'#!/usr/bin/env bash\necho x > {shlex.quote(str(started))}\n'
+            f'while [[ ! -e {shlex.quote(str(release))} ]]; do sleep 0.05; done\n')
+        self.commit('gate waits for a release file')
+        gate_a = subprocess.Popen([str(self.project / '.ai/bin/ai-check')], cwd=self.project,
+                                  env=dict(self.env), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (gate_a.kill(), gate_a.wait()) if gate_a.poll() is None else None)
+        for _ in range(int(1000 * TIMEOUT_SCALE)):
+            if started.exists() or gate_a.poll() is not None:
+                break
+            time.sleep(0.01)
+        self.assertTrue(started.exists(), 'gate A did not start its validator')
+        (self.project / 'data.txt').write_text('changed while gate A runs\n')
+        self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                  AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+        release.write_text('x')
+        _, stderr = gate_a.communicate(timeout=SHORT_TIMEOUT)
+        self.assertNotEqual(gate_a.returncode, 0)
+        self.assertIn('Validation modified project content', stderr)
+        data = json.loads((self.project / '.ai/local/validation.json').read_text())
+        self.assertEqual(data['result'], 'FAIL')
+        self.assertIs(data['unchanged'], False)
+        self.helper('stamp', 'verify', expected=1)
+
     def test_gate_lock_wait_within_the_total_budget_passes(self):
         self.ready()
         self.gate_lock_holder(1)

@@ -38,9 +38,10 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
   - T045 (sonnet, DONE, N1): leading-zero `AI_CHECK_LOCK_WAIT` regression tests (no script
     change: T044 already reads both values with `10#`).
 - Review round 2 (REQUEST CHANGES, M2 + N2 accepted):
-  - T046 (opus, TODO, M2): a lock waiter that runs out of `AI_CHECK_TIMEOUT` exits 124 without
+  - T046 (opus, DONE, M2): a lock waiter that runs out of `AI_CHECK_TIMEOUT` exits 124 without
     calling `stamp invalidate`, so it never overwrites the active gate's RUNNING record and
-    content changes during that gate still fail it.
+    content changes during that gate still fail it. Only the `budget <= 0` exit, which holds
+    the lock, still invalidates. docs/workflow.md and the vault "One gate deadline" bullet say so.
   - N2: this handoff now records T045 as DONE (fixed in the triage commit).
 
 ## Validation run
@@ -69,6 +70,7 @@ T041 added the BLOCKED branch to "Inside one task" (gate-only block retry), a "G
 retry" bullet and the 🔧 retry row in the notifications table. T042 updates the "Executable bits" bullet.
 T043 re-read the vault chart against `ai-run`, `ai-check`, `workflow.py` and the prompts: no change needed.
 T044 added the "One gate deadline" bullet (lock wait counts against `AI_CHECK_TIMEOUT`).
+T046 added one clause to it (a timed-out waiter leaves `validation.json` alone).
 
 ## Manual testing for the human
 
@@ -103,6 +105,11 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
 - `test_gate_lock_wait_leading_zero_is_decimal`,
   `test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once` (T045: `08` waits 8 s and passes;
   `00` refuses at once).
+- `test_gate_lock_wait_timeout_keeps_the_active_stamp`,
+  `test_gate_lock_wait_timeout_keeps_change_detection` (T046: a waiter that times out (124) leaves
+  a RUNNING or PASS `validation.json` byte-for-byte unchanged; a tracked-file change during the
+  running gate still makes it FAIL with `Validation modified project content` and
+  `unchanged: false`).
 - `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
   (T040: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
   `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
@@ -115,11 +122,11 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
 
 ## Human todos
 - After merge: the upgrades above; tick FL-32 in the vault backlog (sessions never tick it).
-- Vault hub Log: each of T037–T045 appends its own dated line (the planning session could edit
+- Vault hub Log: each of T037–T046 appends its own dated line (the planning session could edit
   only `.ai/` files, so it added none).
 - Gate files: none need changing for this batch. If you want this repo's own pipeline to use the
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-T046 (review M2), then another independent review. T037–T045 are DONE. Human review of the branch (independent review through the pipeline,
+Another independent review (round 3). T037–T046 are DONE. Human review of the branch (independent review through the pipeline,
 or `ai-review` by hand), then the "Needs you" steps above. Nothing is merged or deployed.

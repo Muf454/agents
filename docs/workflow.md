@@ -1291,7 +1291,9 @@ the wait is part of the timed gate. `ai-check` keeps one deadline: it caps the w
 `AI_CHECK_TIMEOUT` (validated as decimal digits) and gives `.ai/validate` only the seconds left
 (`budget`); with none left it exits 124 with `Validation time limit reached while waiting for the
 lock.` without starting the validator (GNU `timeout` would read 0 as no deadline), so a host gate
-cannot pass after the run deadline. `ai-recover` and `ai-pipeline` keep the immediate refusal.
+cannot pass after the run deadline. `.ai/local/validation.json` changes only under the lock: a
+waiter whose wait runs out leaves the running gate's record (and its change detection) or a
+finished gate's evidence unchanged (review M2). `ai-recover` and `ai-pipeline` keep the immediate refusal.
 
 Session gate rule (FL-32): every implementation session's RUNNER CONTRACT says `A gate run that
 outlives a tool call is not a blocker: the full gate the runner runs after the session decides.`

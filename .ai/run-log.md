@@ -517,3 +517,4 @@
 | 2026-10-20T21:33:18Z | runner | T045 | completed | PASS | 5d94082 | Claude checkpointed; continuing queue |
 | 2026-10-20T21:44:26Z | runner | none | queue complete; ready for independent review | PASS | 607a8e8 | Human acceptance remains |
 | 2026-10-20T21:48:21Z | runner | triage | review triaged into dispositions/tasks | n/a | 6a08b96 | Fix tasks run next |
+| 2026-10-21T00:00:00Z | claude (opus) | T046 | DONE (review M2): timed-out lock waiter exits 124 without `stamp invalidate`; added `test_gate_lock_wait_timeout_keeps_the_active_stamp` and `_keeps_change_detection` (mutation check fails both) | PASS (ai-check 1035 tests, 675.5 s, background and waited; -k gate_lock_wait 13 OK, gate_only 7 OK) | pending | none |
