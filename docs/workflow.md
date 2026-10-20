@@ -27,7 +27,8 @@ Task parser contract:
   are ignored. Invalid queues stop the runner rather than being guessed at.
 
 The first eligible TODO is selected, with an eligible IN_PROGRESS taking priority
-for recovery. BLOCKED tasks do not count as complete. Independent work may proceed;
+for recovery. BLOCKED tasks do not count as complete (a block without a failing check whose
+host gate passes is retried once per run: "Gate-only block retry" below). Independent work may proceed;
 when no runnable work remains and the queue is incomplete, human intervention is
 needed. A syntactically valid DONE is not semantic proof of acceptance: Claude must
 record verification and Codex must challenge it.
@@ -1282,10 +1283,37 @@ can at most double a session; a helper output outside `^[0-9]{1,7}$` counts as 0
 allowance the `Session:` line is unchanged; otherwise it reads `(limit 1600s: 1000s + 600s for two
 gate runs of 300s; log …)`.
 
-Both host gates run with `AI_CHECK_LOCK_WAIT=min(remaining, 900)` (`host_gate`): `ai-check` then
+Every host gate (after a DONE session, the gate-only block retry below, and the final check)
+runs with `AI_CHECK_LOCK_WAIT=min(remaining, 900)` (`host_gate`): `ai-check` then
 waits up to that many seconds for a session's still-running background gate to release
 `.ai/local/validation.lock` (FL-32) instead of failing with `Validation is already running.`;
 the wait is part of the timed gate. `ai-recover` and `ai-pipeline` keep the immediate refusal.
+
+Session gate rule (FL-32): every implementation session's RUNNER CONTRACT says `A gate run that
+outlives a tool call is not a blocker: the full gate the runner runs after the session decides.`
+
+Gate-only block retry (FL-32, `gate_only_retry`): right before each implementation session
+`ai-run` keeps the DIGEST of `stamp outcome` (`-` on a helper failure). When the session ends with
+its task BLOCKED and a clean tree beyond the records, the runner records the block as before
+(`blocked` outcome, run-log line, BLOCKED runner checkpoint), then retries only if all hold: the
+outcome's digest is not `-` and differs from the one before the session (the session ran the
+gate), its word is `running`, `pass` or `changed` (no failing check: a `fail` record keeps the
+block), `run-manifest gate-unblock TASK` succeeds (a run manifest exists and TASK is not yet in its
+`gate_unblocks`; the list is kept across `--resume` and recovery relaunches and dropped by a human
+`run-manifest start`), and run time remains. The claim is spent before the host gate runs, so it
+is once per task per run whatever the gate's result. The host gate is the one above (lock wait,
+`ai_guard_verify`, a `gate` outcome line). A failing gate prints `Gate-only block retry of T…: the
+full gate failed; it stays BLOCKED.` and the run goes on as for any block (⚠ notification,
+independent tasks). A passing gate sets the task to IN_PROGRESS, appends a run-log line, commits
+tasks/state/run-log/handoff as `chore(ai): retry T… after a gate-only block`, notifies `🔧 T…:
+blocked without a failing check and the full gate passed; running it once more.` (instead of the
+⚠ one), and the next session (`tasks next` prefers the IN_PROGRESS task; it counts against the
+session budget) gets one extra contract sentence: `The previous session marked T… BLOCKED without
+a failing check; the runner's full gate then passed on this tree. If the block was only about the
+gate result, verify the acceptance criteria and mark it DONE; otherwise block it again with the
+reason.` Only deterministic host evidence decides: a forged stamp buys at most one gate run and
+one session, and nothing is accepted without a later DONE checkpoint and its own host gate. A
+dirty tree still stops with `Blocked task was not checkpointed` before any of this.
 
 ## Observation records and the dashboard
 

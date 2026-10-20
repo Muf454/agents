@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-T037–T040 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037–T041 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
@@ -20,7 +20,9 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
     showed no failure (`stamp outcome` running/pass/changed with a new digest) gets one host gate
     after the claim `run-manifest gate-unblock`; a pass commits `chore(ai): retry TASK after a
     gate-only block`, sends 🔧 instead of ⚠ and the next session's prompt says why.
-  - T041 (opus): the neighbouring cases stay as today (tests), docs and flow chart.
+  - T041 (DONE): tests pin the neighbouring BLOCKED cases as today (session gate failed, gate
+    never ran, host gate fails, no run manifest, dirty tree; no runner change needed);
+    docs/workflow.md "Gate-only block retry" and session gate rule, README paragraph, flow chart.
 - **N5** (PR #34 final review, MINOR): T042 (sonnet) makes `scripts/lib/common.sh` hold the one
   protected-path list, read by the guard digest (value unchanged) and by `exec-bits`, which then
   never touches `.ai/prompts/`, `.ai/permissions.allow`, `.claude/settings.json` or
@@ -45,7 +47,8 @@ T040 tree: PASS (1018 tests, 677.9 s; run in the background and waited for).
 ## Flow chart
 Flow chart updated: T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
 T039 updated the "Inside one task" `gate` node (waits for a running gate, at most 15 min) and added a bullet.
-T041 and T042 update the notifications table and the "Executable bits" bullet.
+T041 added the BLOCKED branch to "Inside one task" (gate-only block retry), a "Gate-only block
+retry" bullet and the 🔧 retry row in the notifications table. T042 updates the "Executable bits" bullet.
 
 ## Manual testing for the human
 
@@ -75,7 +78,10 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
 - `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
   (T040, passing: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
   `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
-  exactly once and then stays BLOCKED with ⚠). `test_gate_only_block_unchanged_*` (T041).
+  exactly once and then stays BLOCKED with ⚠).
+- `test_gate_only_block_unchanged_session_gate_failed`, `_session_never_ran_the_gate`,
+  `_host_gate_fails`, `_without_run_manifest`, `_dirty_tree` (T041, passing: T001 stays BLOCKED,
+  ⚠ as today, no retry commit or 🔧; a failing host gate spends the claim and the run goes on).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
   `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
 
@@ -87,4 +93,4 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Implement T040–T043 in queue order (T040, T041, T042, T043).
+Implement T042, then T043.

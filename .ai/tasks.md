@@ -3629,7 +3629,7 @@ Docs (docs/workflow.md, README) and the flow chart are T041's; no vault edit her
 
 
 ## T041 — Gate-only block retry: the cases that stay as today, docs and flow chart (FL-32, contract)
-Status: TODO
+Status: DONE
 Dependencies: T040
 Model: opus
 
@@ -3678,6 +3678,24 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-20. No runner change: every case already behaved as today. Mock: the
+`blocked-gate-unknown(-always)` modes take `MOCK_BLOCK_VARIANT` (`fail`: `stamp record 1 <log>`
+after the invalidate; `marker`: also commits `gate-marker`; `dirty`: also leaves `stray.txt`).
+Tests (queue T001 + independent T002, so the run goes on and ends on `Unfinished tasks exist but
+none can run.` as today): `test_gate_only_block_unchanged_session_gate_failed` (gate rows `[pass]`
+= T002's only, `gate_unblocks` `[]`), `_session_never_ran_the_gate` (`blocked-first` after a prior
+`ai-check` PASS, so the digest is real and unchanged), `_host_gate_fails` (fixture gate fails while
+`gate-marker` exists and T002.txt does not: gate rows `[fail, pass]`, the `Gate-only block retry of
+T001: the full gate failed` line, `gate_unblocks` `["T001"]`), `_without_run_manifest` (plain
+`ai-run --approved`; no run.json), `_dirty_tree` (`Blocked task was not checkpointed`, no ⚠ since
+today's dirty stop precedes it, no gate run). Each asserts T001 BLOCKED, no retry commit, no
+`blocked without a failing check`. Mutations: accepting `fail` in the word list fails
+`_session_gate_failed`; dropping the `stamp_before` comparison fails `_session_never_ran_the_gate`;
+both restored. Docs: docs/workflow.md "Gate-only block retry" + session gate rule paragraphs, the
+host-gate paragraph and the queue-selection sentence; README one paragraph. Vault: flow chart
+"Inside one task" BLOCKED branch, bullet and 🔧 row in the notifications table (`updated:` already
+2026-10-20); hub Log line. Evidence: `-k gate_only_block` Ran 7 OK; `-k Docs` Ran 3 OK;
+`-k flow_this_repo` Ran 1 OK; `.ai/bin/ai-check` PASS (1023 tests, 654.7 s, background, waited for).
 
 
 ## T042 — One protected-path list for the guard and the executable-bit repair (review N5)

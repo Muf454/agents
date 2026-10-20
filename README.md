@@ -241,6 +241,12 @@ sessions keep the plain limit.
 `ai-run`'s host gates wait up to 15 minutes (within the run time), so a session that ends while
 its own background gate still runs does not fail the host gate.
 
+Every session's contract says that a gate run that outlives a tool call is not a blocker: the
+full gate the runner runs after the session decides. If a session still marks its task BLOCKED
+although its own gate showed no failing check, and the runner's full gate then passes on the
+same tree, `ai-run` sets the task back to IN_PROGRESS (commit `chore(ai): retry T… after a
+gate-only block`, a 🔧 notification) and gives it one more session, once per task per run.
+
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
 operations. There are no approval prompts between normal tasks. Claude's `dontAsk`

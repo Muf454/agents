@@ -534,8 +534,11 @@ if mode == 'invalid':
 if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER CONTRACT' in prompt:
     # T001 marked BLOCKED although its own gate run showed no failing check: validation.json is
     # left as `stamp invalidate` writes it (RUNNING). Only the first T001 call (-always: every
-    # one); later calls complete the task normally. Every prompt is recorded.
+    # one); later calls complete the task normally. Every prompt is recorded. MOCK_BLOCK_VARIANT
+    # (T041): `fail` leaves a FAIL record (exit_code 1) instead, `marker` also commits gate-marker,
+    # `dirty` also leaves an untracked stray.txt.
     state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    variant = os.environ.get('MOCK_BLOCK_VARIANT', '')
     with open(state / 'gate-unknown-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
     task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
     calls = state / 'gate-unknown-calls'
@@ -549,8 +552,18 @@ if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER C
         start = text.index('## T001 —')
         queue.write_text(text[:start] + text[start:].replace(
             'Pending.', f'Blocked in session {count + 1}: the full gate result is unknown.', 1))
-        subprocess.run(['git', 'commit', '-qm', 'block T001', '--', '.ai/tasks.md'], check=True)
+        paths = ['.ai/tasks.md']
+        if variant == 'marker':
+            pathlib.Path('gate-marker').write_text('the fixture gate fails while this exists\n')
+            subprocess.run(['git', 'add', '--', 'gate-marker'], check=True)
+            paths.append('gate-marker')
+        subprocess.run(['git', 'commit', '-qm', 'block T001', '--', *paths], check=True)
         subprocess.run(['python3', '.ai/bin/lib/workflow.py', 'stamp', 'invalidate'], check=True)
+        if variant == 'fail':
+            subprocess.run(['python3', '.ai/bin/lib/workflow.py', 'stamp', 'record', '1',
+                            '.ai/local/session-gate.log'], check=True)
+        if variant == 'dirty':
+            pathlib.Path('stray.txt').write_text('uncommitted session output\n')
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
         sys.exit(0)
     mode = 'success'
@@ -10052,6 +10065,74 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len([p for p in self.gate_unknown_prompts() if 'invocation: T001.' in p]), 2)
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertEqual(manifest['gate_unblocks'], ['T001'])
+
+    # Neighbouring BLOCKED cases keep today's behaviour (FL-32, T041). T002 is independent, so the
+    # run goes on after T001's block and then stops on the unrunnable queue as today.
+    def gate_only_block_unchanged(self, mode, manifest=True, expected=1, prior_gate=False, **env):
+        self.ready(task('T001') + task('T002'))
+        if prior_gate:  # a PASS record from before the run, which the session leaves as it is
+            self.tool('ai-check')
+        if manifest:
+            self.approve_run()
+        result = self.tool('ai-run', '--approved', expected=expected, MOCK_CLAUDE=mode, **env)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertNotIn('chore(ai): retry T001 after a gate-only block', self.git_subjects())
+        self.assertNotIn('blocked without a failing check', self.notifications())
+        return result
+
+    def gate_unblocks(self):
+        manifests = list((self.base / 'host-state').rglob('run.json'))
+        return json.loads(manifests[0].read_text()).get('gate_unblocks', []) if manifests else None
+
+    def assert_blocked_as_today(self, result):
+        self.assertEqual(self.notifications().count('⚠ Blocked: '), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('Unfinished tasks exist but none can run.', result.stderr)
+
+    def test_gate_only_block_unchanged_session_gate_failed(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', MOCK_BLOCK_VARIANT='fail')
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])  # T002's only
+        self.assertEqual(self.gate_unblocks(), [])
+
+    def test_gate_only_block_unchanged_session_never_ran_the_gate(self):
+        result = self.gate_only_block_unchanged('blocked-first', prior_gate=True)
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])
+        self.assertEqual(self.gate_unblocks(), [])
+
+    def test_gate_only_block_unchanged_host_gate_fails(self):
+        self.ready_validate_marker()
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-gate-unknown-always',
+                           MOCK_BLOCK_VARIANT='marker')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertNotIn('chore(ai): retry T001 after a gate-only block', self.git_subjects())
+        self.assertNotIn('blocked without a failing check', self.notifications())
+        self.assertIn('Gate-only block retry of T001: the full gate failed; it stays BLOCKED.', result.stdout)
+        self.assert_blocked_as_today(result)
+        # The retry's failing gate, then T002's: the run went on.
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['fail', 'pass'])
+        self.assertEqual(self.gate_unblocks(), ['T001'])  # spent
+
+    def ready_validate_marker(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nif [[ -e gate-marker && ! -e T002.txt ]]; then exit 7; fi\n')
+        self.commit('gate that fails while gate-marker exists')
+        self.approve_run()
+
+    def test_gate_only_block_unchanged_without_run_manifest(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', manifest=False)
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])
+        self.assertIsNone(self.gate_unblocks())
+
+    def test_gate_only_block_unchanged_dirty_tree(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', MOCK_BLOCK_VARIANT='dirty')
+        self.assertIn('Blocked task was not checkpointed; inspect and commit before resuming.', result.stderr)
+        self.assertNotIn('⚠ Blocked', self.notifications())  # today the dirty check stops before it
+        self.assertEqual(self.gate_rows(), [])
+        self.assertEqual(self.gate_unblocks(), [])
 
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):
