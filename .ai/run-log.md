@@ -521,3 +521,4 @@
 | 2026-10-20T22:16:15Z | runner | T046 | completed | PASS | b47e167 | Claude checkpointed; continuing queue |
 | 2026-10-20T22:27:42Z | runner | none | queue complete; ready for independent review | PASS | c795520 | Human acceptance remains |
 | 2026-10-20T22:29:25Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/35 | PASS | 5ef2485 | Human acceptance and merge remain |
+| 2026-10-21T00:00:00Z | claude (opus) | T101 | DONE (BR-01 helpers): `run-manifest ruling KIND KEY` with `rulings` field (once per kind per key per run) and `ruling-row` cell formatter; 4 `test_ruling_manifest_*` tests | PASS (ai-check 1039 tests, 701.4 s, background and waited; -k ruling_manifest 4 OK, gate_unblock_manifest 5 OK) | pending | no caller yet; flow unchanged |

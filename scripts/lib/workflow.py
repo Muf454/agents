@@ -1340,7 +1340,8 @@ def binding_dir():
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
 # used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
 # scheduled at and the armed resume binding ({"head", "tree", "task"}). The other optional
-# fields, `timeout_reruns` and `gate_unblocks`, are checked beside them (timeout_reruns_valid).
+# fields, `timeout_reruns`, `gate_unblocks` and `rulings`, are checked beside them
+# (timeout_reruns_valid).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
                 'limit_stage', 'limit_resume')
 
@@ -1378,10 +1379,42 @@ def task_list_valid(data, field):
             and all(task_id_valid(task) for task in tasks) and len(set(tasks)) == len(tasks))
 
 
+RULING_KINDS = ('queue-order', 'task-sections', 'disposition-cell', 'flow-line')
+
+
+def ruling_valid(value):
+    if not isinstance(value, str) or ':' not in value:
+        return False
+    kind, key = value.split(':', 1)
+    return kind in RULING_KINDS and re.fullmatch(r'[A-Za-z0-9._-]{1,48}', key) is not None
+
+
 def timeout_reruns_valid(data):
     """The optional `timeout_reruns` field: the tasks whose timed-out session was committed and
-    rerun in this run. `gate_unblocks`: the tasks set back from a gate-only block in this run."""
-    return task_list_valid(data, 'timeout_reruns') and task_list_valid(data, 'gate_unblocks')
+    rerun in this run. `gate_unblocks`: the tasks set back from a gate-only block in this run.
+    `rulings`: the `KIND:KEY` host rulings made in this run (same list rules, other items)."""
+    rulings = data.get('rulings', [])
+    return (task_list_valid(data, 'timeout_reruns') and task_list_valid(data, 'gate_unblocks')
+            and isinstance(rulings, list) and len(rulings) <= 200
+            and all(ruling_valid(item) for item in rulings) and len(set(rulings)) == len(rulings))
+
+
+def ruling_row(arguments):
+    """`ruling-row KIND WHAT WHY COST`: the run-log action cell of one host ruling, on one line
+    that cannot break the run-log table (no `|`, backslash or line break; at most 400 chars)."""
+    if len(arguments) != 4 or arguments[0] not in RULING_KINDS:
+        fail('Usage: ruling-row KIND WHAT WHY COST')
+
+    def clean(text):
+        return re.sub(r' {2,}', ' ', re.sub(r'[|\\\r\n]', ' ', text)).strip()
+
+    kind, what, why, cost = (clean(part) for part in arguments)
+    row = f'Ruling ({kind}): {what}. Why: {why}. Cost if wrong: {cost}.'
+    if len(row) > 400:
+        # At the last word boundary, unless one huge word would leave little more than the prefix.
+        cut = row[:401].rsplit(' ', 1)[0]
+        row = cut if 300 <= len(cut) <= 400 else row[:400]
+    print(row)
 
 
 def limit_binding():
@@ -1578,8 +1611,8 @@ def run_manifest(arguments):
         atomic(path, json.dumps(data) + '\n')
         print(data['attempts'])
     elif action == 'clear-attempts':
-        # Keeps `timeout_reruns` and `gate_unblocks`: a resumed pipeline must not reset "once
-        # per task" (only `start`, a human-approved run, does).
+        # Keeps `timeout_reruns`, `gate_unblocks` and `rulings`: a resumed pipeline must not
+        # reset "once per task" (only `start`, a human-approved run, does).
         data['attempts'] = 0
         for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
@@ -1629,6 +1662,20 @@ def run_manifest(arguments):
         if len(unblocks) >= 200:
             fail('gate-only block: too many gate-only block retries in this run')
         data['gate_unblocks'] = unblocks + [task]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'ruling':
+        # Claims the one host ruling of KIND allowed per KEY in this run (BR-01): a record-format
+        # repair the host makes instead of stopping, never twice for the same thing.
+        if (len(arguments) != 3 or arguments[1] not in RULING_KINDS
+                or not re.fullmatch(r'[A-Za-z0-9._-]{1,48}', arguments[2])):
+            fail(f'Usage: run-manifest ruling KIND KEY (KIND: {", ".join(RULING_KINDS)})')
+        kind, key = arguments[1], arguments[2]
+        rulings = data.get('rulings', [])
+        if f'{kind}:{key}' in rulings:
+            fail(f'ruling {kind} for {key} was already made once in this run')
+        if len(rulings) >= 200:
+            fail('ruling: too many rulings in this run')
+        data['rulings'] = rulings + [f'{kind}:{key}']
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
@@ -5014,6 +5061,8 @@ def main():
         stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'ruling-row':
+        ruling_row(arguments)
     elif command == 'state-root-check':
         state_root_check(arguments)
     elif command == 'checkpoint-guard':

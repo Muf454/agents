@@ -3986,7 +3986,7 @@ Validation: `-k gate_lock_wait` Ran 13 OK; `-k gate_only` Ran 7 OK; `-k gate_tim
 and waited for).
 
 ## T101 — Host ruling record and run-log row format (BR-01, helpers)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4032,6 +4032,18 @@ Targeted: `python3 -m unittest discover -s tests -k gate_unblock_manifest` (must
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/lib/workflow.py`: `RULING_KINDS`, `ruling_valid`, the
+`rulings` check inside `timeout_reruns_valid` (list, ≤200, unique, each `KIND:KEY` with a known
+kind and a valid key), `run-manifest ruling KIND KEY` (usage error on bad kind/key/count; repeat
+fails `ruling KIND for KEY was already made once in this run`, bytes unchanged; `too many` at
+200), `clear-attempts` keeps it, `start` drops it; top-level helper `ruling-row KIND WHAT WHY COST`
+(KIND validated too; `|`, `\`, CR, LF → space, space runs collapsed, ≤400 chars cut at the last
+word boundary, or hard-cut when that boundary would keep under 300 chars, e.g. one 2000-char
+word). docs/workflow.md run-manifest paragraph updated. Tests: `test_ruling_manifest_once_per_kind_and_key`,
+`_kept_on_resume_dropped_on_start`, `_wrong_shape_is_invalid`, `_row_is_one_safe_line`.
+Validation: `-k ruling_manifest` Ran 4 OK; `-k gate_unblock_manifest` Ran 5 OK;
+`-k timeout_rerun_manifest` Ran 4 OK; `.ai/bin/ai-check` PASS (1039 tests, 701.4 s, background
+and waited). No caller yet (T103–T105); flow unchanged, vault flow chart not edited.
 
 ## T102 — `tasks preflight`: order-only reorder, empty sections, overlap report (BR-02, helper)
 Status: TODO

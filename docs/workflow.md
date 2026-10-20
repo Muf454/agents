@@ -270,7 +270,12 @@ and rerun once in this run` and writes nothing. A human start drops the list; `c
 keeps it, so a resumed pipeline never resets "once per task". `gate_unblocks` has the same shape
 and lifetime for the one gate-only block retry per task (FL-32): `run-manifest gate-unblock ID`
 appends ID, or fails `gate-only block: ID was already retried once in this run` and writes
-nothing. A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+nothing. `rulings` has the same list rules and lifetime, with `KIND:KEY` items (BR-01):
+`run-manifest ruling KIND KEY` (KIND `queue-order`, `task-sections`, `disposition-cell` or
+`flow-line`; KEY `[A-Za-z0-9._-]{1,48}`) appends it, or fails `ruling KIND for KEY was already
+made once in this run` and writes nothing. `ruling-row KIND WHAT WHY COST` prints the run-log
+action cell `Ruling (KIND): WHAT. Why: WHY. Cost if wrong: COST.` with `|`, backslashes and line
+breaks turned into spaces, space runs collapsed, at most 400 characters (no caller yet). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch

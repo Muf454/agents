@@ -1,7 +1,8 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet in batch 9: this is the plan, written 2026-10-20 in an unattended planning session on
+Done so far: T101 (`run-manifest ruling KIND KEY`, `rulings` manifest field, `ruling-row`
+helper; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -22,7 +23,7 @@ unchanged because the host protects DONE blocks).
 - T112: docs, flow chart and handoff audit.
 
 ## Validation run
-None for batch 9 yet. Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
@@ -66,8 +67,8 @@ could edit only `.ai/` files, so the vault is not edited yet. T112 checks it.
 
 ### Covered by automated tests
 Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
-- `test_ruling_manifest_*` (T101: claim once, kept on resume, dropped on start, wrong shape
-  invalid, row without `|`).
+- `test_ruling_manifest_*` (T101, done: `_once_per_kind_and_key`,
+  `_kept_on_resume_dropped_on_start`, `_wrong_shape_is_invalid`, `_row_is_one_safe_line`).
 - `test_preflight_helper_*` (T102: raid-f4 order, sections, moved DONE task, cycle/unknown/prose,
   overlap report).
 - `test_preflight_pipeline_*` (T103: committed raid-f4 queue repaired and run completed, repeat

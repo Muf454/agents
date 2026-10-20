@@ -6332,6 +6332,77 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'gate')
         self.assertIn('too many', self.helper('run-manifest', 'gate-unblock', 'T999', expected=1).stderr)
 
+    def test_ruling_manifest_once_per_kind_and_key(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        self.assertEqual(json.loads(path.read_text())['rulings'], ['queue-order:T004'])
+        before = path.read_bytes()
+        again = self.helper('run-manifest', 'ruling', 'queue-order', 'T004', expected=1)
+        self.assertIn('ruling queue-order for T004 was already made once in this run', again.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'ruling', 'task-sections', 'T004')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T005')
+        self.assertEqual(json.loads(path.read_text())['rulings'],
+                         ['queue-order:T004', 'task-sections:T004', 'queue-order:T005'])
+        before = path.read_bytes()
+        for args in (('bogus', 'T004'), ('queue-order', 'a b'), ('queue-order', 'k' * 49),
+                     ('queue-order',), (), ('queue-order', 'T006', 'extra')):
+            with self.subTest(args=args):
+                usage = self.helper('run-manifest', 'ruling', *args, expected=1)
+                self.assertIn('Usage: run-manifest ruling KIND KEY', usage.stderr)
+                self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'ruling', 'flow-line', 'k' * 48)
+        self.helper('run-manifest', 'ruling', 'disposition-cell', 'F-1.a_b')
+
+    def test_ruling_manifest_kept_on_resume_dropped_on_start(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        self.helper('run-manifest', 'gate-unblock', 'T004')  # independent claims
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertEqual(json.loads(path.read_text())['rulings'], ['queue-order:T004'])
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004', expected=1)
+        self.approve_run()
+        self.assertNotIn('rulings', json.loads(path.read_text()))
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+
+    def test_ruling_manifest_wrong_shape_is_invalid(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        valid = json.loads(path.read_text())
+        many = [f'queue-order:T{n:03d}' for n in range(201)]
+        for value in ('x', ['a:b', 'a:b'], [1], ['queue-order'], ['bogus:T004'],
+                      ['queue-order:a b'], {'queue-order:T004': 1}, None, many):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(dict(valid, rulings=value)) + '\n')
+                invalid = self.helper('run-manifest', 'gate', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.helper('run-manifest', 'clear-attempts', expected=1)
+        path.write_text(json.dumps(dict(valid, rulings=many[:200])) + '\n')
+        self.helper('run-manifest', 'gate')
+        self.assertIn('too many', self.helper('run-manifest', 'ruling', 'flow-line', 'x', expected=1).stderr)
+
+    def test_ruling_manifest_row_is_one_safe_line(self):
+        row = self.helper('ruling-row', 'queue-order', 'moved T004 | after T006',
+                          'only the order was wrong', 'none').stdout
+        self.assertEqual(row, 'Ruling (queue-order): moved T004 after T006. Why: only the order '
+                              'was wrong. Cost if wrong: none.\n')
+        messy = self.helper('ruling-row', 'flow-line', 'a\\b\r\nc |d', 'w|hy', 'co\nst').stdout
+        self.assertEqual(messy, 'Ruling (flow-line): a b c d. Why: w hy. Cost if wrong: co st.\n')
+        long = self.helper('ruling-row', 'queue-order', ' '.join(['word'] * 400), 'why', 'cost').stdout
+        line = long[:-1]
+        self.assertTrue(line.startswith('Ruling (queue-order): word word'))
+        self.assertLessEqual(len(line), 400)
+        self.assertNotIn('\n', line)
+        self.assertNotIn('|', line)
+        self.assertTrue(line.endswith(' word'), line[-20:])  # cut at a word boundary
+        solid = self.helper('ruling-row', 'queue-order', 'x' * 2000, 'why', 'cost').stdout[:-1]
+        self.assertEqual(len(solid), 400)
+        for args in ((), ('queue-order', 'a', 'b'), ('queue-order', 'a', 'b', 'c', 'd'),
+                     ('bogus', 'a', 'b', 'c')):
+            with self.subTest(args=args):
+                usage = self.helper('ruling-row', *args, expected=1)
+                self.assertIn('Usage: ruling-row KIND WHAT WHY COST', usage.stderr)
+
     def stamp_outcome(self):
         result = self.helper('stamp', 'outcome', expected=None)
         self.assertEqual(result.returncode, 0, result.stderr)
