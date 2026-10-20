@@ -39,7 +39,7 @@ T037 tree: PASS (1006 tests, 644.5 s; run in the background and waited for).
   BATCH 8 GATE RULE tells them to run the gate in the background and not to block on it.
 
 ## Flow chart
-T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
+Flow chart updated: T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
 T039, T041 and T042 update the notifications table and the "Executable bits" bullet.
 
 ## Manual testing for the human

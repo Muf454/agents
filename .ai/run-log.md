@@ -495,3 +495,5 @@
 | 2026-10-19T06:02:18Z | runner | T037 | stopped (exit 1); inspect state/diff before resuming | see local logs | 3bf2529 | No merge or deployment performed |
 | 2026-10-19T07:17:35Z | mission control | T037 | session timed out (exit 124) mid-task; partial work checkpointed as WIP, model raised to opus, run restarted | FAIL (2 subtests, WIP) | 3bf2529 | No merge or deployment performed |
 | 2026-10-19 | claude | T037 | WIP reconciled; prompts/README/RUNNER CONTRACT background-gate rule DONE | PASS (targeted 1+18+3; gate 1006 tests 644.5 s, background + waited) | 1b2d620 | Vault flow chart and hub Log already updated |
+| 2026-10-19T07:50:20Z | runner | T037 | stopped (exit 1); inspect state/diff before resuming | see local logs | e41cb62 | No merge or deployment performed |
+| 2026-10-20T17:39:49Z | mission control | T037 | gate failed only on the handoff "## Flow chart" line format; line fixed to start "Flow chart updated", T037 records restored to DONE | PASS (1006 tests, 637.5 s) | e41cb62 | No merge or deployment performed |
