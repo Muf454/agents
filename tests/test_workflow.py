@@ -10001,6 +10001,22 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 result = self.tool('ai-check', expected=1, AI_CHECK_LOCK_WAIT=value)
                 self.assertIn(f'Invalid AI_CHECK_LOCK_WAIT: {value}', result.stderr)
 
+    def test_gate_lock_wait_leading_zero_is_decimal(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='08')
+        self.assertIn('Waiting up to 8s', result.stderr)
+        self.assertNotIn('value too great for base', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT, AI_CHECK_LOCK_WAIT='00')
+        self.assertIsNone(holder.poll())
+        self.assertIn('Validation is already running.', result.stderr)
+        self.assertNotIn('Waiting up to', result.stderr)
+
     # One AI_CHECK_TIMEOUT deadline covers the lock wait and the validator (review M1, T044).
     def gate_marked_validator(self, sleep):
         marker = self.base / 'validator-ran'

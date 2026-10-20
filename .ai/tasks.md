@@ -3878,7 +3878,7 @@ Evidence: `-k gate_lock_wait` Ran 9 OK (three runs); `-k gate_time` Ran 4 OK;
 1031 tests OK in 662.4 s, exit 0.
 
 ## T045 — `AI_CHECK_LOCK_WAIT` with leading zeros is read as decimal (review N1)
-Status: TODO
+Status: DONE
 Dependencies: T044
 Model: sonnet
 
@@ -3907,4 +3907,10 @@ Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `R
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-20. No script change needed: T044 already normalises `AI_CHECK_LOCK_WAIT` and
+`AI_CHECK_TIMEOUT` with `10#` (`scripts/ai-check` line 19). Added
+`test_gate_lock_wait_leading_zero_is_decimal` (`08` → `Waiting up to 8s`, passes, stamp verifies, no
+`value too great for base`) and `test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once` (`00`).
+Evidence: `-k gate_lock_wait` Ran 11 OK; full `.ai/bin/ai-check` in the background, waited, no edits
+meanwhile: 1033 tests OK in 664.2 s, exit 0.
 
