@@ -312,3 +312,62 @@ ai_log() {
     "$(date -u +%FT%TZ)" "$1" "$2" "$3" \
     "$(git rev-parse --short HEAD 2>/dev/null || printf none)" "$4" >> .ai/run-log.md
 }
+# BR-02 host rulings (T103). OUT is `tasks preflight` output: `queue-order`/`task-sections`
+# change lines, then `overlap` lines. ai_ruling_rows TASK OUT appends one run-log Ruling row per
+# change line under TASK.
+ai_ruling_rows() {
+  local line kind rest why cost
+  while IFS= read -r line; do
+    read -r kind rest <<< "$line"
+    case "$kind" in
+      queue-order) why='only the order was wrong; dependencies first, no DONE task moved'
+                   cost='a task runs later than planned' ;;
+      task-sections) why='empty section added to a TODO task'; cost='none, the section is empty' ;;
+      *) continue ;;
+    esac
+    ai_log "$1" "$(ai_helper ruling-row "$kind" "$rest" "$why" "$cost")" 'n/a' 'host ruling'
+  done <<< "$2"
+}
+# The overlap report of OUT (advisory: never stops a run).
+ai_overlap_lines() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" != overlap\ * ]] || printf '%s\n' "$line"
+  done <<< "$1"
+}
+# ai_queue_ruling TASK: repair .ai/tasks.md when its only faults are the order of TODO tasks or
+# their empty sections, each moved or filled task claimed once per run (`run-manifest ruling`),
+# with Ruling rows under TASK and one 🔧 notification. Returns 0 when it changed the queue; 1
+# when it changed nothing (valid, unfixable or a refused claim, e.g. a repeat or no run
+# manifest), and the caller's queue check decides as before. The caller commits.
+ai_queue_ruling() {
+  local out line kind id rest changes=() moved=() filled=() summary=''
+  out=$(ai_helper tasks preflight --dry-run 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    read -r kind id rest <<< "$line"
+    case "$kind" in
+      queue-order) changes+=("$line"); moved+=("$id ${rest#placed }") ;;
+      task-sections) changes+=("$line"); filled+=("$id") ;;
+    esac
+  done <<< "$out"
+  if (( ${#changes[@]} == 0 )); then
+    ai_overlap_lines "$out"
+    return 1
+  fi
+  for line in "${changes[@]}"; do
+    read -r kind id _ <<< "$line"
+    ai_helper run-manifest ruling "$kind" "$id" >/dev/null 2>&1 || return 1
+  done
+  out=$(ai_helper tasks preflight 2>/dev/null) || return 1
+  printf '%s\n' "$out"
+  ai_ruling_rows "$1" "$out"
+  if (( ${#moved[@]} )); then
+    summary=$(printf '; %s' "${moved[@]}")
+    summary="reordered (${summary#; })"
+  fi
+  if (( ${#filled[@]} )); then
+    line=$(printf ', %s' "${filled[@]}")
+    summary+="${summary:+, }sections added (${line#, })"
+  fi
+  ai_notify "🔧 Ruling: task queue $summary; see the run log."
+}

@@ -4119,7 +4119,7 @@ Evidence: `-k preflight_helper` Ran 7 tests OK; `-k reorder` Ran 12 OK; `-k task
 no edits meanwhile). No caller yet (T103); flow unchanged, vault not edited.
 
 ## T103 — Pre-flight at pipeline start, after plan revisions and after triage (BR-02, FL-24, wiring)
-Status: TODO
+Status: DONE
 Dependencies: T101, T102
 Model: opus
 
@@ -4184,6 +4184,33 @@ Targeted: `python3 -m unittest discover -s tests -k revision_queue_repair` (must
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/lib/common.sh`: `ai_queue_ruling TASK` (dry run →
+`run-manifest ruling` per `queue-order`/`task-sections` line → real `tasks preflight` → one
+`ai_log` row per change via `ruling-row` → one `🔧 Ruling: task queue reordered (T004 after T005,
+T006); see the run log.`; returns 1 and changes nothing on a failed dry run or the first refused
+claim; earlier claims of the same scan stay spent), `ai_ruling_rows`, `ai_overlap_lines`.
+`ai-pipeline`: after the `revision-queue-repair` block, not armed and clean →
+`ai_queue_ruling preflight` → `host_commit 'chore(ai): ruling: task queue' .ai/tasks.md
+.ai/run-log.md`, then `tasks check` as before. `ai-run --triage`: `ai_queue_ruling triage` after
+`fill-sections`, inside the counted triage commit (also notifies). `--plan`/`--revise-plan`: a
+dry run before today's fill+reorder names the changes; rows (`planning`/`plan-revision`) and
+overlap lines added after the check (no claim, no notification). Tests: `test_preflight_pipeline_*`
+(6: `raid_f4_committed_queue`, `same_ruling_twice_stops` (manifest claimed, resumed with
+`AI_RECOVERY_ATTEMPT=1`), `done_task_would_move_stops`, `triage_reorders_fix_task` (mock
+`triage-out-of-order`: T002 depends on T003; IDs follow the fixture queue instead of T010/T011),
+`plan_session_logs_rulings` (mock `plan-out-of-order-shared`), `revision_logs_rulings_in_the_revision_commit`).
+Changed existing tests: `test_queue_check_invalid_queue_stops_plan_review`, `_escalates_without_recovery_session`,
+`_stops_with_skip_plan_review` now use `unfixable_queue()` (a cycle), because the old order-only
+queue is now repaired; `test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline`
+removed (its behaviour is reversed by this task; covered by the new raid-f4 and repeat tests). No
+expected run-log rows in `-k revision_queue_repair`/`plan_revision`/`triage` tests needed changes.
+Docs: docs/workflow.md "Pre-flight queue scan" paragraph, README queue sentence and 🔧 Ruling
+row; vault flow chart (pre-flight step, note, Rulings bullet, 🔧 Ruling row, `updated:`) and hub Log.
+Validation: `-k preflight_pipeline` Ran 6 OK; `-k revision_queue_repair` Ran 0 (matches no test
+name; the tests are `test_queue_repair_*`/`test_queue_recovery_*`: with `-k queue_check`,
+`-k task_sections` Ran 32 OK); `-k plan_revision -k triage` Ran 49 OK; `-k Docs -k flow_this_repo
+-k preflight` Ran 18 OK; `.ai/bin/ai-check` PASS (1051 tests, 678.6 s, background and waited, no
+edits meanwhile).
 
 ## T104 — Ruling: a disposition cell with more than the bare finding ID (BR-01, FL-30, FL-25)
 Status: TODO

@@ -300,8 +300,12 @@ if 'PLANNING CONTRACT' in prompt:
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
     if mode == 'plan-missing-sections':
         second = drop_sections(second)
-    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
+    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section', 'plan-out-of-order-shared'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
+    if mode == 'plan-out-of-order-shared':
+        first, second = (part.replace(f'### Likely affected modules\n{tid}.txt\n',
+                                      '### Likely affected modules\nsrc/shared.py\n')
+                         for part, tid in ((first, 'T001'), (second, 'T002')))
     if mode == 'plan-bad-queue':
         second = second.replace('Dependencies: none', 'Dependencies: T001')
     preamble = '## Context\nKeep this intro.\n\n' if mode == 'plan-preamble-section' else ''
@@ -424,6 +428,11 @@ if 'TRIAGE CONTRACT' in prompt:
             block = drop_sections(block)
         if mode == 'triage-missing-goal':
             block = drop_sections(block, ('Goal', 'Likely affected modules', 'Result / notes'))
+        if mode == 'triage-out-of-order':
+            # Two fix tasks, the first depending on the second (appended after it).
+            later = 'T%03d' % (max(ids) + 2)
+            block = (block.replace('Dependencies: none', 'Dependencies: ' + later)
+                     + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', later))
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
         review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
@@ -2860,6 +2869,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def invalid_queue(self):
         return task('T001', dependencies='T002') + '\n' + task('T002')
 
+    def unfixable_queue(self):
+        """Invalid and beyond the pipeline's pre-flight ruling (a cycle; T103)."""
+        return task('T001', dependencies='T002') + '\n' + task('T002', dependencies='T001')
+
     def test_queue_check_command(self):
         self.ready()
         result = self.tool('ai-task', 'check')
@@ -3157,7 +3170,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('No real tasks', result.stderr)
 
     def test_queue_check_invalid_queue_stops_plan_review(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
         self.assertFalse((self.base / 'codex-plan-calls').exists())
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -3172,7 +3185,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
 
     def test_queue_check_invalid_queue_escalates_without_recovery_session(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
         self.assertFalse((self.base / 'recover-calls').exists())
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -3184,7 +3197,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.base / 'codex-plan-calls').exists())
 
     def test_queue_check_invalid_queue_stops_with_skip_plan_review(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
                   expected=1)
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -4914,11 +4927,112 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn(done, queue)
         self.helper('tasks', 'check')
 
-    def test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline(self):
-        self.ready(self.invalid_queue())
+    # ---------------------------------------------------------------- pre-flight rulings (BR-02, T103)
+    def raid_queue(self):
+        """The raid-f4 shape: T004 depends on the later T005 and T006."""
+        return (task('T001') + task('T002') + task('T003')
+                + task('T004', dependencies='T001, T005, T006') + task('T005') + task('T006'))
+
+    def ruling_rows(self, kind):
+        return [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if f'Ruling ({kind})' in line]
+
+    def assert_one_row_cells(self, row):
+        # The run-log row format: 7 cells, so 8 pipes; the ruling text adds none.
+        self.assertEqual(row.count('|'), 8, row)
+
+    def test_preflight_pipeline_raid_f4_committed_queue(self):
+        self.ready(self.raid_queue())
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('queue-order T004 placed after T005, T006', result.stdout)
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+        self.assertEqual(subjects.count('chore(ai): ruling: task queue'), 1)
+        self.assertLess(subjects.index('chore(ai): ruling: task queue'),
+                        subjects.index('chore(ai): record plan review'))
+        ruling = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): ruling: task queue$']).stdout.strip()
+        self.assertEqual(self.run_cmd(['git', 'show', '--name-only', '--format=', ruling]).stdout.split(),
+                         ['.ai/run-log.md', '.ai/tasks.md'])
+        rows = self.ruling_rows('queue-order')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('Ruling (queue-order): T004 placed after T005, T006. Why: only the order was wrong', rows[0])
+        self.assert_one_row_cells(rows[0])
+        self.assertIn('🔧 Ruling: task queue reordered (T004 after T005, T006); see the run log.',
+                      self.notifications())
+        self.assertNotIn('⛔', self.notifications())
+        self.assertTrue((self.base / 'codex-plan-calls').exists())
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+        self.helper('tasks', 'complete')
+        done = [s.split()[1] for s in subjects if re.fullmatch(r'implement T\d{3}', s)]
+        self.assertEqual(done, ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+
+    def test_preflight_pipeline_same_ruling_twice_stops(self):
+        self.ready(self.raid_queue())
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Task queue is invalid: T004: dependencies must exist earlier in the queue',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()),
+                         ['T001', 'T002', 'T003', 'T004', 'T005', 'T006'])
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_done_task_would_move_stops(self):
+        self.ready(task('T001', 'DONE', dependencies='T002') + task('T002'))
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
-        self.assertIn('Task queue is invalid:', (self.project / '.ai/local/last-error').read_text())
+        self.assertIn('Task queue is invalid: T001: dependencies must exist earlier in the queue: T002',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
         self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_triage_reorders_fix_task(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-out-of-order')
+        self.assertIn('queue-order T002 placed after T003', result.stdout)
+        counted = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.strip()
+        self.assertEqual(self.queue_ids(self.run_cmd(['git', 'show', f'{counted}:.ai/tasks.md']).stdout),
+                         ['T001', 'T003', 'T002'])
+        row = [line for line in self.run_cmd(['git', 'show', f'{counted}:.ai/run-log.md']).stdout.splitlines()
+               if 'Ruling (queue-order)' in line]
+        self.assertEqual(len(row), 1)
+        self.assertIn('| triage | Ruling (queue-order): T002 placed after T003.', row[0])
+        self.assert_one_row_cells(row[0])
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
+        self.assertIn('🔧 Ruling: task queue reordered (T002 after T003)', self.notifications())
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_preflight_pipeline_plan_session_logs_rulings(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-out-of-order-shared')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertIn('overlap T002 T001 src/shared.py', result.stdout.splitlines())
+        rows = self.ruling_rows('queue-order')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| planning | Ruling (queue-order): T001 placed after T002.', rows[0])
+        self.assert_one_row_cells(rows[0])
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_preflight_pipeline_revision_logs_rulings_in_the_revision_commit(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-prereq')
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        rows = [line for line in self.run_cmd(['git', 'show', f'{revision}:.ai/run-log.md']).stdout.splitlines()
+                if 'Ruling (queue-order)' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| plan-revision | Ruling (queue-order): T001 placed after T002.', rows[0])
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
 
     def test_queue_repair_revision_prompt_places_new_tasks_first(self):
         start = self.revise_ready()

@@ -458,6 +458,13 @@ if [[ "$plan_review" == yes ]] && ! armed_resume; then
   }
   [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
 fi
+# Pre-flight (BR-02): a committed queue whose only faults are the order of TODO tasks or their
+# empty sections is repaired once per task per run and committed with its Ruling rows (a stale
+# plan review is then reviewed again); anything else stops at the queue check below as before.
+if ! armed_resume && [[ -z "$(git status --porcelain --untracked-files=all)" ]] && \
+    ai_queue_ruling preflight; then
+  host_commit 'chore(ai): ruling: task queue' .ai/tasks.md .ai/run-log.md
+fi
 queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || {
   printf 'Task queue is invalid: %s\n' "${queue_error#Error: }" > .ai/local/last-error
   stop "$queue_stage"

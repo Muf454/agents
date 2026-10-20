@@ -510,8 +510,7 @@ cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before
 (including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
 `## ` section between two tasks blocks reordering.
 `workflow.py tasks fill-sections` (host-only, not an `ai-task` subcommand) gives TODO tasks a missing `### Likely affected modules` (body `(not listed)`) or `### Result / notes` heading at its canonical position; other sections and tasks are untouched, and nothing is written when nothing is missing.
-`workflow.py tasks preflight [--dry-run]` (host-only, BR-02; no caller yet, T103 wires it in)
-combines both repairs for a queue whose only faults are the order and empty sections: it fails
+`workflow.py tasks preflight [--dry-run]` (host-only, BR-02) combines both repairs for a queue whose only faults are the order and empty sections: it fails
 with the `tasks reorder` errors, or with `T: dependencies must exist earlier in the queue: DEP`
 when a DONE, IN_PROGRESS or BLOCKED task would move, and with the `ai-task check` message when the
 repaired queue is still invalid; in every failure nothing is written. Otherwise it prints one line per change
@@ -520,13 +519,32 @@ TASK added SECTION, …`), then `overlap A B PATH, …` for each pair of TODO ta
 affected modules` share a path-like token (contains `/` or `.`; at most 20 lines, then `overlap …
 N more`). The real run writes the queue once (mode kept) and the overlap lines to
 `.ai/local/preflight.md` (skipped quietly when `.ai/local` is unsafe); `--dry-run` writes nothing.
+Pre-flight queue scan (host ruling, T103; `ai_queue_ruling` in `lib/common.sh`): right before
+the queue check, on a clean checkout and never on an armed resume, `ai-pipeline` dry-runs
+`tasks preflight`; when it succeeds with change lines it claims `run-manifest ruling queue-order
+T` or `task-sections T` for each changed task, runs it for real, appends one run-log row per
+change (task `preflight`, action `ruling-row` cell, e.g. `Ruling (queue-order): T004 placed
+after T005, T006. Why: only the order was wrong; dependencies first, no DONE task moved. Cost if
+wrong: a task runs later than planned.`), commits `chore(ai): ruling: task queue` (`.ai/tasks.md`
+and `.ai/run-log.md`) and sends `🔧 Ruling: task queue reordered (T004 after T005, T006); see the
+run log.` The changed queue makes an earlier plan review stale, so the plan is reviewed again. A
+failed dry run (a DONE/IN_PROGRESS/BLOCKED task would move, a cycle, prose, another missing
+section) or a refused claim (the same task already ruled on in this run; no run manifest)
+changes nothing, and the queue check stops as before. A claim is spent once made, so a later
+claim of the same scan failing leaves the earlier one used. The overlap lines are printed only.
+`ai-run --triage` runs the same scan after `fill-sections` (task `triage`); its queue change, rows
+and the notification go into the counted triage commit (no extra commit). `ai-run --plan` and
+`--revise-plan` keep their unclaimed `fill-sections` + `reorder` repair and add one Ruling row
+per change named by a dry run taken before it (task `planning`, left uncommitted with the plan,
+or `plan-revision`, in the revision commit) and print the overlap lines; a dry run that fails
+(e.g. a `--revision` plan that moves a DONE task) only means no rows.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
 when it differs from HEAD's, only plan revision records are dirty (`plan-revision-scope HEAD`),
 HEAD's queue is valid with no DONE task, and the verified current plan review has no revision
 record yet; otherwise it does nothing and the checks reject as before (a committed out-of-order
-queue still stops here). A repair failure stops with `Plan revision stage: task queue is
+queue is the pre-flight scan's). A repair failure stops with `Plan revision stage: task queue is
 invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
 `plan-dispositions-check`, so a complete section is recorded without a new session.
 Stages, each resumable by rerunning: plan review (only while no task is DONE;

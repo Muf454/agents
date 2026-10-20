@@ -4,7 +4,11 @@
 Done so far: T101 (`run-manifest ruling KIND KEY`, `rulings` manifest field, `ruling-row`
 helper; no caller yet, flow unchanged); T102 (`workflow.py tasks preflight [--dry-run]`: moves
 only TODO tasks, fills empty sections, prints `queue-order`/`task-sections`/`overlap` lines,
-writes `.ai/local/preflight.md`; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
+writes `.ai/local/preflight.md`); T103 (pre-flight wiring: `ai-pipeline` repairs a committed
+queue whose only faults are TODO-task order or empty sections once per task per run, commits
+`chore(ai): ruling: task queue` with `Ruling (…)` rows and a 🔧 notification; `ai-run --triage`
+does the same inside its counted commit; `--plan`/`--revise-plan` add rows and overlap lines;
+shared `ai_queue_ruling`/`ai_ruling_rows`/`ai_overlap_lines` in `scripts/lib/common.sh`). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -25,7 +29,7 @@ unchanged because the host protects DONE blocks).
 - T112: docs, flow chart and handoff audit.
 
 ## Validation run
-T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
@@ -45,9 +49,11 @@ Recorded as A1–A13 in `.ai/project-spec.md`. The ones that shape behaviour mos
   rule); the queue header's BATCH 8 GATE RULE still applies.
 
 ## Flow chart
-Flow chart updated: planned only. T103, T104, T105, T107, T109 and T110 update vault
-`agents-flow.md` (pre-flight scan and rulings, fresh retry, reviewer choice); the planning session
-could edit only `.ai/` files, so the vault is not edited yet. T112 checks it.
+Flow chart updated (T103, 2026-10-21): vault `agents-flow.md` "The big picture" has a "Pre-flight
+queue scan" step before the plan review, a "Pre-flight queue scan" note, a "Rulings (BR-01/BR-02,
+T103, 2026-10-20)" bullet under "When something goes wrong" and the 🔧 Ruling notification row;
+hub Log line added. T104, T105, T107, T109 and T110 still update it (rulings, fresh retry,
+reviewer choice); T112 checks it.
 
 ## Manual testing for the human
 
@@ -75,8 +81,13 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `_done_task_never_moves`, `_unfixable_queues_fail_like_reorder`, `_valid_queue_is_untouched`,
   `_reports_overlaps_between_todo_tasks` (an unsafe `.ai/local` is skipped quietly),
   `_caps_overlap_lines`).
-- `test_preflight_pipeline_*` (T103: committed raid-f4 queue repaired and run completed, repeat
-  stops, DONE task would move stops, triage reorder, planning ruling row).
+- `test_preflight_pipeline_*` (T103, done: `_raid_f4_committed_queue` (ruling commit before the
+  plan review, one 7-cell `Ruling (queue-order)` row, 🔧 notification, T001 T002 T003 T005 T006
+  T004 implemented in that order), `_same_ruling_twice_stops`, `_done_task_would_move_stops`,
+  `_triage_reorders_fix_task` (row in the counted triage commit, no extra commit),
+  `_plan_session_logs_rulings` (row + `overlap` line), `_revision_logs_rulings_in_the_revision_commit`).
+  `test_queue_check_invalid_queue_*` now use a cycle (`unfixable_queue`), since the old
+  order-only queue is repaired by the pre-flight.
 - `test_ruling_disposition_*` (T104: markup and CRITICAL cells rewritten, ambiguous cells left,
   plan section only, repeat stops).
 - `test_ruling_flow_line_*` (T105: blank line, wording, unchanged text, missing section, runner and
@@ -91,8 +102,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - Gate files: none need changing for this batch.
 - After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
   FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
-- Vault hub Log: each flow-changing task appends its own dated line (the planning session could
-  edit only `.ai/` files, so it added none).
+- Vault hub Log: each flow-changing task appends its own dated line (T103 added one).
 
 ## Next action
-Approve and start the run; the runner begins with T101. Nothing is merged or deployed.
+The runner continues with T104. Nothing is merged or deployed.

@@ -439,6 +439,9 @@ if [[ -n "$plan_file" ]]; then
   keep_error=$(ai_helper plan-keeps-done "$since" --baseline "$plan_baseline" 2>&1 >/dev/null) || \
     ai_die "Planning: ${keep_error#Error: }"
   # Dependencies first; the reorder keeps every block's text, so DONE tasks stay as checked.
+  # Repaired as before (no claim: no run manifest here); the pre-flight names each change for
+  # its Ruling row (none when a DONE task moves) and reports overlapping TODO tasks.
+  preflight_out=$(ai_helper tasks preflight --dry-run 2>/dev/null) || preflight_out=''
   fill_out=$(ai_helper tasks fill-sections 2>&1) || \
     ai_die "Planning: task queue is invalid: ${fill_out#Error: }"
   [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
@@ -447,6 +450,8 @@ if [[ -n "$plan_file" ]]; then
   [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
   queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
     ai_die "Planning: task queue is invalid: ${queue_error#Error: }"
+  ai_overlap_lines "$preflight_out"
+  ai_ruling_rows planning "$preflight_out"
   read -r _ plan_total < <(ai_helper tasks counts) || ai_die 'Planning: cannot count the tasks.'
   ai_observe planned "$plan_total tasks"
   ai_helper outcome plan done "$plan_model" "$(( SECONDS - plan_started ))" "$plan_total" \
@@ -551,6 +556,8 @@ if [[ "$revise_plan" == yes ]]; then
     ai_die 'A Claude session modified .ai/reviews/plan.md; inspect and restore the plan review.'
   # A prerequisite added after its dependents is repaired here (committed with the revision);
   # a cycle, unknown ID or prose stops: ai-recover always escalates "Plan revision stage".
+  # No claim (as after planning); the pre-flight names each change for its Ruling row.
+  preflight_out=$(ai_helper tasks preflight --dry-run 2>/dev/null) || preflight_out=''
   fill_out=$(ai_helper tasks fill-sections 2>&1) || \
     ai_die "Plan revision stage: task queue is invalid: ${fill_out#Error: }"
   [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
@@ -559,6 +566,7 @@ if [[ "$revise_plan" == yes ]]; then
   [[ -z "$reorder_out" ]] || printf '%s\n' "$reorder_out"
   queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || \
     ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
+  ai_overlap_lines "$preflight_out"
   revision_scope 'Plan revision stage: '
   counts=$(ai_helper plan-dispositions-check "${check_args[@]}" 2>&1) || \
     ai_die "Plan revision incomplete: ${counts#Error: }"
@@ -569,6 +577,7 @@ if [[ "$revise_plan" == yes ]]; then
   accepted=${BASH_REMATCH[1]} rejected=${BASH_REMATCH[2]} needs_human=${BASH_REMATCH[3]}
   # The log line and state go INTO the counted commit: nothing writes to the checkout after it,
   # so the following plan review starts from a clean checkout.
+  ai_ruling_rows plan-revision "$preflight_out"
   ai_log plan-revision "plan revised (round $revision_round): accepted $accepted, rejected $rejected, needs-human $needs_human" \
     'n/a' 'Plan review runs again'
   if (( needs_human > 0 )); then
@@ -643,6 +652,9 @@ if [[ "$triage" == yes ]]; then
   fill_out=$(ai_helper tasks fill-sections 2>&1) || \
     ai_die "Triage stage: task queue is invalid: ${fill_out#Error: }"
   [[ -z "$fill_out" ]] || printf '%s\n' "$fill_out"
+  # A fix task appended after the task that depends on it: one claimed ruling per moved task,
+  # its row and queue change land in the counted triage commit below (no extra commit).
+  ai_queue_ruling triage || true
   ai_helper tasks check
   triage_scope ''
   error=$(ai_helper triage-check --fresh 2>&1 >/dev/null) || ai_die "Triage incomplete: ${error#Error: }"

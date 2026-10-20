@@ -184,7 +184,9 @@ Before leaving an implementation session unattended:
    line by hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
-   check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
+   check and stops on an invalid queue, unless its pre-flight scan could fix it: only TODO tasks
+   out of dependency order or missing an empty section, repaired once per task per run, committed
+   as `chore(ai): ruling: task queue` with a `Ruling (…)` run-log row and a 🔧 notification). `.ai/bin/ai-task reorder` rewrites the queue so every
    task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
    prose in `Dependencies:`. `python3 scripts/lib/workflow.py tasks fill-sections` (host-only)
    adds a missing `### Likely affected modules` or `### Result / notes` heading to TODO tasks and
@@ -425,6 +427,7 @@ commits. `--no-pr` stops after the review;
 | ✅ Done / ⚠ Blocked | a task finished (with progress, e.g. 1/2), or was blocked |
 | ⏸ PAUSED | usage limit; it resumes by itself at the stated time |
 | 🔧 Recovering / Recovered | auto-recovery is handling a stop; no action needed yet |
+| 🔧 Ruling | the host fixed a task queue whose only fault was the order or an empty section, once per task per run; see the run log |
 | ⚠ HUNG? | a runner is alive but silent for too long; it keeps running |
 | ⛔ STOPPED, needs you | fully stopped; nothing automatic follows. Says why and what to do |
 | 🏁 FINISHED | all tasks done: review result, PR link and your numbered todo list |
