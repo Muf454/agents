@@ -508,3 +508,16 @@
 | 2026-10-20T20:00:00Z | claude (sonnet) | T042 | DONE: one `AI_PROTECTED_PATHS` list in common.sh for the guard digest and `exec-bits ROOT...`; 4 new `test_exec_bits_*` tests; docs, vault flow chart and hub Log | PASS (ai-check 1027 tests; -k exec_bits 11 OK; -k gate_change 6 OK) | pending | none |
 | 2026-10-20T19:53:10Z | runner | T042 | completed | PASS | de8facd | Claude checkpointed; continuing queue |
 | 2026-10-20 | claude (haiku) | T043 | DONE: docs/flow/handoff audit; README protected-path clause added; handoff rewritten for T037–T043; hub Log line | PASS (ai-check 1027 tests, 673.6 s, background and waited, exit 0; -k Docs 3 OK; -k flow_this_repo 1 OK) | pending | Queue complete; no merge or deployment |
+| 2026-10-20T20:17:33Z | runner | T043 | completed | PASS | 48fd9b5 | Claude checkpointed; continuing queue |
+| 2026-10-20T20:28:50Z | runner | none | queue complete; ready for independent review | PASS | 4e5976c | Human acceptance remains |
+| 2026-10-20T20:33:59Z | runner | triage | review triaged into dispositions/tasks | n/a | 1216101 | Fix tasks run next |
+| 2026-10-20T21:00:00Z | claude (opus) | T044 | DONE (review M1): `ai-check` one `AI_CHECK_TIMEOUT` deadline (wait capped and deducted; `budget <= 0` → 124 `Validation time limit reached while waiting for the lock.`, validator not started); timeout validated, both values `10#`; 4 new `test_gate_lock_wait_*` tests; README, docs/workflow.md, vault flow chart + hub Log | PASS (ai-check 1031 tests, 662.4 s, background and waited; -k gate_lock_wait 9 OK; -k gate_time 4 OK; -k session_gate_allowance 5 OK; mutation `budget=$limit` caught) | parent 363fa62 | T045 next |
+| 2026-10-20T21:00:56Z | runner | T044 | completed | PASS | 7ebee4a | Claude checkpointed; continuing queue |
+| 2026-10-20T21:30:00Z | claude (sonnet) | T045 | DONE (review N1): `10#` normalisation already in `ai-check` from T044; added `test_gate_lock_wait_leading_zero_is_decimal` and `_zero_with_leading_zeros_refuses_at_once` | PASS (ai-check 1033 tests, 664.2 s, background and waited; -k gate_lock_wait 11 OK) | pending | none |
+| 2026-10-20T21:33:18Z | runner | T045 | completed | PASS | 5d94082 | Claude checkpointed; continuing queue |
+| 2026-10-20T21:44:26Z | runner | none | queue complete; ready for independent review | PASS | 607a8e8 | Human acceptance remains |
+| 2026-10-20T21:48:21Z | runner | triage | review triaged into dispositions/tasks | n/a | 6a08b96 | Fix tasks run next |
+| 2026-10-21T00:00:00Z | claude (opus) | T046 | DONE (review M2): timed-out lock waiter exits 124 without `stamp invalidate`; added `test_gate_lock_wait_timeout_keeps_the_active_stamp` and `_keeps_change_detection` (mutation check fails both) | PASS (ai-check 1035 tests, 675.5 s, background and waited; -k gate_lock_wait 13 OK, gate_only 7 OK) | pending | none |
+| 2026-10-20T22:16:15Z | runner | T046 | completed | PASS | b47e167 | Claude checkpointed; continuing queue |
+| 2026-10-20T22:27:42Z | runner | none | queue complete; ready for independent review | PASS | c795520 | Human acceptance remains |
+| 2026-10-20T22:29:25Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/35 | PASS | 5ef2485 | Human acceptance and merge remain |

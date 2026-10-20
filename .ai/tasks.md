@@ -12,8 +12,8 @@ Current batch (batch 9, `fix/flow-batch-9` from `fix/flow-batch-8` at 48fd9b5, p
 approved by Zack 2026-10-20): T101–T112, from vault `agents-backlog.md` BR-01, BR-02, BR-03, BR-14
 (section "Borrowed from other projects (2026-10-20)"), FL-24, FL-25, FL-30 and FL-33. Design:
 `.ai/current-plan.md`; scope and assumptions A1–A13: `.ai/project-spec.md`. Line references for
-T101–T112 are at 48fd9b5; re-check them before editing. T001–T043 are batches 6, 7 and 8 (DONE;
-batch 8 on `fix/flow-batch-8`, not merged), kept unchanged because the host protects DONE blocks;
+T101–T112 are at 48fd9b5; re-check them before editing. T001–T046 are batches 6, 7 and 8 (DONE;
+batch 8 on `fix/flow-batch-8`, PR #35, not merged; T044–T046 are its review fixes), kept unchanged because the host protects DONE blocks;
 their line references and gate notes are historical.
 Run-log rows written by the host must contain no `|` (ai_log does not escape it): use the
 `ruling-row` helper (T101) or strip it.
@@ -3812,6 +3812,178 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 - Checked, no change needed: `docs/workflow.md` gate-only retry, lock wait and exec-bits sections; `scripts/ai-run` RUNNER CONTRACT, `gate_only_retry`, `host_gate` (`min(remaining, 900)`); `runner.md` and `triage.md` gate bullets; `workflow.py` `tasks next` (prefers IN_PROGRESS); vault `agents-flow.md` (consistent with the code, not edited).
 - Every test group named in the handoff exists in `tests/test_workflow.py`.
 
+## T044 — Lock waiting and validation share one `AI_CHECK_TIMEOUT` deadline (review M1)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+`ai-check` never runs longer than `AI_CHECK_TIMEOUT` (plus GNU `timeout`'s kill-after) in total:
+seconds spent waiting for `.ai/local/validation.lock` are deducted from the validator's budget, so
+a host gate (`host_gate` in `scripts/ai-run`, which passes `AI_CHECK_TIMEOUT=$remaining`) cannot
+return success after the run deadline.
+
+### Implementation notes
+- Review M1: `scripts/ai-check` (~15–28) waits up to `AI_CHECK_LOCK_WAIT` for the lock, then starts
+  the whole `${AI_CHECK_TIMEOUT:-1800}` for `.ai/validate`; the final gate in `scripts/ai-run`
+  (~854–866) does not re-check remaining time after `host_gate`.
+- Validate `AI_CHECK_TIMEOUT` (default 1800) as decimal digits like the wait (reuse one pattern;
+  T045 handles leading zeros, so normalise with `10#` here already if convenient). Record the start
+  (`SECONDS`) before `flock -n`; cap the lock wait at the timeout (`flock -w min(wait, timeout)`).
+  After the lock is acquired compute `budget = timeout - (SECONDS - start)`; if `budget <= 0`
+  print `Error: Validation time limit reached while waiting for the lock.` and exit 124 (the same
+  code GNU `timeout` returns) WITHOUT starting the validator. Never pass 0 to `timeout` (0 disables
+  its deadline). Otherwise run `timeout … "$budget" bash .ai/validate`.
+- A lock wait that runs out because the timeout cap was hit (not the wait) also exits 124 with
+  that message; a wait that runs out first keeps `Validation is already running.` (exit 1).
+- Keep the toolkit-repo branch (~4–12) unchanged. `host_gate` keeps passing `remaining`; no
+  ai-run change is needed beyond a comment if the behaviour is now exact.
+- docs/workflow.md (~1286 "the wait is part of the timed gate") and README (~240) get a clause:
+  the wait counts against `AI_CHECK_TIMEOUT`.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py, README.md, docs/workflow.md
+
+### Acceptance criteria
+- New tests `test_gate_lock_wait_*` in tests/test_workflow.py on a `ready()` fixture (the test may
+  rewrite the fixture's `.ai/validate` to sleep), using `gate_lock_holder`:
+  - `_shares_the_timeout_during_validation`: lock held ~2 s (scaled), `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT` = a scaled 3 s, validator sleeps a scaled 3 s → non-zero (124), total time
+    below the timeout plus the 10 s kill-after plus a scaled margin, and `stamp verify` fails;
+  - `_exhausts_the_timeout_while_waiting`: lock held a scaled 10 s, `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT=1` → exit 124 with `Validation time limit reached while waiting`, returns
+    within a scaled bound while the holder still runs, and the validator never ran (marker file
+    absent);
+  - `_within_the_total_budget_passes`: lock held ~1 s, `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT=30`, fast validator → passes and `stamp verify` succeeds.
+- `AI_CHECK_TIMEOUT=x` → non-zero with `Invalid AI_CHECK_TIMEOUT`.
+- Existing `-k gate_lock_wait`, `-k gate_time` and `-k session_gate_allowance` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-20. `scripts/ai-check` validates `AI_CHECK_TIMEOUT` (`^[0-9]{1,9}$`, default 1800;
+the wait keeps `^[0-9]{1,5}$`), normalises both with `10#` (so T045 only needs its tests), records
+`SECONDS` before `flock -n`, caps the wait at the timeout when the timeout is the smaller limit
+(running out then → `out_of_time`: stamp invalidated, `Error: Validation time limit reached while
+waiting for the lock.`, exit 124), and runs `.ai/validate` with `budget = limit - elapsed`, exiting
+124 the same way without starting the validator when `budget <= 0`. `ai-run` `host_gate` got a
+comment only. Tests: `test_gate_lock_wait_shares_the_timeout_during_validation`,
+`_exhausts_the_timeout_while_waiting`, `_within_the_total_budget_passes`, `_invalid_timeout`.
+Mutation (`budget=$limit`) fails the shares test. README, docs/workflow.md (Validation section and
+host-gate paragraph), vault flow chart note and hub Log updated.
+Evidence: `-k gate_lock_wait` Ran 9 OK (three runs); `-k gate_time` Ran 4 OK;
+`-k session_gate_allowance` Ran 5 OK; `-k test_validation_content_mutation_and_timeout_fail` OK;
+`-k Docs` Ran 3 OK; full `.ai/bin/ai-check` in the background, waited, no edits meanwhile:
+1031 tests OK in 662.4 s, exit 0.
+
+## T045 — `AI_CHECK_LOCK_WAIT` with leading zeros is read as decimal (review N1)
+Status: DONE
+Dependencies: T044
+Model: sonnet
+
+### Goal
+An accepted `AI_CHECK_LOCK_WAIT` such as `08` or `09` waits that many seconds under contention
+instead of failing Bash octal arithmetic with a misleading `Validation is already running.`.
+
+### Implementation notes
+- Review N1: `scripts/ai-check` (~16–19) accepts `^[0-9]{1,5}$` then evaluates `(( wait > 0 ))`;
+  `08` errors as an invalid octal number and the script dies at once.
+- After the regex check normalise: `wait=$((10#$wait))` (same for `AI_CHECK_TIMEOUT` if T044 did
+  not already). The printed `Waiting up to Ns` then shows the decimal value.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py
+
+### Acceptance criteria
+- New test `test_gate_lock_wait_leading_zero_is_decimal`: lock held ~1 s (`gate_lock_holder`),
+  `AI_CHECK_LOCK_WAIT=08` → prints `Waiting up to 8s`, passes, `stamp verify` succeeds, and stderr
+  has no `value too great for base`.
+- `AI_CHECK_LOCK_WAIT=00` with the lock held refuses at once with `Validation is already running.`.
+- Existing `-k gate_lock_wait` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-20. No script change needed: T044 already normalises `AI_CHECK_LOCK_WAIT` and
+`AI_CHECK_TIMEOUT` with `10#` (`scripts/ai-check` line 19). Added
+`test_gate_lock_wait_leading_zero_is_decimal` (`08` → `Waiting up to 8s`, passes, stamp verifies, no
+`value too great for base`) and `test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once` (`00`).
+Evidence: `-k gate_lock_wait` Ran 11 OK; full `.ai/bin/ai-check` in the background, waited, no edits
+meanwhile: 1033 tests OK in 664.2 s, exit 0.
+
+## T046 — A lock waiter that times out leaves the active gate's stamp alone (review M2)
+Status: DONE
+Dependencies: T044
+Model: opus
+
+### Goal
+`ai-check` mutates `.ai/local/validation.json` only while it holds `.ai/local/validation.lock`. A
+caller whose lock wait runs out against `AI_CHECK_TIMEOUT` exits 124 with its time-limit message
+but never replaces the running validator's RUNNING record (and its `before` fingerprint), so a
+content change during the active validation still makes that validation FAIL.
+
+### Implementation notes
+- Review M2: `scripts/ai-check` (~22–33): `flock -w "$limit" 8 || out_of_time` runs
+  `out_of_time`, which calls `ai_helper stamp invalidate` without the lock. `stamp invalidate`
+  (`scripts/lib/workflow.py` ~760) rewrites `before` with the current fingerprint, so the holder's
+  later `stamp record` compares against the waiter's fingerprint and can record PASS with
+  `unchanged: true` after the content changed; racing the holder's `stamp record` can also replace
+  finished evidence with RUNNING.
+- Split the two exits: the lock-wait failure path prints `Error: Validation time limit reached
+  while waiting for the lock.` and exits 124 without any stamp call (same as the `ai_die` paths,
+  which never touched the stamp before T044). The `budget <= 0` path after the lock is acquired
+  may keep invalidating (it holds the lock). Add a short comment: stamp changes only under the lock.
+- Keep the toolkit-repo branch (~4–12) unchanged. No ai-run change expected; check `host_gate`
+  and `gate_only_retry` do not rely on the waiter invalidating (they read `stamp outcome`).
+- docs/workflow.md "One gate deadline"/lock-wait paragraph: one clause that a timed-out waiter
+  leaves the stamp unchanged, if the paragraph describes the stamp at all.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- New test `test_gate_lock_wait_timeout_keeps_the_active_stamp` on a `ready()` fixture: write a
+  RUNNING `validation.json` with a known `before` value while `gate_lock_holder` holds the lock
+  (a scaled 10 s), run `ai-check` with `AI_CHECK_LOCK_WAIT=30 AI_CHECK_TIMEOUT=1` → exit 124 with
+  the time-limit message, and `validation.json` is byte-for-byte unchanged afterwards.
+- New test `test_gate_lock_wait_timeout_keeps_change_detection`: gate A runs a validator that
+  waits for a release file (signalled by the test), the test changes a tracked file while A runs,
+  gate B times out waiting (`AI_CHECK_LOCK_WAIT=30 AI_CHECK_TIMEOUT=1`, 124), then A is released
+  and exits non-zero with `Validation modified project content`, the stamp is FAIL with
+  `unchanged: false`, and `stamp verify` fails. Mutation check: re-adding `stamp invalidate` to
+  the wait-failure path makes this test fail (record it in the result).
+- A PASS stamp from a finished gate is also left unchanged by a timed-out waiter (subtest or part
+  of the first test).
+- Existing `-k gate_lock_wait`, `-k gate_time`, `-k session_gate_allowance` and `-k gate_only`
+  tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_only` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+Done 2026-10-21 (claude opus). `scripts/ai-check`: `out_of_time` no longer calls
+`stamp invalidate`; only the `budget <= 0` exit (lock held) invalidates before calling it, with
+the comment "The stamp changes only under the lock". New tests
+`test_gate_lock_wait_timeout_keeps_the_active_stamp` (PASS and RUNNING `validation.json` subtests,
+byte-for-byte unchanged after a 124 waiter; holder still alive) and
+`test_gate_lock_wait_timeout_keeps_change_detection` (gate A FAILs with `Validation modified
+project content`, `unchanged: false`, `stamp verify` fails). Mutation check: re-adding
+`ai_helper stamp invalidate` on the `flock -w "$limit"` failure path made both tests fail (3
+failures: change detection `0 == 0`, PASS and RUNNING stamps overwritten); reverted. `host_gate`
+uses only the exit code and `gate_only_retry` reads `stamp outcome` before its gate, so neither
+relied on the waiter invalidating. docs/workflow.md lock-wait paragraph and the vault "One gate
+deadline" bullet updated; hub Log line appended.
+Validation: `-k gate_lock_wait` Ran 13 OK; `-k gate_only` Ran 7 OK; `-k gate_time` Ran 4 OK;
+`-k session_gate_allowance` Ran 5 OK; `.ai/bin/ai-check` PASS (1035 tests, 675.5 s, background
+and waited for).
 
 ## T101 — Host ruling record and run-log row format (BR-01, helpers)
 Status: TODO

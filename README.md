@@ -239,6 +239,8 @@ sessions keep the plain limit.
 
 `ai-check` refuses with `Validation is already running.` while another gate holds its lock;
 `AI_CHECK_LOCK_WAIT=N` (seconds, default 0) makes it wait up to N seconds for that gate first.
+The wait counts against `AI_CHECK_TIMEOUT`: the validator gets only the seconds left, and a wait
+that uses them all exits 124 with `Validation time limit reached while waiting for the lock.`
 `ai-run`'s host gates wait up to 15 minutes (within the run time), so a session that ends while
 its own background gate still runs does not fail the host gate.
 
