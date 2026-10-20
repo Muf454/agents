@@ -42,7 +42,7 @@ The runner records ready_for_review, never claims that the human accepted the wo
 
 `.ai/validate` is the one real project gate. `.ai/bin/ai-check` invokes it from the
 root with Bash error propagation and GNU timeout (default 1800 seconds;
-`AI_CHECK_TIMEOUT` overrides). Use non-writing format/lint checks and deterministic
+`AI_CHECK_TIMEOUT` overrides; time spent waiting for the validation lock counts against it). Use non-writing format/lint checks and deterministic
 non-watch tests. Tests may write ignored build/cache artifacts. Nonignored project
 changes during the gate cause a failure, even if the command itself exits zero.
 
@@ -1287,7 +1287,11 @@ Every host gate (after a DONE session, the gate-only block retry below, and the 
 runs with `AI_CHECK_LOCK_WAIT=min(remaining, 900)` (`host_gate`): `ai-check` then
 waits up to that many seconds for a session's still-running background gate to release
 `.ai/local/validation.lock` (FL-32) instead of failing with `Validation is already running.`;
-the wait is part of the timed gate. `ai-recover` and `ai-pipeline` keep the immediate refusal.
+the wait is part of the timed gate. `ai-check` keeps one deadline: it caps the wait at
+`AI_CHECK_TIMEOUT` (validated as decimal digits) and gives `.ai/validate` only the seconds left
+(`budget`); with none left it exits 124 with `Validation time limit reached while waiting for the
+lock.` without starting the validator (GNU `timeout` would read 0 as no deadline), so a host gate
+cannot pass after the run deadline. `ai-recover` and `ai-pipeline` keep the immediate refusal.
 
 Session gate rule (FL-32): every implementation session's RUNNER CONTRACT says `A gate run that
 outlives a tool call is not a blocker: the full gate the runner runs after the session decides.`

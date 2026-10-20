@@ -3810,7 +3810,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 - Every test group named in the handoff exists in `tests/test_workflow.py`.
 
 ## T044 — Lock waiting and validation share one `AI_CHECK_TIMEOUT` deadline (review M1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -3862,6 +3862,20 @@ Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-20. `scripts/ai-check` validates `AI_CHECK_TIMEOUT` (`^[0-9]{1,9}$`, default 1800;
+the wait keeps `^[0-9]{1,5}$`), normalises both with `10#` (so T045 only needs its tests), records
+`SECONDS` before `flock -n`, caps the wait at the timeout when the timeout is the smaller limit
+(running out then → `out_of_time`: stamp invalidated, `Error: Validation time limit reached while
+waiting for the lock.`, exit 124), and runs `.ai/validate` with `budget = limit - elapsed`, exiting
+124 the same way without starting the validator when `budget <= 0`. `ai-run` `host_gate` got a
+comment only. Tests: `test_gate_lock_wait_shares_the_timeout_during_validation`,
+`_exhausts_the_timeout_while_waiting`, `_within_the_total_budget_passes`, `_invalid_timeout`.
+Mutation (`budget=$limit`) fails the shares test. README, docs/workflow.md (Validation section and
+host-gate paragraph), vault flow chart note and hub Log updated.
+Evidence: `-k gate_lock_wait` Ran 9 OK (three runs); `-k gate_time` Ran 4 OK;
+`-k session_gate_allowance` Ran 5 OK; `-k test_validation_content_mutation_and_timeout_fail` OK;
+`-k Docs` Ran 3 OK; full `.ai/bin/ai-check` in the background, waited, no edits meanwhile:
+1031 tests OK in 662.4 s, exit 0.
 
 ## T045 — `AI_CHECK_LOCK_WAIT` with leading zeros is read as decimal (review N1)
 Status: TODO

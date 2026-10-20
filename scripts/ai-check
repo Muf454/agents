@@ -14,18 +14,34 @@ ai_root
 [[ -f .ai/validate ]] || ai_die 'Missing .ai/validate.'
 wait=${AI_CHECK_LOCK_WAIT:-0}
 [[ $wait =~ ^[0-9]{1,5}$ ]] || ai_die "Invalid AI_CHECK_LOCK_WAIT: $wait"
+limit=${AI_CHECK_TIMEOUT:-1800}
+[[ $limit =~ ^[0-9]{1,9}$ ]] || ai_die "Invalid AI_CHECK_TIMEOUT: $limit"
+wait=$((10#$wait)) limit=$((10#$limit))
+# One deadline: seconds spent waiting for the lock come out of the validator's budget.
+started=$SECONDS
+out_of_time() {
+  ai_helper stamp invalidate
+  echo 'Error: Validation time limit reached while waiting for the lock.' >&2
+  exit 124
+}
 exec 8>.ai/local/validation.lock
 if ! flock -n 8; then
   (( wait > 0 )) || ai_die 'Validation is already running.'
   echo "Waiting up to ${wait}s for a running validation to finish." >&2
-  flock -w "$wait" 8 || ai_die 'Validation is already running.'
+  if (( limit <= wait )); then
+    flock -w "$limit" 8 || out_of_time
+  else
+    flock -w "$wait" 8 || ai_die 'Validation is already running.'
+  fi
 fi
+budget=$(( limit - (SECONDS - started) ))
+# GNU timeout treats 0 as no deadline, so never start the validator without time left.
+(( budget > 0 )) || out_of_time
 log=$(mktemp .ai/local/check-XXXXXXXX.log)
 # Remove old evidence first: a failed/interrupted run cannot retain a green stamp.
 ai_helper stamp invalidate
 set +e
-timeout --signal=TERM --kill-after=10s "${AI_CHECK_TIMEOUT:-1800}" \
-  bash .ai/validate 2>&1 | tee "$log"
+timeout --signal=TERM --kill-after=10s "$budget" bash .ai/validate 2>&1 | tee "$log"
 codes=("${PIPESTATUS[@]}")
 set -e
 result=${codes[0]}

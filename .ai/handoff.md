@@ -30,11 +30,18 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku, DONE): docs, flow chart and handoff audit. The code and docs of T037–T042 agree;
   the mismatches found are listed in its Result / notes (README protected-path clause added, this
   handoff brought up to date, hub Log lines checked).
+- Review round 1 (REQUEST CHANGES, M1 + N1 accepted):
+  - T044 (opus, DONE, M1): `ai-check` keeps one `AI_CHECK_TIMEOUT` deadline: the lock wait is
+    capped at it and deducted from the validator's budget; with no time left it exits 124
+    (`Validation time limit reached while waiting for the lock.`) without starting the validator.
+    `AI_CHECK_TIMEOUT` is now validated (digits) and both values are read as decimal.
+  - T045 (sonnet, TODO, N1): leading-zero `AI_CHECK_LOCK_WAIT` regression tests.
 
 ## Validation run
 T042 tree: PASS (1027 tests, 712.6 s; run in the background and waited for).
 T043 tree: `-k Docs` 3 OK and `-k flow_this_repo` 1 OK (targeted). The full gate ran in the
 background and was waited for; its result is in the T043 run-log line.
+T044 tree: PASS (1031 tests, 662.4 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -54,6 +61,7 @@ T039 updated the "Inside one task" `gate` node (waits for a running gate, at mos
 T041 added the BLOCKED branch to "Inside one task" (gate-only block retry), a "Gate-only block
 retry" bullet and the 🔧 retry row in the notifications table. T042 updates the "Executable bits" bullet.
 T043 re-read the vault chart against `ai-run`, `ai-check`, `workflow.py` and the prompts: no change needed.
+T044 added the "One gate deadline" bullet (lock wait counts against `AI_CHECK_TIMEOUT`).
 
 ## Manual testing for the human
 
@@ -80,6 +88,11 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
 - `test_gate_lock_wait_*` (T039: waits then passes and the stamp verifies; unset refuses
   at once; held past the wait refuses; invalid value; the runner's host gate waits for a lock left
   by the session and checkpoints the task DONE).
+- `test_gate_lock_wait_shares_the_timeout_during_validation`,
+  `_exhausts_the_timeout_while_waiting`, `_within_the_total_budget_passes`, `_invalid_timeout`
+  (T044: wait plus validation end by `AI_CHECK_TIMEOUT` with 124 and no stamp; a wait that uses
+  the whole budget exits 124 with the time-limit message and never starts the validator; a short
+  wait inside the budget passes; non-digit timeouts are refused).
 - `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
   (T040: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
   `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
@@ -92,11 +105,11 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
 
 ## Human todos
 - After merge: the upgrades above; tick FL-32 in the vault backlog (sessions never tick it).
-- Vault hub Log: each of T037–T043 appends its own dated line (the planning session could edit
+- Vault hub Log: each of T037–T045 appends its own dated line (the planning session could edit
   only `.ai/` files, so it added none).
 - Gate files: none need changing for this batch. If you want this repo's own pipeline to use the
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Queue complete after T043. Human review of the branch (independent review through the pipeline,
+T045 (review N1 tests), then another independent review. Queue was complete after T043. Human review of the branch (independent review through the pipeline,
 or `ai-review` by hand), then the "Needs you" steps above. Nothing is merged or deployed.

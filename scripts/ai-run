@@ -292,7 +292,8 @@ verify_checkpoint() {
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
 # The host's full gate; sets gate_code. A session may end with its own background gate still
-# holding the validation lock (FL-32), so wait for it for up to 15 minutes within the run time.
+# holding the validation lock (FL-32), so wait for it for up to 15 minutes within the run time
+# (ai-check deducts the wait from AI_CHECK_TIMEOUT, so the gate ends by the run deadline).
 host_gate() {
   local lock_wait=$remaining
   (( lock_wait <= 900 )) || lock_wait=900

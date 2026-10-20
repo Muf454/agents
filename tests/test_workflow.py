@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -9999,6 +10000,56 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             with self.subTest(value=value):
                 result = self.tool('ai-check', expected=1, AI_CHECK_LOCK_WAIT=value)
                 self.assertIn(f'Invalid AI_CHECK_LOCK_WAIT: {value}', result.stderr)
+
+    # One AI_CHECK_TIMEOUT deadline covers the lock wait and the validator (review M1, T044).
+    def gate_marked_validator(self, sleep):
+        marker = self.base / 'validator-ran'
+        (self.project / '.ai/validate').write_text(
+            f'#!/usr/bin/env bash\necho x > {shlex.quote(str(marker))}\nsleep {sleep}\n')
+        self.commit('sleeping gate')
+        return marker
+
+    def test_gate_lock_wait_shares_the_timeout_during_validation(self):
+        self.ready()
+        hold, limit = 4 * TIMEOUT_SCALE, math.ceil(5 * TIMEOUT_SCALE)
+        marker = self.gate_marked_validator(60)
+        self.gate_lock_holder(hold)
+        started = time.monotonic()
+        self.tool('ai-check', expected=124, timeout=limit + 30 * TIMEOUT_SCALE,
+                  AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT=str(limit))
+        # timeout signals the validator's whole process group, so the kill-after never applies;
+        # a fresh budget after the wait would take hold + limit.
+        self.assertLess(time.monotonic() - started, limit + 2 * TIMEOUT_SCALE)
+        self.assertTrue(marker.exists())
+        self.helper('stamp', 'verify', expected=1)
+
+    def test_gate_lock_wait_exhausts_the_timeout_while_waiting(self):
+        self.ready()
+        marker = self.gate_marked_validator(0)
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                           AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+        self.assertLess(time.monotonic() - started, 5 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())
+        self.assertIn('Validation time limit reached while waiting for the lock.', result.stderr)
+        self.assertNotIn('Validation is already running.', result.stderr)
+        self.assertFalse(marker.exists())
+        self.helper('stamp', 'verify', expected=1)
+
+    def test_gate_lock_wait_within_the_total_budget_passes(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='30')
+        self.assertIn('Waiting up to 30s', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_invalid_timeout(self):
+        self.ready()
+        for value in ('x', '-1', '1234567890', ' 5'):
+            with self.subTest(value=value):
+                result = self.tool('ai-check', expected=1, AI_CHECK_TIMEOUT=value)
+                self.assertIn(f'Invalid AI_CHECK_TIMEOUT: {value}', result.stderr)
 
     def test_gate_lock_wait_runner_waits_for_the_session_gate(self):
         self.ready()

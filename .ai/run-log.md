@@ -511,3 +511,4 @@
 | 2026-10-20T20:17:33Z | runner | T043 | completed | PASS | 48fd9b5 | Claude checkpointed; continuing queue |
 | 2026-10-20T20:28:50Z | runner | none | queue complete; ready for independent review | PASS | 4e5976c | Human acceptance remains |
 | 2026-10-20T20:33:59Z | runner | triage | review triaged into dispositions/tasks | n/a | 1216101 | Fix tasks run next |
+| 2026-10-20T21:00:00Z | claude (opus) | T044 | DONE (review M1): `ai-check` one `AI_CHECK_TIMEOUT` deadline (wait capped and deducted; `budget <= 0` → 124 `Validation time limit reached while waiting for the lock.`, validator not started); timeout validated, both values `10#`; 4 new `test_gate_lock_wait_*` tests; README, docs/workflow.md, vault flow chart + hub Log | PASS (ai-check 1031 tests, 662.4 s, background and waited; -k gate_lock_wait 9 OK; -k gate_time 4 OK; -k session_gate_allowance 5 OK; mutation `budget=$limit` caught) | parent 363fa62 | T045 next |
