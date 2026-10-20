@@ -12938,7 +12938,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         plain = self.exec_bits_file('notes.txt', 0o644, 'text\n')
         self.commit('tracked files')
         script.chmod(0o644)
-        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/tool.sh\n')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, 'scripts/tool.sh\n')
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertEqual(self.exec_bits_mode(plain), 0o644)
 
@@ -12953,7 +12953,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         gone.unlink()
         gate.chmod(0o644)
         untracked = self.exec_bits_file('free.sh', 0o644)
-        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, '')
         self.assertEqual(self.exec_bits_mode(target), 0o644)
         self.assertEqual(self.exec_bits_mode(gate), 0o644)
         self.assertEqual(self.exec_bits_mode(untracked), 0o644)
@@ -12970,13 +12970,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         external.chmod(0o644)
         shutil.rmtree(self.project / 'scripts')
         (self.project / 'scripts').symlink_to(outside)
-        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, '')
         self.assertEqual(self.exec_bits_mode(external), 0o644)
 
     def test_exec_bits_restores_a_staged_executable_bit(self):
         script = self.exec_bits_file('scripts/new.sh', 0o644)
         self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/new.sh'])
-        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/new.sh\n')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, 'scripts/new.sh\n')
         self.assertEqual(self.exec_bits_mode(script), 0o755)
 
     def test_exec_bits_runner_restores_the_bit_a_session_lost(self):
@@ -13022,6 +13022,71 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('⛔', notes)
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertNotIn('mode change', self.run_cmd(['git', 'log', '--summary', '--format=']).stdout)
+
+    def protected_paths(self):
+        common = str(ROOT / 'scripts/lib/common.sh')
+        out = self.run_cmd(['bash', '-c', f'source "{common}"; printf "%s\\n" "${{AI_PROTECTED_PATHS[@]}}"']).stdout
+        return out.split()
+
+    def test_exec_bits_skips_every_protected_path(self):
+        protected = self.protected_paths()
+        self.assertIn('.ai/permissions.allow', protected)
+        names = []
+        for root in protected:
+            names.append(root + '/x' if root in ('.ai/bin', '.ai/prompts') else root)
+        names += ['scripts/tool.sh', '.ai/prompts-extra/x.sh']
+        for name in names:
+            self.exec_bits_file(name, 0o644)
+            self.run_cmd(['git', 'add', '--chmod=+x', '--', name])
+        restored = self.helper('exec-bits', *protected).stdout.split()
+        self.assertEqual(sorted(restored), ['.ai/prompts-extra/x.sh', 'scripts/tool.sh'])
+        for name in names:
+            expected = 0o755 if name in restored else 0o644
+            self.assertEqual(self.exec_bits_mode(self.project / name), expected, name)
+
+    def test_exec_bits_requires_the_protected_list(self):
+        script = self.exec_bits_file('scripts/tool.sh', 0o644)
+        self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/tool.sh'])
+        self.assertNotEqual(self.helper('exec-bits', expected=None).returncode, 0)
+        self.assertEqual(self.exec_bits_mode(script), 0o644)
+
+    def test_exec_bits_protected_list_is_defined_once(self):
+        common = (ROOT / 'scripts/lib/common.sh').read_text()
+        self.assertEqual(common.count('AI_PROTECTED_PATHS=('), 1)
+        guard = common.split('ai_guard_digest() {', 1)[1].split('\nPY\n', 1)[0]
+        self.assertNotIn('.ai/permissions.allow', guard)
+        self.assertIn('exec-bits "${AI_PROTECTED_PATHS[@]}"', (ROOT / 'scripts/ai-run').read_text())
+
+    def test_exec_bits_guard_digest_unchanged(self):
+        self.ready()
+        reference = '''
+import hashlib
+from pathlib import Path
+import stat
+digest = hashlib.sha256()
+roots = ('.ai/validate', '.ai/ci-setup', '.ai/bin', '.ai/prompts',
+         '.ai/permissions.allow', '.claude/settings.json',
+         '.github/workflows/ai-validate.yml')
+optional = ('.claude/settings.json', '.github/workflows/ai-validate.yml')
+for name in roots:
+    root = Path(name)
+    paths = [root]
+    if root.is_dir():
+        paths += sorted(root.rglob('*'))
+    for path in paths:
+        digest.update(str(path).encode() + b'\\0')
+        if not path.exists():
+            digest.update(b'absent\\0')
+            continue
+        mode = path.lstat().st_mode
+        digest.update(str(mode).encode() + b'\\0')
+        if stat.S_ISREG(mode):
+            digest.update(path.read_bytes())
+        digest.update(b'\\0')
+print(digest.hexdigest())
+'''
+        expected = self.run_cmd(['python3', '-I', '-c', reference]).stdout.strip()
+        self.assertEqual(self.gate_digest(), expected)
 
     def test_exec_bits_prompts_name_the_only_form(self):
         for name in ('runner', 'triage'):

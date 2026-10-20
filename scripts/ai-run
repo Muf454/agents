@@ -372,7 +372,7 @@ claude_session() {
       ai_branch
       # A session cannot always chmod: give back the bit git records for a tracked script. Also
       # before a timeout or error stops the run, so ai-recover's rerun gate sees the bit.
-      if ! restored=$(ai_helper exec-bits); then
+      if ! restored=$(ai_helper exec-bits "${AI_PROTECTED_PATHS[@]}"); then
         (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error); also cannot restore recorded executable bits. Preserve partial work; see $log and $errors."
         ai_die 'Cannot restore recorded executable bits.'
       fi

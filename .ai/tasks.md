@@ -3699,7 +3699,7 @@ host-gate paragraph and the queue-selection sentence; README one paragraph. Vaul
 
 
 ## T042 — One protected-path list for the guard and the executable-bit repair (review N5)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -3758,6 +3758,12 @@ Targeted: `python3 -m unittest discover -s tests -k gate_change` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+`AI_PROTECTED_PATHS`/`AI_PROTECTED_OPTIONAL` defined once in common.sh; `ai_guard_digest` takes them
+as argv (digest unchanged, checked against the old algorithm). `exec-bits ROOT...` skips a ROOT and
+anything below it; no ROOT is a usage error. `ai-run` passes the list. 4 new `test_exec_bits_*` tests,
+existing ones pass the list. docs/workflow.md and vault flow chart/hub Log updated; README does not
+list the excluded paths, so unchanged. Validation: -k exec_bits 11 OK, -k gate_change 6 OK, ai-check
+1027 tests OK (712.6 s, background and waited).
 
 
 ## T043 — Docs, flow chart and handoff audit (batch 8)

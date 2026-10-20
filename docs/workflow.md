@@ -155,7 +155,7 @@ outside the allowlist become denials. The template allows `chmod +x` (and no oth
 form) so a session can make a script it created executable. After every implementation session, including
 one that timed out or failed (before that stop, so `ai-recover`'s rerun gate sees the bit), the
 host also gives back the executable bit git records (`100755`) to a tracked script that lost it
-(`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`, and only a
+(`workflow.py exec-bits`; never a gate file (the guard's protected-path list), and only a
 regular file reached without following any symlink, so a directory a session swapped for a
 symlink never leads outside the checkout). Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint

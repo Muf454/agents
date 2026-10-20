@@ -139,20 +139,24 @@ clean_or_armed() {
   armed_resume || return 1
   AI_ARMED=yes
 }
+# The ONLY protected-path list: the gate guard digests it and `exec-bits` never touches it.
+AI_PROTECTED_PATHS=(.ai/validate .ai/ci-setup .ai/bin .ai/prompts .ai/permissions.allow
+  .claude/settings.json .github/workflows/ai-validate.yml)
+AI_PROTECTED_OPTIONAL=(.claude/settings.json .github/workflows/ai-validate.yml)
 ai_guard_digest() {
   # Inline verifier is loaded before Claude starts. Never ask a potentially
-  # modified project helper to verify its own integrity.
-  python3 -I - <<'PY'
+  # modified project helper to verify its own integrity. Arguments: the roots, `--`, the
+  # optional ones.
+  python3 -I - "${AI_PROTECTED_PATHS[@]}" -- "${AI_PROTECTED_OPTIONAL[@]}" <<'PY'
 import hashlib
 from pathlib import Path
 import stat
 import sys
 
 digest = hashlib.sha256()
-roots = ('.ai/validate', '.ai/ci-setup', '.ai/bin', '.ai/prompts',
-         '.ai/permissions.allow', '.claude/settings.json',
-         '.github/workflows/ai-validate.yml')
-optional = ('.claude/settings.json', '.github/workflows/ai-validate.yml')
+separator = sys.argv.index('--')
+roots = tuple(sys.argv[1:separator])
+optional = tuple(sys.argv[separator + 1:])
 try:
     for name in roots:
         root = Path(name)

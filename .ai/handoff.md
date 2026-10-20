@@ -30,7 +30,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-T040 tree: PASS (1018 tests, 677.9 s; run in the background and waited for).
+T042 tree: PASS (1027 tests, 712.6 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -83,7 +83,7 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
   `_host_gate_fails`, `_without_run_manifest`, `_dirty_tree` (T041, passing: T001 stays BLOCKED,
   ⚠ as today, no retry commit or 🔧; a failing host gate spends the claim and the run goes on).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
-  `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
+  `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042, passing).
 
 ## Human todos
 - After merge: the upgrades above; tick FL-32 in the vault backlog (sessions never tick it).

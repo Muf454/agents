@@ -4519,14 +4519,15 @@ def clear_scratch():
         os.close(local_fd)
 
 
-def exec_bits():
-    """exec-bits: give back the execute bit git records (index mode 100755) to a regular file
-    that lost it in the working tree. Gate files and symlinks are never touched: every path
-    component is opened below the pinned root without following a symlink, so a directory
-    replaced by a symlink never leads outside the checkout. Prints the restored relative
-    paths, one per line."""
+def exec_bits(protected):
+    """exec-bits ROOT...: give back the execute bit git records (index mode 100755) to a regular
+    file that lost it in the working tree. A path equal to a ROOT or below it is never touched
+    (the runner passes the guard's protected-path list), nor is a symlink: every path component
+    is opened below the pinned root without following a symlink, so a directory replaced by a
+    symlink never leads outside the checkout. Prints the restored relative paths, one per line."""
+    if not protected:
+        fail('usage: exec-bits ROOT...')
     root = checkout_root()
-    gate = ('.ai/validate', '.ai/ci-setup')
     try:
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError:
@@ -4537,7 +4538,7 @@ def exec_bits():
             if not meta.startswith(b'100755 '):
                 continue
             name = raw.decode()
-            if name.startswith('.ai/bin/') or name in gate:
+            if any(name == gate.rstrip('/') or name.startswith(gate.rstrip('/') + '/') for gate in protected):
                 continue
             if exec_bit_restored(root_fd, name):
                 print(name)
@@ -5028,7 +5029,7 @@ def main():
     elif command == 'clear-scratch':
         clear_scratch()
     elif command == 'exec-bits':
-        exec_bits()
+        exec_bits(arguments)
     elif command == 'exec-logged':
         exec_logged(arguments)
     elif command == 'tree-snapshot':
