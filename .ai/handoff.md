@@ -1,102 +1,93 @@
 # Handoff
 
 ## What has been implemented?
-T037–T043 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
-written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
-verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
-(T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
-- **FL-32** (vault backlog): the ~11-minute gate outlives a session's 600 s foreground tool call,
-  and the prompts said to mark the task BLOCKED then (T027, T029, T030 and T033 of batch 7).
-  - T037 (DONE): the runner and triage prompt templates, the RUNNER CONTRACT and README say to
-    run the gate with `run_in_background`, wait for it, make no edits meanwhile, and never block
-    on an unknown gate result (the host gate decides).
-  - T038 (DONE): `run-manifest gate-unblock TASK` (once per task per run, field `gate_unblocks`)
-    and `stamp outcome` (a safe reading of `.ai/local/validation.json`: `WORD DIGEST`, never
-    following a symlink or blocking on a FIFO). Used by `ai-run` from T040.
-  - T039 (DONE): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates (`host_gate`)
-    wait (at most 900 s, within the run time) for a session's background gate that still holds
-    the lock. `ai-recover` and `ai-pipeline` keep the immediate refusal.
-  - T040 (DONE): `ai-run`'s `gate_only_retry`: a session that blocks its task after its own gate
-    showed no failure (`stamp outcome` running/pass/changed with a new digest) gets one host gate
-    after the claim `run-manifest gate-unblock`; a pass commits `chore(ai): retry TASK after a
-    gate-only block`, sends 🔧 instead of ⚠ and the next session's prompt says why.
-  - T041 (DONE): tests pin the neighbouring BLOCKED cases as today (session gate failed, gate
-    never ran, host gate fails, no run manifest, dirty tree; no runner change needed);
-    docs/workflow.md "Gate-only block retry" and session gate rule, README paragraph, flow chart.
-- **N5** (PR #34 final review, MINOR): T042 (sonnet) makes `scripts/lib/common.sh` hold the one
-  protected-path list, read by the guard digest (value unchanged) and by `exec-bits`, which then
-  never touches `.ai/prompts/`, `.ai/permissions.allow`, `.claude/settings.json` or
-  `.github/workflows/ai-validate.yml` either.
-- T043 (haiku, DONE): docs, flow chart and handoff audit. The code and docs of T037–T042 agree;
-  the mismatches found are listed in its Result / notes (README protected-path clause added, this
-  handoff brought up to date, hub Log lines checked).
+Nothing yet in batch 9: this is the plan, written 2026-10-20 in an unattended planning session on
+`fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
+this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
+`.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
+`.ai/current-plan.md` (design) and `.ai/tasks.md` (T044–T055; T001–T043 are batches 6–8, DONE and
+unchanged because the host protects DONE blocks).
+- **BR-02 pre-flight queue scan** (FL-24): T044 ruling record and row format, T045 `tasks
+  preflight` (order-only reorder of TODO tasks, empty sections, overlap report), T046 wiring at
+  pipeline start, after plan revisions/planning and after triage, with the raid-f4 regression.
+- **BR-01 rulings**: queue order and empty sections (T046), a disposition cell with more than the
+  bare ID (T047), the handoff `## Flow chart` line (T048). Once per kind per key per run, a
+  `Ruling (KIND): what. Why: …. Cost if wrong: ….` run-log row; anything else stops as today.
+- **BR-03 fresh retry**: T049 `attempt-info` (host outcome log: attempt number, model one tier up
+  from the third attempt, failure note), T050 runner wiring (prompt note, model, run-log rows).
+- **BR-14 review routing**: T051 `review-route`, T052 Codex limit memory and routing in
+  `ai-review` (small low-risk fix rounds on a fresh Claude opus session), T053 "Reviewed by" in
+  every review and the PR body.
+- **FL-33**: T054 isolated test state and a registry guard in `tests/run_parallel.py`.
+- T055: docs, flow chart and handoff audit.
 
 ## Validation run
-T042 tree: PASS (1027 tests, 712.6 s; run in the background and waited for).
-T043 tree: `-k Docs` 3 OK and `-k flow_this_repo` 1 OK (targeted). The full gate ran in the
-background and was waited for; its result is in the T043 run-log line.
-`.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
+None for batch 9 yet. Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
-- A1: the retry lives in `ai-run`'s BLOCKED branch and sets the task back to IN_PROGRESS for one
-  more session, never DONE without a session.
-- A2: "the session ran the gate" means `validation.json` changed during the session; "no failing
-  check" means its outcome is running, pass or changed (exit 0 but the tree changed during the run).
-- A3: once per task per human-started run (kept on resume, dropped by `run-manifest start`).
-- A5: N5 excludes exactly the guard's list (`.github/workflows/ai-validate.yml`, not every
-  workflow file); the guard digest value does not change.
-- Sessions of this batch still get the frozen `.ai/prompts` (old foreground rule). The queue header's
-  BATCH 8 GATE RULE tells them to run the gate in the background and not to block on it.
+Recorded as A1–A13 in `.ai/project-spec.md`. The ones that shape behaviour most:
+- A1/A2: a ruling only moves TODO tasks and is claimed once per kind per key per run; without a
+  run manifest no new ruling happens.
+- A3: `ai-recover` is unchanged; the pre-flight on every pipeline start removes the fixable
+  `Task queue is invalid` stops.
+- A7: attempt number from the host outcome log (failed rows of this project, branch and task);
+  from attempt 3 one tier up (haiku → sonnet → opus), no model known → opus.
+- A9/A10: "final code review" = the first full-branch code review (round 1); Claude only for
+  fix-round re-reviews of at most 200 changed lines outside `.ai/` with no risk path, risk word or
+  opus fix task, decided from host records (fix-round records, outcome log), never from commit
+  subjects. Plan reviews and re-checks stay on Codex.
+- A11: a Codex limit with a known reset is remembered in host state; unknown reset → today.
+- Sessions of this batch still get the frozen `.ai/prompts` of this repo (old foreground gate
+  rule); the queue header's BATCH 8 GATE RULE still applies.
 
 ## Flow chart
-Flow chart updated: T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
-T039 updated the "Inside one task" `gate` node (waits for a running gate, at most 15 min) and added a bullet.
-T041 added the BLOCKED branch to "Inside one task" (gate-only block retry), a "Gate-only block
-retry" bullet and the 🔧 retry row in the notifications table. T042 updates the "Executable bits" bullet.
-T043 re-read the vault chart against `ai-run`, `ai-check`, `workflow.py` and the prompts: no change needed.
+Flow chart updated: planned only. T046, T047, T048, T050, T052 and T053 update vault
+`agents-flow.md` (pre-flight scan and rulings, fresh retry, reviewer choice); the planning session
+could edit only `.ai/` files, so the vault is not edited yet. T055 checks it.
 
 ## Manual testing for the human
 
 ### Needs you
-1. Approve the run (`ai-pipeline --approved …`) after reading the plan; no gate file changes are
-   needed to start.
-2. After merging: run `setup-project --upgrade --apply` here and in raid-planner, family-planner and
-   family-budget, so `.ai/prompts` gets the new gate bullet and `.ai/bin` the new `ai-run`,
-   `ai-check`, `common.sh` and `workflow.py`. Until then installed sessions keep the old
-   "mark BLOCKED" wording (T040's retry covers them).
-3. On the next real run with the ~11-minute gate: check one task session's log
-   (`.ai/local/claude-*.json`) shows the gate started with `run_in_background` and its result read
-   before the commit, and that no task is BLOCKED with "gate result unknown". This needs a live
-   `claude -p` session; no test can show the real tool's background behaviour.
-4. If a task is still blocked that way on a project not yet upgraded: expect one
-   `🔧 T…: blocked without a failing check and the full gate passed; running it once more.` and
-   the task finished by the next session.
+1. Read the plan (`.ai/project-spec.md` assumptions A1–A13, `.ai/current-plan.md`) and approve the
+   run (`ai-pipeline --approved --base fix/flow-batch-8 --pr-base fix/flow-batch-8 …`). No gate
+   file changes are needed to start.
+2. Decide whether the routing defaults fit your Codex budget: at most 200 changed lines, the risk
+   path and word lists in A9. You can change them per run with `AI_REVIEW_SMALL_LINES`,
+   `AI_REVIEW_RISK_PATHS`, `AI_REVIEW_RISK_WORDS`, or turn routing off with `AI_REVIEW_ROUTE=codex`.
+3. After merging (batch 8 first, then this one): run `setup-project --upgrade --apply` here and in
+   raid-planner, family-planner and family-budget, so `.ai/bin` gets the new helpers. Then retire
+   mission control's `auto-reorder.sh` / `reorder-queue.py` stopgap (BR-02 replaces it).
+4. On the next real run that has a fix round: check the PR's "Reviewed by" list and that a small
+   fix round shows `Claude, routed`, and that a run with a Codex limit sends the second review
+   straight to the fallback (the `↪` notification says `(recorded)`). This needs the real CLIs.
+5. After the next self-check while a pipeline runs: `ai-dashboard --json` lists no
+   `/dev/shm/ai-tests-*` checkouts (FL-33).
 
 ### Covered by automated tests
-Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all passing):
-- `test_gate_background_prompts_tell_the_session_to_wait` (T037).
-- `test_gate_unblock_manifest_*` (T038: once per task, kept on resume/dropped on start,
-  wrong shape invalid, `stamp outcome` words and digest, symlink/FIFO/unsafe `.ai/local` → `none -`).
-- `test_gate_lock_wait_*` (T039: waits then passes and the stamp verifies; unset refuses
-  at once; held past the wait refuses; invalid value; the runner's host gate waits for a lock left
-  by the session and checkpoints the task DONE).
-- `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
-  (T040: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
-  `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
-  exactly once and then stays BLOCKED with ⚠).
-- `test_gate_only_block_unchanged_session_gate_failed`, `_session_never_ran_the_gate`,
-  `_host_gate_fails`, `_without_run_manifest`, `_dirty_tree` (T041: T001 stays BLOCKED,
-  ⚠ as today, no retry commit or 🔧; a failing host gate spends the claim and the run goes on).
-- `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
-  `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
+Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
+- `test_ruling_manifest_*` (T044: claim once, kept on resume, dropped on start, wrong shape
+  invalid, row without `|`).
+- `test_preflight_helper_*` (T045: raid-f4 order, sections, moved DONE task, cycle/unknown/prose,
+  overlap report).
+- `test_preflight_pipeline_*` (T046: committed raid-f4 queue repaired and run completed, repeat
+  stops, DONE task would move stops, triage reorder, planning ruling row).
+- `test_ruling_disposition_*` (T047: markup and CRITICAL cells rewritten, ambiguous cells left,
+  plan section only, repeat stops).
+- `test_ruling_flow_line_*` (T048: blank line, wording, unchanged text, missing section, runner and
+  PR body).
+- `test_attempt_info_*` (T049) and `test_fresh_retry_*` (T050: note, model raise, run-log rows).
+- `test_review_route_*` (T051: every routing rule, forged history ignored).
+- `test_codex_limit_*`, `test_review_routing_*` (T052: limit memory, routed review, risky fix
+  round on Codex, reviewer settings).
+- `test_reviewed_by_*` (T053) and `test_state_isolation_*` (T054).
 
 ## Human todos
-- After merge: the upgrades above; tick FL-32 in the vault backlog (sessions never tick it).
-- Vault hub Log: each of T037–T043 appends its own dated line (the planning session could edit
-  only `.ai/` files, so it added none).
-- Gate files: none need changing for this batch. If you want this repo's own pipeline to use the
-  new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
+- Gate files: none need changing for this batch.
+- After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
+  FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
+- Vault hub Log: each flow-changing task appends its own dated line (the planning session could
+  edit only `.ai/` files, so it added none).
 
 ## Next action
-Queue complete after T043. Human review of the branch (independent review through the pipeline,
-or `ai-review` by hand), then the "Needs you" steps above. Nothing is merged or deployed.
+Approve and start the run; the runner begins with T044. Nothing is merged or deployed.
