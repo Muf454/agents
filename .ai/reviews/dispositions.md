@@ -10,3 +10,5 @@ with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. 
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
+| M1 | accepted | Confirmed in source: `scripts/ai-check` waits up to AI_CHECK_LOCK_WAIT at `flock -w` (line 21), then starts the full `${AI_CHECK_TIMEOUT:-1800}` for `.ai/validate` (line 27) with no deduction; `host_gate` (`scripts/ai-run` ~296) passes remaining as both values, and the final gate (~854–866) does not re-check remaining after host_gate, so a gate can pass up to 900 s past the run deadline. Existing `test_gate_lock_wait_*` tests check wait and refusal only, not a combined deadline. | T044 |
+| N1 | accepted | Confirmed: line 16 accepts `^[0-9]{1,5}$` (e.g. 08) and line 19 evaluates `(( wait > 0 ))`, which Bash reads as octal and errors on 08 or 09, so the held-lock branch dies at once. Cheap and in scope. | T045 |

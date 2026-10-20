@@ -3809,3 +3809,88 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 - Checked, no change needed: `docs/workflow.md` gate-only retry, lock wait and exec-bits sections; `scripts/ai-run` RUNNER CONTRACT, `gate_only_retry`, `host_gate` (`min(remaining, 900)`); `runner.md` and `triage.md` gate bullets; `workflow.py` `tasks next` (prefers IN_PROGRESS); vault `agents-flow.md` (consistent with the code, not edited).
 - Every test group named in the handoff exists in `tests/test_workflow.py`.
 
+## T044 — Lock waiting and validation share one `AI_CHECK_TIMEOUT` deadline (review M1)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+`ai-check` never runs longer than `AI_CHECK_TIMEOUT` (plus GNU `timeout`'s kill-after) in total:
+seconds spent waiting for `.ai/local/validation.lock` are deducted from the validator's budget, so
+a host gate (`host_gate` in `scripts/ai-run`, which passes `AI_CHECK_TIMEOUT=$remaining`) cannot
+return success after the run deadline.
+
+### Implementation notes
+- Review M1: `scripts/ai-check` (~15–28) waits up to `AI_CHECK_LOCK_WAIT` for the lock, then starts
+  the whole `${AI_CHECK_TIMEOUT:-1800}` for `.ai/validate`; the final gate in `scripts/ai-run`
+  (~854–866) does not re-check remaining time after `host_gate`.
+- Validate `AI_CHECK_TIMEOUT` (default 1800) as decimal digits like the wait (reuse one pattern;
+  T045 handles leading zeros, so normalise with `10#` here already if convenient). Record the start
+  (`SECONDS`) before `flock -n`; cap the lock wait at the timeout (`flock -w min(wait, timeout)`).
+  After the lock is acquired compute `budget = timeout - (SECONDS - start)`; if `budget <= 0`
+  print `Error: Validation time limit reached while waiting for the lock.` and exit 124 (the same
+  code GNU `timeout` returns) WITHOUT starting the validator. Never pass 0 to `timeout` (0 disables
+  its deadline). Otherwise run `timeout … "$budget" bash .ai/validate`.
+- A lock wait that runs out because the timeout cap was hit (not the wait) also exits 124 with
+  that message; a wait that runs out first keeps `Validation is already running.` (exit 1).
+- Keep the toolkit-repo branch (~4–12) unchanged. `host_gate` keeps passing `remaining`; no
+  ai-run change is needed beyond a comment if the behaviour is now exact.
+- docs/workflow.md (~1286 "the wait is part of the timed gate") and README (~240) get a clause:
+  the wait counts against `AI_CHECK_TIMEOUT`.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py, README.md, docs/workflow.md
+
+### Acceptance criteria
+- New tests `test_gate_lock_wait_*` in tests/test_workflow.py on a `ready()` fixture (the test may
+  rewrite the fixture's `.ai/validate` to sleep), using `gate_lock_holder`:
+  - `_shares_the_timeout_during_validation`: lock held ~2 s (scaled), `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT` = a scaled 3 s, validator sleeps a scaled 3 s → non-zero (124), total time
+    below the timeout plus the 10 s kill-after plus a scaled margin, and `stamp verify` fails;
+  - `_exhausts_the_timeout_while_waiting`: lock held a scaled 10 s, `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT=1` → exit 124 with `Validation time limit reached while waiting`, returns
+    within a scaled bound while the holder still runs, and the validator never ran (marker file
+    absent);
+  - `_within_the_total_budget_passes`: lock held ~1 s, `AI_CHECK_LOCK_WAIT=30`,
+    `AI_CHECK_TIMEOUT=30`, fast validator → passes and `stamp verify` succeeds.
+- `AI_CHECK_TIMEOUT=x` → non-zero with `Invalid AI_CHECK_TIMEOUT`.
+- Existing `-k gate_lock_wait`, `-k gate_time` and `-k session_gate_allowance` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
+## T045 — `AI_CHECK_LOCK_WAIT` with leading zeros is read as decimal (review N1)
+Status: TODO
+Dependencies: T044
+Model: sonnet
+
+### Goal
+An accepted `AI_CHECK_LOCK_WAIT` such as `08` or `09` waits that many seconds under contention
+instead of failing Bash octal arithmetic with a misleading `Validation is already running.`.
+
+### Implementation notes
+- Review N1: `scripts/ai-check` (~16–19) accepts `^[0-9]{1,5}$` then evaluates `(( wait > 0 ))`;
+  `08` errors as an invalid octal number and the script dies at once.
+- After the regex check normalise: `wait=$((10#$wait))` (same for `AI_CHECK_TIMEOUT` if T044 did
+  not already). The printed `Waiting up to Ns` then shows the decimal value.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py
+
+### Acceptance criteria
+- New test `test_gate_lock_wait_leading_zero_is_decimal`: lock held ~1 s (`gate_lock_holder`),
+  `AI_CHECK_LOCK_WAIT=08` → prints `Waiting up to 8s`, passes, `stamp verify` succeeds, and stderr
+  has no `value too great for base`.
+- `AI_CHECK_LOCK_WAIT=00` with the lock held refuses at once with `Validation is already running.`.
+- Existing `-k gate_lock_wait` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
