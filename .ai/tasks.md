@@ -3541,7 +3541,7 @@ Evidence: `-k gate_lock_wait` Ran 5 OK; `-k gate_time` Ran 4 OK; `-k session_gat
 OK; `.ai/bin/ai-check` PASS (1016 tests, 654.5 s, background and waited, no edits meanwhile).
 
 ## T040 — Runner retries a gate-only block once per task (FL-32, recovery)
-Status: TODO
+Status: DONE
 Dependencies: T038, T039
 Model: opus
 
@@ -3609,6 +3609,23 @@ Targeted: `python3 -m unittest discover -s tests -k blocked` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-20. `scripts/ai-run`: `stamp_before` (DIGEST of `stamp outcome`, `-` on failure) right
+before `claude_session`; new `gate_only_retry TASK` after the BLOCKED `runner_checkpoint` (outcome
+`running|pass|changed` with a new digest → `run-manifest gate-unblock` → `host_gate` (T039 lock
+wait) + `ai_guard_verify` + `record_gate`; a fail prints `Gate-only block retry of TASK: the full gate
+failed; it stays BLOCKED.`; a pass sets IN_PROGRESS, logs, commits `chore(ai): retry TASK after a
+gate-only block` with tasks/state/run-log/handoff, notifies 🔧, sets `retry_note`). The ⚠ notification
+is sent only when no retry happened. The function is called as a plain command (not in a `||`
+list) so errexit still guards its commits; the `ai_log` line runs before the commit so it is
+included. The next prompt for that task gets the contract sentence once; `retry_note` is cleared
+after use. Usage text: one sentence. Tests: mock modes `blocked-gate-unknown(-always)` (record every
+prompt in `MOCK_STATE_DIR/gate-unknown-prompts.log`); `test_gate_only_block_retried_once_then_done`
+and `test_gate_only_block_retried_once_per_task`.
+Evidence: `-k gate_only_block` Ran 2 OK; `-k gate_only_block -k blocked -k timeout_rerun -k exec_bits`
+Ran 26 OK; `.ai/bin/ai-check` PASS (1018 tests, 677.9 s, background and waited for, no edits
+meanwhile). Mutation: with the `gate-unblock` line removed, the `-always` case loops (ai-run timed
+out at the 25 s command bound) and the first case fails (no `gate_unblocks`); restored.
+Docs (docs/workflow.md, README) and the flow chart are T041's; no vault edit here.
 
 
 ## T041 — Gate-only block retry: the cases that stay as today, docs and flow chart (FL-32, contract)

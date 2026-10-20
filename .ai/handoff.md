@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-T037–T039 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037–T040 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
@@ -16,8 +16,10 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
   - T039 (DONE): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates (`host_gate`)
     wait (at most 900 s, within the run time) for a session's background gate that still holds
     the lock. `ai-recover` and `ai-pipeline` keep the immediate refusal.
-  - T040 (opus): a session that blocks its task after its own gate showed no failure gets one
-    host gate; a pass sets the task back to IN_PROGRESS for one more session, once per task.
+  - T040 (DONE): `ai-run`'s `gate_only_retry`: a session that blocks its task after its own gate
+    showed no failure (`stamp outcome` running/pass/changed with a new digest) gets one host gate
+    after the claim `run-manifest gate-unblock`; a pass commits `chore(ai): retry TASK after a
+    gate-only block`, sends 🔧 instead of ⚠ and the next session's prompt says why.
   - T041 (opus): the neighbouring cases stay as today (tests), docs and flow chart.
 - **N5** (PR #34 final review, MINOR): T042 (sonnet) makes `scripts/lib/common.sh` hold the one
   protected-path list, read by the guard digest (value unchanged) and by `exec-bits`, which then
@@ -26,7 +28,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-T039 tree: PASS (1016 tests, 654.5 s; run in the background and waited for).
+T040 tree: PASS (1018 tests, 677.9 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -70,7 +72,10 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
 - `test_gate_lock_wait_*` (T039, passing: waits then passes and the stamp verifies; unset refuses
   at once; held past the wait refuses; invalid value; the runner's host gate waits for a lock left
   by the session and checkpoints the task DONE).
-- `test_gate_only_block_*` (T040), `test_gate_only_block_unchanged_*` (T041).
+- `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
+  (T040, passing: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
+  `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
+  exactly once and then stays BLOCKED with ⚠). `test_gate_only_block_unchanged_*` (T041).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
   `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
 

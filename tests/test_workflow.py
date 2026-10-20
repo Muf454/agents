@@ -531,6 +531,29 @@ if denied_but_done:
 if mode == 'invalid':
     print('not JSON')
     sys.exit(0)
+if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER CONTRACT' in prompt:
+    # T001 marked BLOCKED although its own gate run showed no failing check: validation.json is
+    # left as `stamp invalidate` writes it (RUNNING). Only the first T001 call (-always: every
+    # one); later calls complete the task normally. Every prompt is recorded.
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    with open(state / 'gate-unknown-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
+    calls = state / 'gate-unknown-calls'
+    count = len(calls.read_text().splitlines()) if calls.exists() else 0
+    if task_id == 'T001':
+        with open(calls, 'a') as f: f.write('call\n')
+    if task_id == 'T001' and (mode == 'blocked-gate-unknown-always' or count == 0):
+        subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'BLOCKED'], check=True, stdout=subprocess.DEVNULL)
+        queue = pathlib.Path('.ai/tasks.md')
+        text = queue.read_text()
+        start = text.index('## T001 —')
+        queue.write_text(text[:start] + text[start:].replace(
+            'Pending.', f'Blocked in session {count + 1}: the full gate result is unknown.', 1))
+        subprocess.run(['git', 'commit', '-qm', 'block T001', '--', '.ai/tasks.md'], check=True)
+        subprocess.run(['python3', '.ai/bin/lib/workflow.py', 'stamp', 'invalidate'], check=True)
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+        sys.exit(0)
+    mode = 'success'
 if mode not in ('no-progress', 'bad-format'):
     task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
     file = pathlib.Path('.ai/tasks.md')
@@ -9980,6 +10003,55 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass'])
         self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
         self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    # ---------------------------------------------------------------- gate-only block retry (FL-32, T040)
+    def gate_unknown_prompts(self):
+        path = self.base / 'gate-unknown-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def git_subjects(self):
+        return self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+
+    def test_gate_only_block_retried_once_then_done(self):
+        self.ready()
+        self.approve_run()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='blocked-gate-unknown')
+        self.helper('tasks', 'complete')
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+        notes = self.notifications()
+        self.assertIn('🔧 T001: blocked without a failing check and the full gate passed; running it once more.', notes)
+        self.assertNotIn('⚠ Blocked', notes)
+        subjects = self.git_subjects()
+        retry = subjects.index('chore(ai): retry T001 after a gate-only block')
+        self.assertLess(subjects.index('chore(ai): record T001 runner checkpoint'), retry)  # the BLOCKED one
+        self.assertLess(retry, subjects.index('implement T001'))
+        self.assertEqual(subjects.count('chore(ai): record T001 runner checkpoint'), 2)  # BLOCKED, then DONE
+        prompts = self.gate_unknown_prompts()
+        self.assertEqual(len(prompts), 2)
+        note = 'The previous session marked T001 BLOCKED without a failing check'
+        self.assertNotIn(note, prompts[0])
+        self.assertEqual(prompts[1].count(note), 1)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['gate_unblocks'], ['T001'])
+        # A run without the retry has two host gates (after T001, final); the retry adds one.
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass', 'pass'])
+        self.assertEqual([r[1] for r in self.task_rows()], ['blocked', 'done'])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_gate_only_block_retried_once_per_task(self):
+        self.ready(task('T001') + task('T002', dependencies='T001') + task('T003'))
+        self.approve_run()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-gate-unknown-always')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.helper('tasks', 'status', 'T003').stdout.strip(), 'DONE')
+        self.assertEqual(self.git_subjects().count('chore(ai): retry T001 after a gate-only block'), 1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('blocked without a failing check'), 1)
+        self.assertEqual(notes.count('⚠ Blocked: '), 1)
+        self.assertEqual(len([p for p in self.gate_unknown_prompts() if 'invocation: T001.' in p]), 2)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['gate_unblocks'], ['T001'])
 
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):
