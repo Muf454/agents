@@ -35,13 +35,20 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
     capped at it and deducted from the validator's budget; with no time left it exits 124
     (`Validation time limit reached while waiting for the lock.`) without starting the validator.
     `AI_CHECK_TIMEOUT` is now validated (digits) and both values are read as decimal.
-  - T045 (sonnet, TODO, N1): leading-zero `AI_CHECK_LOCK_WAIT` regression tests.
+  - T045 (sonnet, DONE, N1): leading-zero `AI_CHECK_LOCK_WAIT` regression tests (no script
+    change: T044 already reads both values with `10#`).
+- Review round 2 (REQUEST CHANGES, M2 + N2 accepted):
+  - T046 (opus, TODO, M2): a lock waiter that runs out of `AI_CHECK_TIMEOUT` exits 124 without
+    calling `stamp invalidate`, so it never overwrites the active gate's RUNNING record and
+    content changes during that gate still fail it.
+  - N2: this handoff now records T045 as DONE (fixed in the triage commit).
 
 ## Validation run
 T042 tree: PASS (1027 tests, 712.6 s; run in the background and waited for).
 T043 tree: `-k Docs` 3 OK and `-k flow_this_repo` 1 OK (targeted). The full gate ran in the
 background and was waited for; its result is in the T043 run-log line.
 T044 tree: PASS (1031 tests, 662.4 s; run in the background and waited for).
+T045 tree: PASS (1033 tests, 664.2 s in the session; 665.7 s in the host stamp at 607a8e8).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -93,6 +100,9 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
   (T044: wait plus validation end by `AI_CHECK_TIMEOUT` with 124 and no stamp; a wait that uses
   the whole budget exits 124 with the time-limit message and never starts the validator; a short
   wait inside the budget passes; non-digit timeouts are refused).
+- `test_gate_lock_wait_leading_zero_is_decimal`,
+  `test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once` (T045: `08` waits 8 s and passes;
+  `00` refuses at once).
 - `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
   (T040: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
   `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
@@ -111,5 +121,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all pa
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-T045 (review N1 tests), then another independent review. Queue was complete after T043. Human review of the branch (independent review through the pipeline,
+T046 (review M2), then another independent review. T037–T045 are DONE. Human review of the branch (independent review through the pipeline,
 or `ai-review` by hand), then the "Needs you" steps above. Nothing is merged or deployed.

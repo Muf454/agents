@@ -3914,3 +3914,56 @@ DONE 2026-10-20. No script change needed: T044 already normalises `AI_CHECK_LOCK
 Evidence: `-k gate_lock_wait` Ran 11 OK; full `.ai/bin/ai-check` in the background, waited, no edits
 meanwhile: 1033 tests OK in 664.2 s, exit 0.
 
+## T046 — A lock waiter that times out leaves the active gate's stamp alone (review M2)
+Status: TODO
+Dependencies: T044
+Model: opus
+
+### Goal
+`ai-check` mutates `.ai/local/validation.json` only while it holds `.ai/local/validation.lock`. A
+caller whose lock wait runs out against `AI_CHECK_TIMEOUT` exits 124 with its time-limit message
+but never replaces the running validator's RUNNING record (and its `before` fingerprint), so a
+content change during the active validation still makes that validation FAIL.
+
+### Implementation notes
+- Review M2: `scripts/ai-check` (~22–33): `flock -w "$limit" 8 || out_of_time` runs
+  `out_of_time`, which calls `ai_helper stamp invalidate` without the lock. `stamp invalidate`
+  (`scripts/lib/workflow.py` ~760) rewrites `before` with the current fingerprint, so the holder's
+  later `stamp record` compares against the waiter's fingerprint and can record PASS with
+  `unchanged: true` after the content changed; racing the holder's `stamp record` can also replace
+  finished evidence with RUNNING.
+- Split the two exits: the lock-wait failure path prints `Error: Validation time limit reached
+  while waiting for the lock.` and exits 124 without any stamp call (same as the `ai_die` paths,
+  which never touched the stamp before T044). The `budget <= 0` path after the lock is acquired
+  may keep invalidating (it holds the lock). Add a short comment: stamp changes only under the lock.
+- Keep the toolkit-repo branch (~4–12) unchanged. No ai-run change expected; check `host_gate`
+  and `gate_only_retry` do not rely on the waiter invalidating (they read `stamp outcome`).
+- docs/workflow.md "One gate deadline"/lock-wait paragraph: one clause that a timed-out waiter
+  leaves the stamp unchanged, if the paragraph describes the stamp at all.
+
+### Likely affected modules
+scripts/ai-check, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- New test `test_gate_lock_wait_timeout_keeps_the_active_stamp` on a `ready()` fixture: write a
+  RUNNING `validation.json` with a known `before` value while `gate_lock_holder` holds the lock
+  (a scaled 10 s), run `ai-check` with `AI_CHECK_LOCK_WAIT=30 AI_CHECK_TIMEOUT=1` → exit 124 with
+  the time-limit message, and `validation.json` is byte-for-byte unchanged afterwards.
+- New test `test_gate_lock_wait_timeout_keeps_change_detection`: gate A runs a validator that
+  waits for a release file (signalled by the test), the test changes a tracked file while A runs,
+  gate B times out waiting (`AI_CHECK_LOCK_WAIT=30 AI_CHECK_TIMEOUT=1`, 124), then A is released
+  and exits non-zero with `Validation modified project content`, the stamp is FAIL with
+  `unchanged: false`, and `stamp verify` fails. Mutation check: re-adding `stamp invalidate` to
+  the wait-failure path makes this test fail (record it in the result).
+- A PASS stamp from a finished gate is also left unchanged by a timed-out waiter (subtest or part
+  of the first test).
+- Existing `-k gate_lock_wait`, `-k gate_time`, `-k session_gate_allowance` and `-k gate_only`
+  tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k gate_lock_wait` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_only` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+
