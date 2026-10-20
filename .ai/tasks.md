@@ -3767,7 +3767,7 @@ list the excluded paths, so unchanged. Validation: -k exec_bits 11 OK, -k gate_c
 
 
 ## T043 — Docs, flow chart and handoff audit (batch 8)
-Status: TODO
+Status: DONE
 Dependencies: T037, T038, T039, T040, T041, T042
 Model: haiku
 
@@ -3800,4 +3800,12 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+- Targeted: `-k Docs` Ran 3 OK; `-k flow_this_repo` Ran 1 OK.
+- Gate: `.ai/bin/ai-check` in the background, waited for: 1027 tests, 0 failing, 673.6 s, OK, exit 0.
+- Mismatches found and how they were handled:
+  - README chmod paragraph did not say the exec-bit restore skips the protected-path list (N5): clause added.
+  - `.ai/handoff.md` was stale (T037–T041 heading, "Next action: Implement T042", test groups "planned"): rewritten for T037–T043.
+  - Handoff "Human todos" said only some tasks add a hub Log line: corrected to T037–T043 each adding theirs (T038 and T040 did too).
+- Checked, no change needed: `docs/workflow.md` gate-only retry, lock wait and exec-bits sections; `scripts/ai-run` RUNNER CONTRACT, `gate_only_retry`, `host_gate` (`min(remaining, 900)`); `runner.md` and `triage.md` gate bullets; `workflow.py` `tasks next` (prefers IN_PROGRESS); vault `agents-flow.md` (consistent with the code, not edited).
+- Every test group named in the handoff exists in `tests/test_workflow.py`.
 

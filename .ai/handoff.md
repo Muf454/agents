@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-T037–T041 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037–T043 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
@@ -12,7 +12,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
     on an unknown gate result (the host gate decides).
   - T038 (DONE): `run-manifest gate-unblock TASK` (once per task per run, field `gate_unblocks`)
     and `stamp outcome` (a safe reading of `.ai/local/validation.json`: `WORD DIGEST`, never
-    following a symlink or blocking on a FIFO). Not yet used by `ai-run` (T040).
+    following a symlink or blocking on a FIFO). Used by `ai-run` from T040.
   - T039 (DONE): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates (`host_gate`)
     wait (at most 900 s, within the run time) for a session's background gate that still holds
     the lock. `ai-recover` and `ai-pipeline` keep the immediate refusal.
@@ -27,10 +27,14 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
   protected-path list, read by the guard digest (value unchanged) and by `exec-bits`, which then
   never touches `.ai/prompts/`, `.ai/permissions.allow`, `.claude/settings.json` or
   `.github/workflows/ai-validate.yml` either.
-- T043 (haiku): docs, flow chart and handoff audit.
+- T043 (haiku, DONE): docs, flow chart and handoff audit. The code and docs of T037–T042 agree;
+  the mismatches found are listed in its Result / notes (README protected-path clause added, this
+  handoff brought up to date, hub Log lines checked).
 
 ## Validation run
 T042 tree: PASS (1027 tests, 712.6 s; run in the background and waited for).
+T043 tree: `-k Docs` 3 OK and `-k flow_this_repo` 1 OK (targeted). The full gate ran in the
+background and was waited for; its result is in the T043 run-log line.
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -49,6 +53,7 @@ Flow chart updated: T037 updated vault `agents-flow.md` ("Inside one task" `work
 T039 updated the "Inside one task" `gate` node (waits for a running gate, at most 15 min) and added a bullet.
 T041 added the BLOCKED branch to "Inside one task" (gate-only block retry), a "Gate-only block
 retry" bullet and the 🔧 retry row in the notifications table. T042 updates the "Executable bits" bullet.
+T043 re-read the vault chart against `ai-run`, `ai-check`, `workflow.py` and the prompts: no change needed.
 
 ## Manual testing for the human
 
@@ -68,29 +73,30 @@ retry" bullet and the 🔧 retry row in the notifications table. T042 updates th
    the task finished by the next session.
 
 ### Covered by automated tests
-Planned (group names fixed by the tasks; run with `python3 -m unittest discover -s tests -k <group>`):
-- `test_gate_background_prompts_tell_the_session_to_wait` (T037, passing).
-- `test_gate_unblock_manifest_*` (T038, passing: once per task, kept on resume/dropped on start,
+Test groups (run with `python3 -m unittest discover -s tests -k <group>`; all passing):
+- `test_gate_background_prompts_tell_the_session_to_wait` (T037).
+- `test_gate_unblock_manifest_*` (T038: once per task, kept on resume/dropped on start,
   wrong shape invalid, `stamp outcome` words and digest, symlink/FIFO/unsafe `.ai/local` → `none -`).
-- `test_gate_lock_wait_*` (T039, passing: waits then passes and the stamp verifies; unset refuses
+- `test_gate_lock_wait_*` (T039: waits then passes and the stamp verifies; unset refuses
   at once; held past the wait refuses; invalid value; the runner's host gate waits for a lock left
   by the session and checkpoints the task DONE).
 - `test_gate_only_block_retried_once_then_done`, `test_gate_only_block_retried_once_per_task`
-  (T040, passing: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
+  (T040: retry commit before the DONE checkpoint, 🔧 and no ⚠, the second prompt's note,
   `gate_unblocks` `["T001"]`, one extra host gate pass; a task that blocks every time is retried
   exactly once and then stays BLOCKED with ⚠).
 - `test_gate_only_block_unchanged_session_gate_failed`, `_session_never_ran_the_gate`,
-  `_host_gate_fails`, `_without_run_manifest`, `_dirty_tree` (T041, passing: T001 stays BLOCKED,
+  `_host_gate_fails`, `_without_run_manifest`, `_dirty_tree` (T041: T001 stays BLOCKED,
   ⚠ as today, no retry commit or 🔧; a failing host gate spends the claim and the run goes on).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
-  `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042, passing).
+  `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
 
 ## Human todos
 - After merge: the upgrades above; tick FL-32 in the vault backlog (sessions never tick it).
-- Vault: this planning session could edit only `.ai/` files, so it left no hub Log line; T037,
-  T039, T041, T042 and T043 add theirs.
+- Vault hub Log: each of T037–T043 appends its own dated line (the planning session could edit
+  only `.ai/` files, so it added none).
 - Gate files: none need changing for this batch. If you want this repo's own pipeline to use the
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Implement T042, then T043.
+Queue complete after T043. Human review of the branch (independent review through the pipeline,
+or `ai-review` by hand), then the "Needs you" steps above. Nothing is merged or deployed.
