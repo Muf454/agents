@@ -236,6 +236,11 @@ runs, which `ai-run` records as `gate` lines in the host outcome log (where agen
 The cap keeps a corrupt log from more than doubling a session. Triage, plan revision and `--plan`
 sessions keep the plain limit.
 
+`ai-check` refuses with `Validation is already running.` while another gate holds its lock;
+`AI_CHECK_LOCK_WAIT=N` (seconds, default 0) makes it wait up to N seconds for that gate first.
+`ai-run`'s host gates wait up to 15 minutes (within the run time), so a session that ends while
+its own background gate still runs does not fail the host gate.
+
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production
 operations. There are no approval prompts between normal tasks. Claude's `dontAsk`

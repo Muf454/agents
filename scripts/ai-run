@@ -289,6 +289,15 @@ verify_checkpoint() {
 
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
+# The host's full gate; sets gate_code. A session may end with its own background gate still
+# holding the validation lock (FL-32), so wait for it for up to 15 minutes within the run time.
+host_gate() {
+  local lock_wait=$remaining
+  (( lock_wait <= 900 )) || lock_wait=900
+  gate_code=0
+  AI_CHECK_LOCK_WAIT=$lock_wait AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+}
+
 knowledge_prompt() {
   [[ -n "$knowledge_dir" ]] || return 0
   printf '\nProject knowledge base explicitly configured for this run: %s. ' "$knowledge_dir"
@@ -698,8 +707,7 @@ checkpoint_done() {
   (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
   ai_observe step checks "$task"
   gate_started=$SECONDS
-  gate_code=0
-  AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+  host_gate
   ai_guard_verify
   record_gate "$gate_code" "$gate_started"
   if (( gate_code != 0 )); then
@@ -809,8 +817,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
     ai_observe step checks final
     gate_started=$SECONDS
-    gate_code=0
-    AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+    host_gate
     ai_guard_verify
     record_gate "$gate_code" "$gate_started"
     if (( gate_code != 0 )); then

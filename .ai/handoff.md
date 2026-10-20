@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-T037–T038 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037–T039 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
@@ -13,8 +13,9 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
   - T038 (DONE): `run-manifest gate-unblock TASK` (once per task per run, field `gate_unblocks`)
     and `stamp outcome` (a safe reading of `.ai/local/validation.json`: `WORD DIGEST`, never
     following a symlink or blocking on a FIFO). Not yet used by `ai-run` (T040).
-  - T039 (opus): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates wait (at most
-    900 s) for a session's background gate that still holds the lock.
+  - T039 (DONE): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates (`host_gate`)
+    wait (at most 900 s, within the run time) for a session's background gate that still holds
+    the lock. `ai-recover` and `ai-pipeline` keep the immediate refusal.
   - T040 (opus): a session that blocks its task after its own gate showed no failure gets one
     host gate; a pass sets the task back to IN_PROGRESS for one more session, once per task.
   - T041 (opus): the neighbouring cases stay as today (tests), docs and flow chart.
@@ -25,7 +26,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-T038 tree (f136412): PASS (1011 tests, 651.6 s; run in the background and waited for).
+T039 tree: PASS (1016 tests, 654.5 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -41,7 +42,8 @@ T038 tree (f136412): PASS (1011 tests, 651.6 s; run in the background and waited
 
 ## Flow chart
 Flow chart updated: T037 updated vault `agents-flow.md` ("Inside one task" `work` node, "Session gate runs" bullet).
-T039, T041 and T042 update the notifications table and the "Executable bits" bullet.
+T039 updated the "Inside one task" `gate` node (waits for a running gate, at most 15 min) and added a bullet.
+T041 and T042 update the notifications table and the "Executable bits" bullet.
 
 ## Manual testing for the human
 
@@ -65,7 +67,9 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
 - `test_gate_background_prompts_tell_the_session_to_wait` (T037, passing).
 - `test_gate_unblock_manifest_*` (T038, passing: once per task, kept on resume/dropped on start,
   wrong shape invalid, `stamp outcome` words and digest, symlink/FIFO/unsafe `.ai/local` → `none -`).
-- `test_gate_lock_wait_*` (T039).
+- `test_gate_lock_wait_*` (T039, passing: waits then passes and the stamp verifies; unset refuses
+  at once; held past the wait refuses; invalid value; the runner's host gate waits for a lock left
+  by the session and checkpoints the task DONE).
 - `test_gate_only_block_*` (T040), `test_gate_only_block_unchanged_*` (T041).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
   `test_exec_bits_protected_list_is_defined_once`, `test_exec_bits_guard_digest_unchanged` (T042).
@@ -78,4 +82,4 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Implement T039–T043 in queue order (T039, T040, T041, T042, T043).
+Implement T040–T043 in queue order (T040, T041, T042, T043).

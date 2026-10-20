@@ -564,6 +564,22 @@ if mode not in ('no-progress', 'bad-format'):
             pathlib.Path(task_id + '.txt').chmod(0o755)
             subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
+if mode == 'lock-held':
+    # The session's own background gate outlives it: a detached process holds the validation lock
+    # for MOCK_LOCK_HOLD seconds (the test scales it) after the session ends.
+    ready = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'lock-holder.ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', 'import fcntl, pathlib, sys, time\n'
+         'f = open(".ai/local/validation.lock", "w"); fcntl.flock(f, fcntl.LOCK_EX)\n'
+         'pathlib.Path(sys.argv[2]).write_text("x"); time.sleep(float(sys.argv[1]))',
+         os.environ.get('MOCK_LOCK_HOLD', '2'), str(ready)],
+        start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'lock-holder.pid', 'w') as f:
+        f.write(f'{holder.pid}\n')
+    for _ in range(500):
+        if ready.exists(): break
+        time.sleep(0.01)
 if mode == 'scratch-leftover':
     # Throwaway files a session leaves behind; the host must remove them after the session.
     scratch = pathlib.Path('.ai/local/scratch')
@@ -9896,6 +9912,74 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('failing gate')
         self.tool('ai-run', '--approved', expected=1)
         self.assertEqual([r['result'] for r in self.gate_rows()], ['fail'])
+
+    # ---------------------------------------------------------------- gate lock wait (FL-32, T039)
+    def gate_lock_holder(self, seconds):
+        """A process holding .ai/local/validation.lock for `seconds`; returns once it holds it."""
+        ready = self.base / 'test-lock-holder.ready'
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        holder = subprocess.Popen(
+            [sys.executable, '-c', 'import fcntl, pathlib, sys, time\n'
+             'f = open(".ai/local/validation.lock", "w"); fcntl.flock(f, fcntl.LOCK_EX)\n'
+             'pathlib.Path(sys.argv[2]).write_text("x"); time.sleep(float(sys.argv[1]))',
+             str(seconds), str(ready)], cwd=self.project)
+        self.addCleanup(lambda: (holder.kill(), holder.wait()) if holder.poll() is None else None)
+        for _ in range(500):
+            if ready.exists():
+                return holder
+            time.sleep(0.01)
+        self.fail('lock holder did not start')
+
+    def test_gate_lock_wait_passes_after_a_running_gate_ends(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='30')
+        self.assertIn('Waiting up to 30s for a running validation to finish.', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_unset_refuses_at_once(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT)
+        self.assertLess(time.monotonic() - started, 5 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())  # refused while the lock was still held
+        self.assertIn('Validation is already running.', result.stderr)
+        self.assertNotIn('Waiting up to', result.stderr)
+
+    def test_gate_lock_wait_held_past_the_wait_refuses(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT, AI_CHECK_LOCK_WAIT='1')
+        self.assertLess(time.monotonic() - started, 6 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())
+        self.assertIn('Waiting up to 1s', result.stderr)
+        self.assertIn('Validation is already running.', result.stderr)
+
+    def test_gate_lock_wait_invalid_value(self):
+        self.ready()
+        for value in ('x', '-1', '123456', ' 5'):
+            with self.subTest(value=value):
+                result = self.tool('ai-check', expected=1, AI_CHECK_LOCK_WAIT=value)
+                self.assertIn(f'Invalid AI_CHECK_LOCK_WAIT: {value}', result.stderr)
+
+    def test_gate_lock_wait_runner_waits_for_the_session_gate(self):
+        self.ready()
+        pid_file = self.base / 'lock-holder.pid'
+
+        def reap():
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        self.addCleanup(reap)
+        hold = 2 * TIMEOUT_SCALE
+        result = self.tool('ai-run', '--approved', MOCK_CLAUDE='lock-held', MOCK_LOCK_HOLD=str(hold))
+        self.assertTrue(pid_file.exists())
+        self.assertIn('Waiting up to', result.stderr)
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass'])
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
 
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):

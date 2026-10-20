@@ -1282,6 +1282,11 @@ can at most double a session; a helper output outside `^[0-9]{1,7}$` counts as 0
 allowance the `Session:` line is unchanged; otherwise it reads `(limit 1600s: 1000s + 600s for two
 gate runs of 300s; log …)`.
 
+Both host gates run with `AI_CHECK_LOCK_WAIT=min(remaining, 900)` (`host_gate`): `ai-check` then
+waits up to that many seconds for a session's still-running background gate to release
+`.ai/local/validation.lock` (FL-32) instead of failing with `Validation is already running.`;
+the wait is part of the timed gate. `ai-recover` and `ai-pipeline` keep the immediate refusal.
+
 ## Observation records and the dashboard
 
 `ai-dashboard --wait [--since CURSOR]` polls the same read-only snapshot and returns the runs

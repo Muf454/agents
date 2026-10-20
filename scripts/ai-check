@@ -12,8 +12,14 @@ if [[ ! -d .ai && -d "$AI_BIN/../tests" ]]; then
 fi
 ai_root
 [[ -f .ai/validate ]] || ai_die 'Missing .ai/validate.'
+wait=${AI_CHECK_LOCK_WAIT:-0}
+[[ $wait =~ ^[0-9]{1,5}$ ]] || ai_die "Invalid AI_CHECK_LOCK_WAIT: $wait"
 exec 8>.ai/local/validation.lock
-flock -n 8 || ai_die 'Validation is already running.'
+if ! flock -n 8; then
+  (( wait > 0 )) || ai_die 'Validation is already running.'
+  echo "Waiting up to ${wait}s for a running validation to finish." >&2
+  flock -w "$wait" 8 || ai_die 'Validation is already running.'
+fi
 log=$(mktemp .ai/local/check-XXXXXXXX.log)
 # Remove old evidence first: a failed/interrupted run cannot retain a green stamp.
 ai_helper stamp invalidate

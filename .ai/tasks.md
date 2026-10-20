@@ -3475,7 +3475,7 @@ for, on f136412 with no edits meanwhile: Ran 1011 tests in 651.6 s, OK, exit 0.
 No ai-run change (T040). Flow unchanged in this task.
 
 ## T039 — The host gate waits for a validation that is still running (FL-32, gate lock)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -3527,7 +3527,18 @@ Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
-
+DONE. `scripts/ai-check`: `AI_CHECK_LOCK_WAIT` (`^[0-9]{1,5}$`, default 0, invalid → `Invalid
+AI_CHECK_LOCK_WAIT: …`); `flock -n` first, then with a wait prints `Waiting up to Ns for a running
+validation to finish.` and `flock -w N`; a timeout dies `Validation is already running.`.
+`scripts/ai-run`: new `host_gate` (lock wait = min(remaining, 900), sets `gate_code`) used by
+`checkpoint_done` and the final gate; T040 can reuse it. `ai-recover`/`ai-pipeline` unchanged.
+Mock mode `lock-held` (detached `python3 -c` holder, `MOCK_LOCK_HOLD` scaled by `TIMEOUT_SCALE`,
+pid recorded and killed in cleanup). Tests: `test_gate_lock_wait_passes_after_a_running_gate_ends`,
+`_unset_refuses_at_once`, `_held_past_the_wait_refuses`, `_invalid_value`,
+`_runner_waits_for_the_session_gate`. README + docs/workflow.md one paragraph each; vault flow chart
+gate node, bullet, `updated:` and hub Log line.
+Evidence: `-k gate_lock_wait` Ran 5 OK; `-k gate_time` Ran 4 OK; `-k session_gate_allowance` Ran 5
+OK; `.ai/bin/ai-check` PASS (1016 tests, 654.5 s, background and waited, no edits meanwhile).
 
 ## T040 — Runner retries a gate-only block once per task (FL-32, recovery)
 Status: TODO
