@@ -3406,7 +3406,7 @@ one task" `work` node, "Session gate runs" bullet) and hub Log line were already
 earlier session; checked present.
 
 ## T038 — Host record of a gate-only block retry and a safe reading of the validation stamp (FL-32, helpers)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: none
 Model: opus
 

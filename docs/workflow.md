@@ -76,6 +76,10 @@ including spec, plan, tasks, and validation tooling. Clean submodules are repres
 by their HEAD; dirty submodules are rejected. It omits `.ai/local/`, reviews, compact
 state, handoff, and run log so normal bookkeeping does not invalidate source checks.
 Ignored source cannot be validated by this digest; keep real source tracked.
+`stamp outcome` reads that file without following a symlink or blocking (regular file, at most
+64 KiB) and prints `WORD DIGEST`: `none` (missing, unsafe, unreadable or not a JSON object),
+`running`, `pass`, `changed` (FAIL with exit 0 because content changed) or `fail`, and the
+SHA-256 of the bytes read (`-` when nothing was read); it always exits 0 (FL-32).
 
 A new gate invalidates old success before execution; failures/interruption never
 retain a green stamp. Review requires a current successful content digest. Commits
@@ -262,7 +266,10 @@ there is none). The optional `timeout_reruns` (unique task IDs, at most 200; any
 invalidates the manifest) holds the tasks whose timed-out session was committed and rerun once:
 `run-manifest timeout-rerun ID` appends ID, or fails `session timeout: ID was already committed
 and rerun once in this run` and writes nothing. A human start drops the list; `clear-attempts`
-keeps it, so a resumed pipeline never resets "once per task". A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+keeps it, so a resumed pipeline never resets "once per task". `gate_unblocks` has the same shape
+and lifetime for the one gate-only block retry per task (FL-32): `run-manifest gate-unblock ID`
+appends ID, or fails `gate-only block: ID was already retried once in this run` and writes
+nothing. A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch

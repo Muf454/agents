@@ -6236,6 +6236,113 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'gate')
         self.assertIn('too many', self.helper('run-manifest', 'timeout-rerun', 'T999', expected=1).stderr)
 
+    def test_gate_unblock_manifest_once_per_task(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001'])
+        before = path.read_bytes()
+        again = self.helper('run-manifest', 'gate-unblock', 'T001', expected=1)
+        self.assertIn('gate-only block: T001 was already retried once in this run', again.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'gate-unblock', 'T002')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001', 'T002'])
+        before = path.read_bytes()
+        for args in (('bad',), (), ('T005', 'T006')):
+            with self.subTest(args=args):
+                usage = self.helper('run-manifest', 'gate-unblock', *args, expected=1)
+                self.assertIn('Usage: run-manifest gate-unblock ID', usage.stderr)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_gate_unblock_manifest_kept_on_resume_dropped_on_start(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        self.helper('run-manifest', 'timeout-rerun', 'T001')  # the two claims are independent
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001'])
+        self.helper('run-manifest', 'gate-unblock', 'T001', expected=1)
+        self.approve_run()
+        self.assertNotIn('gate_unblocks', json.loads(path.read_text()))
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+
+    def test_gate_unblock_manifest_wrong_shape_is_invalid(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        valid = json.loads(path.read_text())
+        many = [f'T{n:03d}' for n in range(201)]
+        for value in ('T001', ['T001', 'T001'], ['x'], [7], {'T001': 1}, None, many):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(dict(valid, gate_unblocks=value)) + '\n')
+                invalid = self.helper('run-manifest', 'gate', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.helper('run-manifest', 'clear-attempts', expected=1)
+        path.write_text(json.dumps(dict(valid, gate_unblocks=many[:200])) + '\n')
+        self.helper('run-manifest', 'gate')
+        self.assertIn('too many', self.helper('run-manifest', 'gate-unblock', 'T999', expected=1).stderr)
+
+    def stamp_outcome(self):
+        result = self.helper('stamp', 'outcome', expected=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def assert_stamp_outcome(self, word):
+        content = (self.project / '.ai/local/validation.json').read_bytes()
+        self.assertEqual(self.stamp_outcome(), f'{word} {hashlib.sha256(content).hexdigest()}\n')
+
+    def test_gate_unblock_manifest_stamp_outcome_words(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        evidence = self.project / '.ai/local/validation.json'
+        self.assertEqual(self.stamp_outcome(), 'none -\n')  # no .ai/local yet
+        evidence.parent.mkdir(exist_ok=True)
+        if evidence.exists():
+            evidence.unlink()
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+        self.helper('stamp', 'invalidate')
+        self.assert_stamp_outcome('running')
+        self.assertRegex(self.stamp_outcome(), r'^running [0-9a-f]{64}\n$')
+        log = str(self.project / '.ai/local/check.log')
+        self.helper('stamp', 'record', '0', log)
+        self.assertEqual(json.loads(evidence.read_text())['result'], 'PASS')
+        self.assert_stamp_outcome('pass')
+        self.helper('stamp', 'invalidate')
+        (self.project / 'changed.txt').write_text('edited during the gate\n')
+        self.helper('stamp', 'record', '0', log, expected=1)
+        self.assertEqual(json.loads(evidence.read_text())['unchanged'], False)
+        self.assert_stamp_outcome('changed')
+        self.helper('stamp', 'invalidate')
+        self.helper('stamp', 'record', '1', log)
+        self.assert_stamp_outcome('fail')
+        for content in (b'not json\n', b'["PASS"]\n', b'\xff\xfe garbage', b'[' * 60000):
+            with self.subTest(content=content[:12]):
+                evidence.write_bytes(content)
+                self.assert_stamp_outcome('none')
+        evidence.write_bytes(b'{"result": "PASS"}' + b' ' * (64 * 1024))  # over the size bound
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+
+    def test_gate_unblock_manifest_stamp_outcome_never_follows_or_blocks(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        evidence = self.project / '.ai/local/validation.json'
+        evidence.parent.mkdir(exist_ok=True)
+        if evidence.exists():
+            evidence.unlink()
+        outside = self.base / 'outside.json'
+        outside.write_text('{"result": "PASS", "exit_code": 0}\n')
+        evidence.symlink_to(outside)
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+        evidence.unlink()
+        os.mkfifo(evidence)
+        started = time.monotonic()
+        result = self.run_cmd(['python3', str(HELPER), 'stamp', 'outcome'], timeout=SHORT_TIMEOUT)
+        self.assertEqual(result.stdout, 'none -\n')
+        self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+        evidence.unlink()
+        moved = self.base / 'local-elsewhere'
+        evidence.parent.rename(moved)
+        (self.project / '.ai/local').symlink_to(moved)  # an unsafe .ai/local
+        (moved / 'validation.json').write_text('{"result": "PASS"}\n')
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+
     def test_limit_relaunch_record_setting_recorded_with_the_run(self):
         self.setup_project()
         self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', 'c' * 64, 'main', '--approved'],
