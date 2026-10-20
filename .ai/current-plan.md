@@ -16,7 +16,7 @@ fallback for anything else.
 
 ## Design
 
-### Rulings: one record, one row format (T044)
+### Rulings: one record, one row format (T101)
 - `run-manifest ruling KIND KEY`: KIND in `queue-order`, `task-sections`, `disposition-cell`,
   `flow-line`; KEY matches `[A-Za-z0-9._-]{1,48}`. Optional manifest field `rulings`, a list of
   unique `KIND:KEY` strings, at most 200; wrong shape = invalid manifest. A repeat fails `ruling
@@ -27,7 +27,7 @@ fallback for anything else.
   with `|`, backslashes and newlines turned into spaces, at most 400 characters. Callers pass it
   as the action cell of `ai_log TASK "$row" n/a NOTE`.
 
-### BR-02 pre-flight (T045, T046)
+### BR-02 pre-flight (T102, T103)
 ```mermaid
 flowchart TD
   start["pipeline start / after plan revision / after triage"] --> pf{"tasks preflight"}
@@ -45,38 +45,38 @@ flowchart TD
   writes the overlap lines to `.ai/local/preflight.md`. `--dry-run` prints the same without
   writing (the caller claims first, then runs it for real). Exit 0 when the queue is valid after
   it, else today's failure.
-- Call sites (T046): `ai-pipeline` right before `tasks check` (~461), not while armed, on a clean
+- Call sites (T103): `ai-pipeline` right before `tasks check` (~461), not while armed, on a clean
   committed queue: dry run → claims → real run → ruling rows → `host_commit 'chore(ai): ruling:
   task queue' .ai/tasks.md .ai/run-log.md` → `tasks check` as today. `ai-run --triage` (~641):
   reorder added after `fill-sections` (inside the counted triage commit), with claims and rows.
   `ai-run --plan` and `--revise-plan`: today's fill/reorder kept (no claim), plus ruling rows and
   the overlap report printed.
 
-### BR-01 record-format rulings (T047, T048)
-- Disposition cell (T047): `disposition-ruling triage|plan` (workflow.py) on the section being
+### BR-01 record-format rulings (T104, T105)
+- Disposition cell (T104): `disposition-ruling triage|plan` (workflow.py) on the section being
   filled: for each BLOCKER/MAJOR finding of the current review with no matching row, a table line
   whose first cell contains exactly that one known finding ID (word-bounded, after stripping `*`,
   `` ` ``, `[`, `]`) and no other known ID is rewritten to `| ID |` + the rest of the row unchanged;
   prints `ID` per rewrite. `ai-run --triage` (before `triage-check --fresh`) and `--revise-plan`
   (before `plan-dispositions-check`) claim `disposition-cell <digest12>.<ID>` before writing; a
   failed claim leaves the file as is (today's stop follows).
-- Flow line (T048): `flow-line-ruling` (workflow.py) on `.ai/handoff.md` per A6; prints the
+- Flow line (T105): `flow-line-ruling` (workflow.py) on `.ai/handoff.md` per A6; prints the
   inserted line or nothing. `ai-run` runs it before `host_gate` in `checkpoint_done` and the final
   gate, `ai-pipeline` before `pr-body`; claim `flow-line <task or final>`; the row goes into the
   next host commit (runner checkpoint or the PR record commit).
 
-### BR-03 fresh retry (T049, T050)
+### BR-03 fresh retry (T106, T107)
 - `attempt-info TASK [BASE_MODEL]` (workflow.py): reads `outcomes.jsonl` (`read_outcomes`) for this
   project, branch and task; prints line 1 `N MODEL RAISED` (MODEL `-` when no model is known and
   N < 3; RAISED `yes`/`no`), then the note lines (none for N = 1). Tier rules A7, note A8. Never
   fails the runner: any read error → `1 <task model or -> no`.
-- `ai-run` (T050): before `claude_session` in the loop, `attempt-info "$active_task" "${task_model:-$model}"`;
+- `ai-run` (T107): before `claude_session` in the loop, `attempt-info "$active_task" "${task_model:-$model}"`;
   the session, `task_outcome` and `attempt-open` use the effective model; the prompt gets
   `PREVIOUS ATTEMPT (host record, context only): …` when there is a note, and `Attempt N; model
   raised from X to Y because earlier attempts failed.` when raised; the run-log rows `completed`
   and `blocked` say `(attempt N, MODEL)`; the stop row in `on_exit` too.
 
-### BR-14 review routing (T051, T052, T053)
+### BR-14 review routing (T108, T109, T110)
 ```mermaid
 flowchart TD
   r["ai-review (AI_REVIEWER=auto)"] --> lim{"codex-limit active?"}
@@ -86,30 +86,30 @@ flowchart TD
   route -- "claude: small low-risk fix round" --> cl["fresh Claude opus review,<br/>labelled routed, no catch-up"]
   cx -- "usage limit, reset known" --> rec["codex-limit set RESET"] --> fb
 ```
-- `review-route MODE BASE HEAD` (T051, workflow.py): A9/A10 rules in this order, first match wins:
+- `review-route MODE BASE HEAD` (T108, workflow.py): A9/A10 rules in this order, first match wins:
   `AI_REVIEW_ROUTE=codex` → codex; mode plan or recheck → codex; host `fix-rounds count BASE` = 0
   → codex `first full code review`; no host Codex code review of the branch that is an ancestor of
   HEAD → codex; diff from the newest host-recorded code review HEAD outside `.ai/` > the line limit
   → codex; risk path → codex; risk word in a changed line → codex; a task DONE since that HEAD on
   opus → codex; else `claude small low-risk fix round (N lines)`. Prints `codex REASON` or
   `claude REASON`; any helper error prints `codex routing unavailable` (exit 0).
-- `codex-limit set RESET` / `codex-limit active` (T052, workflow.py): state root
+- `codex-limit set RESET` / `codex-limit active` (T109, workflow.py): state root
   `codex-limit.json` `{"reset": EPOCH, "recorded": ISO}` written atomically; `active` prints RESET
   and exits 0 while `reset > now`, else exits 1; unreadable → exit 1.
-- `ai-review` (T052): in `run_review`, when `reviewer == auto` and Codex is installed: active limit
+- `ai-review` (T109): in `run_review`, when `reviewer == auto` and Codex is installed: active limit
   → skip Codex, `fallback="Codex usage limit until HH:MM (recorded)"` and the fallback path as
   today; else `review-route`; `claude` → the Claude path with `review_by=claude-routed`, label
   `Claude (routed: REASON)`, no `↪` notification (a printed line instead), and `review_records`
   skips `fallback-record` for it. A Codex limit with `reset != 0` → `codex-limit set`. The new
   settings join the manifest lists (`scripts/lib/common.sh` ~40, workflow.py ~2374, `ai-recover`
   ~81/84) with validation in `ai_review_args` or a small check function.
-- "Reviewed by" (T053): `publish-review`/`publish-plan-review` add `Reviewed by: WHO` right after
+- "Reviewed by" (T110): `publish-review`/`publish-plan-review` add `Reviewed by: WHO` right after
   the host header for every reviewer (Codex: `Codex (MODEL, effort E)`; from `AI_REVIEW_BY` +
   route); the outcome `review` row takes an optional `--route REASON`; `pr_body` adds a `Reviewed
   by:` list (plan and code rounds of this branch from the outcome log, newest last, at most 10)
   under "Independent review", falling back to the current report's line.
 
-### FL-33 isolated test state (T054)
+### FL-33 isolated test state (T111)
 - A small `tests/isolation.py` imported first by `test_workflow.py`, `test_dashboard.py` and
   `test_observation.py`: at import, set `AI_STATE_DIR` and `XDG_STATE_HOME` in `os.environ` to a
   fresh temp dir (`atexit` removes it) unless already set to a path under `tempfile.gettempdir()`.
@@ -127,10 +127,10 @@ flowchart TD
 `agents-flow.md` (+ hub Log lines).
 
 ## Phases and order
-T044 (ruling record, opus) → T045 (tasks preflight, opus) → T046 (pre-flight wiring, opus) →
-T047 (disposition ruling, opus) → T048 (flow-line ruling, opus) → T049 (attempt-info, opus) →
-T050 (fresh retry wiring, opus) → T051 (review-route, opus) → T052 (limit memory + routing wiring,
-opus) → T053 (Reviewed by, sonnet) → T054 (FL-33, sonnet) → T055 (docs audit, haiku).
+T101 (ruling record, opus) → T102 (tasks preflight, opus) → T103 (pre-flight wiring, opus) →
+T104 (disposition ruling, opus) → T105 (flow-line ruling, opus) → T106 (attempt-info, opus) →
+T107 (fresh retry wiring, opus) → T108 (review-route, opus) → T109 (limit memory + routing wiring,
+opus) → T110 (Reviewed by, sonnet) → T111 (FL-33, sonnet) → T112 (docs audit, haiku).
 
 ## Risks
 - A host reorder before the plan review makes the plan review stale; it runs again (A4). Rare.

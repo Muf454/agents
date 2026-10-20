@@ -9,14 +9,14 @@ date in the same task and appends a dated line to the Log of `agents.md`; never 
 checkboxes. If the vault edit is denied, record it in the result and in the handoff's
 "## Flow chart" section.
 Current batch (batch 9, `fix/flow-batch-9` from `fix/flow-batch-8` at 48fd9b5, planned 2026-10-20,
-approved by Zack 2026-10-20): T044–T055, from vault `agents-backlog.md` BR-01, BR-02, BR-03, BR-14
+approved by Zack 2026-10-20): T101–T112, from vault `agents-backlog.md` BR-01, BR-02, BR-03, BR-14
 (section "Borrowed from other projects (2026-10-20)"), FL-24, FL-25, FL-30 and FL-33. Design:
 `.ai/current-plan.md`; scope and assumptions A1–A13: `.ai/project-spec.md`. Line references for
-T044–T055 are at 48fd9b5; re-check them before editing. T001–T043 are batches 6, 7 and 8 (DONE;
+T101–T112 are at 48fd9b5; re-check them before editing. T001–T043 are batches 6, 7 and 8 (DONE;
 batch 8 on `fix/flow-batch-8`, not merged), kept unchanged because the host protects DONE blocks;
 their line references and gate notes are historical.
 Run-log rows written by the host must contain no `|` (ai_log does not escape it): use the
-`ruling-row` helper (T044) or strip it.
+`ruling-row` helper (T101) or strip it.
 BATCH 8 GATE RULE (still in force for batch 9; overrides the gate note below and the installed runner prompt):
 run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, wait for
 its completion notice and read the result; make no edits and no commits while it runs, and do not
@@ -3813,7 +3813,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 - Every test group named in the handoff exists in `tests/test_workflow.py`.
 
 
-## T044 — Host ruling record and run-log row format (BR-01, helpers)
+## T101 — Host ruling record and run-log row format (BR-01, helpers)
 Status: TODO
 Dependencies: none
 Model: opus
@@ -3834,7 +3834,7 @@ run-log row in the `Ruling: what, why, cost if wrong` shape that cannot break th
 - New action `ruling-row KIND WHAT WHY COST`: prints `Ruling (KIND): WHAT. Why: WHY. Cost if
   wrong: COST.` with each `|`, backslash, CR and LF replaced by a space, runs of spaces collapsed,
   cut to 400 characters at a word boundary; wrong argument count → usage error.
-- No caller yet (T046–T048). Flow unchanged in this task; say so in the result.
+- No caller yet (T103–T105). Flow unchanged in this task; say so in the result.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (the run-manifest field list)
@@ -3861,7 +3861,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T045 — `tasks preflight`: order-only reorder, empty sections, overlap report (BR-02, helper)
+## T102 — `tasks preflight`: order-only reorder, empty sections, overlap report (BR-02, helper)
 Status: TODO
 Dependencies: none
 Model: opus
@@ -3893,7 +3893,7 @@ TODO tasks, says what it changed, and reports task pairs that share a likely-aff
   5. without `--dry-run` apply 1–2 in one atomic write (mode kept), then run `tasks()` on the
      result; a remaining fault fails with its message. With `--dry-run` write nothing (no
      preflight.md either) and exit 0 when 1–2 would make the queue valid, else fail as in 5.
-- No caller yet (T046). Flow unchanged in this task; say so in the result.
+- No caller yet (T103). Flow unchanged in this task; say so in the result.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (the `ai-task`/helper list)
@@ -3921,9 +3921,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T046 — Pre-flight at pipeline start, after plan revisions and after triage (BR-02, FL-24, wiring)
+## T103 — Pre-flight at pipeline start, after plan revisions and after triage (BR-02, FL-24, wiring)
 Status: TODO
-Dependencies: T044, T045
+Dependencies: T101, T102
 Model: opus
 
 ### Goal
@@ -3950,7 +3950,7 @@ repairs the same way.
 - Notify once per ruling commit: `🔧 Ruling: task queue reordered (T004 after T005, T006); see the
   run log.`
 - Flow chart (vault `agents-flow.md`, "The big picture" before the plan review, and "When
-  something goes wrong"): a "Pre-flight queue scan" step and a bullet "Rulings (BR-01/BR-02, T046,
+  something goes wrong"): a "Pre-flight queue scan" step and a bullet "Rulings (BR-01/BR-02, T103,
   2026-10-20)": order-only faults and empty sections of TODO tasks are fixed once per task per run,
   logged `Ruling (…)`, else the stop as today; the notifications table gains the 🔧 Ruling row.
   Update `updated:`; append a dated hub Log line in `agents.md` (never tick checkboxes); set the
@@ -3988,9 +3988,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T047 — Ruling: a disposition cell with more than the bare finding ID (BR-01, FL-30, FL-25)
+## T104 — Ruling: a disposition cell with more than the bare finding ID (BR-01, FL-30, FL-25)
 Status: TODO
-Dependencies: T044
+Dependencies: T101
 Model: opus
 
 ### Goal
@@ -4018,8 +4018,8 @@ parser rejects is repaired once by the host instead of stopping the run.
   counted triage commit. `--revise-plan`, before `plan-dispositions-check` (~562): the same with
   `plan`.
 - Prompts unchanged (`templates/.ai/prompts/` already show the bare-ID row).
-- Flow chart: the "Rulings" bullet (T046) gains "a disposition cell with more than the bare ID".
-  Update `updated:`, hub Log line (or record a denied vault edit). If T046's bullet is missing, add
+- Flow chart: the "Rulings" bullet (T103) gains "a disposition cell with more than the bare ID".
+  Update `updated:`, hub Log line (or record a denied vault edit). If T103's bullet is missing, add
   the bullet here.
 
 ### Likely affected modules
@@ -4050,9 +4050,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T048 — Ruling: the handoff's `## Flow chart` line (BR-01, wiring)
+## T105 — Ruling: the handoff's `## Flow chart` line (BR-01, wiring)
 Status: TODO
-Dependencies: T044
+Dependencies: T101
 Model: opus
 
 ### Goal
@@ -4105,7 +4105,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T049 — `attempt-info`: attempt number, raised model and failure note from the host outcome log (BR-03, helper)
+## T106 — `attempt-info`: attempt number, raised model and failure note from the host outcome log (BR-03, helper)
 Status: TODO
 Dependencies: none
 Model: opus
@@ -4134,7 +4134,7 @@ session should use, and what to tell it about the last failure.
     gate line: …` with the last non-empty line; nothing when no log); `Last result line: …` (the
     last non-empty line of the task's `### Result / notes`, 200 characters);
   - any error reading the outcome log or the queue → `1 <task or base model or -> no` and exit 0.
-- No ai-run change here (T050). Flow unchanged in this task; say so in the result.
+- No ai-run change here (T107). Flow unchanged in this task; say so in the result.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (helper list / outcome log)
@@ -4161,9 +4161,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T050 — The runner gives a retried task its failure note and, from the third attempt, a stronger model (BR-03, runner)
+## T107 — The runner gives a retried task its failure note and, from the third attempt, a stronger model (BR-03, runner)
 Status: TODO
-Dependencies: T049
+Dependencies: T106
 Model: opus
 
 ### Goal
@@ -4188,7 +4188,7 @@ from the third attempt it runs one model tier up; the run log names each attempt
 - Unchanged: session budget, `AI_RECOVER_MAX`, `timeout-rerun`, `gate-unblock`, the triage and
   planning model choice, `AI_SUPERVISE_ESCALATE_MODEL`.
 - Flow chart (vault `agents-flow.md`, "When something goes wrong" and "Inside one task"): a bullet
-  "Fresh retry (BR-03, T050, 2026-10-20)": each new session of a failed task gets the host's
+  "Fresh retry (BR-03, T107, 2026-10-20)": each new session of a failed task gets the host's
   failure note; from the third attempt one model tier up (haiku → sonnet → opus); attempt and model
   in the run log. Update `updated:`, hub Log line (or record a denied vault edit).
 
@@ -4219,7 +4219,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T051 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
+## T108 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
 Status: TODO
 Dependencies: none
 Model: opus
@@ -4254,7 +4254,7 @@ review needs Codex or can go to a fresh Claude session.
   8. a task DONE at HEAD but not at LAST (`tasks newly-done`-style comparison) whose model starts
      with `opus` or `claude-opus` → `codex T… runs on opus`;
   9. else `claude small low-risk fix round (N lines)`.
-- No caller yet (T052). Flow unchanged in this task; say so in the result.
+- No caller yet (T109). Flow unchanged in this task; say so in the result.
 
 ### Likely affected modules
 scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (helper list)
@@ -4285,9 +4285,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T052 — ai-review: remember a Codex usage limit and route small low-risk fix rounds to Claude (BR-14, review)
+## T109 — ai-review: remember a Codex usage limit and route small low-risk fix rounds to Claude (BR-14, review)
 Status: TODO
-Dependencies: T051
+Dependencies: T108
 Model: opus
 
 ### Goal
@@ -4361,9 +4361,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T053 — "Reviewed by" in every review record and in the PR body (BR-14, records)
+## T110 — "Reviewed by" in every review record and in the PR body (BR-14, records)
 Status: TODO
-Dependencies: T052
+Dependencies: T109
 Model: sonnet
 
 ### Goal
@@ -4412,7 +4412,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T054 — Self-check fixtures never register in the real run registry (FL-33, tests)
+## T111 — Self-check fixtures never register in the real run registry (FL-33, tests)
 Status: TODO
 Dependencies: none
 Model: sonnet
@@ -4461,9 +4461,9 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 
 ### Result / notes
 
-## T055 — Docs, flow chart and handoff audit (batch 9)
+## T112 — Docs, flow chart and handoff audit (batch 9)
 Status: TODO
-Dependencies: T044, T045, T046, T047, T048, T049, T050, T051, T052, T053, T054
+Dependencies: T101, T102, T103, T104, T105, T106, T107, T108, T109, T110, T111
 Model: haiku
 
 ### Goal
@@ -4476,7 +4476,7 @@ README, docs/workflow.md, the vault flow chart and the handoff match the code of
   `disposition-ruling`, `flow-line-ruling`, `attempt-info`, `review-route`, `codex-limit`, the
   `rulings` manifest field). Wording fixes only; a behaviour mismatch is recorded in the handoff,
   not fixed here.
-- Vault `agents-flow.md`: the T046, T047, T048, T050, T052 and T053 changes are present and agree.
+- Vault `agents-flow.md`: the T103, T104, T105, T107, T109 and T110 changes are present and agree.
   Fix the wording if needed (update `updated:` then) and append one hub Log line.
 - `.ai/handoff.md`: "What has been implemented", "Validation run", "## Flow chart" (one line
   starting `Flow chart updated`), and "Manual testing for the human" with `### Needs you` and
@@ -4487,7 +4487,7 @@ README, docs/workflow.md, the vault flow chart and the handoff match the code of
 README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md Log
 
 ### Acceptance criteria
-- `-k Docs` and `-k flow_this_repo` pass; the handoff names every new test group of T044–T054.
+- `-k Docs` and `-k flow_this_repo` pass; the handoff names every new test group of T101–T111.
 - The result lists every mismatch found and how it was fixed or recorded.
 
 ### Validation
