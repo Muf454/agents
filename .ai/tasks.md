@@ -3406,7 +3406,7 @@ one task" `work` node, "Session gate runs" bullet) and hub Log line were already
 earlier session; checked present.
 
 ## T038 — Host record of a gate-only block retry and a safe reading of the validation stamp (FL-32, helpers)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -3458,7 +3458,21 @@ Targeted: `python3 -m unittest discover -s tests -k timeout_rerun_manifest` (mus
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
-
+Done (2026-10-20). `scripts/lib/workflow.py`: `run-manifest gate-unblock ID` (usage error for a
+bad/missing ID; a repeat fails `gate-only block: ID was already retried once in this run` with the
+bytes unchanged; at most 200); `gate_unblocks` is validated with `timeout_reruns` through a shared
+`task_list_valid`, kept by `clear-attempts`, dropped by `start`. `stamp outcome` (`stamp_outcome`)
+pins `.ai/local` with `local_dir_fd`, reads `validation.json` with `read_record(..., raw=True)` (new
+`raw` flag returns undecoded bytes so the digest is of the file bytes), a 64 KiB bound (larger →
+`none -`), and prints `none|running|pass|changed|fail DIGEST`; always exits 0 (JSON errors and
+deep nesting → `none DIGEST`). docs/workflow.md: run-manifest field list and the evidence paragraph.
+Tests: `test_gate_unblock_manifest_once_per_task`, `_kept_on_resume_dropped_on_start`,
+`_wrong_shape_is_invalid`, `_stamp_outcome_words`, `_stamp_outcome_never_follows_or_blocks`
+(symlinked file, FIFO within `SHORT_TIMEOUT`, symlinked `.ai/local`).
+Evidence: `-k gate_unblock_manifest` Ran 5 OK; `-k timeout_rerun_manifest` Ran 4 OK (unchanged);
+`-k stamp -k manifest -k Docs` Ran 20 OK; full gate `.ai/bin/ai-check` in the background, waited
+for, on f136412 with no edits meanwhile: Ran 1011 tests in 651.6 s, OK, exit 0.
+No ai-run change (T040). Flow unchanged in this task.
 
 ## T039 — The host gate waits for a validation that is still running (FL-32, gate lock)
 Status: TODO

@@ -1,7 +1,7 @@
 # Handoff
 
 ## What has been implemented?
-T037 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
+T037–T038 DONE on `fix/flow-batch-8` (from `master` at c32f768, which has batch 7, #34). The plan was
 written 2026-10-19 in an unattended planning session: `.ai/project-spec.md` (scope, what was
 verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `.ai/tasks.md`
 (T037–T043; T001–T036 are batches 6 and 7, DONE and unchanged because the host protects DONE blocks).
@@ -10,8 +10,9 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
   - T037 (DONE): the runner and triage prompt templates, the RUNNER CONTRACT and README say to
     run the gate with `run_in_background`, wait for it, make no edits meanwhile, and never block
     on an unknown gate result (the host gate decides).
-  - T038 (opus): `run-manifest gate-unblock TASK` (once per task per run) and `stamp outcome` (a
-    safe reading of `.ai/local/validation.json`).
+  - T038 (DONE): `run-manifest gate-unblock TASK` (once per task per run, field `gate_unblocks`)
+    and `stamp outcome` (a safe reading of `.ai/local/validation.json`: `WORD DIGEST`, never
+    following a symlink or blocking on a FIFO). Not yet used by `ai-run` (T040).
   - T039 (opus): `ai-check` honours `AI_CHECK_LOCK_WAIT`; `ai-run`'s host gates wait (at most
     900 s) for a session's background gate that still holds the lock.
   - T040 (opus): a session that blocks its task after its own gate showed no failure gets one
@@ -24,7 +25,7 @@ verified in the code, assumptions A1–A6), `.ai/current-plan.md` (design) and `
 - T043 (haiku): docs, flow chart and handoff audit.
 
 ## Validation run
-T037 tree: PASS (1006 tests, 644.5 s; run in the background and waited for).
+T038 tree (f136412): PASS (1011 tests, 651.6 s; run in the background and waited for).
 `.ai/validate` is unchanged: shell syntax checks, then `tests/run_parallel.py`.
 
 ## Assumptions
@@ -62,7 +63,8 @@ T039, T041 and T042 update the notifications table and the "Executable bits" bul
 ### Covered by automated tests
 Planned (group names fixed by the tasks; run with `python3 -m unittest discover -s tests -k <group>`):
 - `test_gate_background_prompts_tell_the_session_to_wait` (T037, passing).
-- `test_gate_unblock_manifest_*` (T038).
+- `test_gate_unblock_manifest_*` (T038, passing: once per task, kept on resume/dropped on start,
+  wrong shape invalid, `stamp outcome` words and digest, symlink/FIFO/unsafe `.ai/local` → `none -`).
 - `test_gate_lock_wait_*` (T039).
 - `test_gate_only_block_*` (T040), `test_gate_only_block_unchanged_*` (T041).
 - `test_exec_bits_skips_every_protected_path`, `test_exec_bits_requires_the_protected_list`,
@@ -76,4 +78,4 @@ Planned (group names fixed by the tasks; run with `python3 -m unittest discover 
   new prompt before merging, upgrade `.ai/prompts` yourself (sessions must not).
 
 ## Next action
-Implement T038–T043 in queue order (T038, T039, T040, T041, T042, T043).
+Implement T039–T043 in queue order (T039, T040, T041, T042, T043).
