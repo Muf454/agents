@@ -510,6 +510,16 @@ cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before
 (including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
 `## ` section between two tasks blocks reordering.
 `workflow.py tasks fill-sections` (host-only, not an `ai-task` subcommand) gives TODO tasks a missing `### Likely affected modules` (body `(not listed)`) or `### Result / notes` heading at its canonical position; other sections and tasks are untouched, and nothing is written when nothing is missing.
+`workflow.py tasks preflight [--dry-run]` (host-only, BR-02; no caller yet, T103 wires it in)
+combines both repairs for a queue whose only faults are the order and empty sections: it fails
+with the `tasks reorder` errors, or with `T: dependencies must exist earlier in the queue: DEP`
+when a DONE, IN_PROGRESS or BLOCKED task would move, and with the `ai-task check` message when the
+repaired queue is still invalid; in every failure nothing is written. Otherwise it prints one line per change
+(`queue-order TASK placed after DEP, …` for each task whose dependencies were later, `task-sections
+TASK added SECTION, …`), then `overlap A B PATH, …` for each pair of TODO tasks whose `### Likely
+affected modules` share a path-like token (contains `/` or `.`; at most 20 lines, then `overlap …
+N more`). The real run writes the queue once (mode kept) and the overlap lines to
+`.ai/local/preflight.md` (skipped quietly when `.ai/local` is unsafe); `--dry-run` writes nothing.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only

@@ -3035,6 +3035,122 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.helper('tasks', 'check', expected=1)
         self.assertIn('T001: missing ### Goal', result.stderr)
 
+    def preflight_queue(self, text):
+        self.ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(text)
+        return queue
+
+    def test_preflight_helper_raid_order_is_repaired(self):
+        original = (task('T001') + task('T002') + task('T003')
+                    + task('T004', dependencies='T001, T005, T006') + task('T005') + task('T006'))
+        queue = self.preflight_queue(original)
+        queue.chmod(0o640)
+        before = queue.read_bytes()
+        result = self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n')
+        text = queue.read_text()
+        self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text),
+                         ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+        self.assertEqual(self.queue_blocks(text), self.queue_blocks(original))
+        self.assertEqual(stat.S_IMODE(queue.stat().st_mode), 0o640)
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(), '')
+        self.helper('tasks', 'check')
+
+    def test_preflight_helper_fills_todo_sections_only(self):
+        bare = task('T002').replace('### Likely affected modules\nT002.txt\n', '') \
+            .replace('### Result / notes\nPending.\n', '')
+        queue = self.preflight_queue(task('T001') + bare)
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout,
+                         'task-sections T002 added Likely affected modules, Result / notes\n')
+        self.assertEqual(self.queue_blocks(queue.read_text())['T002'].count('### Result / notes'), 1)
+        self.helper('tasks', 'check')
+        done = task('T001', status='DONE').replace('### Result / notes\nPending.\n', '')
+        queue.write_text(done + bare)
+        before = queue.read_bytes()
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args, expected=1)
+            self.assertIn('T001: missing ### Result / notes', result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(queue.read_bytes(), before)
+
+    def test_preflight_helper_done_task_never_moves(self):
+        text = task('T001', status='DONE') + task('T002', status='DONE', dependencies='T003') + task('T003')
+        queue = self.preflight_queue(text)
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args, expected=1)
+            self.assertIn('T002: dependencies must exist earlier in the queue: T003', result.stderr)
+            self.assertEqual(queue.read_text(), text)
+        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+
+    def test_preflight_helper_unfixable_queues_fail_like_reorder(self):
+        cases = [
+            (task('T001', dependencies='T002') + task('T002', dependencies='T001'),
+             'dependency cycle: T001 -> T002 -> T001'),
+            (task('T001', dependencies='T009'), 'T001: dependency T009 is not a task in the queue'),
+            (task('T001') + task('T002') + task('T003', dependencies='after T002'),
+             'T003: Dependencies: must be "none" or task IDs'),
+        ]
+        queue = self.preflight_queue('')
+        for text, message in cases:
+            queue.write_text(text)
+            for args in (('--dry-run',), ()):
+                result = self.helper('tasks', 'preflight', *args, expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(queue.read_text(), text)
+
+    def test_preflight_helper_valid_queue_is_untouched(self):
+        queue = self.preflight_queue(task('T001') + task('T002', dependencies='T001'))
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args)
+            self.assertEqual(result.stdout + result.stderr, '')
+            self.assertEqual(queue.read_bytes(), before)
+            self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_preflight_helper_reports_overlaps_between_todo_tasks(self):
+        def likely(text, task_id, value):
+            return text.replace(f'### Likely affected modules\n{task_id}.txt\n',
+                                f'### Likely affected modules\n{value}\n')
+        queue = self.preflight_queue(
+            likely(task('T001', status='DONE'), 'T001', '`scripts/ai-run`, docs/a.md')
+            + likely(task('T002'), 'T002', '`scripts/ai-run`, docs/a.md (the helper list).')
+            + task('T003')
+            + likely(task('T004'), 'T004', 'none of these; tests')
+            + likely(task('T005'), 'T005', 'scripts/ai-run; docs/b.md'))
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout, 'overlap T002 T005 scripts/ai-run\n')
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(),
+                         'overlap T002 T005 scripts/ai-run\n')
+        self.assertNotIn('T001', result.stdout)
+        # An unsafe .ai/local (a symlink) is skipped quietly; the report is still printed.
+        local = self.project / '.ai/local'
+        local.rename(self.project / '.ai/local-real')
+        outside = self.base / 'outside-local'
+        outside.mkdir()
+        local.symlink_to(outside)
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual((result.stdout, result.stderr), ('overlap T002 T005 scripts/ai-run\n', ''))
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_preflight_helper_caps_overlap_lines(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        queue = self.preflight_queue(''.join(
+            task(f'T{n:03d}').replace(f'### Likely affected modules\nT{n:03d}.txt\n', shared)
+            for n in range(1, 9)))
+        lines = self.helper('tasks', 'preflight', '--dry-run').stdout.splitlines()
+        self.assertEqual(len(lines), 21)
+        self.assertEqual(lines[0], 'overlap T001 T002 scripts/ai-run')
+        self.assertEqual(lines[-1], 'overlap … 8 more')
+        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+        self.assertIn('T001', queue.read_text())
+
     def test_queue_check_empty_template_queue_fails(self):
         self.setup_project()
         result = self.tool('ai-task', 'check', expected=1)

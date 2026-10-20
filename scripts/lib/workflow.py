@@ -490,9 +490,9 @@ def queue_segments(text):
     return segments
 
 
-def tasks_reorder():
-    path = Path('.ai/tasks.md')
-    text = path.read_text()
+def queue_order(text):
+    """(blocks, ids, order, deps) of TEXT: the stable dependency-first order `tasks reorder` writes,
+    deps per ID in file order. Fails on duplicates, prose or unknown IDs and cycles."""
     blocks = task_blocks(text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
@@ -530,8 +530,11 @@ def tasks_reorder():
 
     for task_id in ids:
         visit(task_id)
-    if order == ids:
-        return
+    return blocks, ids, order, deps
+
+
+def reordered_text(text, order):
+    """TEXT with its task blocks in ORDER; the preamble and the trailer are kept as they are."""
     segments = queue_segments(text)
     positions = [index for index, segment in enumerate(segments) if segment[0] == 'task']
     first, last = positions[0], positions[-1]
@@ -551,8 +554,18 @@ def tasks_reorder():
         out.extend(lines)
     for segment in segments[last + 1:]:
         out.extend(segment[2])
+    return ''.join(out)
+
+
+def tasks_reorder():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    _, ids, order, _ = queue_order(text)
+    if order == ids:
+        return
+    new = reordered_text(text, order)
     mode = stat.S_IMODE(path.stat().st_mode)
-    atomic(path, ''.join(out))
+    atomic(path, new)
     path.chmod(mode)
     print('Task queue reordered (dependencies first): ' + ' '.join(order))
 
@@ -598,26 +611,121 @@ def fill_task_sections(lines):
     return lines, added
 
 
-def tasks_fill_sections():
-    path = Path('.ai/tasks.md')
-    text = path.read_text()
+def task_status(block):
+    """The block's only `Status:` value, or None (fenced lines don't count; task_blocks skips them)."""
+    statuses = [line for line in block['lines'] if line.startswith('Status:')]
+    return statuses[0].split(':', 1)[1].strip() if len(statuses) == 1 else None
+
+
+def filled_text(text):
+    """(TEXT with the missing fillable sections of TODO tasks added, [(ID, names added)])."""
     out, report = [], []
     for kind, key, lines in queue_segments(text):
         if kind == 'task':
-            # Fenced Status: lines don't count; task_blocks ignores them too.
             block = next((b for b in task_blocks(''.join(lines)) if b['id'] == key), None)
-            statuses = [line for line in block['lines'] if line.startswith('Status:')] if block else []
-            if len(statuses) == 1 and statuses[0].split(':', 1)[1].strip() == 'TODO':
+            if block and task_status(block) == 'TODO':
                 lines, added = fill_task_sections(lines)
                 if added:
-                    report.append(f"{key} ({', '.join(added)})")
+                    report.append((key, added))
         out.extend(lines)
+    return ''.join(out), report
+
+
+def tasks_fill_sections():
+    path = Path('.ai/tasks.md')
+    new, report = filled_text(path.read_text())
     if not report:
         return
     mode = stat.S_IMODE(path.stat().st_mode)
-    atomic(path, ''.join(out))
+    atomic(path, new)
     path.chmod(mode)
-    print('Task queue: added missing sections: ' + ', '.join(report))
+    print('Task queue: added missing sections: '
+          + ', '.join(f"{key} ({', '.join(added)})" for key, added in report))
+
+
+PREFLIGHT_OVERLAP_LINES = 20
+
+
+def likely_paths(block):
+    """Path-like tokens of `### Likely affected modules` (outside fences), in first-seen order."""
+    lines, inside, fence = [], False, None
+    for line in block['raw']:
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+            continue
+        if fence:
+            continue
+        if line.startswith('### '):
+            inside = line.rstrip() == '### Likely affected modules'
+        elif inside:
+            lines.append(line)
+    paths = []
+    for token in re.split(r'[\s,]+', ' '.join(lines)):
+        token = token.replace('`', '').rstrip(',.;:')
+        if ('/' in token or '.' in token) and token not in paths:
+            paths.append(token)
+    return paths
+
+
+def tasks_preflight(arguments):
+    """tasks preflight [--dry-run]: repair a queue whose only faults are the order (only TODO
+    tasks move) and empty fillable sections of TODO tasks, print one line per change and the
+    TODO task pairs sharing a likely-affected path. A queue the repair can't make valid fails with
+    the `tasks reorder`/`tasks()` message and nothing is written."""
+    if arguments not in ([], ['--dry-run']):
+        fail('Usage: tasks preflight [--dry-run]')
+    dry_run = bool(arguments)
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    blocks, ids, order, deps = queue_order(text)
+    late = {task_id: [dep for dep in deps[task_id] if ids.index(dep) >= ids.index(task_id)]
+            for task_id in ids}
+    changes, new = [], text
+    if order != ids:
+        status = {block['id']: task_status(block) for block in blocks}
+        moved = [task_id for index, task_id in enumerate(ids) if order[index] != task_id]
+        stuck = [task_id for task_id in moved if status[task_id] != 'TODO']
+        if stuck:
+            # The tasks() wording: a stuck task's own late dependency, else the queue's first one.
+            first = next((t for t in stuck if late[t]), None) or next(t for t in ids if late[t])
+            fail(f'{first}: dependencies must exist earlier in the queue: {late[first][0]}')
+        new = reordered_text(text, order)
+        changes += [f"queue-order {task_id} placed after {', '.join(late[task_id])}"
+                    for task_id in order if late[task_id]]
+    new, filled = filled_text(new)
+    changes += [f"task-sections {key} added {', '.join(added)}" for key, added in filled]
+    final = tasks(new)
+    todo = [block for block in final if block['status'] == 'TODO']
+    overlaps = []
+    for index, first in enumerate(todo):
+        first_paths = likely_paths(first)
+        for second in todo[index + 1:]:
+            shared = [p for p in first_paths if p in likely_paths(second)]
+            if shared:
+                overlaps.append(f"overlap {first['id']} {second['id']} {', '.join(shared)}")
+    if len(overlaps) > PREFLIGHT_OVERLAP_LINES:
+        overlaps = (overlaps[:PREFLIGHT_OVERLAP_LINES]
+                    + [f'overlap … {len(overlaps) - PREFLIGHT_OVERLAP_LINES} more'])
+    if not dry_run:
+        if new != text:
+            mode = stat.S_IMODE(path.stat().st_mode)
+            atomic(path, new)
+            path.chmod(mode)
+        local_fd = local_dir_fd(os.getcwd())
+        if local_fd is not None:
+            try:
+                write_record(local_fd, 'preflight.md', ''.join(line + '\n' for line in overlaps))
+            except (RecordError, OSError):
+                pass  # The report is advisory; an unsafe .ai/local skips it quietly.
+            finally:
+                close_fds(local_fd)
+    for line in changes + overlaps:
+        print(line)
 
 
 def task_command(arguments):
@@ -626,6 +734,9 @@ def task_command(arguments):
         return
     if arguments[0] == 'fill-sections':
         tasks_fill_sections()
+        return
+    if arguments[0] == 'preflight':
+        tasks_preflight(arguments[1:])
         return
     blocks = tasks()
     action = arguments[0]

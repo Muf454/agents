@@ -4046,7 +4046,7 @@ Validation: `-k ruling_manifest` Ran 4 OK; `-k gate_unblock_manifest` Ran 5 OK;
 and waited). No caller yet (T103–T105); flow unchanged, vault flow chart not edited.
 
 ## T102 — `tasks preflight`: order-only reorder, empty sections, overlap report (BR-02, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4104,6 +4104,19 @@ Targeted: `python3 -m unittest discover -s tests -k reorder` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21. `scripts/lib/workflow.py`: `queue_order` (parse + DFS) and `reordered_text`
+factored out of `tasks_reorder` (behaviour and output unchanged), `filled_text` out of
+`tasks_fill_sections` (output unchanged), new `tasks_preflight` (`tasks preflight [--dry-run]`),
+`likely_paths`, `task_status`. One deliberate tightening of the notes: the repaired text is checked
+with `tasks()` *before* the write, so a remaining fault fails with its message and leaves the file
+unchanged in both modes (the caller dry-runs first anyway). The moved-non-TODO failure names the
+moved task's own first later dependency, else the queue's first one. `preflight.md` is written on
+every successful real run (empty when there are no overlaps) through `write_record` on the pinned
+`.ai/local`; an unsafe or missing `.ai/local` is skipped quietly. docs/workflow.md helper paragraph.
+Evidence: `-k preflight_helper` Ran 7 tests OK; `-k reorder` Ran 12 OK; `-k task_sections` Ran 8 OK
+(the `-k fill_sections` filter matches no test names; the fill tests are `test_task_sections_fill_*`);
+`.ai/bin/ai-check` PASS, 1046 tests, 706.7 s (moved to the background at 600 s and waited for,
+no edits meanwhile). No caller yet (T103); flow unchanged, vault not edited.
 
 ## T103 — Pre-flight at pipeline start, after plan revisions and after triage (BR-02, FL-24, wiring)
 Status: TODO

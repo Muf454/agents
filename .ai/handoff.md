@@ -2,7 +2,9 @@
 
 ## What has been implemented?
 Done so far: T101 (`run-manifest ruling KIND KEY`, `rulings` manifest field, `ruling-row`
-helper; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
+helper; no caller yet, flow unchanged); T102 (`workflow.py tasks preflight [--dry-run]`: moves
+only TODO tasks, fills empty sections, prints `queue-order`/`task-sections`/`overlap` lines,
+writes `.ai/local/preflight.md`; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -23,7 +25,7 @@ unchanged because the host protects DONE blocks).
 - T112: docs, flow chart and handoff audit.
 
 ## Validation run
-T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
@@ -69,8 +71,10 @@ could edit only `.ai/` files, so the vault is not edited yet. T112 checks it.
 Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
 - `test_ruling_manifest_*` (T101, done: `_once_per_kind_and_key`,
   `_kept_on_resume_dropped_on_start`, `_wrong_shape_is_invalid`, `_row_is_one_safe_line`).
-- `test_preflight_helper_*` (T102: raid-f4 order, sections, moved DONE task, cycle/unknown/prose,
-  overlap report).
+- `test_preflight_helper_*` (T102, done: `_raid_order_is_repaired`, `_fills_todo_sections_only`,
+  `_done_task_never_moves`, `_unfixable_queues_fail_like_reorder`, `_valid_queue_is_untouched`,
+  `_reports_overlaps_between_todo_tasks` (an unsafe `.ai/local` is skipped quietly),
+  `_caps_overlap_lines`).
 - `test_preflight_pipeline_*` (T103: committed raid-f4 queue repaired and run completed, repeat
   stops, DONE task would move stops, triage reorder, planning ruling row).
 - `test_ruling_disposition_*` (T104: markup and CRITICAL cells rewritten, ambiguous cells left,
