@@ -4359,7 +4359,7 @@ background by the tool and waited for). docs/workflow.md, vault agents-flow.md R
 agents.md Log updated.
 
 ## T106 — `attempt-info`: attempt number, raised model and failure note from the host outcome log (BR-03, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4413,6 +4413,19 @@ Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21 (claude opus). `workflow.py attempt-info TASK [BASE_MODEL]` (`attempt_info`,
+`raised_model`, `attempt_note_item`, `gate_log_lines`, `failing_checks_item`, `result_notes_line`):
+rows from `read_outcomes(strict=True)` filtered to kind task, `project_name()`, branch and TASK,
+ordered by `ordered_attempts`; N = failed rows + 1; tier raise from N ≥ 3 (unknown model names stay);
+note items one per line, `|`/backslashes/line breaks → spaces, 600 characters in total including
+newlines (later items cut), crashed rows without seconds omit `after S s`. The gate log is read only
+when `validation.json`'s `log` names a file directly in `.ai/local` (relative or absolute), via the
+pinned `.ai/local` descriptor (`read_record`, O_NOFOLLOW, tail 256 KiB); unittest's `FAILED
+(failures=…)` summary is not a check name. Errors reading the queue, the state root (overlap check)
+or the outcome log print `1 <task/base model or -> no`, exit 0; a bad TASK ID or argument count is a
+usage error (exit 1). Docs: docs/workflow.md outcome-log section. No ai-run change (T107). Flow
+unchanged in this task. Evidence: `-k attempt_info` Ran 7 tests OK; `-k outcome` Ran 88 tests OK;
+`-k attempt` 54 OK; `.ai/bin/ai-check` PASS, Ran 1069 tests in 743.9 s (background, waited for).
 
 ## T107 — The runner gives a retried task its failure note and, from the third attempt, a stronger model (BR-03, runner)
 Status: TODO

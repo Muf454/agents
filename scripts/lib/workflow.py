@@ -4277,6 +4277,135 @@ def gate_seconds(arguments):
     print(max(passes[-3:], default=0))
 
 
+ATTEMPT_NOTE_LIMIT = 600
+ATTEMPT_LOG_LIMIT = 256 * 1024
+FAILING_CHECK = re.compile(r'^(?:(?:FAIL|ERROR): (.+?)|FAILED ([^\s(]\S*)(?: - .*)?)\s*$')  # not unittest's `FAILED (failures=1)`
+
+
+def raised_model(model):
+    """One tier up from MODEL (BR-03, A7): haiku → sonnet, sonnet → opus; opus, fable and
+    unknown names stay; no model → opus."""
+    if not model:
+        return 'opus'
+    lowered = model.lower()
+    if 'haiku' in lowered:
+        return 'sonnet'
+    if 'sonnet' in lowered:
+        return 'opus'
+    return model
+
+
+def attempt_note_item(text, limit=ATTEMPT_NOTE_LIMIT):
+    """One note item on one line: `|`, backslashes and line breaks become spaces, at most LIMIT."""
+    text = ' '.join(re.sub(r'[|\\\r\n\x0b\x0c\x1c-\x1e\x85  ]', ' ', str(text)).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def gate_log_lines():
+    """The last ai-check's log lines, read like `stamp outcome` (pinned `.ai/local`, never a
+    symlink): only a log that is a regular file directly inside `.ai/local`, at most
+    ATTEMPT_LOG_LIMIT bytes from its end. None when there is no such log."""
+    root = checkout_root()
+    dir_fd = local_dir_fd(root)
+    if dir_fd is None:
+        return None
+    try:
+        record = read_record(dir_fd, 'validation.json', STAMP_LIMIT + 1)
+        if record is None or len(record[0]) > STAMP_LIMIT:
+            return None
+        try:
+            data = json.loads(record[0])
+        except (ValueError, RecursionError):
+            return None
+        log = data.get('log') if isinstance(data, dict) else None
+        if not isinstance(log, str) or not log or '\0' in log:
+            return None
+        path = Path(log)
+        parent = path.parent if path.is_absolute() else Path(root) / path.parent
+        if path.name in ('', '.', '..') or os.path.normpath(parent) != os.path.normpath(Path(root) / '.ai/local'):
+            return None
+        content = read_record(dir_fd, path.name, ATTEMPT_LOG_LIMIT, tail=True)
+    finally:
+        os.close(dir_fd)
+    return None if content is None else content[0].splitlines()
+
+
+def failing_checks_item():
+    lines = gate_log_lines()
+    if not lines:
+        return None
+    names = []
+    for line in lines:
+        match = FAILING_CHECK.match(line)
+        name = match and (match.group(1) or match.group(2))
+        if name and name not in names:
+            names.append(name)
+    if names:
+        return 'Failing checks: ' + ', '.join(names[:5]) + '.'
+    last = next((line for line in reversed(lines) if line.strip()), None)
+    return f'Last gate line: {last.strip()}' if last else None
+
+
+def result_notes_line(task):
+    section = None
+    last = None
+    for line in task['lines']:
+        if line.startswith('### '):
+            section = line[4:].strip()
+        elif section == 'Result / notes' and line.strip():
+            last = line.strip()
+    return last
+
+
+def attempt_info(arguments):
+    """attempt-info TASK [BASE_MODEL] (BR-03): line 1 `N MODEL RAISED` for the next attempt of
+    TASK on this project and branch, then (from attempt 2) a short failure note, from the host
+    outcome log, the last gate log and the queue. Never fails the runner: any read error prints
+    `1 <task or base model or -> no` and exits 0."""
+    if len(arguments) not in (1, 2) or not re.fullmatch(r'T\d{3,}', arguments[0]):
+        fail('Usage: attempt-info TASK [BASE_MODEL]')
+    task_id, base = arguments[0], (arguments[1] if len(arguments) == 2 else '')
+    known = base
+    try:
+        task = next((t for t in tasks() if t['id'] == task_id), None)
+        known = (task and task['model']) or base
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        try:
+            branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+        except subprocess.CalledProcessError:
+            branch = 'detached'
+        rows = [r for r in read_outcomes([outcomes_path()], strict=True) if r.get('kind') == 'task']
+        rows = ordered_attempts(rows).get((project_name(), branch, task_id), [])
+    except (ValueError, OSError, subprocess.CalledProcessError, RecursionError):
+        print(f"1 {known or '-'} no")
+        return
+    failures = [r for r in rows if r.get('result') != 'done']
+    attempt = len(failures) + 1
+    model = raised_model(known) if attempt >= 3 else known
+    print(f"{attempt} {model or '-'} {'yes' if model != known else 'no'}")
+    if attempt < 2:
+        return
+    last = failures[-1]
+    seconds = last.get('seconds')
+    took = f' after {seconds} s' if type(seconds) is int else ''
+    items = [f"Attempt {attempt - 1} ended {last.get('result')}{took} on {last.get('model') or 'default'}."]
+    try:
+        checks = failing_checks_item()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        checks = None
+    if checks:
+        items.append(checks)
+    notes = task and result_notes_line(task)
+    if notes:
+        items.append('Last result line: ' + attempt_note_item(notes, 200))
+    room = ATTEMPT_NOTE_LIMIT
+    for item in items:
+        if room <= 1:
+            break
+        item = attempt_note_item(item, room)
+        print(item)
+        room -= len(item) + 1  # the newline between items counts
+
 def outcomes_report(arguments):
     """Summary of the outcome log(s) for tuning the model rules."""
     # Gate runs are runner timing (gate_seconds), not outcomes: a log of only gate lines still
@@ -5357,6 +5486,8 @@ def main():
         outcome(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
+    elif command == 'attempt-info':
+        attempt_info(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
     elif command == 'pr-draft':

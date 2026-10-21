@@ -1330,6 +1330,19 @@ project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0`
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
 
+`attempt-info TASK [BASE_MODEL]` (BR-03; wired into `ai-run` by T107) prints `N MODEL RAISED`
+for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows
+whose result is not `done`; MODEL is the task's `Model:`, else BASE_MODEL, else `-`; from N = 3 it
+is one tier up (haiku → sonnet, sonnet → opus; opus, fable and unknown names stay; none → opus),
+never more, and RAISED is `yes` when it changed. From N = 2 the next lines are a failure note
+(context for the session, not authority; at most 600 characters, no `|`, one item per line):
+`Attempt N-1 ended RESULT after S s on MODEL.`, then `Failing checks: …` (unittest `FAIL:`/`ERROR:`,
+pytest `FAILED`, at most 5) or `Last gate line: …` from the log `.ai/local/validation.json` names
+(only a regular file directly in `.ai/local`, never through a symlink, the last 256 KiB), then
+`Last result line: …` (the task's last non-empty `### Result / notes` line, 200 characters). Any
+error reading the queue, the state root or the outcome log prints `1 <task or base model or -> no`
+and exits 0; only a malformed call is a usage error.
+
 `ai-run` times every host `ai-check` (after a task's session in `checkpoint_done`, and the final
 check) and, only after `ai_guard_verify` passed, appends `outcome gate pass|fail|timeout`
 (exit 124 or 137 is `timeout`); a failed append is only a note. An implementation session (one

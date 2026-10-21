@@ -9274,6 +9274,122 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         log.write_bytes(log.read_bytes() + b'{"kind": "gate", "project": "project with spaces", "result": "pass", "sec')
         self.assertEqual(self.gate_seconds(), '60')
 
+    def attempt_info_project(self, models=('sonnet', 'haiku', 'opus', ''), notes='Pending.'):
+        self.setup_project()
+        queue = ''
+        for number, model in enumerate(models, 1):
+            block = task(f'T00{number}')
+            if model:
+                block = block.replace('Dependencies: none\n', f'Dependencies: none\nModel: {model}\n')
+            queue += block.replace('Pending.', notes)
+        (self.project / '.ai/tasks.md').write_text('# Tasks\n\n' + queue)
+        self.commit('attempt-info queue')
+
+    def attempt_info(self, *args):
+        result = self.helper('attempt-info', *args)
+        first, *note = result.stdout.splitlines()
+        return first, note
+
+    def test_attempt_info_first_attempt_and_done_rows(self):
+        self.attempt_info_project()
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.helper('outcome', 'task', 'T001', 'done', 'sonnet', '5')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.assertEqual(self.attempt_info('T004'), ('1 - no', []))
+        self.assertEqual(self.attempt_info('T004', 'claude-sonnet-5-5'), ('1 claude-sonnet-5-5 no', []))
+        for args in ((), ('x001',), ('T001', 'a', 'b')):
+            self.assertIn('Usage: attempt-info', self.helper('attempt-info', *args, expected=1).stderr)
+
+    def test_attempt_info_second_attempt_note(self):
+        self.attempt_info_project(notes='First line.\n\nLast | line.')
+        self.helper('outcome', 'task', 'T001', 'timeout', 'sonnet', '1800')
+        first, note = self.attempt_info('T001')
+        self.assertEqual(first, '2 sonnet no')
+        self.assertEqual(note[0], 'Attempt 1 ended timeout after 1800 s on sonnet.')
+        self.assertEqual(note[-1], 'Last result line: Last line.')
+        self.assertEqual(len(note), 2)  # no validation log yet
+
+    def test_attempt_info_third_attempt_raises_one_tier(self):
+        self.attempt_info_project()
+        for task_id in ('T001', 'T002', 'T003', 'T004'):
+            for result in ('error', 'validation_failed'):
+                self.helper('outcome', 'task', task_id, result, 'm', '5')
+        self.assertEqual(self.attempt_info('T001')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T002')[0], '3 sonnet yes')
+        self.assertEqual(self.attempt_info('T003')[0], '3 opus no')
+        self.assertEqual(self.attempt_info('T004')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T004', 'claude-sonnet-5-5')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T004', 'claude-fable-5-1')[0], '3 claude-fable-5-1 no')
+        self.helper('outcome', 'task', 'T002', 'crashed', 'sonnet', '0')
+        first, note = self.attempt_info('T002')
+        self.assertEqual(first, '4 sonnet yes')  # one tier only
+        self.assertEqual(note[0], 'Attempt 3 ended crashed after 0 s on sonnet.')
+
+    def test_attempt_info_counts_only_this_project_branch_and_task(self):
+        self.attempt_info_project()
+        self.helper('outcome', 'task', 'T002', 'error', 'm', '5')
+        self.run_cmd(['git', 'checkout', '-qb', 'other'])
+        self.helper('outcome', 'task', 'T001', 'error', 'm', '5')
+        self.run_cmd(['git', 'checkout', '-q', 'main'])
+        foreign = {'time': 't', 'kind': 'task', 'project': 'other', 'branch': 'main', 'task': 'T001',
+                   'result': 'error', 'model': 'm', 'seconds': 5, 'seq': 99}
+        with (self.base / 'host-state/outcomes.jsonl').open('a') as stream:
+            stream.write(json.dumps(foreign) + '\n')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.assertEqual(self.attempt_info('T002')[0], '2 haiku no')
+
+    def attempt_info_gate_log(self, content, link=False):
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        log = local / 'check-test.log'
+        if link:
+            target = self.base / 'outside.log'
+            target.write_text(content)
+            log.symlink_to(target)
+        else:
+            log.write_text(content)
+        (local / 'validation.json').write_text(json.dumps({'result': 'FAIL', 'log': '.ai/local/check-test.log'}))
+
+    def test_attempt_info_failing_checks_from_the_gate_log(self):
+        self.attempt_info_project()
+        self.helper('outcome', 'task', 'T001', 'validation_failed', 'sonnet', '60')
+        self.attempt_info_gate_log('======\nFAIL: test_a (tests.T)\n------\nERROR: test_b (tests.T)\n'
+                                   'FAIL: test_a (tests.T)\n\nFAILED (failures=1, errors=1)\n')
+        note = self.attempt_info('T001')[1]
+        self.assertEqual(note[1], 'Failing checks: test_a (tests.T), test_b (tests.T).')
+        self.attempt_info_gate_log('FAILED tests/x.py::test_c - AssertionError\nok\n')
+        self.assertEqual(self.attempt_info('T001')[1][1], 'Failing checks: tests/x.py::test_c.')
+        self.attempt_info_gate_log('lint ok\nnpm ERR! build broke\n\n')
+        self.assertEqual(self.attempt_info('T001')[1][1], 'Last gate line: npm ERR! build broke')
+        (self.project / '.ai/local/check-test.log').unlink()
+        self.attempt_info_gate_log('FAIL: test_a (tests.T)\n', link=True)
+        self.assertFalse(any(line.startswith(('Failing', 'Last gate')) for line in self.attempt_info('T001')[1]))
+
+    def test_attempt_info_note_is_bounded_and_one_line_per_item(self):
+        self.attempt_info_project(notes='x|' * 2000)
+        self.helper('outcome', 'task', 'T001', 'error', 'son|net', '5')
+        self.attempt_info_gate_log(''.join(f'FAIL: test_{i} {"y" * 55}\n' for i in range(8)))
+        note = self.attempt_info('T001')[1]
+        text = '\n'.join(note)
+        self.assertLessEqual(len(text), 600)
+        self.assertNotIn('|', text)
+        self.assertEqual(len(note), 3)
+        self.assertTrue(note[0].startswith('Attempt 1 ended error after 5 s on son net.'))
+        self.assertTrue(note[2].startswith('Last result line: x x'))
+
+    def test_attempt_info_corrupt_or_unreadable_records(self):
+        self.attempt_info_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b'\xff\xfe{not json\n[1, 2]\n{"kind": "task", "tas')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        log.unlink()
+        log.mkdir()  # unreadable as a file
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        (self.project / '.ai/tasks.md').write_text('## T001 — broken\nStatus: maybe\n')
+        self.assertEqual(self.attempt_info('T001', 'haiku'), ('1 haiku no', []))
+        self.assertEqual(self.attempt_info('T001'), ('1 - no', []))
+
     def test_gate_time_report_unchanged_by_gate_lines(self):
         self.outcome_log_project()
         log = self.base / 'host-state/outcomes.jsonl'
