@@ -4502,7 +4502,7 @@ two Fresh retry bullets, hub Log line. Evidence: `-k fresh_retry` Ran 7 tests OK
 1076 tests in 725.6 s (foreground call moved to background by the tool, waited for).
 
 ## T108 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4566,6 +4566,15 @@ Targeted: `python3 -m unittest discover -s tests -k review_risk` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+2026-10-21: DONE. `workflow.py review-route plan|code|recheck BASE HEAD` (`review_route_reason`,
+`route_fix_rounds` read-only fix-round count, `risk_path`, `risk_word`, `queue_at`;
+`is_ancestor` gained an optional head) applies rules 1–9 in order from host records only (outcome
+code review rows of this project/branch, never commit subjects); any exception → `codex routing
+unavailable`, exit 0. Binary files route to Codex (`… and a binary file`). docs/workflow.md helper
+list updated. No caller yet (T109); flow unchanged. Work from the interrupted session was
+reconciled from the recovery checkpoint 298e43c and verified. Evidence: `-k review_route` Ran 9
+tests OK; `-k review_risk` Ran 1 test OK; `.ai/bin/ai-check` PASS, 1085 tests in 736.6 s
+(foreground call moved to background by the tool, waited for).
 
 ## T109 — ai-review: remember a Codex usage limit and route small low-risk fix rounds to Claude (BR-14, review)
 Status: TODO
