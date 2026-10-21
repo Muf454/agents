@@ -153,6 +153,11 @@ Out (later work, recorded in the vault backlog by the human):
   `human_stop` are recorded so nothing resumes it, exit 0 with a message that says so; no record
   or an ended record → exit 3, nothing changed (a repeated stop says "already stopped by you");
   signalled and still ending after the wait → exit 4 (rerun to wait again); refused or error → 1.
+  The run may be a pipeline, a recovery or a stand-alone `ai-run`: the owning runner that ends a
+  stop-requested run as `stopped` gets `human_stop` (decided by `run-record end` under the host
+  lock; plan review round 3, P16), so the signalled run ends `human_stop` itself; a run that
+  ended with another outcome before the signal took effect (e.g. `finished`) is reported, exit 0,
+  and never rewritten.
 - FR-6 (escalation record, G9): whenever a pipeline, recovery or stand-alone `ai-run` stops for a
   human, `<binding dir>/escalation.json` (schema 1) holds kind, stage, run id, branch, time, task
   ids, evidence (redacted last-error excerpt, review file, finding ids, run log path) and the
@@ -163,6 +168,9 @@ Out (later work, recorded in the vault backlog by the human):
   and every automatic resume (`run-record resume`) removes it (plan review P7). The record a
   stopped process leaves is the specific kind of its stop: one write per shutdown chain, and a
   later unclassified write of the same run never replaces a specific kind (B22, plan review P13).
+  The answers belong to that run: built from its run record (kind and argv), never from the
+  checkout's `run.json` of an earlier pipeline (B24, plan review round 3, P18). The fix-round
+  limit record is written once in `finish()`, whichever finish path the run takes (P19).
   Readers treat an unknown kind as `other` and an unknown schema as absent.
 - FR-7 (G7): `ai-task set ID STATUS --commit`, and every new subcommand, takes the checkout lock
   without waiting (held: exit 75, "A run is active in this checkout; nothing changed."), refuses
@@ -192,6 +200,8 @@ Out (later work, recorded in the vault backlog by the human):
   this prefix beside `plan-…`; plan review P12), records launcher and log
   path in the run record, waits up to `AI_PLAN_ACK_SECONDS` (default 20) for the new run record
   and prints the pid, the log, `tail -f <log>` and `.ai/bin/ai-pipeline --stop <checkout>`.
+  A `--knowledge-dir` value is resolved against the caller's working directory before the
+  dispatch changes to the checkout root, as in the foreground (plan review round 3, P17).
 
 ## Non-functional requirements
 - Host records live in the host state directory (never the checkout), are written atomically
@@ -279,11 +289,13 @@ Out (later work, recorded in the vault backlog by the human):
 - B15: T118 (batch 9) stays as batch 9 left it (TODO, fix committed in 38f671c). If
   `fix/flow-batch-9` finishes it first, the human merges that branch here before approving;
   otherwise this run verifies T118 first.
-- B16 (revised after plan review rounds 1 and 2): 24 tasks (T301–T324; the queue order, not the
-  number order, is the run order). The review's process-chain, ownership and skip findings and
-  the split of the old T301, T302, T306, T308, T309 and T313 added work; round 2 added T323
-  (publication commands, split from T318) and T324 (the log name check, split from T313); each
-  task is still sized for one 30-minute session including the ~13-minute self-check.
+- B16 (revised after plan review rounds 1, 2 and 3): 27 tasks (T301–T327; the queue order, not
+  the number order, is the run order). The review's process-chain, ownership and skip findings
+  and the split of the old T301, T302, T306, T308, T309 and T313 added work; round 2 added T323
+  (publication commands, split from T318) and T324 (the log name check, split from T313); round
+  3 added T325 (stand-alone `ai-run` stop), T326 (detach path resolution, split from T313) and
+  T327 (plan kinds, split from T321); each task is still sized for one 30-minute session
+  including the ~13-minute self-check.
 - B17 (plan review P5, revised after round 2 P15): Run ids are `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>`,
   `seq` one more than the highest of the checkout's kept records, chosen under the host lock, the
   record created exclusively, so two starts by one pid in one second never collide; retention
@@ -315,6 +327,14 @@ Out (later work, recorded in the vault backlog by the human):
   `stop()` writes with its stage and sets `AI_ESCALATION_WRITTEN`; the `ai_die` it always ends in
   then writes nothing; a direct `ai_die` writes once. The helper keeps a same-run record with a
   specific kind against a later write that is still `other` after its refinement.
+- B23 (plan review round 3, P16): a stand-alone `ai-run` interrupted by INT/TERM without a
+  recorded stop request keeps ending `stopped` with today's "needs you" notification (it is not
+  auto-recovered, so nothing changes for it); only a stop request (`ai-pipeline --stop`) makes
+  it `human_stop`. Extending B4 to stand-alone runners is not needed for mission control.
+- B24 (plan review round 3, P18): the `resume` answer of a stand-alone `ai-run` is offered only
+  for a task run (`--approved` and none of `--plan`, `--triage`, `--revise-plan`): rerunning a
+  planning, triage or revision session from an escalation is not a safe default. Its argv is
+  recorded with the resolved `--knowledge-dir` (the only path option of a task run).
 
 ## Plan review round 1 (hand-run Codex review)
 Source: `.ai/reviews/plan.md` (HEAD 6bd6e3e, BLOCKER 1, MAJOR 7, MINOR 3), run by hand because the
@@ -348,3 +368,17 @@ session; every finding was checked against the cited code at 86df815 (scripts un
 | P13 (MAJOR) second escalation write loses the kind | Accepted | Confirmed: the non-recovery `stop()` always calls `ai_die` (`scripts/ai-pipeline:186–188`), and the first write consumes the hint. B22: one writer per shutdown chain (`AI_ESCALATION_WRITTEN`, T320) plus a helper backstop (T305: a same-run `other` write keeps a specific kind). T320 tests the final record after exit for a blocked-task stop and a plan-review stop; T305 tests the repeated write. |
 | P14 (MAJOR) ai-check rewrite drops the logger status | Accepted | Confirmed: today a failing `tee` fails the gate (`scripts/ai-check:48–51`, `PIPESTATUS`). T304 now starts the logger on its own descriptor, waits for its pid and keeps today's rule (the logger's code when it failed) before `stamp record`; new regression with a passing validator and a failing fake `tee`: nonzero exit, no PASS stamp. |
 | P15 (MINOR) run ids collide within one second | Accepted | Confirmed by the format in B17 (stamp and pid only). B17 revised: id `<stamp>-<pid>-<seq>` with `seq` chosen under the host lock and exclusive creation; retention by `seq`. T301 adds a fixed-clock, fixed-pid test, and the 23-start retention test uses the fixed clock. |
+
+## Plan review round 3 (hand-run Codex review, last round)
+Source: `.ai/reviews/plan.md` (HEAD 4afd9ab, BLOCKER 0, MAJOR 4, MINOR 0), run by hand because the
+frozen pipeline would have skipped it (FL-35). There is no further plan review; the Codex code
+reviews after implementation check the result, so every fix is a concrete acceptance criterion
+or test. Revised 2026-10-21 by an interactive planning session; every finding was checked
+against the cited code at 4afd9ab (scripts unchanged since 4fea72d). Nothing was cut.
+
+| Finding | Disposition | Reason or task |
+| --- | --- | --- |
+| P16 (MAJOR) `--stop` of a stand-alone `ai-run` cannot end `human_stop` | Accepted | Confirmed: T316's `on_exit` ends every nonzero exit `stopped`, T315 keeps ended records immutable and `settle-stop` refuses them, and T308 then called `settle-stop` on an ended record. Fix in the owning runner's end, under the host lock: T315's `end` stores `human_stop` for `stopped` when `stop_requested` is set (new test); T305 refines `other` to `human_stop` for such a run; T308 reports a run that ended otherwise before the signal (exit 0, nothing rewritten). New T325 (opus): end-to-end `--stop` of a stand-alone `ai-run` with a sleeping fake session (exit 0, session gone, outcome and escalation `human_stop`, second stop exit 3 with bytes unchanged) and its "stopped by you" notification. B23 records that a plain INT/TERM of a stand-alone `ai-run` stays `stopped`. |
+| P17 (MAJOR) detach changes relative `--knowledge-dir` | Accepted | Confirmed: the foreground parser resolves it against the caller (`scripts/ai-pipeline:52–58`), `ai_root` changes to the checkout root (`scripts/lib/common.sh:126–128`), and `scripts/ai-plan:23–28` already resolves first. New T326 (opus, after T313; T313 is already a full session): the dispatch resolves the value before `ai_root`, keeps argument order and forwards the absolute path; tests from a subdirectory with same-named directories at both levels, only the caller-relative one, and neither (exit 1, nothing launched), asserting the `systemd-run` argv, the run record argv and the manifest args. FR-10 extended. |
+| P18 (MAJOR) stand-alone run offers an earlier pipeline's resume | Accepted | Confirmed: `run_manifest` writes one `run.json` per checkout (`scripts/lib/workflow.py:1678`) only at a pipeline start, and T305 built answers from it. T305 now builds every answer from the run record named by `--run` (kind and argv): pipeline runs resume with their own argv, a stand-alone task run with `.ai/bin/ai-run` and its argv, other `ai-run` modes get no resume answer, pipeline-only answers only for pipelines (B24). T316 records the stand-alone argv with the resolved `--knowledge-dir`. Regressions: T305 `test_escalation_answers_belong_to_the_current_run` (earlier manifest left, different arguments) and the extended T320 stand-alone wiring test; T325 and T327 assert no stale pipeline answer. |
+| P19 (MAJOR) fix-round record misses two finish paths | Accepted | Confirmed: besides `--no-pr` (`scripts/ai-pipeline:638`) and the PR stage (`:730`), the run finishes at `:658` (no `origin`) and `:663` (`gh` missing), and all four call `finish()`. T321 now writes the record once inside `finish()` when the loop broke at the limit, with the BLOCKER and MAJOR ids from `finding_ids`; tests cover all four paths (exit 0, outcome `finished`, the finding ids) plus a source check that the write exists only in `finish()`. The plan-kinds tests moved to the new T327 (sonnet) to keep T321 one session. |

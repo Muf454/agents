@@ -8,14 +8,15 @@ planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (fro
 delegation. Batch 10 (TS-01, ME-01, FL-39) is built in parallel from the same commit.
 
 - `.ai/project-spec.md`: scope, what was verified in the code at 4fea72d (every gap G1–G7, G9,
-  G11 is still open; G8 and G10 are later work), FR-1 to FR-10, assumptions B1–B22, and "Plan
-  review round 1" / "Plan review round 2 (hand-run Codex review)" with the dispositions of
-  P1–P15.
-- `.ai/current-plan.md`: four rules (gate first, bound to the run, every layer forwards, one
-  escalation writer per shutdown chain), record schemas and paths, the human-stop flow, the task
-  map in queue order.
-- `.ai/tasks.md`: T301–T324 (earlier batches' DONE tasks unchanged; T118 of batch 9 is DONE,
-  recorded from `fix/flow-batch-9`). New tasks T315–T324 sit where their dependencies need them:
+  G11 is still open; G8 and G10 are later work), FR-1 to FR-10, assumptions B1–B24, and "Plan
+  review round 1" / "round 2" / "round 3 (hand-run Codex review, last round)" with the
+  dispositions of P1–P19.
+- `.ai/current-plan.md`: seven rules (gate first, bound to the run, every layer forwards, one
+  escalation writer per shutdown chain, a stop request decides the terminal outcome, answers
+  belong to the current run, one place per lifecycle point), record schemas and paths, the
+  human-stop flow, the task map in queue order.
+- `.ai/tasks.md`: T301–T327 (earlier batches' DONE tasks unchanged; T118 of batch 9 is DONE,
+  recorded from `fix/flow-batch-9`). New tasks T315–T327 sit where their dependencies need them:
   the queue order is the run order.
 
 Revised 2026-10-21 after the hand-run Codex plan review (`.ai/reviews/plan.md`: BLOCKER 1, MAJOR
@@ -32,6 +33,15 @@ the new small task T324 rather than more work in T313). New T323 forwards a stop
 number (P15). Nothing was cut; two limitations are recorded in B21 (a push hook may outlive the
 ended `git push`; `git commit` hooks stay in the foreground).
 
+Revised a third and last time 2026-10-21 after the third hand-run Codex plan review (HEAD
+4afd9ab: MAJOR 4). All four findings were confirmed in the code and accepted; nothing was cut.
+P16: `run-record end` stores `human_stop` for a stop-requested run (T315), and new T325 tests
+`--stop` of a stand-alone `ai-run` end to end. P17: new T326 resolves `--detach`'s
+`--knowledge-dir` against the caller's directory. P18: escalation answers come from the current
+run record, never an earlier pipeline's `run.json` (T305, T316, T320). P19: the fix-round-limit
+record is written in `finish()`, covering all four finish paths (T321); the plan-kinds tests
+moved to new T327. There is no further plan review: the code reviews check the result.
+
 Planned tasks (queue order):
 - **G3 run record**: T301 helper (schema 1, start prints the run id, host lock, 20 kept), T315
   lifecycle bound to run id and process identity (P5), T302 pipeline wiring (start required,
@@ -46,23 +56,24 @@ Planned tasks (queue order):
   recovery and watchdog never resume it, T308 `ai-pipeline --stop` (SIGTERM; a run whose process is
   gone is recorded as stopped, P9), T319 completion bound to its run, relaunch cancel, stopping a
   watchdog-started recovery.
-- **G9 wiring**: T309 hints, T320 writes at every stop (gate first), T321 fix-round limit and plan
-  kinds end to end (P11 split).
+- **G9 wiring**: T309 hints, T320 writes at every stop (gate first), T321 fix-round limit on
+  every finish path (P19), T327 plan kinds end to end.
+- **G1 stand-alone**: T325 `--stop` of a stand-alone `ai-run` ends `human_stop` (P16).
 - **G7, G4, G5, G6 task commands**: T310 lock and `--commit`, T311 SKIPPED with a host-wide
   authorization that survives new branches and worktrees (P6), T312 `ai-task retry`, `model`,
   `skip`, T322 `ai-task skip ID --reauthorize` for another host.
 - **G11**: T324 `exec-logged` accepts `pipeline-…` log names (P12), T313 `ai-pipeline --detach`
-  (systemd-run only) with an end-to-end stop test.
+  (systemd-run only) with an end-to-end stop test, T326 caller-relative `--knowledge-dir` (P17).
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
-None on this branch yet (both plan revisions changed only `.ai/` planning records; no shell was
-available in either revision session, so the queue was checked by reading, not with `ai-task
-check`: 88 tasks, 88 `Model:` lines, every new dependency on a task earlier in the queue). The
+None on this branch yet (all three plan revisions changed only `.ai/` planning records; no shell
+was available in the revision sessions, so the queue was checked by reading, not with `ai-task
+check`: 91 tasks, 91 `Model:` lines, every new dependency on a task earlier in the queue). The
 round-2 reviewer ran `workflow.py tasks check` on 86df815: passed. Batch 9's last full gate: PASS, 1104 tests (T116 tree, 816.3 s).
 
 ## Assumptions
-Recorded as B1–B22 in `.ai/project-spec.md`. The ones that shape behaviour most:
+Recorded as B1–B24 in `.ai/project-spec.md`. The ones that shape behaviour most:
 - B1: `ai-pipeline --stop` and `--detach` (first argument) instead of a new `ai-stop` script: one
   entry point mission control already calls, no change to the installed file list.
 - B2 (revised): the stop sends SIGTERM (not SIGINT, which a background job may have ignored) to
@@ -77,13 +88,17 @@ Recorded as B1–B22 in `.ai/project-spec.md`. The ones that shape behaviour mos
   next branch or worktree on this host.
 - B14 (revised): `--detach` uses `systemd-run --user` only; without it, it refuses.
 - B15: T118 (batch 9) is left as batch 9 left it (it is now DONE, recorded in c7bc9b5).
-- B16 (revised twice): 24 tasks, each sized for one 30-minute session with the ~13-minute
+- B16 (revised three times): 27 tasks, each sized for one 30-minute session with the ~13-minute
   self-check.
 - B17–B20: run ids (`<stamp>-<pid>-<seq>`, revised for P15) and `AI_RUN_ID`, recovery ownership
   and `resumes`, why T318 follows T306, gate first on every pipeline shutdown path.
 - B21: publication commands are forwarded; a push hook may outlive them and commit hooks stay in
   the foreground (recorded limitations).
 - B22: one escalation writer per shutdown chain, with a helper backstop.
+- B23: a plain INT/TERM of a stand-alone `ai-run` stays `stopped`; only `--stop` makes it
+  `human_stop`.
+- B24: a stand-alone `ai-run`'s escalation offers `resume` only for a task run, built from its
+  own run record.
 
 ## Flow chart
 Flow unchanged so far (planning only). T303, T306, T307, T308, T311, T313 and T320 change the
@@ -95,9 +110,11 @@ Planned commands (exact forms land with their tasks; T314 checks this list again
   stopped and recorded (also: a run whose process was already gone is recorded as stopped so
   nothing resumes it, or a scheduled usage-limit relaunch cancelled), 3 no run active (or
   already stopped), 4 signalled and still ending, 1 refused or error. Replaces FR-K's own `/proc`
-  walk and signals (C3, C4, C19). Also stops a recovery the watchdog started.
+  walk and signals (C3, C4, C19). Also stops a recovery the watchdog started and a stand-alone
+  `ai-run`.
 - `<checkout>/.ai/bin/ai-pipeline --detach --approved …`: replaces the app's `systemd-run`
-  builder for resume (FR-P4); prints pid and log; needs `systemd-run` (exit 1 without it).
+  builder for resume (FR-P4); prints pid and log; needs `systemd-run` (exit 1 without it); a
+  relative `--knowledge-dir` is resolved against the caller's directory.
 - `<checkout>/.ai/bin/ai-task set ID STATUS --commit`, `retry ID --note TEXT --commit`, `model ID
   MODEL --commit`, `skip ID --reason TEXT --commit`, `skip ID --reauthorize`: exit 75 while a run
   holds the checkout. Replaces FR-Q3's `flock` + `git commit` steps; adds the "retry with a
@@ -106,7 +123,7 @@ Planned commands (exact forms land with their tasks; T314 checks this list again
   `runs/current` (id, `<UTC stamp>-<pid>-<seq>`) and `runs/<id>.json` (run record schema 1: process identity, launcher,
   argv, log, base, branch, outcome; the owner's process identity is always the live one, also
   during a recovery), `escalation.json` (schema 1: kind, stage, run id, tasks, evidence, answers
-  as argv arrays; treat unknown kinds as `other`). Skip authorizations: `<state
+  as argv arrays built from that run's own record; treat unknown kinds as `other`). Skip authorizations: `<state
   root>/skips/<64 hex>` (host-wide per repository). Detached logs:
   `<checkout>/.ai/local/pipeline-<UTC stamp>-<hex>.log`.
 - FR-E1's wording classifier can be replaced by `escalation.json`'s `kind`; FR-K4's "auto-recovery
@@ -115,11 +132,12 @@ Planned commands (exact forms land with their tasks; T314 checks this list again
 ## Manual testing for the human
 
 ### Needs you
-1. Read the round-2 revision (`.ai/project-spec.md` with B1–B22 and "Plan review round 2",
-   `.ai/current-plan.md`) and commit it (this revision is uncommitted). Decide whether the plan
-   review must run a third time before approving; the hand-run round-2 review covers 86df815,
-   not this revision. Then approve the run (`ai-pipeline --approved --base fix/flow-batch-9
-   --pr-base fix/flow-batch-9 …`). No gate file changes are needed to start.
+1. Read the round-3 revision (`.ai/project-spec.md` with B1–B24 and "Plan review round 3",
+   `.ai/current-plan.md`) and commit it (this revision is uncommitted). Round 3 was the last
+   plan review; the Codex code reviews check the result. Then approve the run (`ai-pipeline
+   --approved --base fix/flow-batch-9 --pr-base fix/flow-batch-9 --skip-plan-review …`, or
+   without `--skip-plan-review` if you want the pipeline's own plan review). No gate file
+   changes are needed to start.
 2. T118 is already DONE here (c7bc9b5, recorded from `fix/flow-batch-9` at 8f01f4d); nothing to
    merge for it before approving.
 3. After T308 is merged and installed (`setup-project --upgrade --apply`): on a real run in a
@@ -127,7 +145,8 @@ Planned commands (exact forms land with their tasks; T314 checks this list again
    phone gets one "⛔ STOPPED by you" message, and the watchdog timer does not restart it. Rerun
    `ai-pipeline --approved …` and check that it continues.
 4. On another real run, from a second terminal: `.ai/bin/ai-pipeline --stop <checkout>`; check the
-   exit status 0, the message and the same records; a second `--stop` says "No run active" (exit 3).
+   exit status 0, the message and the same records; a second `--stop` says "already stopped by
+   you" (exit 3).
 5. `.ai/bin/ai-pipeline --detach --approved …` on the PC: close the terminal and check that the run
    keeps going (`systemctl --user list-units 'ai-pipeline-*'`), that the printed `tail -f` shows
    its output, and that the printed stop command ends it.
@@ -146,29 +165,34 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - `run_record` (T301, T315, T302, T316): schema, current pointer, unique ids with a fixed clock
   and pid, retention, identity, bounded lock; lifecycle bound to the run id (interleaving of two runs); pipeline start required,
   resume, `ai_die` after a gate change; recovery owns the run before its session; stand-alone
-  `ai-run` records, refusal after publication, escalation cleared at start.
+  `ai-run` records, refusal after publication, escalation cleared at start; `end stopped` after a
+  stop request is `human_stop`; resolved `--knowledge-dir` in a stand-alone argv.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
   `tee` logger fails the gate (no PASS stamp).
-- `escalation` (T305, T309, T320, T321): kinds, answers, redaction, hint consumption, a repeated
-  write keeps the kind, current run only, cleared by a new run and a resume; hints at the
+- `escalation` (T305, T309, T320, T321, T327): kinds, answers, redaction, hint consumption, a repeated
+  write keeps the kind, current run only, answers from the current run record never an earlier
+  manifest, a stop request wins, cleared by a new run and a resume; hints at the
   producers; final records after exit for a blocked-task and a plan-review stop; writes for blocked tasks,
   validation through recovery, stand-alone `ai-run`, not after a gate change, no classification
-  from text; fix-round limit and plan kinds end to end.
+  from text; fix-round limit on all four finish paths (`--no-pr`, PR, no origin, no `gh`) and
+  plan kinds end to end.
 - `human_stop` (T306, T318, T323, T307): trap records, bookkeeping commit, stop request in
   `stop()`, gate tampering with a child failure and with an interrupt; PID-only stop in
   implementation, review, validation, dependency setup, the retry wait, `git push`, `git
   ls-remote` and `gh`; recovery refuses, interrupt during
   recovery, watchdog does not recover.
-- `stop_command` (T308, T319): stop, non-leader, no run, process already gone, identity mismatch,
-  wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery.
+- `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
+  wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
+  stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
 - `ai_task` (T310, T312, T322): lock, `--commit`, dirty or protected refusal, hook failure, plain
   `set` unchanged; retry, model, skip; reauthorize and its refusals.
 - `skip` (T311): SKIPPED semantics, forged status refused, new branch, merge and second worktree,
   refusals, `tasks set`, planning guard.
 - `exec_logged` (T324): both log prefixes accepted, invalid names refused, existing protections.
-- `detach` (T313): `systemd-run` arguments, detach then `--stop`, refusals.
+- `detach` (T313, T326): `systemd-run` arguments, detach then `--stop`, refusals; a relative
+  `--knowledge-dir` from a subdirectory resolves against the caller.
 - `Docs` (T314).
 
 ## Human todos
@@ -181,6 +205,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-Zack (or mission control on Zack's behalf) commits the round-2 revision, decides on a third plan
-review, and approves; then the runner starts with T301.
+Zack (or mission control on Zack's behalf) commits the round-3 revision and approves (no further
+plan review); then the runner starts with T301.
 Nothing is merged or deployed.

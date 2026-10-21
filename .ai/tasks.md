@@ -10,14 +10,16 @@ checkboxes. If the vault edit is denied, record it in the result and in the hand
 "## Flow chart" section.
 Current batch (batch 11, `fix/flow-batch-11` from `fix/flow-batch-9` at 4fea72d, planned 2026-10-21
 by an unattended planning session; scope chosen by mission control 2026-10-21 with Zack's
-delegation): T301–T324, from vault `agents-backlog.md` RC-01 (gaps G1–G7, G9, G11; G8 and G10 are
-later work). Revised after plan review round 1 (`.ai/reviews/plan.md` at 6bd6e3e, P1–P11) and
-round 2 (at 86df815: P2 again, P12–P15): new tasks T315–T324 sit in the queue where their
-dependencies need them, so the queue order (not the number order) is the run order. Design:
-`.ai/current-plan.md` (its round-1 rules: gate first, bound to the run, every layer forwards;
-round 2 adds: one escalation writer per shutdown chain); scope, verified code facts, assumptions
-B1–B22 and the round-1 and round-2 dispositions: `.ai/project-spec.md`. Line references in
-T301–T324 are at 4fea72d (same code as 86df815); re-check them before editing.
+delegation): T301–T327, from vault `agents-backlog.md` RC-01 (gaps G1–G7, G9, G11; G8 and G10 are
+later work). Revised after plan review round 1 (`.ai/reviews/plan.md` at 6bd6e3e, P1–P11),
+round 2 (at 86df815: P2 again, P12–P15) and round 3, the last (at 4afd9ab: P16–P19): new tasks
+T315–T327 sit in the queue where their dependencies need them, so the queue order (not the
+number order) is the run order. Design: `.ai/current-plan.md` (its round-1 rules: gate first,
+bound to the run, every layer forwards; round 2 adds: one escalation writer per shutdown chain;
+round 3 adds: a stop request decides the terminal outcome, answers come from the current run);
+scope, verified code facts, assumptions B1–B24 and the round-1 to round-3 dispositions:
+`.ai/project-spec.md`. Line references in T301–T327 are at 4fea72d (same code as 4afd9ab);
+re-check them before editing.
 Batch 10 is built in parallel from the same commit: keep edits to the session contract in
 `scripts/ai-run` and to `scripts/ai-pipeline` small and local, never touch the plan-review entry
 condition (`ai-pipeline` ~478), `scripts/ai-status` or `tests/run_parallel.py`.
@@ -5246,6 +5248,11 @@ yet.
   [DETAIL]` (OUTCOME `finished`, `stopped`, `human_stop`, `crashed`; sets `ended`): the recorded
   process must be PID with PID's current start ticks. DETAIL: one line, ≤ 200 characters, `|`
   removed.
+- A pending stop request decides the terminal outcome (plan review round 3, P16): under the same
+  lock, `end … stopped` on a record whose `stop_requested` is set stores `human_stop` instead
+  (the caller's DETAIL kept), so the owning runner (a stand-alone `ai-run`, an `ai_die` or an
+  `ai-recover` `escalate()` racing a `--stop`) never ends a stop-requested run as `stopped`.
+  `finished` and `crashed` are stored as given. Ended records stay immutable.
 - `request-stop --run ID --via VIA [--expect-pid P --expect-ticks T]` (VIA `ai-pipeline --stop`
   or `signal`): refuses an ended record and, with `--expect-*`, a recorded process that differs;
   a second request keeps the first.
@@ -5262,6 +5269,10 @@ scripts/lib/workflow.py, tests/test_workflow.py
 - `test_run_record_end_keeps_human_stop`: `end --run ID --pid <own pid> human_stop` sets `ended`
   and the outcome; a second `end … stopped` exits 3 and keeps `human_stop`; `pause` then `end
   finished` works and `pause` leaves `ended` null.
+- `test_run_record_end_after_stop_request_is_human_stop` (P16): `request-stop --run ID --via
+  'ai-pipeline --stop'`, then `end --run ID --pid <own pid> stopped "exit 143"` exits 0 and
+  stores outcome `human_stop` with that detail; a second `end … stopped` exits 3, bytes
+  unchanged; on another record `request-stop` then `end … finished` stores `finished`.
 - `test_run_record_own_and_resume`: `own` with a fixture child's pid replaces `process`, sets
   launcher `ai-recover`, keeps `resumes` 0; `resume` → `resumes` 1; `own` is refused (exit 3,
   bytes unchanged) with a stop request, after `end`, and while another live process is recorded.
@@ -5298,8 +5309,10 @@ it. No other caller yet.
   nothing written) when ID is not the current run (plan review P5). KIND from the fixed list
   (`plan_review_limit`, `fix_round_limit`, `task_blocked`, `needs_human_question`, `validation`,
   `usage_limit`, `crash`, `human_stop`, `other`; anything else → `other`). KIND `other` is
-  refined: a pending hint of the same run overrides it and adds its tasks and findings (then is
-  removed), else stage `validation` → `validation`, a stage starting with `crash` → `crash`.
+  refined: a run record with `stop_requested` set or outcome `human_stop` → `human_stop` (plan
+  review round 3, P16; any pending hint of that run is removed), else a pending hint of the same
+  run overrides it and adds its tasks and findings (then is removed), else stage `validation` →
+  `validation`, a stage starting with `crash` → `crash`.
   Task ids `^T\d{3,}$`, finding ids `^[A-Z]{1,3}\d{1,4}$`, review path one of
   `.ai/reviews/plan.md`, `.ai/reviews/current.md`, `.ai/reviews/recheck.md`. Evidence:
   `last_error` from `.ai/local/last-error` through `local_dir_fd` (regular file only), redacted
@@ -5310,9 +5323,15 @@ it. No other caller yet.
   after the refinement above leaves the record unchanged (exit 0). An explicit specific kind
   (e.g. `human_stop`) replaces it. This is the backstop; the shell side has one writer per
   shutdown chain (T320).
-- Answers per kind as in the plan, built from the manifest's recorded args (`--approved`
-  included); no manifest → no `resume` answer. `resume_more_rounds` only when the recorded
-  `--max-fix-rounds` (default 2) + 1 ≤ 5. `usage_limit` adds `not_before` (epoch) from
+- Answers per kind as in the plan, built only from the current run record named by `--run`
+  (its `kind` and `argv`), never from `run.json` (plan review round 3, P18: the manifest belongs
+  to the last pipeline start, which may be an unrelated earlier run). Run kind `pipeline` →
+  `resume` is `.ai/bin/ai-pipeline` + the record's argv, and `resume_more_rounds` /
+  `resume_skip_plan_review` are derived from that argv. Run kind `ai-run` → `resume` is
+  `.ai/bin/ai-run` + the record's argv only when that argv contains `--approved` and none of
+  `--plan`, `--triage`, `--revise-plan`; otherwise no `resume` answer; never a pipeline-only
+  answer (`resume_more_rounds`, `resume_skip_plan_review`). `resume_more_rounds` only when the
+  recorded `--max-fix-rounds` (default 2) + 1 ≤ 5. `usage_limit` adds `not_before` (epoch) from
   `.ai/local/limit-stop` when valid.
 - `hint KIND --run ID [--task ID]… [--finding ID]…` (same current-run rule), `show` (prints the
   JSON; exit 1 when none or invalid), `clear` (removes record and hint; no error when absent).
@@ -5342,6 +5361,15 @@ scripts/lib/workflow.py, tests/test_workflow.py
   start` (run B) and, in a second case, by `run-record resume --run A`.
 - `test_escalation_clear_and_invalid`: `clear` removes it; a record with schema 2 → `show` exit 1;
   recorded `--max-fix-rounds 5` → no `resume_more_rounds`.
+- `test_escalation_answers_belong_to_the_current_run` (P18): a `run.json` from an earlier
+  pipeline start (`--approved --base main --max-fix-rounds 3 --no-pr`) and its ended pipeline
+  record are left in place; a stand-alone record `start ai-run … -- --approved --sessions 2`
+  becomes current; `write task_blocked implementation --run <ai-run id> --task T001` → no answer
+  `argv` starts with `.ai/bin/ai-pipeline`, `resume` is exactly `[".ai/bin/ai-run", "--approved",
+  "--sessions", "2"]`, no `resume_more_rounds`; a stand-alone record with `--plan /abs/p.md` → no
+  `resume` answer; a pipeline record's `resume` equals its own argv, not the manifest's.
+- `test_escalation_stop_request_wins` (P16): with a stop request on run A and a pending
+  `task_blocked` hint, `write other implementation --run A` → kind `human_stop`, hint removed.
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N tests`, N ≥ 1).
@@ -5429,12 +5457,16 @@ exit.
   and the pipeline verified the gate before this process started). `relaunch_wait` (~94–106):
   `run-record pause`. `on_exit` (unexpected exit): `end stopped`, same conditions. `resume()`
   (~58–64): pass `AI_RUN_ID="$AI_RUN_ID"` in the `exec env`.
-- `scripts/ai-run`: save the original arguments at the top (`run_argv=("$@")`). Only when
-  `AI_PIPELINE` is unset: right after the traps (~243–245) `AI_RUN_ID=$(ai_helper run-record start
-  ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}") || ai_die 'Cannot record the run in
-  the host state directory.'` (plan review P7: `AI_START_BRANCH`, not `branch`; after `on_exit`
-  is installed). `on_exit`: when `AI_RUN_ID` is set and `gate_ok=yes`, `end finished` on code 0
-  else `end stopped`. Keep both additions small (batch 10 edits the session code).
+- `scripts/ai-run`: save the original arguments at the top (`run_argv=("$@")`); the
+  `--knowledge-dir` branch (~78–82) replaces its value in `run_argv` with the resolved
+  `knowledge_dir`, as `ai-pipeline` does (~57), so the recorded argv (and T305's `resume`
+  answer, run from the checkout root) never holds a caller-relative path (plan review round 3,
+  P18). Only when `AI_PIPELINE` is unset: right after the traps (~243–245) `AI_RUN_ID=$(ai_helper
+  run-record start ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}") || ai_die 'Cannot
+  record the run in the host state directory.'` (plan review P7: `AI_START_BRANCH`, not
+  `branch`; after `on_exit` is installed). `on_exit`: when `AI_RUN_ID` is set and `gate_ok=yes`,
+  `end finished` on code 0 else `end stopped` (T315 stores `human_stop` when a stop was
+  requested; P16). Keep both additions small (batch 10 edits the session code).
 - Docs: `docs/workflow.md` "Recovery contract" (the recovery owns the run record first) and the
   T302 "Run record" paragraph (stand-alone `ai-run`). Flow unchanged (records only).
 
@@ -5449,7 +5481,9 @@ scripts/ai-recover, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
 - `test_run_record_recovery_refuses_a_stopped_run`: a record with a stop request → `ai-recover`
   exits 1, manifest `attempts` unchanged, no session started.
 - `test_run_record_standalone_ai_run`: `ai-run --approved` alone writes a kind `ai-run` record
-  with `AI_START_BRANCH` as branch, ended `finished`; inside a pipeline no second record appears.
+  with `AI_START_BRANCH` as branch, ended `finished`; inside a pipeline no second record appears;
+  started from a subdirectory with `--knowledge-dir ./notes`, the recorded argv holds the
+  absolute path of `<subdir>/notes`.
 - `test_run_record_standalone_refusal_after_publication`: a stand-alone run whose only task is
   BLOCKED ("none can run") → its record ended `stopped`, not `running`.
 - `test_run_record_standalone_start_clears_escalation`: an `escalation.json` of an earlier run is
@@ -5858,8 +5892,11 @@ idempotent with clear exit statuses.
   --expect-ticks`, identity check again, `os.killpg(pgid, SIGTERM)` only when `pgid == pid` and
   the pgid is not the caller's own process group, else `os.kill(pid, SIGTERM)`; never PID 1;
   poll every 0.2 s up to `--wait`: ended `human_stop` → exit 0 `Run <id> stopped (stopped by
-  you).`; still alive → exit 4 `Signalled run <id>; still ending after N s. Rerun to wait again.`
-  Errors exit 1.
+  you).`; ended with another outcome (the run finished or ended before the signal took effect;
+  plan review round 3, P16: never `settle-stop` on an ended record, it refuses) → exit 0 `Run
+  <id> ended (<outcome>) before the stop took effect; nothing will resume it.`; the process gone
+  but the record not ended → `settle-stop` (T319 adds the completion), exit 0; still alive → exit
+  4 `Signalled run <id>; still ending after N s. Rerun to wait again.` Errors exit 1.
 - Docs: README (command list) and `docs/workflow.md` (stop section, exit statuses). Flow chart:
   the "Stopped by you" path names `ai-pipeline --stop`; `updated:` date; hub Log line.
 
@@ -6037,7 +6074,10 @@ scripts/ai-pipeline, scripts/ai-run, scripts/ai-recover, scripts/lib/common.sh, 
   escalates → kind `validation` written by `ai-recover`; a recovery that resumes removes the
   record.
 - `test_escalation_wiring_standalone_ai_run`: a stand-alone `ai-run` whose only task is BLOCKED →
-  `task_blocked`; a fresh stand-alone `ai-run` then removes it (plan review P7).
+  `task_blocked`; a fresh stand-alone `ai-run` then removes it (plan review P7). Run after an
+  earlier fixture pipeline left its `run.json` (other arguments, e.g. `--max-fix-rounds 3`): no
+  answer's argv starts with `.ai/bin/ai-pipeline`, and `resume` is `.ai/bin/ai-run` with the
+  stand-alone run's own arguments (plan review round 3, P18).
 - `test_escalation_wiring_cleared_on_human_start`: a new `ai-pipeline --approved` removes it.
 - `test_escalation_wiring_ignores_last_error_text`: a `last-error` that says "plan review needs
   your decision" without a hint → kind `other`.
@@ -6050,40 +6090,142 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
-## T321 — Fix-round limit escalation and the plan kinds end to end (RC-01 G9, B9)
+## T321 — Fix-round limit escalation on every finish path (RC-01 G9, B9, plan review round 3 P19)
 Status: TODO
 Dependencies: T320
 Model: sonnet
 
 ### Goal
-A run that ends at the fix-round limit with significant findings still publishes its draft PR
-and leaves a `fix_round_limit` escalation record; the plan-review stops leave their records end
-to end.
+A run that ends at the fix-round limit with significant findings still finishes as today (draft
+PR, local only, or pushed without `gh`) and leaves exactly one `fix_round_limit` escalation
+record, whichever of the four finish paths it takes.
 
 ### Implementation notes
-- Design: `.ai/current-plan.md` "G9"; spec B9. `scripts/ai-pipeline`: when the review loop breaks
-  at the limit (~602–606) set `fix_round_limit_hit=yes`; on both finish paths (no-PR ~632–639 and
-  PR ~724–730), before the final notification, `ai_helper escalation write fix_round_limit review
-  --run "$AI_RUN_ID" --review .ai/reviews/current.md [--finding ID]… 2>/dev/null || true` with the
-  BLOCKER/MAJOR ids of the current review when the helper can list them, then `finish` (the run
-  record still ends `finished`).
+- Design: `.ai/current-plan.md` "G9"; spec B9. `scripts/ai-pipeline` has four successful finish
+  paths, all through `finish()` (~89): `--no-pr` (~638), no `origin` remote (~658), `gh` missing
+  after the push (~663) and the PR stage (~730) (plan review round 3, P19: the old plan covered
+  only the first and the last).
+- When the review loop breaks at the limit (~602–606, the `unresolved=1; … break` branch) set
+  `fix_round_limit_hit=yes` (initialised `no` beside `unresolved=0` ~546; the deferred-only break
+  ~622 does not set it).
+- Centralised write in `finish()`, so every finish path writes it once and none can bypass it:
+  before T302's `run-record end … finished`, `if [[ "$fix_round_limit_hit" == yes ]]; then
+  ai_helper escalation write fix_round_limit review --run "$AI_RUN_ID" --review
+  .ai/reviews/current.md 2>/dev/null || true; fi`. `finish` exits, so the write happens at most
+  once per run; no write at the four call sites.
+- `scripts/lib/workflow.py` `escalation write`: for kind `fix_round_limit` with `--review` and no
+  `--finding`, the finding ids are the review's BLOCKER and MAJOR ids from the existing
+  `finding_ids(content, level)` (~1108), read as a regular file ≤ 1 MB under the checkout; an
+  unreadable review gives `findings: []`, never a failure.
 - No change to the stop paths (T320) or the plan-review entry condition (~478).
 - Docs: the "Escalation record" section names the fix-round case (the run finished, the human
-  decides). Flow unchanged beyond T320.
+  decides; written on every finish path). Flow unchanged beyond T320.
 
 ### Likely affected modules
-scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md
+scripts/ai-pipeline, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
 
 ### Acceptance criteria
-- `test_escalation_wiring_fix_round_limit`: the limit reached with findings → `fix_round_limit`
-  with `resume_more_rounds` (recorded `--max-fix-rounds` + 1 ≤ 5), the run still finishes (draft PR
-  fixture), run record outcome `finished`.
-- `test_escalation_wiring_plan_kinds`: a plan review over the supervision limit →
-  `plan_review_limit` with `resume_skip_plan_review`; `AI_SUPERVISE=0` with a BLOCKER plan review
-  → `plan_review_limit`; a needs-human plan revision → `needs_human_question` with `review_plan`.
+- `test_escalation_wiring_fix_round_limit_paths`: one shared fixture (`--max-fix-rounds 1`, a
+  fake review that always reports `M1` and `M2` as MAJOR and a minor `N1`), four subtests read
+  after the pipeline process exited: (a) `--no-pr`; (b) a PR completed through the mock `gh`
+  (draft PR created); (c) no `origin` remote; (d) an `origin` (local bare repo) and no `gh` on
+  `PATH`. Each: exit 0, kind `fix_round_limit`, stage `review`, `findings` exactly `["M1",
+  "M2"]`, review `.ai/reviews/current.md`, a `resume_more_rounds` answer whose argv has
+  `--max-fix-rounds 2`, run record outcome `finished`.
+- `test_fix_round_limit_written_only_in_finish`: a source check on `scripts/ai-pipeline`: the
+  text `escalation write fix_round_limit` occurs exactly once, inside the body of `finish()`
+  (written once per run because `finish` exits).
+- `test_escalation_wiring_no_fix_round_record_without_limit`: a run whose review loop ends with
+  no significant findings finishes (`--no-pr`) with no `escalation.json`.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k escalation` and `-k fix_round` (must say `Ran N
+tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T327 — Plan-review escalation kinds end to end (RC-01 G9, split from T321 after plan review round 3)
+Status: TODO
+Dependencies: T320
+Model: sonnet
+
+### Goal
+The three plan-review stops for a human leave the right escalation record after the pipeline
+has exited: the supervision limit, `AI_SUPERVISE=0` and a needs-human plan disposition.
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "G9" (answers per kind); T309 hints and T320 writes are the code
+  under test; this task adds end-to-end tests and fixes only what they find in the hint or write
+  wiring of these three stops (`scripts/ai-pipeline` `plan_decision_check` ~436–442, the
+  `revision-reserve` refusals ~327–330 and ~529–531, the `AI_SUPERVISE != 1` stop ~523–526).
+- No change to the plan-review entry condition (~478; batch 10). Read every record after the
+  pipeline process exited (`AI_AUTO_RECOVER=0`).
+- Docs: none beyond T320's section unless a test shows it is wrong. Flow unchanged.
+
+### Likely affected modules
+scripts/ai-pipeline, tests/test_workflow.py
+
+### Acceptance criteria
+- `test_escalation_wiring_plan_kinds`: a plan review over the supervision limit
+  (`AI_SUPERVISE_PLAN_ROUNDS=1`, two BLOCKER plan reviews) → `plan_review_limit` with
+  `resume_skip_plan_review` (argv = the run record's argv plus `--skip-plan-review`);
+  `AI_SUPERVISE=0` with a BLOCKER plan review → `plan_review_limit`; a needs-human plan
+  disposition → `needs_human_question` with a `review_plan` answer and the question's finding id.
+- Each record's `run` is the pipeline's run id and its answers never contain an argv from an
+  earlier manifest (P18).
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T325 — `--stop` of a stand-alone `ai-run` is a human stop (RC-01 G1, plan review round 3 P16)
+Status: TODO
+Dependencies: T319, T320
+Model: opus
+
+### Goal
+`ai-pipeline --stop` on a checkout whose run is a stand-alone `ai-run` ends the session and
+leaves outcome and escalation `human_stop`, exit 0, and a second `--stop` changes nothing; the
+runner's own notification says "stopped by you".
+
+### Implementation notes
+- Mechanism (no new record logic): T315's `end` stores `human_stop` for `stopped` when the
+  record has a stop request (under `runs/.lock`), T305's write refines `other` to `human_stop` for
+  such a run, T316's `on_exit` ends the record and T320's `on_exit` writes the escalation. This
+  task verifies the chain end to end and fixes what the test finds.
+- `scripts/ai-run` `on_exit` stand-alone notification (~238–240): when `AI_RUN_ID` is set,
+  `gate_ok=yes` and `ai_helper run-record stop-requested --run "$AI_RUN_ID"` exits 0 → `⛔ STOPPED
+  by you: runner stopped at $active_task. Rerun ai-run --approved … to continue.` instead of the
+  "needs you" text; otherwise unchanged. One `if`, kept small (batch 10).
+- `ai-run` has no marker and no auto-recovery, so `--stop`'s completion (T319) finds nothing more
+  to do; `run-stop` returns at "ended `human_stop`" (T308).
+- Tests: a fixture stand-alone `ai-run --approved` started with `start_new_session=True` and a
+  fake `claude` that writes its pid and sleeps 300 s; the test signals nothing itself, `--stop`
+  does (it signals only the fixture's recorded group or pid).
+- Docs: `docs/workflow.md` stop section: `--stop` also stops a stand-alone `ai-run`. Flow
+  unchanged beyond T308.
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_stop_command_stops_a_standalone_ai_run`: while the fake session sleeps, `ai-pipeline
+  --stop <checkout>` exits 0 within a scaled 60 s with `Run <id> stopped (stopped by you).`; the
+  `ai-run` process and the fake claude are gone; the run record (kind `ai-run`) has outcome
+  `human_stop` and `stop_requested.via` `ai-pipeline --stop`; `escalation.json` has kind
+  `human_stop`, that run id and no answer whose argv starts with `.ai/bin/ai-pipeline`; the
+  notification log has one `⛔ STOPPED by you:` line and no `needs you` line.
+- In the same test a second `--stop` exits 3 with "already stopped by you"; record and
+  escalation bytes unchanged.
+- `test_standalone_ai_run_interrupt_without_request`: SIGTERM to the fixture `ai-run` pid without
+  a stop request still ends `stopped` with today's "needs you" notification (spec B23).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k stop_command` and `-k standalone` (must say
+`Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -6329,6 +6471,8 @@ to follow and stop it; the printed stop command really stops it. Without `system
   beside `--stop` (T308's dispatch block: add the branch there). `--approved` must be among the
   remaining arguments (else the usual message). `systemd-run` not executable → exit 1 with the
   plan's message, nothing started. `ai_root` first (paths check); no lock (the child takes it).
+  Pass the remaining arguments through unchanged; resolving a caller-relative `--knowledge-dir`
+  before `ai_root` is T326 (plan review round 3, P17), so this task's tests use absolute paths.
 - Log name `pipeline-$(date -u +%Y%m%dT%H%M%SZ)-<8 hex>.log` in `.ai/local`, created by
   `workflow.py exec-logged` (as `scripts/ai-plan` ~56–64), which accepts this prefix since T324
   (plan review P12). The unit form of the plan (env: `PATH`,
@@ -6370,9 +6514,58 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
+## T326 — `--detach` resolves `--knowledge-dir` against the caller's directory (RC-01 G11, plan review round 3 P17)
+Status: TODO
+Dependencies: T313
+Model: opus
+
+### Goal
+`ai-pipeline --detach … --knowledge-dir DIR` means the same directory as the foreground command:
+DIR is resolved against the caller's working directory before the dispatch changes to the
+checkout root, and the detached child gets the absolute path in the same argument position.
+
+### Implementation notes
+- Cause: the `--detach` dispatch (T313) calls `ai_root` (`scripts/lib/common.sh` ~126–132, `cd`
+  to the checkout root) before it launches the child, which then resolves `--knowledge-dir`
+  (`scripts/ai-pipeline` ~52–58) against the root. `scripts/ai-plan` ~23–28 resolves it first.
+- In the dispatch, before `ai_root`: walk the remaining arguments once, copying them into
+  `detach_args` in order; for `--knowledge-dir` require a value (else `Missing knowledge
+  directory`, exit 1, nothing started) and an existing directory (else `Knowledge directory must
+  already exist.`, exit 1, nothing started), and copy `--knowledge-dir "$(cd -- "$2" && pwd -P)"`.
+  A value of another option is copied as is and never inspected as an option (the pipeline's
+  own parser validates everything else). Only `--knowledge-dir` takes a path in `ai-pipeline`'s
+  options (`--base` and `--pr-base` are refs).
+- `systemd-run` gets `exec-logged … -- <AI_BIN>/ai-pipeline "${detach_args[@]}"`.
+- Tests reuse T313's fake `systemd-run` (argv recorded, command started with
+  `start_new_session=True`) and stop the fixture with the printed `--stop` command.
+- Docs: README/`docs/workflow.md` detach paragraph: paths are resolved against your working
+  directory, as in the foreground. Flow unchanged.
+
+### Likely affected modules
+scripts/ai-pipeline, tests/test_workflow.py, README.md, docs/workflow.md
+
+### Acceptance criteria
+- `test_detach_knowledge_dir_is_caller_relative`: checkout root with `notes/` holding file
+  `root-marker` and `sub/notes/` holding `sub-marker`; run `ai-pipeline --detach --approved
+  --no-pr --knowledge-dir ./notes --sessions 1` with `cwd=<checkout>/sub` → the recorded
+  `systemd-run` argv ends with `ai-pipeline --approved --no-pr --knowledge-dir <abs
+  checkout>/sub/notes --sessions 1` (order kept), and the detached fixture pipeline's run record
+  `argv` and the manifest `args` hold `<abs checkout>/sub/notes`, never `<abs checkout>/notes`.
+- `test_detach_knowledge_dir_only_caller_relative_exists`: only `sub/notes/` exists (no root
+  `notes/`), launched from `sub` → started, and the child argv holds `<abs checkout>/sub/notes`.
+- `test_detach_knowledge_dir_missing`: only the root `notes/` exists (not `sub/notes/`) and the
+  launch is from `sub`, neither exists, or `--knowledge-dir` is the last argument
+  → exit 1 with the message, the fake `systemd-run` never called, no log created.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k detach` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
 ## T314 — Docs, flow chart audit and the mission-control handoff note (batch 11)
 Status: TODO
-Dependencies: T313, T321, T322
+Dependencies: T313, T321, T322, T325, T326, T327
 Model: haiku
 
 ### Goal
@@ -6386,7 +6579,7 @@ the new commands and record paths.
 - README: command list (`ai-pipeline --stop`, `--detach` (systemd only), `ai-task retry`,
   `model`, `skip`, `skip --reauthorize`, `--commit`). `docs/workflow.md`: one "Run controls"
   section that links the stop, escalation record, run record and task command paragraphs added
-  by T301–T324, and says that `--detach` needs `systemd-run` (the `setsid` fallback is later
+  by T301–T327, and says that `--detach` needs `systemd-run` (the `setsid` fallback is later
   work).
 - Vault `agents-flow.md`: check the "Stopped by you" path, the escalation record bullet, the
   SKIPPED note and `--detach` exist and match; `updated:` date; one hub Log line in `agents.md`

@@ -1,7 +1,8 @@
 # Plan: Flow batch 11: run controls (RC-01: G1, G2, G3, G4–G7, G9, G11)
 
-## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review rounds 1 and 2)
-See `.ai/project-spec.md`, "Verified against the code" and "Plan review round 1" / "round 2". In short:
+## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review rounds 1, 2 and 3)
+See `.ai/project-spec.md`, "Verified against the code" and "Plan review round 1" / "round 2" /
+"round 3". In short:
 nothing in the toolkit tells a human stop from a failure. An interrupt waits for the whole agent
 session, then lands in `stop()`, which hands over to auto-recovery; a killed pipeline looks like a
 crash to the watchdog. The only record of a run is one manifest per checkout without process or
@@ -24,6 +25,15 @@ Round 2 adds:
 4. **One escalation writer per shutdown chain** (P13): a shutdown chain (e.g. `stop()` →
    `ai_die`) writes the escalation record once; the helper never lets a later `other` write
    replace a specific kind of the same run.
+
+Round 3 (the last plan review) adds:
+5. **A stop request decides the terminal outcome** (P16): whoever ends a stop-requested run as
+   `stopped` (its own runner, `ai_die`, `escalate()`) gets `human_stop`, decided by `end` under
+   `runs/.lock`; ended records stay immutable, so `--stop` never has to rewrite one.
+6. **Answers belong to the current run** (P18): escalation answers are built from the run record
+   the write names (its kind and argv), never from the checkout's `run.json`.
+7. **One place per lifecycle point** (P19): the fix-round-limit record is written in `finish()`,
+   which every successful finish path calls.
 
 ## Design
 
@@ -65,7 +75,8 @@ Round 2 adds:
   - `pause --run ID --pid PID` (outcome `paused`, not ended) and `end --run ID --pid PID OUTCOME
     [DETAIL]` (`finished`, `stopped`, `human_stop`, `crashed`): the record's process must be PID
     with PID's current start ticks; an ended record never changes again, so a first
-    `human_stop` is kept.
+    `human_stop` is kept; `stopped` on a record with `stop_requested` is stored as `human_stop`
+    (round 3, P16).
   - `request-stop --run ID --via VIA [--expect-pid P --expect-ticks T]`: refuses an ended
     record and, with `--expect-*`, a record whose process is not that one.
   - `settle-stop --run ID` (also a Python function for `run-stop`): only with a stop request,
@@ -144,8 +155,12 @@ flowchart TD
   <id>.` when the manifest has `limit_relaunch_at`). Otherwise: identity check, `request-stop
   --expect-*`, identity check again, `os.killpg(pgid, SIGTERM)` when `pgid == pid` and it is not
   the caller's own group, else `os.kill(pid, SIGTERM)`; poll every 0.2 s up to `--wait`; ended
-  with outcome `human_stop` → exit 0; ended without it → `settle-stop` + completion, exit 0;
-  still alive → exit 4.
+  with outcome `human_stop` → exit 0; ended with another outcome (it finished first) → exit 0,
+  nothing written (round 3, P16: ended records are immutable, `settle-stop` refuses them); process
+  gone, record not ended → `settle-stop` + completion, exit 0; still alive → exit 4. The owning
+  runner itself ends a stop-requested run as `human_stop`: T315's `end` stores `human_stop` for
+  `stopped` when `stop_requested` is set (under `runs/.lock`), which is what makes `--stop` of a
+  stand-alone `ai-run` (whose `on_exit` ends `stopped`) a human stop (T325).
 - Completion (T319): only for the kept id, only while it is still `current`, and only while
   `run-stop` holds `.ai/local/workflow.lock` with `flock -n` (held → another runner owns the
   checkout now: nothing written, the message says so): `escalation write human_stop <stage or
@@ -168,10 +183,15 @@ flowchart TD
   [--task ID]… [--finding ID]…` (host-side pending kind for that run, consumed by its next
   write), `show`, `clear`. A same-run `write` whose kind stays `other` after the refinement never
   replaces a record with a specific kind (round 2, P13). `write` reads `.ai/local/last-error` through the pinned `.ai/local`
-  (regular file, ≤ 64 KB), redacts it (spec B10), takes the run log path from the run record and
-  the recorded arguments from the manifest. `run-record start` and `resume` call `clear` (T305
-  adds this to T315's actions).
-- Answers per kind (always ending with `resume` when a manifest exists): `task_blocked` →
+  (regular file, ≤ 64 KB), redacts it (spec B10), takes the run log path, the run kind and the
+  recorded arguments from the run record named by `--run`, never from `run.json` (round 3,
+  P18). A run with a stop request refines `other` to `human_stop` before any hint (P16).
+  `run-record start` and `resume` call `clear` (T305 adds this to T315's actions).
+- `resume` answer: run kind `pipeline` → `.ai/bin/ai-pipeline` + the record's argv; kind
+  `ai-run` → `.ai/bin/ai-run` + the record's argv only for a task run (`--approved`, no
+  `--plan`, `--triage`, `--revise-plan`), else none; pipeline-only answers only for kind
+  `pipeline`. T316 records a stand-alone `ai-run`'s argv with the resolved `--knowledge-dir`.
+- Answers per kind (always ending with `resume` when the run has one): `task_blocked` →
   per task `retry_task`, `skip_task`, `set_model`; `plan_review_limit` → `resume` (a human start
   resets the budget) and `resume_skip_plan_review`; `fix_round_limit` → `resume_more_rounds`
   (recorded args with `--max-fix-rounds` + 1, only when ≤ 5); `needs_human_question` →
@@ -190,7 +210,9 @@ flowchart TD
   crash stage gives kind `crash`), the stand-alone `ai-run`'s `on_exit`. The watchdog itself only
   marks outcome `crashed` for a death it does not recover (T307); it writes no escalation record
   (that would need a second builder outside `workflow.py`). The fix-round limit (T321): written
-  at `finish` when the loop broke at the limit.
+  inside `finish()` when the loop broke at the limit, so all four successful finish paths
+  (`--no-pr`, no `origin`, `gh` missing, PR completed) write it exactly once (round 3, P19);
+  the findings are the current review's BLOCKER and MAJOR ids (`finding_ids`).
 
 ### G7, G4, G5, G6: task commands (T310 lock and commit, T311 SKIPPED, T312 subcommands, T322 reauthorize)
 - `ai-task` mutating forms: `set ID STATUS --commit`, `retry ID --note TEXT [--commit]`, `model ID
@@ -228,6 +250,10 @@ exec-logged <name> -- <AI_BIN>/ai-pipeline <args>`. Then poll `run-record show` 
 `AI_PLAN_ACK_SECONDS` for a record started after the launch whose `log` is this log; print
 `Pipeline started: pid N, log PATH`, `Follow: tail -f PATH`, `Stop: <AI_BIN>/ai-pipeline --stop
 <checkout>`; not confirmed → exit 1 with the log's last lines, the service left running.
+- Caller-relative paths (T326, round 3, P17): before `ai_root` changes to the checkout root, the
+  dispatch replaces a `--knowledge-dir DIR` value by `$(cd -- DIR && pwd -P)` resolved against
+  the caller's working directory (as `scripts/ai-plan` ~23–28 does), keeping argument order;
+  a missing or non-existent DIR → exit 1, nothing started.
 
 ## Task map (queue order)
 | Task | Gap | Model | What |
@@ -248,13 +274,16 @@ exec-logged <name> -- <AI_BIN>/ai-pipeline <args>`. Then poll `run-record show` 
 | T319 | G1 | opus | `--stop` completion bound to its run; relaunch cancel; recovery stop; races |
 | T309 | G9 | sonnet | escalation hints at the producers |
 | T320 | G9 | opus | escalation writes at every stop for a human (gate first), clearing |
-| T321 | G9 | sonnet | fix-round limit record and plan kinds end to end |
+| T321 | G9 | sonnet | fix-round limit record written in `finish()`, all four finish paths |
+| T327 | G9 | sonnet | plan-review escalation kinds end to end |
+| T325 | G1 | opus | `--stop` of a stand-alone `ai-run` ends `human_stop` |
 | T310 | G7 | opus | ai-task lock and `--commit` |
 | T311 | G6 | opus | SKIPPED status and the host-wide skip authorization |
 | T312 | G4 G5 G6 | opus | `ai-task retry`, `model`, `skip` |
 | T322 | G6 | opus | `ai-task skip ID --reauthorize` |
 | T324 | G11 | sonnet | `exec-logged` accepts `pipeline-…` log names (both prefixes tested) |
 | T313 | G11 | opus | `ai-pipeline --detach` (systemd-run only) and its stop test |
+| T326 | G11 | opus | `--detach` resolves `--knowledge-dir` against the caller's directory |
 | T314 | docs | haiku | README, docs/workflow.md, flow chart audit, mission-control handoff note |
 
 ## Risks
