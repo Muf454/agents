@@ -16155,6 +16155,27 @@ class StateIsolationTest(unittest.TestCase):
             entries = list((Path(os.environ['AI_STATE_DIR']) / 'pipelines').glob('*.json'))
             self.assertTrue(any(json.loads(e.read_text())['checkout'] == checkout for e in entries))
 
+    def test_state_isolation_temp_ai_state_with_missing_or_external_xdg(self):
+        isolation = Path(__file__).resolve().parent / 'isolation.py'
+        code = ("import runpy, os, json; runpy.run_path(%r); "
+                "print(json.dumps([os.environ['AI_STATE_DIR'], os.environ['XDG_STATE_HOME']]))"
+                % str(isolation))
+        temp = os.path.realpath(tempfile.gettempdir())
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as both:
+            for xdg in (None, '/nonexistent-external-xdg', both):
+                env = {k: v for k, v in os.environ.items() if k != 'XDG_STATE_HOME'}
+                env['AI_STATE_DIR'] = state
+                if xdg:
+                    env['XDG_STATE_HOME'] = xdg
+                result = subprocess.run([sys.executable, '-c', code], env=env,
+                                        capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                got_state, got_xdg = json.loads(result.stdout)
+                self.assertEqual(got_state, state)
+                self.assertTrue(os.path.realpath(got_xdg).startswith(temp + os.sep), got_xdg)
+                if xdg == both:
+                    self.assertEqual(got_xdg, both)
+
     def test_state_isolation_registry_guard(self):
         import run_parallel
         with tempfile.TemporaryDirectory() as base:

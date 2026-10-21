@@ -5048,7 +5048,7 @@ ai-check PASS, 1104 tests, 816.3 s (no edits during the gate). Flow unchanged; t
 note already says counts never come from commit subjects.
 
 ## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
