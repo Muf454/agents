@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -531,6 +532,42 @@ if denied_but_done:
 if mode == 'invalid':
     print('not JSON')
     sys.exit(0)
+if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER CONTRACT' in prompt:
+    # T001 marked BLOCKED although its own gate run showed no failing check: validation.json is
+    # left as `stamp invalidate` writes it (RUNNING). Only the first T001 call (-always: every
+    # one); later calls complete the task normally. Every prompt is recorded. MOCK_BLOCK_VARIANT
+    # (T041): `fail` leaves a FAIL record (exit_code 1) instead, `marker` also commits gate-marker,
+    # `dirty` also leaves an untracked stray.txt.
+    state = pathlib.Path(os.environ['MOCK_STATE_DIR'])
+    variant = os.environ.get('MOCK_BLOCK_VARIANT', '')
+    with open(state / 'gate-unknown-prompts.log', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
+    task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
+    calls = state / 'gate-unknown-calls'
+    count = len(calls.read_text().splitlines()) if calls.exists() else 0
+    if task_id == 'T001':
+        with open(calls, 'a') as f: f.write('call\n')
+    if task_id == 'T001' and (mode == 'blocked-gate-unknown-always' or count == 0):
+        subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'BLOCKED'], check=True, stdout=subprocess.DEVNULL)
+        queue = pathlib.Path('.ai/tasks.md')
+        text = queue.read_text()
+        start = text.index('## T001 —')
+        queue.write_text(text[:start] + text[start:].replace(
+            'Pending.', f'Blocked in session {count + 1}: the full gate result is unknown.', 1))
+        paths = ['.ai/tasks.md']
+        if variant == 'marker':
+            pathlib.Path('gate-marker').write_text('the fixture gate fails while this exists\n')
+            subprocess.run(['git', 'add', '--', 'gate-marker'], check=True)
+            paths.append('gate-marker')
+        subprocess.run(['git', 'commit', '-qm', 'block T001', '--', *paths], check=True)
+        subprocess.run(['python3', '.ai/bin/lib/workflow.py', 'stamp', 'invalidate'], check=True)
+        if variant == 'fail':
+            subprocess.run(['python3', '.ai/bin/lib/workflow.py', 'stamp', 'record', '1',
+                            '.ai/local/session-gate.log'], check=True)
+        if variant == 'dirty':
+            pathlib.Path('stray.txt').write_text('uncommitted session output\n')
+        print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
+        sys.exit(0)
+    mode = 'success'
 if mode not in ('no-progress', 'bad-format'):
     task_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
     file = pathlib.Path('.ai/tasks.md')
@@ -564,6 +601,22 @@ if mode not in ('no-progress', 'bad-format'):
             pathlib.Path(task_id + '.txt').chmod(0o755)
             subprocess.run(['git','update-index','--chmod=-x','--',task_id+'.txt'],check=True)
         subprocess.run(['git','commit','-qm','implement '+task_id],check=True)
+if mode == 'lock-held':
+    # The session's own background gate outlives it: a detached process holds the validation lock
+    # for MOCK_LOCK_HOLD seconds (the test scales it) after the session ends.
+    ready = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'lock-holder.ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', 'import fcntl, pathlib, sys, time\n'
+         'f = open(".ai/local/validation.lock", "w"); fcntl.flock(f, fcntl.LOCK_EX)\n'
+         'pathlib.Path(sys.argv[2]).write_text("x"); time.sleep(float(sys.argv[1]))',
+         os.environ.get('MOCK_LOCK_HOLD', '2'), str(ready)],
+        start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'lock-holder.pid', 'w') as f:
+        f.write(f'{holder.pid}\n')
+    for _ in range(500):
+        if ready.exists(): break
+        time.sleep(0.01)
 if mode == 'scratch-leftover':
     # Throwaway files a session leaves behind; the host must remove them after the session.
     scratch = pathlib.Path('.ai/local/scratch')
@@ -1909,6 +1962,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('never prefix commands with `cd`', runner)
         self.assertIn('never prefix commands with `cd`', self.prompt_section('recover'))
         self.assertNotIn('never prefix commands with cd (', (ROOT / 'scripts/ai-run').read_text())
+
+    def test_gate_background_prompts_tell_the_session_to_wait(self):
+        for name in ('runner', 'triage'):
+            section = self.prompt_section(name)
+            for phrase in ('run_in_background', 'Validation modified project content',
+                           'left to the host gate'):
+                self.assertIn(phrase, section, f'{name}.md lacks {phrase!r}')
+            for phrase in ('never run it in the background',
+                           'mark the task BLOCKED with the evidence instead'):
+                self.assertNotIn(phrase, ' '.join(section.split()), f'{name}.md has {phrase!r}')
+        self.assertIn('run_in_background', (ROOT / 'README.md').read_text())
+        self.assertIn('is not a blocker', (ROOT / 'scripts/ai-run').read_text())
 
     def test_task_sections_prompts_show_the_format(self):
         for name in ('triage', 'plan-revision', 'plan'):
@@ -6224,6 +6289,113 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('run-manifest', 'gate')
         self.assertIn('too many', self.helper('run-manifest', 'timeout-rerun', 'T999', expected=1).stderr)
 
+    def test_gate_unblock_manifest_once_per_task(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001'])
+        before = path.read_bytes()
+        again = self.helper('run-manifest', 'gate-unblock', 'T001', expected=1)
+        self.assertIn('gate-only block: T001 was already retried once in this run', again.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'gate-unblock', 'T002')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001', 'T002'])
+        before = path.read_bytes()
+        for args in (('bad',), (), ('T005', 'T006')):
+            with self.subTest(args=args):
+                usage = self.helper('run-manifest', 'gate-unblock', *args, expected=1)
+                self.assertIn('Usage: run-manifest gate-unblock ID', usage.stderr)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_gate_unblock_manifest_kept_on_resume_dropped_on_start(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        self.helper('run-manifest', 'timeout-rerun', 'T001')  # the two claims are independent
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertEqual(json.loads(path.read_text())['gate_unblocks'], ['T001'])
+        self.helper('run-manifest', 'gate-unblock', 'T001', expected=1)
+        self.approve_run()
+        self.assertNotIn('gate_unblocks', json.loads(path.read_text()))
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+
+    def test_gate_unblock_manifest_wrong_shape_is_invalid(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'gate-unblock', 'T001')
+        valid = json.loads(path.read_text())
+        many = [f'T{n:03d}' for n in range(201)]
+        for value in ('T001', ['T001', 'T001'], ['x'], [7], {'T001': 1}, None, many):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(dict(valid, gate_unblocks=value)) + '\n')
+                invalid = self.helper('run-manifest', 'gate', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.helper('run-manifest', 'clear-attempts', expected=1)
+        path.write_text(json.dumps(dict(valid, gate_unblocks=many[:200])) + '\n')
+        self.helper('run-manifest', 'gate')
+        self.assertIn('too many', self.helper('run-manifest', 'gate-unblock', 'T999', expected=1).stderr)
+
+    def stamp_outcome(self):
+        result = self.helper('stamp', 'outcome', expected=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def assert_stamp_outcome(self, word):
+        content = (self.project / '.ai/local/validation.json').read_bytes()
+        self.assertEqual(self.stamp_outcome(), f'{word} {hashlib.sha256(content).hexdigest()}\n')
+
+    def test_gate_unblock_manifest_stamp_outcome_words(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        evidence = self.project / '.ai/local/validation.json'
+        self.assertEqual(self.stamp_outcome(), 'none -\n')  # no .ai/local yet
+        evidence.parent.mkdir(exist_ok=True)
+        if evidence.exists():
+            evidence.unlink()
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+        self.helper('stamp', 'invalidate')
+        self.assert_stamp_outcome('running')
+        self.assertRegex(self.stamp_outcome(), r'^running [0-9a-f]{64}\n$')
+        log = str(self.project / '.ai/local/check.log')
+        self.helper('stamp', 'record', '0', log)
+        self.assertEqual(json.loads(evidence.read_text())['result'], 'PASS')
+        self.assert_stamp_outcome('pass')
+        self.helper('stamp', 'invalidate')
+        (self.project / 'changed.txt').write_text('edited during the gate\n')
+        self.helper('stamp', 'record', '0', log, expected=1)
+        self.assertEqual(json.loads(evidence.read_text())['unchanged'], False)
+        self.assert_stamp_outcome('changed')
+        self.helper('stamp', 'invalidate')
+        self.helper('stamp', 'record', '1', log)
+        self.assert_stamp_outcome('fail')
+        for content in (b'not json\n', b'["PASS"]\n', b'\xff\xfe garbage', b'[' * 60000):
+            with self.subTest(content=content[:12]):
+                evidence.write_bytes(content)
+                self.assert_stamp_outcome('none')
+        evidence.write_bytes(b'{"result": "PASS"}' + b' ' * (64 * 1024))  # over the size bound
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+
+    def test_gate_unblock_manifest_stamp_outcome_never_follows_or_blocks(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        evidence = self.project / '.ai/local/validation.json'
+        evidence.parent.mkdir(exist_ok=True)
+        if evidence.exists():
+            evidence.unlink()
+        outside = self.base / 'outside.json'
+        outside.write_text('{"result": "PASS", "exit_code": 0}\n')
+        evidence.symlink_to(outside)
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+        evidence.unlink()
+        os.mkfifo(evidence)
+        started = time.monotonic()
+        result = self.run_cmd(['python3', str(HELPER), 'stamp', 'outcome'], timeout=SHORT_TIMEOUT)
+        self.assertEqual(result.stdout, 'none -\n')
+        self.assertLess(time.monotonic() - started, SHORT_TIMEOUT)
+        evidence.unlink()
+        moved = self.base / 'local-elsewhere'
+        evidence.parent.rename(moved)
+        (self.project / '.ai/local').symlink_to(moved)  # an unsafe .ai/local
+        (moved / 'validation.json').write_text('{"result": "PASS"}\n')
+        self.assertEqual(self.stamp_outcome(), 'none -\n')
+
     def test_limit_relaunch_record_setting_recorded_with_the_run(self):
         self.setup_project()
         self.run_cmd(['python3', str(HELPER), 'run-manifest', 'start', 'c' * 64, 'main', '--approved'],
@@ -9778,6 +9950,304 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-run', '--approved', expected=1)
         self.assertEqual([r['result'] for r in self.gate_rows()], ['fail'])
 
+    # ---------------------------------------------------------------- gate lock wait (FL-32, T039)
+    def gate_lock_holder(self, seconds):
+        """A process holding .ai/local/validation.lock for `seconds`; returns once it holds it."""
+        ready = self.base / 'test-lock-holder.ready'
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        holder = subprocess.Popen(
+            [sys.executable, '-c', 'import fcntl, pathlib, sys, time\n'
+             'f = open(".ai/local/validation.lock", "w"); fcntl.flock(f, fcntl.LOCK_EX)\n'
+             'pathlib.Path(sys.argv[2]).write_text("x"); time.sleep(float(sys.argv[1]))',
+             str(seconds), str(ready)], cwd=self.project)
+        self.addCleanup(lambda: (holder.kill(), holder.wait()) if holder.poll() is None else None)
+        for _ in range(500):
+            if ready.exists():
+                return holder
+            time.sleep(0.01)
+        self.fail('lock holder did not start')
+
+    def test_gate_lock_wait_passes_after_a_running_gate_ends(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='30')
+        self.assertIn('Waiting up to 30s for a running validation to finish.', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_unset_refuses_at_once(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT)
+        self.assertLess(time.monotonic() - started, 5 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())  # refused while the lock was still held
+        self.assertIn('Validation is already running.', result.stderr)
+        self.assertNotIn('Waiting up to', result.stderr)
+
+    def test_gate_lock_wait_held_past_the_wait_refuses(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT, AI_CHECK_LOCK_WAIT='1')
+        self.assertLess(time.monotonic() - started, 6 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())
+        self.assertIn('Waiting up to 1s', result.stderr)
+        self.assertIn('Validation is already running.', result.stderr)
+
+    def test_gate_lock_wait_invalid_value(self):
+        self.ready()
+        for value in ('x', '-1', '123456', ' 5'):
+            with self.subTest(value=value):
+                result = self.tool('ai-check', expected=1, AI_CHECK_LOCK_WAIT=value)
+                self.assertIn(f'Invalid AI_CHECK_LOCK_WAIT: {value}', result.stderr)
+
+    def test_gate_lock_wait_leading_zero_is_decimal(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='08')
+        self.assertIn('Waiting up to 8s', result.stderr)
+        self.assertNotIn('value too great for base', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_zero_with_leading_zeros_refuses_at_once(self):
+        self.ready()
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        result = self.tool('ai-check', expected=1, timeout=SHORT_TIMEOUT, AI_CHECK_LOCK_WAIT='00')
+        self.assertIsNone(holder.poll())
+        self.assertIn('Validation is already running.', result.stderr)
+        self.assertNotIn('Waiting up to', result.stderr)
+
+    # One AI_CHECK_TIMEOUT deadline covers the lock wait and the validator (review M1, T044).
+    def gate_marked_validator(self, sleep):
+        marker = self.base / 'validator-ran'
+        (self.project / '.ai/validate').write_text(
+            f'#!/usr/bin/env bash\necho x > {shlex.quote(str(marker))}\nsleep {sleep}\n')
+        self.commit('sleeping gate')
+        return marker
+
+    def test_gate_lock_wait_shares_the_timeout_during_validation(self):
+        self.ready()
+        hold, limit = 4 * TIMEOUT_SCALE, math.ceil(5 * TIMEOUT_SCALE)
+        marker = self.gate_marked_validator(60)
+        self.gate_lock_holder(hold)
+        started = time.monotonic()
+        self.tool('ai-check', expected=124, timeout=limit + 30 * TIMEOUT_SCALE,
+                  AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT=str(limit))
+        # timeout signals the validator's whole process group, so the kill-after never applies;
+        # a fresh budget after the wait would take hold + limit.
+        self.assertLess(time.monotonic() - started, limit + 2 * TIMEOUT_SCALE)
+        self.assertTrue(marker.exists())
+        self.helper('stamp', 'verify', expected=1)
+
+    def test_gate_lock_wait_exhausts_the_timeout_while_waiting(self):
+        self.ready()
+        marker = self.gate_marked_validator(0)
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        started = time.monotonic()
+        result = self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                           AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+        self.assertLess(time.monotonic() - started, 5 * TIMEOUT_SCALE)
+        self.assertIsNone(holder.poll())
+        self.assertIn('Validation time limit reached while waiting for the lock.', result.stderr)
+        self.assertNotIn('Validation is already running.', result.stderr)
+        self.assertFalse(marker.exists())
+        self.helper('stamp', 'verify', expected=1)
+
+    # The stamp changes only under the lock: a timed-out waiter leaves it alone (review M2, T046).
+    def test_gate_lock_wait_timeout_keeps_the_active_stamp(self):
+        self.ready()
+        self.tool('ai-check')  # a finished gate's PASS evidence
+        stamp = self.project / '.ai/local/validation.json'
+        running = json.dumps({'result': 'RUNNING', 'started': '2026-10-20T00:00:00Z',
+                              'before': 'known-fingerprint'}) + '\n'
+        holder = self.gate_lock_holder(10 * TIMEOUT_SCALE)
+        for name, content in (('pass', stamp.read_text()), ('running', running)):
+            with self.subTest(stamp=name):
+                stamp.write_text(content)
+                result = self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                                   AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+                self.assertIn('Validation time limit reached while waiting for the lock.',
+                              result.stderr)
+                self.assertEqual(stamp.read_text(), content)
+        self.assertIsNone(holder.poll())  # both waiters gave up while the lock was held
+
+    def test_gate_lock_wait_timeout_keeps_change_detection(self):
+        self.ready()
+        started, release = self.base / 'gate-a.started', self.base / 'gate-a.release'
+        (self.project / 'data.txt').write_text('before\n')
+        (self.project / '.ai/validate').write_text(
+            f'#!/usr/bin/env bash\necho x > {shlex.quote(str(started))}\n'
+            f'while [[ ! -e {shlex.quote(str(release))} ]]; do sleep 0.05; done\n')
+        self.commit('gate waits for a release file')
+        gate_a = subprocess.Popen([str(self.project / '.ai/bin/ai-check')], cwd=self.project,
+                                  env=dict(self.env), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (gate_a.kill(), gate_a.wait()) if gate_a.poll() is None else None)
+        for _ in range(int(1000 * TIMEOUT_SCALE)):
+            if started.exists() or gate_a.poll() is not None:
+                break
+            time.sleep(0.01)
+        self.assertTrue(started.exists(), 'gate A did not start its validator')
+        (self.project / 'data.txt').write_text('changed while gate A runs\n')
+        self.tool('ai-check', expected=124, timeout=SHORT_TIMEOUT,
+                  AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='1')
+        release.write_text('x')
+        _, stderr = gate_a.communicate(timeout=SHORT_TIMEOUT)
+        self.assertNotEqual(gate_a.returncode, 0)
+        self.assertIn('Validation modified project content', stderr)
+        data = json.loads((self.project / '.ai/local/validation.json').read_text())
+        self.assertEqual(data['result'], 'FAIL')
+        self.assertIs(data['unchanged'], False)
+        self.helper('stamp', 'verify', expected=1)
+
+    def test_gate_lock_wait_within_the_total_budget_passes(self):
+        self.ready()
+        self.gate_lock_holder(1)
+        result = self.tool('ai-check', AI_CHECK_LOCK_WAIT='30', AI_CHECK_TIMEOUT='30')
+        self.assertIn('Waiting up to 30s', result.stderr)
+        self.helper('stamp', 'verify')
+
+    def test_gate_lock_wait_invalid_timeout(self):
+        self.ready()
+        for value in ('x', '-1', '1234567890', ' 5'):
+            with self.subTest(value=value):
+                result = self.tool('ai-check', expected=1, AI_CHECK_TIMEOUT=value)
+                self.assertIn(f'Invalid AI_CHECK_TIMEOUT: {value}', result.stderr)
+
+    def test_gate_lock_wait_runner_waits_for_the_session_gate(self):
+        self.ready()
+        pid_file = self.base / 'lock-holder.pid'
+
+        def reap():
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        self.addCleanup(reap)
+        hold = 2 * TIMEOUT_SCALE
+        result = self.tool('ai-run', '--approved', MOCK_CLAUDE='lock-held', MOCK_LOCK_HOLD=str(hold))
+        self.assertTrue(pid_file.exists())
+        self.assertIn('Waiting up to', result.stderr)
+        self.assertEqual(self.task_rows(), [(1, 'done', True)])
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass'])
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    # ---------------------------------------------------------------- gate-only block retry (FL-32, T040)
+    def gate_unknown_prompts(self):
+        path = self.base / 'gate-unknown-prompts.log'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def git_subjects(self):
+        return self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+
+    def test_gate_only_block_retried_once_then_done(self):
+        self.ready()
+        self.approve_run()
+        self.tool('ai-run', '--approved', MOCK_CLAUDE='blocked-gate-unknown')
+        self.helper('tasks', 'complete')
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+        notes = self.notifications()
+        self.assertIn('🔧 T001: blocked without a failing check and the full gate passed; running it once more.', notes)
+        self.assertNotIn('⚠ Blocked', notes)
+        subjects = self.git_subjects()
+        retry = subjects.index('chore(ai): retry T001 after a gate-only block')
+        self.assertLess(subjects.index('chore(ai): record T001 runner checkpoint'), retry)  # the BLOCKED one
+        self.assertLess(retry, subjects.index('implement T001'))
+        self.assertEqual(subjects.count('chore(ai): record T001 runner checkpoint'), 2)  # BLOCKED, then DONE
+        prompts = self.gate_unknown_prompts()
+        self.assertEqual(len(prompts), 2)
+        note = 'The previous session marked T001 BLOCKED without a failing check'
+        self.assertNotIn(note, prompts[0])
+        self.assertEqual(prompts[1].count(note), 1)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['gate_unblocks'], ['T001'])
+        # A run without the retry has two host gates (after T001, final); the retry adds one.
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass', 'pass'])
+        self.assertEqual([r[1] for r in self.task_rows()], ['blocked', 'done'])
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout.strip(), '')
+
+    def test_gate_only_block_retried_once_per_task(self):
+        self.ready(task('T001') + task('T002', dependencies='T001') + task('T003'))
+        self.approve_run()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-gate-unknown-always')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertEqual(self.helper('tasks', 'status', 'T003').stdout.strip(), 'DONE')
+        self.assertEqual(self.git_subjects().count('chore(ai): retry T001 after a gate-only block'), 1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('blocked without a failing check'), 1)
+        self.assertEqual(notes.count('⚠ Blocked: '), 1)
+        self.assertEqual(len([p for p in self.gate_unknown_prompts() if 'invocation: T001.' in p]), 2)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['gate_unblocks'], ['T001'])
+
+    # Neighbouring BLOCKED cases keep today's behaviour (FL-32, T041). T002 is independent, so the
+    # run goes on after T001's block and then stops on the unrunnable queue as today.
+    def gate_only_block_unchanged(self, mode, manifest=True, expected=1, prior_gate=False, **env):
+        self.ready(task('T001') + task('T002'))
+        if prior_gate:  # a PASS record from before the run, which the session leaves as it is
+            self.tool('ai-check')
+        if manifest:
+            self.approve_run()
+        result = self.tool('ai-run', '--approved', expected=expected, MOCK_CLAUDE=mode, **env)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertNotIn('chore(ai): retry T001 after a gate-only block', self.git_subjects())
+        self.assertNotIn('blocked without a failing check', self.notifications())
+        return result
+
+    def gate_unblocks(self):
+        manifests = list((self.base / 'host-state').rglob('run.json'))
+        return json.loads(manifests[0].read_text()).get('gate_unblocks', []) if manifests else None
+
+    def assert_blocked_as_today(self, result):
+        self.assertEqual(self.notifications().count('⚠ Blocked: '), 1)
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('Unfinished tasks exist but none can run.', result.stderr)
+
+    def test_gate_only_block_unchanged_session_gate_failed(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', MOCK_BLOCK_VARIANT='fail')
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])  # T002's only
+        self.assertEqual(self.gate_unblocks(), [])
+
+    def test_gate_only_block_unchanged_session_never_ran_the_gate(self):
+        result = self.gate_only_block_unchanged('blocked-first', prior_gate=True)
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])
+        self.assertEqual(self.gate_unblocks(), [])
+
+    def test_gate_only_block_unchanged_host_gate_fails(self):
+        self.ready_validate_marker()
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-gate-unknown-always',
+                           MOCK_BLOCK_VARIANT='marker')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'BLOCKED')
+        self.assertNotIn('chore(ai): retry T001 after a gate-only block', self.git_subjects())
+        self.assertNotIn('blocked without a failing check', self.notifications())
+        self.assertIn('Gate-only block retry of T001: the full gate failed; it stays BLOCKED.', result.stdout)
+        self.assert_blocked_as_today(result)
+        # The retry's failing gate, then T002's: the run went on.
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['fail', 'pass'])
+        self.assertEqual(self.gate_unblocks(), ['T001'])  # spent
+
+    def ready_validate_marker(self):
+        self.ready(task('T001') + task('T002'))
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nif [[ -e gate-marker && ! -e T002.txt ]]; then exit 7; fi\n')
+        self.commit('gate that fails while gate-marker exists')
+        self.approve_run()
+
+    def test_gate_only_block_unchanged_without_run_manifest(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', manifest=False)
+        self.assert_blocked_as_today(result)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass'])
+        self.assertIsNone(self.gate_unblocks())
+
+    def test_gate_only_block_unchanged_dirty_tree(self):
+        result = self.gate_only_block_unchanged('blocked-gate-unknown-always', MOCK_BLOCK_VARIANT='dirty')
+        self.assertIn('Blocked task was not checkpointed; inspect and commit before resuming.', result.stderr)
+        self.assertNotIn('⚠ Blocked', self.notifications())  # today the dirty check stops before it
+        self.assertEqual(self.gate_rows(), [])
+        self.assertEqual(self.gate_unblocks(), [])
+
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):
         return Path(self.helper('outcome', 'attempt-dir').stdout.strip())
@@ -12582,7 +13052,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         plain = self.exec_bits_file('notes.txt', 0o644, 'text\n')
         self.commit('tracked files')
         script.chmod(0o644)
-        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/tool.sh\n')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, 'scripts/tool.sh\n')
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertEqual(self.exec_bits_mode(plain), 0o644)
 
@@ -12597,7 +13067,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         gone.unlink()
         gate.chmod(0o644)
         untracked = self.exec_bits_file('free.sh', 0o644)
-        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, '')
         self.assertEqual(self.exec_bits_mode(target), 0o644)
         self.assertEqual(self.exec_bits_mode(gate), 0o644)
         self.assertEqual(self.exec_bits_mode(untracked), 0o644)
@@ -12614,13 +13084,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         external.chmod(0o644)
         shutil.rmtree(self.project / 'scripts')
         (self.project / 'scripts').symlink_to(outside)
-        self.assertEqual(self.helper('exec-bits').stdout, '')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, '')
         self.assertEqual(self.exec_bits_mode(external), 0o644)
 
     def test_exec_bits_restores_a_staged_executable_bit(self):
         script = self.exec_bits_file('scripts/new.sh', 0o644)
         self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/new.sh'])
-        self.assertEqual(self.helper('exec-bits').stdout, 'scripts/new.sh\n')
+        self.assertEqual(self.helper('exec-bits', *self.protected_paths()).stdout, 'scripts/new.sh\n')
         self.assertEqual(self.exec_bits_mode(script), 0o755)
 
     def test_exec_bits_runner_restores_the_bit_a_session_lost(self):
@@ -12666,6 +13136,71 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('⛔', notes)
         self.assertEqual(self.exec_bits_mode(script), 0o755)
         self.assertNotIn('mode change', self.run_cmd(['git', 'log', '--summary', '--format=']).stdout)
+
+    def protected_paths(self):
+        common = str(ROOT / 'scripts/lib/common.sh')
+        out = self.run_cmd(['bash', '-c', f'source "{common}"; printf "%s\\n" "${{AI_PROTECTED_PATHS[@]}}"']).stdout
+        return out.split()
+
+    def test_exec_bits_skips_every_protected_path(self):
+        protected = self.protected_paths()
+        self.assertIn('.ai/permissions.allow', protected)
+        names = []
+        for root in protected:
+            names.append(root + '/x' if root in ('.ai/bin', '.ai/prompts') else root)
+        names += ['scripts/tool.sh', '.ai/prompts-extra/x.sh']
+        for name in names:
+            self.exec_bits_file(name, 0o644)
+            self.run_cmd(['git', 'add', '--chmod=+x', '--', name])
+        restored = self.helper('exec-bits', *protected).stdout.split()
+        self.assertEqual(sorted(restored), ['.ai/prompts-extra/x.sh', 'scripts/tool.sh'])
+        for name in names:
+            expected = 0o755 if name in restored else 0o644
+            self.assertEqual(self.exec_bits_mode(self.project / name), expected, name)
+
+    def test_exec_bits_requires_the_protected_list(self):
+        script = self.exec_bits_file('scripts/tool.sh', 0o644)
+        self.run_cmd(['git', 'add', '--chmod=+x', '--', 'scripts/tool.sh'])
+        self.assertNotEqual(self.helper('exec-bits', expected=None).returncode, 0)
+        self.assertEqual(self.exec_bits_mode(script), 0o644)
+
+    def test_exec_bits_protected_list_is_defined_once(self):
+        common = (ROOT / 'scripts/lib/common.sh').read_text()
+        self.assertEqual(common.count('AI_PROTECTED_PATHS=('), 1)
+        guard = common.split('ai_guard_digest() {', 1)[1].split('\nPY\n', 1)[0]
+        self.assertNotIn('.ai/permissions.allow', guard)
+        self.assertIn('exec-bits "${AI_PROTECTED_PATHS[@]}"', (ROOT / 'scripts/ai-run').read_text())
+
+    def test_exec_bits_guard_digest_unchanged(self):
+        self.ready()
+        reference = '''
+import hashlib
+from pathlib import Path
+import stat
+digest = hashlib.sha256()
+roots = ('.ai/validate', '.ai/ci-setup', '.ai/bin', '.ai/prompts',
+         '.ai/permissions.allow', '.claude/settings.json',
+         '.github/workflows/ai-validate.yml')
+optional = ('.claude/settings.json', '.github/workflows/ai-validate.yml')
+for name in roots:
+    root = Path(name)
+    paths = [root]
+    if root.is_dir():
+        paths += sorted(root.rglob('*'))
+    for path in paths:
+        digest.update(str(path).encode() + b'\\0')
+        if not path.exists():
+            digest.update(b'absent\\0')
+            continue
+        mode = path.lstat().st_mode
+        digest.update(str(mode).encode() + b'\\0')
+        if stat.S_ISREG(mode):
+            digest.update(path.read_bytes())
+        digest.update(b'\\0')
+print(digest.hexdigest())
+'''
+        expected = self.run_cmd(['python3', '-I', '-c', reference]).stdout.strip()
+        self.assertEqual(self.gate_digest(), expected)
 
     def test_exec_bits_prompts_name_the_only_form(self):
         for name in ('runner', 'triage'):

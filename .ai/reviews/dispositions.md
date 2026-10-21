@@ -1,6 +1,6 @@
 # Review dispositions (Claude)
 
-Review HEAD: b651970c55b64ff3fccec2e4a9cd702d576da372
+Review HEAD: 5c73c56d55b8e9b4548855151255aa67e19f62b3
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
 e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
@@ -10,7 +10,5 @@ with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. 
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
-| M2 | accepted | Confirmed in scripts/lib/workflow.py exec_bits(): os.lstat(root / name) rejects only a symlink leaf, and os.chmod(root / name) follows parent-directory symlinks, so a session-planted directory symlink lets the host chmod an external file. Fix: pinned no-follow descriptor walk plus fchmod, with an external-directory regression. | T034 |
-| M3 | accepted | Confirmed in scripts/ai-run: claude_session calls ai_die for any non-zero exit (line 360) before returning, and exec-bits runs only after it returns (line 842), so exits 124 and 137 stop the run unrepaired and ai-recover's timeout commit-and-rerun can fail its gate on a lost bit. Fix: repair before the stop, with a timeout regression. | T035 |
-| N3 | accepted | Handoff "Next action" and T033 lines still say T033 is BLOCKED although tasks.md has it DONE on mission control's gate pass. state.md counts are runner-managed and refresh at the next runner checkpoint. Cheap and in scope; folded into the post-fix docs task. | T036 |
-| N4 | accepted | AGENTS.md requires the flow chart to show every flow step; exec-bits (ai-run line 842) is a new host mutation and T035 changes where it runs, so the chart is updated after that fix. | T036 |
+| M2 | accepted | Confirmed in `scripts/ai-check` lines 22–33: when `flock -w "$limit" 8` fails the waiter calls `out_of_time`, which runs `ai_helper stamp invalidate` without holding the lock. `stamp invalidate` (`scripts/lib/workflow.py` ~760) rewrites `before` with the current fingerprint, and the holder's `stamp record` then compares against it, so a mid-run content change can record PASS with `unchanged: true`. `test_gate_lock_wait_exhausts_the_timeout_while_waiting` has no active stamp, so it misses this. Before T044 the wait-failure path used `ai_die` and never touched the stamp; T046 restores that for the timeout exit and adds concurrent-stamp regressions. | T046 |
+| N2 | accepted | `.ai/handoff.md` listed T045 as TODO and its next action as T045, but `.ai/bin/ai-task show T045` is DONE (tests in 5d94082). Fixed in this triage commit: T045 is DONE with its validation line and test names, and the next action is T046. T046 keeps the handoff current. | T046 |

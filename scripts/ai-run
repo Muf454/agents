@@ -41,6 +41,8 @@ directory (plans, research); --knowledge-dir stays the knowledge base option.
 Usage-limit errors pause until the reset (AI_LIMIT_RETRY/AI_LIMIT_MAX_WAIT) and resume. Inside
 ai-pipeline, a reset beyond that budget is relaunched after the reset by the watchdog timer (--recover),
 at most AI_LIMIT_RELAUNCH_MAX (default 2) times per run.
+A task blocked although its session's own gate run showed no failing check gets one more session,
+once per task per run, when the host's full gate then passes on the same tree.
 Before a task runs, the host runs .ai/ci-setup when dependencies are missing or stale
 (time limit AI_DEPS_TIMEOUT, default 1200 seconds; log in .ai/local/deps-*.log).
 The human must inspect the plan, validation script, and permission allowlist first.
@@ -289,6 +291,16 @@ verify_checkpoint() {
 
 remaining_time() { echo $(( run_timeout + AI_WAITED - (SECONDS - started) )); }
 
+# The host's full gate; sets gate_code. A session may end with its own background gate still
+# holding the validation lock (FL-32), so wait for it for up to 15 minutes within the run time
+# (ai-check deducts the wait from AI_CHECK_TIMEOUT, so the gate ends by the run deadline).
+host_gate() {
+  local lock_wait=$remaining
+  (( lock_wait <= 900 )) || lock_wait=900
+  gate_code=0
+  AI_CHECK_LOCK_WAIT=$lock_wait AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+}
+
 knowledge_prompt() {
   [[ -n "$knowledge_dir" ]] || return 0
   printf '\nProject knowledge base explicitly configured for this run: %s. ' "$knowledge_dir"
@@ -361,7 +373,7 @@ claude_session() {
       ai_branch
       # A session cannot always chmod: give back the bit git records for a tracked script. Also
       # before a timeout or error stops the run, so ai-recover's rerun gate sees the bit.
-      if ! restored=$(ai_helper exec-bits); then
+      if ! restored=$(ai_helper exec-bits "${AI_PROTECTED_PATHS[@]}"); then
         (( code == 0 )) || ai_die "Claude exited $code (timeout/interruption/error); also cannot restore recorded executable bits. Preserve partial work; see $log and $errors."
         ai_die 'Cannot restore recorded executable bits.'
       fi
@@ -698,8 +710,7 @@ checkpoint_done() {
   (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
   ai_observe step checks "$task"
   gate_started=$SECONDS
-  gate_code=0
-  AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+  host_gate
   ai_guard_verify
   record_gate "$gate_code" "$gate_started"
   if (( gate_code != 0 )); then
@@ -733,6 +744,41 @@ checkpoint_done() {
   task_outcome done
   ai_log "$task" 'completed' PASS 'Claude checkpointed; continuing queue'
   runner_checkpoint "$task" DONE
+}
+
+# Gate-only block retry (FL-32): TASK was just checkpointed BLOCKED. When the session's own gate
+# run left no failing check (validation.json changed during the session and reads running, pass
+# or changed) and the host's full gate passes on this tree, set TASK back to IN_PROGRESS for one
+# more session. Deterministic host evidence only, once per task per run: the manifest claim is
+# spent before the gate runs, so a failing gate spends it too. A forged stamp buys at most one
+# gate run and one session, and nothing is accepted without a later DONE checkpoint. Sets
+# retry_note=TASK when it set the task back; otherwise TASK stays BLOCKED and the run goes on.
+# Call it as a plain command (never in a || list) so errexit still guards its commits.
+# Usage: gate_only_retry TASK.
+gate_only_retry() {
+  local task=$1 word='' digest=''
+  read -r word digest < <(ai_helper stamp outcome 2>/dev/null) || return 0
+  [[ -n "$digest" && "$digest" != - && "$digest" != "$stamp_before" ]] || return 0
+  case "$word" in running|pass|changed) ;; *) return 0 ;; esac
+  ai_helper run-manifest gate-unblock "$task" 2>/dev/null || return 0
+  remaining=$(remaining_time)
+  (( remaining > 0 )) || return 0
+  ai_observe step checks "$task"
+  gate_started=$SECONDS
+  host_gate
+  ai_guard_verify
+  record_gate "$gate_code" "$gate_started"
+  if (( gate_code != 0 )); then
+    printf '%s\n' "Gate-only block retry of $task: the full gate failed; it stays BLOCKED."
+    return 0
+  fi
+  ai_helper tasks set "$task" IN_PROGRESS
+  ai_log "$task" 'gate-only block; host gate passed; retrying once' PASS 'See task result'
+  git add -- .ai/tasks.md .ai/state.md .ai/run-log.md .ai/handoff.md
+  git commit -m "chore(ai): retry $task after a gate-only block" >/dev/null
+  ai_guard_verify
+  ai_notify "🔧 $task: blocked without a failing check and the full gate passed; running it once more."
+  retry_note=$task
 }
 
 # Preserved task work of a usage-limit stop (the relaunch armed it; admitted above). Every check
@@ -793,6 +839,7 @@ if [[ "$route" == checkpoint ]]; then
   checkpoint_done "$bound"
 fi
 
+retry_note='' stamp_before=-
 for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   ai_guard_verify
   ai_branch
@@ -809,8 +856,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
     ai_observe step checks final
     gate_started=$SECONDS
-    gate_code=0
-    AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+    host_gate
     ai_guard_verify
     record_gate "$gate_code" "$gate_started"
     if (( gate_code != 0 )); then
@@ -839,13 +885,21 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. A gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  if [[ -n "$retry_note" && "$retry_note" == "$active_task" ]]; then
+    prompt+=" The previous session marked $active_task BLOCKED without a failing check; the runner's full gate then passed on this tree. If the block was only about the gate result, verify the acceptance criteria and mark it DONE; otherwise block it again with the reason."
+  fi
+  retry_note=''
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
   # Best effort: a standalone run has no manifest (and no relaunch); in a pipeline a lost record
   # makes a later limit-arm fail closed. Kept through a limit stop (on_exit leaves it).
   ai_helper run-manifest task-set "$active_task" 2>/dev/null || \
     printf '%s\n' 'Note: could not record the task in the run manifest.' >&2
+  # What the session's own gate runs change in validation.json is the gate-only retry's evidence.
+  stamp_before=-
+  read -r _ stamp_before < <(ai_helper stamp outcome 2>/dev/null) || stamp_before=-
+  [[ -n "$stamp_before" ]] || stamp_before=-
   track_attempt=yes
   claude_session "$prompt" "${task_model:-$model}" "$all_tools" "${allowed[@]}"
   track_attempt=no
@@ -859,8 +913,11 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
       task_outcome blocked
       ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
-      ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks"
-      runner_checkpoint "$active_task" BLOCKED ;;
+      runner_checkpoint "$active_task" BLOCKED
+      retry_note=''
+      gate_only_retry "$active_task"
+      [[ "$retry_note" == "$active_task" ]] || \
+        ai_notify "⚠ Blocked: $(ai_helper tasks progress "$active_task"); trying other independent tasks" ;;
     *) task_outcome no_checkpoint
        ai_die "No completed/blocked checkpoint for $active_task; refusing an automatic retry loop." ;;
   esac

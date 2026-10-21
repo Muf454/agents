@@ -179,7 +179,8 @@ Before leaving an implementation session unattended:
    The template already allows `Bash(chmod +x *)` (no other chmod form; numeric modes such
    as `chmod 755` are denied) so a runner session can make a script it created executable,
    or repair a tracked script that lost its bit; the runner also restores a tracked script's
-   recorded executable bit after each implementation session, even one that timed out. Existing projects add that
+   recorded executable bit after each implementation session, even one that timed out (never a
+   gate or prompt file: the guard's protected-path list). Existing projects add that
    line by hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
@@ -195,8 +196,8 @@ Before leaving an implementation session unattended:
    Keep secrets out of reach of the runner's user. `sed`, `rg` and `find` are left out
    on purpose: they write or execute through their own flags (`sed -i`, `rg --pre`,
    `find -exec`/`-delete`).
-4. Run `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout` set to 600000 ms;
-   never run it in the background or poll it. Record/fix any baseline failures rather than
+4. Run `.ai/bin/ai-check` with the Bash tool's `run_in_background: true` and wait for its
+   completion notice; make no edits while it runs. Record/fix any baseline failures rather than
    suppressing them.
 5. Checkpoint the approved plan, validation, permissions, and task queue on the feature branch.
 
@@ -235,6 +236,19 @@ beyond the remaining run time. The gate time is the slowest of the last 3 passin
 runs, which `ai-run` records as `gate` lines in the host outcome log (where agents cannot write).
 The cap keeps a corrupt log from more than doubling a session. Triage, plan revision and `--plan`
 sessions keep the plain limit.
+
+`ai-check` refuses with `Validation is already running.` while another gate holds its lock;
+`AI_CHECK_LOCK_WAIT=N` (seconds, default 0) makes it wait up to N seconds for that gate first.
+The wait counts against `AI_CHECK_TIMEOUT`: the validator gets only the seconds left, and a wait
+that uses them all exits 124 with `Validation time limit reached while waiting for the lock.`
+`ai-run`'s host gates wait up to 15 minutes (within the run time), so a session that ends while
+its own background gate still runs does not fail the host gate.
+
+Every session's contract says that a gate run that outlives a tool call is not a blocker: the
+full gate the runner runs after the session decides. If a session still marks its task BLOCKED
+although its own gate showed no failing check, and the runner's full gate then passes on the
+same tree, `ai-run` sets the task back to IN_PROGRESS (commit `chore(ai): retry T… after a
+gate-only block`, a 🔧 notification) and gives it one more session, once per task per run.
 
 `--approved` records your intent to implement the inspected plan using the inspected
 permissions and checks. It does not authorize merge, deployment, or production

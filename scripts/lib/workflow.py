@@ -776,6 +776,50 @@ def stamp(arguments):
         if data.get('result') != 'PASS' or data.get('fingerprint') != fingerprint():
             fail('Validation failed, interrupted, or stale. Run .ai/bin/ai-check.')
         print(f"Validation PASS: {data['timestamp']} (content unchanged since checks)")
+    elif action == 'outcome':
+        print(stamp_outcome())
+
+
+STAMP_LIMIT = 64 * 1024
+
+
+def stamp_outcome():
+    """'WORD DIGEST' for what the last ai-check left in `.ai/local/validation.json`, read through
+    the pinned `.ai/local` (never a symlink, never blocking on a FIFO). WORD: none (missing,
+    unsafe, unreadable, too large or not a JSON object), running, pass, changed (FAIL with exit 0
+    because the content changed) or fail. DIGEST: sha256 of the bytes read, or '-'. The runner
+    compares it across a session to tell whether the session ran the gate (FL-32)."""
+    try:
+        dir_fd = local_dir_fd(checkout_root())
+    except (OSError, subprocess.CalledProcessError):
+        dir_fd = None
+    if dir_fd is None:
+        return 'none -'
+    try:
+        record = read_record(dir_fd, 'validation.json', STAMP_LIMIT + 1, raw=True)
+    finally:
+        os.close(dir_fd)
+    if record is None or len(record[0]) > STAMP_LIMIT:
+        return 'none -'
+    content = record[0]
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        data = json.loads(content)
+    except (ValueError, RecursionError):
+        return f'none {digest}'
+    if not isinstance(data, dict):
+        return f'none {digest}'
+    result = data.get('result')
+    if result == 'RUNNING':
+        word = 'running'
+    elif result == 'PASS':
+        word = 'pass'
+    elif result == 'FAIL' and type(data.get('exit_code')) is int and data['exit_code'] == 0 \
+            and data.get('unchanged') is False:
+        word = 'changed'
+    else:
+        word = 'fail'
+    return f'{word} {digest}'
 
 
 def update_state(phase, next_action):
@@ -1296,7 +1340,7 @@ def binding_dir():
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
 # used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
 # scheduled at and the armed resume binding ({"head", "tree", "task"}). The other optional
-# field, `timeout_reruns`, is checked beside them (timeout_reruns_valid).
+# fields, `timeout_reruns` and `gate_unblocks`, are checked beside them (timeout_reruns_valid).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
                 'limit_stage', 'limit_resume')
 
@@ -1326,13 +1370,18 @@ def limit_fields_valid(data):
                      and task_id_valid(resume['task']))))
 
 
+def task_list_valid(data, field):
+    """The optional list FIELD: unique valid task IDs, at most 200. Any other shape invalidates
+    the manifest, as a wrong limit field does."""
+    tasks = data.get(field, [])
+    return (isinstance(tasks, list) and len(tasks) <= 200
+            and all(task_id_valid(task) for task in tasks) and len(set(tasks)) == len(tasks))
+
+
 def timeout_reruns_valid(data):
     """The optional `timeout_reruns` field: the tasks whose timed-out session was committed and
-    rerun in this run, unique valid IDs, at most 200. Any other shape invalidates the manifest,
-    as a wrong limit field does."""
-    reruns = data.get('timeout_reruns', [])
-    return (isinstance(reruns, list) and len(reruns) <= 200
-            and all(task_id_valid(task) for task in reruns) and len(set(reruns)) == len(reruns))
+    rerun in this run. `gate_unblocks`: the tasks set back from a gate-only block in this run."""
+    return task_list_valid(data, 'timeout_reruns') and task_list_valid(data, 'gate_unblocks')
 
 
 def limit_binding():
@@ -1529,8 +1578,8 @@ def run_manifest(arguments):
         atomic(path, json.dumps(data) + '\n')
         print(data['attempts'])
     elif action == 'clear-attempts':
-        # Keeps `timeout_reruns`: a resumed pipeline must not reset "once per task" (only
-        # `start`, a human-approved run, does).
+        # Keeps `timeout_reruns` and `gate_unblocks`: a resumed pipeline must not reset "once
+        # per task" (only `start`, a human-approved run, does).
         data['attempts'] = 0
         for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
@@ -1567,6 +1616,19 @@ def run_manifest(arguments):
         if len(reruns) >= 200:
             fail('session timeout: too many timeout reruns in this run')
         data['timeout_reruns'] = reruns + [task]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'gate-unblock':
+        # Claims the one gate-only block retry allowed per task in this run (FL-32): spent
+        # before the host gate runs, so a failing gate spends it too.
+        if len(arguments) != 2 or not task_id_valid(arguments[1]):
+            fail('Usage: run-manifest gate-unblock ID')
+        task = arguments[1]
+        unblocks = data.get('gate_unblocks', [])
+        if task in unblocks:
+            fail(f'gate-only block: {task} was already retried once in this run')
+        if len(unblocks) >= 200:
+            fail('gate-only block: too many gate-only block retries in this run')
+        data['gate_unblocks'] = unblocks + [task]
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
@@ -4457,14 +4519,15 @@ def clear_scratch():
         os.close(local_fd)
 
 
-def exec_bits():
-    """exec-bits: give back the execute bit git records (index mode 100755) to a regular file
-    that lost it in the working tree. Gate files and symlinks are never touched: every path
-    component is opened below the pinned root without following a symlink, so a directory
-    replaced by a symlink never leads outside the checkout. Prints the restored relative
-    paths, one per line."""
+def exec_bits(protected):
+    """exec-bits ROOT...: give back the execute bit git records (index mode 100755) to a regular
+    file that lost it in the working tree. A path equal to a ROOT or below it is never touched
+    (the runner passes the guard's protected-path list), nor is a symlink: every path component
+    is opened below the pinned root without following a symlink, so a directory replaced by a
+    symlink never leads outside the checkout. Prints the restored relative paths, one per line."""
+    if not protected:
+        fail('usage: exec-bits ROOT...')
     root = checkout_root()
-    gate = ('.ai/validate', '.ai/ci-setup')
     try:
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError:
@@ -4475,7 +4538,7 @@ def exec_bits():
             if not meta.startswith(b'100755 '):
                 continue
             name = raw.decode()
-            if name.startswith('.ai/bin/') or name in gate:
+            if any(name == gate.rstrip('/') or name.startswith(gate.rstrip('/') + '/') for gate in protected):
                 continue
             if exec_bit_restored(root_fd, name):
                 print(name)
@@ -4506,9 +4569,10 @@ def exec_bit_restored(root_fd, name):
         close_fds(fd, dir_fd)
 
 
-def read_record(dir_fd, name, limit, tail=False):
+def read_record(dir_fd, name, limit, tail=False, raw=False):
     """(text, stat) of the regular file NAME in DIR_FD, at most LIMIT bytes, or None. Never
-    follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines."""
+    follows a symlink or blocks on a FIFO or device. TAIL reads the newest complete lines; RAW
+    returns the bytes undecoded."""
     if '/' in name or name in ('', '.', '..'):
         return None
     try:
@@ -4534,7 +4598,7 @@ def read_record(dir_fd, name, limit, tail=False):
         data = b''.join(chunks)
         if cut:
             data = data.split(b'\n', 1)[1] if b'\n' in data else b''
-        return data.decode('utf-8', errors='replace'), info
+        return (data if raw else data.decode('utf-8', errors='replace')), info
     except OSError:
         return None
     finally:
@@ -4965,7 +5029,7 @@ def main():
     elif command == 'clear-scratch':
         clear_scratch()
     elif command == 'exec-bits':
-        exec_bits()
+        exec_bits(arguments)
     elif command == 'exec-logged':
         exec_logged(arguments)
     elif command == 'tree-snapshot':

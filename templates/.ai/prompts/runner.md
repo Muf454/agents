@@ -46,10 +46,15 @@ your checkpoint and continues the queue.
   redirect edits (`>`, `>>`, `tee`).
 - Run plain commands, and never prefix commands with `cd`: the shell already starts in the
   project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout`
-  set to 600000 ms; never run it in the background or poll it. If it still times out, mark
-  the task BLOCKED with the evidence instead of ending without a checkpoint. When the task
-  names its own targeted test command, run that command as written.
+- Run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+  wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
+  `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and
+  after; a change fails it with `Validation modified project content`) and do not end the
+  session. Never mark a task BLOCKED only because the gate outlived a tool call or its result
+  could not be read: finish on the targeted checks, write `full gate result unknown in the
+  session; left to the host gate` in the result, and mark the task DONE when everything else is
+  met. The runner runs the full gate after the session and sets a DONE task whose gate fails
+  back to IN_PROGRESS. Run a task's targeted test command as written, in the foreground.
 - Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
 - Scratch files (experiments, throwaway scripts or tests) go only under `.ai/local/scratch/`
   (ignored by Git; the runner empties it before and after every session). Never create them in

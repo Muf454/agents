@@ -27,7 +27,8 @@ Task parser contract:
   are ignored. Invalid queues stop the runner rather than being guessed at.
 
 The first eligible TODO is selected, with an eligible IN_PROGRESS taking priority
-for recovery. BLOCKED tasks do not count as complete. Independent work may proceed;
+for recovery. BLOCKED tasks do not count as complete (a block without a failing check whose
+host gate passes is retried once per run: "Gate-only block retry" below). Independent work may proceed;
 when no runnable work remains and the queue is incomplete, human intervention is
 needed. A syntactically valid DONE is not semantic proof of acceptance: Claude must
 record verification and Codex must challenge it.
@@ -41,7 +42,7 @@ The runner records ready_for_review, never claims that the human accepted the wo
 
 `.ai/validate` is the one real project gate. `.ai/bin/ai-check` invokes it from the
 root with Bash error propagation and GNU timeout (default 1800 seconds;
-`AI_CHECK_TIMEOUT` overrides). Use non-writing format/lint checks and deterministic
+`AI_CHECK_TIMEOUT` overrides; time spent waiting for the validation lock counts against it). Use non-writing format/lint checks and deterministic
 non-watch tests. Tests may write ignored build/cache artifacts. Nonignored project
 changes during the gate cause a failure, even if the command itself exits zero.
 
@@ -76,6 +77,10 @@ including spec, plan, tasks, and validation tooling. Clean submodules are repres
 by their HEAD; dirty submodules are rejected. It omits `.ai/local/`, reviews, compact
 state, handoff, and run log so normal bookkeeping does not invalidate source checks.
 Ignored source cannot be validated by this digest; keep real source tracked.
+`stamp outcome` reads that file without following a symlink or blocking (regular file, at most
+64 KiB) and prints `WORD DIGEST`: `none` (missing, unsafe, unreadable or not a JSON object),
+`running`, `pass`, `changed` (FAIL with exit 0 because content changed) or `fail`, and the
+SHA-256 of the bytes read (`-` when nothing was read); it always exits 0 (FL-32).
 
 A new gate invalidates old success before execution; failures/interruption never
 retain a green stamp. Review requires a current successful content digest. Commits
@@ -150,7 +155,7 @@ outside the allowlist become denials. The template allows `chmod +x` (and no oth
 form) so a session can make a script it created executable. After every implementation session, including
 one that timed out or failed (before that stop, so `ai-recover`'s rerun gate sees the bit), the
 host also gives back the executable bit git records (`100755`) to a tracked script that lost it
-(`workflow.py exec-bits`; never `.ai/bin/`, `.ai/validate` or `.ai/ci-setup`, and only a
+(`workflow.py exec-bits`; never a gate file (the guard's protected-path list), and only a
 regular file reached without following any symlink, so a directory a session swapped for a
 symlink never leads outside the checkout). Denials are logged and the run continues
 (`.ai/local/denials.log`); a session that cannot work around one ends without a checkpoint
@@ -262,7 +267,10 @@ there is none). The optional `timeout_reruns` (unique task IDs, at most 200; any
 invalidates the manifest) holds the tasks whose timed-out session was committed and rerun once:
 `run-manifest timeout-rerun ID` appends ID, or fails `session timeout: ID was already committed
 and rerun once in this run` and writes nothing. A human start drops the list; `clear-attempts`
-keeps it, so a resumed pipeline never resets "once per task". A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+keeps it, so a resumed pipeline never resets "once per task". `gate_unblocks` has the same shape
+and lifetime for the one gate-only block retry per task (FL-32): `run-manifest gate-unblock ID`
+appends ID, or fails `gate-only block: ID was already retried once in this run` and writes
+nothing. A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch
@@ -1274,6 +1282,44 @@ gate no longer uses up the session. It is bounded at double the base so a corrup
 can at most double a session; a helper output outside `^[0-9]{1,7}$` counts as 0. With no
 allowance the `Session:` line is unchanged; otherwise it reads `(limit 1600s: 1000s + 600s for two
 gate runs of 300s; log …)`.
+
+Every host gate (after a DONE session, the gate-only block retry below, and the final check)
+runs with `AI_CHECK_LOCK_WAIT=min(remaining, 900)` (`host_gate`): `ai-check` then
+waits up to that many seconds for a session's still-running background gate to release
+`.ai/local/validation.lock` (FL-32) instead of failing with `Validation is already running.`;
+the wait is part of the timed gate. `ai-check` keeps one deadline: it caps the wait at
+`AI_CHECK_TIMEOUT` (validated as decimal digits) and gives `.ai/validate` only the seconds left
+(`budget`); with none left it exits 124 with `Validation time limit reached while waiting for the
+lock.` without starting the validator (GNU `timeout` would read 0 as no deadline), so a host gate
+cannot pass after the run deadline. `.ai/local/validation.json` changes only under the lock: a
+waiter whose wait runs out leaves the running gate's record (and its change detection) or a
+finished gate's evidence unchanged (review M2). `ai-recover` and `ai-pipeline` keep the immediate refusal.
+
+Session gate rule (FL-32): every implementation session's RUNNER CONTRACT says `A gate run that
+outlives a tool call is not a blocker: the full gate the runner runs after the session decides.`
+
+Gate-only block retry (FL-32, `gate_only_retry`): right before each implementation session
+`ai-run` keeps the DIGEST of `stamp outcome` (`-` on a helper failure). When the session ends with
+its task BLOCKED and a clean tree beyond the records, the runner records the block as before
+(`blocked` outcome, run-log line, BLOCKED runner checkpoint), then retries only if all hold: the
+outcome's digest is not `-` and differs from the one before the session (the session ran the
+gate), its word is `running`, `pass` or `changed` (no failing check: a `fail` record keeps the
+block), `run-manifest gate-unblock TASK` succeeds (a run manifest exists and TASK is not yet in its
+`gate_unblocks`; the list is kept across `--resume` and recovery relaunches and dropped by a human
+`run-manifest start`), and run time remains. The claim is spent before the host gate runs, so it
+is once per task per run whatever the gate's result. The host gate is the one above (lock wait,
+`ai_guard_verify`, a `gate` outcome line). A failing gate prints `Gate-only block retry of T…: the
+full gate failed; it stays BLOCKED.` and the run goes on as for any block (⚠ notification,
+independent tasks). A passing gate sets the task to IN_PROGRESS, appends a run-log line, commits
+tasks/state/run-log/handoff as `chore(ai): retry T… after a gate-only block`, notifies `🔧 T…:
+blocked without a failing check and the full gate passed; running it once more.` (instead of the
+⚠ one), and the next session (`tasks next` prefers the IN_PROGRESS task; it counts against the
+session budget) gets one extra contract sentence: `The previous session marked T… BLOCKED without
+a failing check; the runner's full gate then passed on this tree. If the block was only about the
+gate result, verify the acceptance criteria and mark it DONE; otherwise block it again with the
+reason.` Only deterministic host evidence decides: a forged stamp buys at most one gate run and
+one session, and nothing is accepted without a later DONE checkpoint and its own host gate. A
+dirty tree still stops with `Blocked task was not checkpointed` before any of this.
 
 ## Observation records and the dashboard
 
