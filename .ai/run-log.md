@@ -565,3 +565,4 @@
 | 2026-10-21T15:54:22Z | runner | T117 | blocked; try next independent task | not complete | 905bf68 | See task result |
 | 2026-10-21T16:24:24Z | runner | T118 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38f671c | No merge or deployment performed |
 | 2026-10-21 | claude (opus) | T117 | DONE (review N2): verified 905bf68 against the criteria (per-variable `under_temp` in tests/isolation.py; regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg`) | targeted -k state_isolation 4 OK; full ai-check not run in session (≈816 s > 600 s limit), left to the runner's gate | pending | test-only, flow unchanged |
+| 2026-10-21T20:55:45Z | runner | T117 | completed | PASS | 4fea72d | Claude checkpointed; continuing queue |
