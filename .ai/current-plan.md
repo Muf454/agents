@@ -1,151 +1,180 @@
-# Plan: Flow batch 9: BR-02, BR-01, BR-03, BR-14, FL-33
+# Plan: Flow batch 11: run controls (RC-01: G1, G2, G3, G4–G7, G9, G11)
 
-## Assessment (verified at 48fd9b5, 2026-10-20)
-See `.ai/project-spec.md`, "Verified against the code". In short: the repairs for queue order
-and missing sections already exist but run only after the sessions that write the queue, so a
-committed queue in the wrong order (raid-planner F4, 2026-10-20) still stops at the pipeline
-start and recovery escalates it. The other hand fixes mission control made were small format
-mismatches the host can repair deterministically. Retries already start a fresh session but give
-it no memory of the failure and never raise the model. Every review calls Codex first, even when
-Codex is known to be at its limit and when the fix-round diff is tiny. Some tests start child
-processes without the test state root.
+## Assessment (verified at 4fea72d, 2026-10-21)
+See `.ai/project-spec.md`, "Verified against the code". In short: nothing in the toolkit tells a
+human stop from a failure. An interrupt waits for the whole agent session, then lands in `stop()`,
+which hands over to auto-recovery; a killed pipeline looks like a crash to the watchdog. The only
+record of a run is one manifest per checkout without process or time data, and a stop is
+described only in English text. Task edits by humans or apps need a hand commit and have no lock.
 
-The common shape of this batch: deterministic host decisions from host records, each bounded
-(once per kind per key per run, recorded in the run manifest) and logged, with today's stop as the
-fallback for anything else.
+The common shape of this batch (AD-4): small host records outside the checkout, one owner per
+record, atomic writes, schema-versioned, read by the toolkit and by apps; the checkout's
+`.ai/local` stays a convenience copy that is never trusted for authority.
 
 ## Design
 
-### Rulings: one record, one row format (T101)
-- `run-manifest ruling KIND KEY`: KIND in `queue-order`, `task-sections`, `disposition-cell`,
-  `flow-line`; KEY matches `[A-Za-z0-9._-]{1,48}`. Optional manifest field `rulings`, a list of
-  unique `KIND:KEY` strings, at most 200; wrong shape = invalid manifest. A repeat fails `ruling
-  KIND for KEY was already made once in this run` with the bytes unchanged. Kept by
-  `clear-attempts`, dropped by `start` (the `timeout_reruns`/`gate_unblocks` lifecycle, shared
-  `task_list_valid`-style check).
-- `ruling-row KIND WHAT WHY COST` prints `Ruling (KIND): WHAT. Why: WHY. Cost if wrong: COST.`
-  with `|`, backslashes and newlines turned into spaces, at most 400 characters. Callers pass it
-  as the action cell of `ai_log TASK "$row" n/a NOTE`.
+### Records and paths (all under `<binding dir>` = `<state root>/reviews/<16 hex>/`)
+- `runs/<id>.json`, `runs/current` (the id, one line), `runs/.lock` (flock for read-modify-write).
+- `escalation.json` (one at a time, beside `run.json`).
+- `skips-<16 hex of sha256(branch)>.json` (SKIPPED host record).
+- Log of a detached run: `<checkout>/.ai/local/pipeline-<UTC stamp>-<8 hex>.log`.
 
-### BR-02 pre-flight (T102, T103)
+### Run record, schema 1 (T301 helper, T302 wiring)
+```json
+{"schema": 1, "id": "20261021T210000Z-12345", "kind": "pipeline", "checkout": "/abs/path",
+ "branch": "fix/x", "base": {"ref": "origin/main", "sha": "<40 hex>"}, "argv": ["--approved", "..."],
+ "launcher": "terminal", "log": null, "started": "2026-10-21T21:00:00Z",
+ "process": {"pid": 12345, "pgid": 12345, "sid": 12000, "start_ticks": 987654},
+ "resumes": 0, "stop_requested": null, "ended": null, "outcome": "running", "detail": ""}
+```
+- `kind`: `pipeline` or `ai-run`. `base` null for `ai-run`. `argv` is the exact argument array
+  (`orig_args` with the resolved `--knowledge-dir`, as the manifest).
+- `outcome`: `running`, `finished`, `stopped` (stopped for a human), `human_stop`, `paused` (a
+  usage-limit relaunch is scheduled), `crashed` (the watchdog found the process gone).
+- `stop_requested`: null or `{"at": ISO, "via": "ai-pipeline --stop" or "signal"}`.
+- `detail`: at most 200 characters, one line, no `|`.
+- `workflow.py run-record` actions: `start KIND BRANCH BASE_REF BASE_SHA -- ARGS…` (new record,
+  process identity of the caller's parent shell given by `--pid PID`, prunes to 20, writes
+  `current`), `resume --pid PID` (current record: new process, `resumes`+1, outcome `running`),
+  `end OUTCOME [DETAIL]`, `request-stop VIA`, `stop-requested` (exit 0/1), `current` (prints the
+  path), `show [ID]` (prints the JSON), `alive` (exit 0 when the recorded process exists with the
+  same start ticks and is not a zombie). Readers accept unknown extra fields; an unknown
+  `schema` is treated as no record.
+
+### G2: interrupts reach the child (T303 sessions, T304 review and gate)
+`common.sh`:
+```bash
+# Run a long child (a timeout-wrapped session or gate) so a trapped INT/TERM can end it at once.
+ai_run_child() { "$@" & AI_CHILD_PID=$!; local code=0; wait "$AI_CHILD_PID" || code=$?; AI_CHILD_PID=''; return "$code"; }
+# From a trap: TERM the child (timeout forwards it and kills after 10 s), wait for it to end.
+ai_stop_child() { … kill -TERM "$AI_CHILD_PID"; wait up to 20 s … }
+```
+Each call site changes from `timeout …` to `ai_run_child timeout …` (redirections stay on the
+call); the traps become `trap 'ai_stop_child; exit 130' INT` / `… 143' TERM`. `ai-check`'s
+`| tee` becomes `> >(tee "$log") 2>&1` so `$!` is `timeout`. Exit codes are the child's.
+
+### G1: human stop (T306 trap, T307 recovery and watchdog, T308 `--stop`)
 ```mermaid
 flowchart TD
-  start["pipeline start / after plan revision / after triage"] --> pf{"tasks preflight"}
-  pf -- "queue valid" --> ok["continue (overlap report printed)"]
-  pf -- "only order or empty sections wrong,<br/>only TODO tasks move" --> claim{"run-manifest ruling<br/>(each moved / filled task)"}
-  claim -- ok --> fix["rewrite .ai/tasks.md, run-log Ruling row,<br/>host commit chore(ai): ruling: task queue"] --> ok
-  claim -- "repeat / no manifest" --> stop["today: Task queue is invalid → stop"]
-  pf -- "anything else" --> stop
+  H[human: Ctrl-C, kill -TERM, or ai-pipeline --stop] -->|--stop: verify identity, write stop_requested| S[SIGINT to the run's group]
+  S --> R[ai-run trap: ai_stop_child, task attempt interrupted, run-log row]
+  R --> P[ai-pipeline trap / stop sees stop_requested]
+  P --> HS[human_stop: run-log row, bookkeeping commit if only records dirty, notify STOPPED by you, run record human_stop, escalation human_stop, marker removed]
+  HS --> W{later: watchdog or ai-recover}
+  W -->|stop requested or human_stop| E[no recovery; reported once]
+  HS --> A[human reruns ai-pipeline --approved: new run record, escalation cleared]
 ```
-- `tasks preflight [--dry-run]` (workflow.py): parses like `tasks reorder` (same errors), computes
-  the stable dependency order; when any task whose index changes is not TODO → fail with today's
-  `tasks()` message (`dependencies must exist earlier in the queue: …`). Fills empty sections of
-  TODO tasks (`fill_task_sections`). Prints one line per change: `queue-order TASK moved after DEP…`
-  / `task-sections TASK added Result / notes`, then `overlap: T004 T006 src/lib/realtime.ts` lines;
-  writes the overlap lines to `.ai/local/preflight.md`. `--dry-run` prints the same without
-  writing (the caller claims first, then runs it for real). Exit 0 when the queue is valid after
-  it, else today's failure.
-- Call sites (T103): `ai-pipeline` right before `tasks check` (~461), not while armed, on a clean
-  committed queue: dry run → claims → real run → ruling rows → `host_commit 'chore(ai): ruling:
-  task queue' .ai/tasks.md .ai/run-log.md` → `tasks check` as today. `ai-run --triage` (~641):
-  reorder added after `fill-sections` (inside the counted triage commit), with claims and rows.
-  `ai-run --plan` and `--revise-plan`: today's fill/reorder kept (no claim), plus ruling rows and
-  the overlap report printed.
+- `ai_human_stop SIGNAL` (common.sh, used by ai-pipeline and ai-recover; idempotent through
+  `AI_HUMAN_STOPPED`): `ai_stop_child`; `ai_log "$active" "stopped by the human ($sig)"` (skipped
+  while armed); `git commit` of state/run-log/handoff only when nothing else is dirty (subject
+  `chore(ai): record stop by the human`, gate re-checked, skipped while armed); `ai_observe stop
+  '' 'stopped by the human'`; `ai_notify "⛔ STOPPED by you: $branch during $stage. Partial work is
+  kept uncommitted; rerun ai-pipeline --approved … to continue."` (the "Partial work…" clause only
+  when the checkout is dirty); `last-error` = `stopped by the human during <stage>`, then
+  `last-error.notified`; `run-record end human_stop`; `escalation write human_stop <stage>`;
+  `ai_drop_marker`; exit 130 or 143.
+- `ai-pipeline` tracks the current stage in a shell variable set by `step` (no new observation).
+- `--stop`: bash dispatch at the top of `ai-pipeline` (before option parsing): `cd` into the
+  checkout (`git -C CHECKOUT rev-parse --show-toplevel`), then `exec python3 workflow.py run-stop
+  [--wait S]`. `run-stop`: read `current`; no record, ended record, or process gone → handle the
+  scheduled relaunch case (manifest `limit_relaunch_at` present: write the stop request, `end
+  human_stop`, escalation, exit 0 "Cancelled the scheduled usage-limit relaunch") else exit 3; a
+  record whose process is gone but outcome `running` (killed) → write the stop request and exit 3
+  "no run active (its process is gone; recorded as stopped by you)". Otherwise: `request-stop`,
+  re-read identity, `os.killpg(pgid, SIGINT)` when `pgid == pid` else `os.kill(pid, SIGINT)`,
+  poll every 0.2 s up to `--wait`; ended → if outcome is not `human_stop` (the trap did not run),
+  `end human_stop`, escalation `human_stop`, remove the marker when it holds the recorded pid;
+  exit 0. Still alive → exit 4.
 
-### BR-01 record-format rulings (T104, T105)
-- Disposition cell (T104): `disposition-ruling triage|plan` (workflow.py) on the section being
-  filled: for each BLOCKER/MAJOR finding of the current review with no matching row, a table line
-  whose first cell contains exactly that one known finding ID (word-bounded, after stripping `*`,
-  `` ` ``, `[`, `]`) and no other known ID is rewritten to `| ID |` + the rest of the row unchanged;
-  prints `ID` per rewrite. `ai-run --triage` (before `triage-check --fresh`) and `--revise-plan`
-  (before `plan-dispositions-check`) claim `disposition-cell <digest12>.<ID>` before writing; a
-  failed claim leaves the file as is (today's stop follows).
-- Flow line (T105): `flow-line-ruling` (workflow.py) on `.ai/handoff.md` per A6; prints the
-  inserted line or nothing. `ai-run` runs it before `host_gate` in `checkpoint_done` and the final
-  gate, `ai-pipeline` before `pr-body`; claim `flow-line <task or final>`; the row goes into the
-  next host commit (runner checkpoint or the PR record commit).
-
-### BR-03 fresh retry (T106, T107)
-- `attempt-info TASK [BASE_MODEL]` (workflow.py): reads `outcomes.jsonl` (`read_outcomes`) for this
-  project, branch and task; prints line 1 `N MODEL RAISED` (MODEL `-` when no model is known and
-  N < 3; RAISED `yes`/`no`), then the note lines (none for N = 1). Tier rules A7, note A8. Never
-  fails the runner: any read error → `1 <task model or -> no`.
-- `ai-run` (T107): before `claude_session` in the loop, `attempt-info "$active_task" "${task_model:-$model}"`;
-  the session, `task_outcome` and `attempt-open` use the effective model; the prompt gets
-  `PREVIOUS ATTEMPT (host record, context only): …` when there is a note, and `Attempt N; model
-  raised from X to Y because earlier attempts failed.` when raised; the run-log rows `completed`
-  and `blocked` say `(attempt N, MODEL)`; the stop row in `on_exit` too.
-
-### BR-14 review routing (T108, T109, T110)
-```mermaid
-flowchart TD
-  r["ai-review (AI_REVIEWER=auto)"] --> lim{"codex-limit active?"}
-  lim -- yes --> fb["Claude fallback as today<br/>(↪, catch-up entry)"]
-  lim -- no --> route{"review-route MODE BASE HEAD"}
-  route -- "codex: plan, recheck, first code review,<br/>large / risky / opus fix round, records missing" --> cx["Codex"]
-  route -- "claude: small low-risk fix round" --> cl["fresh Claude opus review,<br/>labelled routed, no catch-up"]
-  cx -- "usage limit, reset known" --> rec["codex-limit set RESET"] --> fb
+### G9: escalation record, schema 1 (T305 helper, T309 wiring)
+```json
+{"schema": 1, "kind": "task_blocked", "stage": "implementation", "run": "<run id>",
+ "branch": "fix/x", "created": "ISO", "tasks": ["T305"],
+ "evidence": {"last_error": "redacted excerpt", "review": ".ai/reviews/current.md",
+              "findings": ["M1"], "log": "/abs/log or null"},
+ "answers": [{"id": "retry_task", "label": "Return T305 to TODO with a note",
+              "argv": [".ai/bin/ai-task", "retry", "T305", "--note", "{note}", "--commit"]},
+             {"id": "resume", "label": "Start the run again with its approved arguments",
+              "argv": [".ai/bin/ai-pipeline", "--approved", "..."]}]}
 ```
-- `review-route MODE BASE HEAD` (T108, workflow.py): A9/A10 rules in this order, first match wins:
-  `AI_REVIEW_ROUTE=codex` → codex; mode plan or recheck → codex; host `fix-rounds count BASE` = 0
-  → codex `first full code review`; no host Codex code review of the branch that is an ancestor of
-  HEAD → codex; diff from the newest host-recorded code review HEAD outside `.ai/` > the line limit
-  → codex; risk path → codex; risk word in a changed line → codex; a task DONE since that HEAD on
-  opus → codex; else `claude small low-risk fix round (N lines)`. Prints `codex REASON` or
-  `claude REASON`; any helper error prints `codex routing unavailable` (exit 0).
-- `codex-limit set RESET` / `codex-limit active` (T109, workflow.py): state root
-  `codex-limit.json` `{"reset": EPOCH, "recorded": ISO}` written atomically; `active` prints RESET
-  and exits 0 while `reset > now`, else exits 1; unreadable → exit 1.
-- `ai-review` (T109): in `run_review`, when `reviewer == auto` and Codex is installed: active limit
-  → skip Codex, `fallback="Codex usage limit until HH:MM (recorded)"` and the fallback path as
-  today; else `review-route`; `claude` → the Claude path with `review_by=claude-routed`, label
-  `Claude (routed: REASON)`, no `↪` notification (a printed line instead), and `review_records`
-  skips `fallback-record` for it. A Codex limit with `reset != 0` → `codex-limit set`. The new
-  settings join the manifest lists (`scripts/lib/common.sh` ~40, workflow.py ~2374, `ai-recover`
-  ~81/84) with validation in `ai_review_args` or a small check function.
-- "Reviewed by" (T110): `publish-review`/`publish-plan-review` add `Reviewed by: WHO` right after
-  the host header for every reviewer (Codex: `Codex (MODEL, effort E)`; from `AI_REVIEW_BY` +
-  route); the outcome `review` row takes an optional `--route REASON`; `pr_body` adds a `Reviewed
-  by:` list (plan and code rounds of this branch from the outcome log, newest last, at most 10)
-  under "Independent review", falling back to the current report's line.
+- `workflow.py escalation write KIND STAGE [--task ID]… [--finding ID]… [--review PATH]`,
+  `hint KIND [--task ID]… [--finding ID]…` (host-side pending kind, consumed by the next write),
+  `show`, `clear`. `write` reads `.ai/local/last-error` through the pinned `.ai/local` (regular
+  file, ≤ 64 KB), redacts it (spec B10), takes the run log path from the current run record and
+  the recorded arguments from the manifest.
+- Answers per kind (always ending with `resume` when a manifest exists): `task_blocked` →
+  per task `retry_task`, `skip_task`, `set_model`; `plan_review_limit` → `resume` (a human start
+  resets the budget) and `resume_skip_plan_review`; `fix_round_limit` → `resume_more_rounds`
+  (recorded args with `--max-fix-rounds` + 1, only when ≤ 5); `needs_human_question` →
+  `review_plan` (`.ai/bin/ai-review --plan`, after answering in
+  `.ai/reviews/plan-dispositions.md`; G8 is later work) then `resume`; `validation`, `crash`,
+  `human_stop`, `usage_limit` (with `not_before` epoch when known), `other` → `resume`.
+- Producers (T309): hints right before the stop at `plan_decision_check` (needs_human_question,
+  finding ids from the questions), the `revision-reserve` refusals (plan_review_limit), the AI_SUPERVISE=0
+  plan review stop (plan_review_limit), `ai-run`'s "none can run" (task_blocked, the BLOCKED ids),
+  `ensure_validated` (validation), `ai_limit_pause` beyond the budget (usage_limit), the fix-round
+  limit break (fix_round_limit, written at `finish`). Writers: `stop()` non-recovery path,
+  `ai_die` inside a pipeline (common.sh, best effort), `ai-recover` `escalate()`, `ai-run`'s
+  stand-alone `on_exit`, the watchdog's crash report when it does not recover (kind `crash`, plus
+  `run-record end crashed`). Clear: `run-manifest start` (human start) and `ai-recover`'s
+  `resume()`.
 
-### FL-33 isolated test state (T111)
-- A small `tests/isolation.py` imported first by `test_workflow.py`, `test_dashboard.py` and
-  `test_observation.py`: at import, set `AI_STATE_DIR` and `XDG_STATE_HOME` in `os.environ` to a
-  fresh temp dir (`atexit` removes it) unless already set to a path under `tempfile.gettempdir()`.
-  Find and fix any test that clears both and then starts a process that registers.
-- `tests/run_parallel.py`: remember the real state root's `pipelines/` directory from the caller's
-  environment before setting the workers' env; after the suite, read its entries (no symlink
-  following) and fail with `self-check registered fixture runs in the real registry: …` when an
-  entry names a checkout under the suite's temp dir.
+### G7, G4, G5, G6: task commands (T310 lock and commit, T311 SKIPPED, T312 subcommands)
+- `ai-task` mutating forms: `set ID STATUS --commit`, `retry ID --note TEXT [--commit]`, `model ID
+  MODEL [--commit]`, `skip ID --reason TEXT [--commit]`. Shared bash function `task_change`: lock
+  `.ai/local/workflow.lock` on fd 9 with `flock -n` (held → exit 75), branch check (not detached,
+  not protected), with `--commit` a clean checkout first, run the helper, `ai_helper tasks check`
+  (failure → restore the saved bytes, exit 1), then with `--commit` `git commit --only -m MSG --
+  .ai/tasks.md` and a clean check (failure → "changed but not committed", exit 1, nothing
+  reverted). Messages: `chore(ai): set T305 to TODO (ai-task)`, `chore(ai): return T305 to TODO
+  (ai-task)`, `chore(ai): note on T305 (ai-task)`, `chore(ai): set T305 model to opus (ai-task)`,
+  `chore(ai): skip T305 (ai-task)`.
+- Text arguments: one line, 1–500 characters, no control characters, no backticks.
+- SKIPPED (T311): `tasks()` accepts it; it satisfies dependencies only with a matching host skip
+  record (else `T…: SKIPPED without a host skip record (use ai-task skip)`); `next` skips it;
+  `complete` = every task DONE or SKIPPED; `untouched` and `newly-done` unchanged (DONE only);
+  `counts`/`progress` count DONE only; `tasks set` refuses SKIPPED; the planning DONE-block guard
+  (the "DONE task was changed or removed" check) covers SKIPPED blocks; `pr-body` adds "Skipped
+  tasks: T… (reason)". `workflow.py tasks skip ID REASON` (refuses DONE, IN_PROGRESS, SKIPPED and a
+  task an unfinished task depends on) writes the status, the `Skipped (DATE, ai-task skip): REASON`
+  line under `### Result / notes` and the host record.
 
-## Affected components
-`scripts/lib/workflow.py`, `scripts/ai-run`, `scripts/ai-pipeline`, `scripts/ai-review`,
-`scripts/ai-recover` (settings list only), `scripts/lib/common.sh` (settings list only),
-`tests/test_workflow.py`, `tests/isolation.py` (new), `tests/run_parallel.py`,
-`tests/test_dashboard.py`, `tests/test_observation.py`, README.md, docs/workflow.md, vault
-`agents-flow.md` (+ hub Log lines).
+### G11: `--detach` (T313)
+Bash dispatch at the top of `ai-pipeline`: `--detach` must be first; the rest must contain
+`--approved`. Name `pipeline-<stamp>-<hex>.log`. With `systemd-run` executable:
+`systemd-run --user --collect --quiet --service-type=exec --unit=ai-pipeline-<base name>-<epoch>
+--working-directory=<checkout> --setenv=…(PATH, XDG_CONFIG_HOME, XDG_STATE_HOME, AI_*) --setenv=
+AI_LAUNCHER=detach-systemd --setenv=AI_RUN_LOG=<abs log> -- python3 -I <AI_BIN>/lib/workflow.py
+exec-logged <name> -- <AI_BIN>/ai-pipeline <args>`; else the `ai-plan` form with `setsid` and
+`AI_LAUNCHER=detach-setsid`. Then poll `run-record show` up to `AI_PLAN_ACK_SECONDS` for a record
+started after the launch whose `log` is this log; print `Pipeline started: pid N, log PATH`,
+`Follow: tail -f PATH`, `Stop: <AI_BIN>/ai-pipeline --stop <checkout>`; not confirmed → exit 1
+with the log's last lines, the service left running.
 
-## Phases and order
-T101 (ruling record, opus) → T102 (tasks preflight, opus) → T103 (pre-flight wiring, opus) →
-T104 (disposition ruling, opus) → T105 (flow-line ruling, opus) → T106 (attempt-info, opus) →
-T107 (fresh retry wiring, opus) → T108 (review-route, opus) → T109 (limit memory + routing wiring,
-opus) → T110 (Reviewed by, sonnet) → T111 (FL-33, sonnet) → T112 (docs audit, haiku).
+## Task map
+| Task | Gap | Model | What |
+| --- | --- | --- | --- |
+| T301 | G3 | opus | run record helper, schema, host lock, retention |
+| T302 | G3 | sonnet | run records written by ai-pipeline, ai-recover and stand-alone ai-run |
+| T303 | G2 | opus | `ai_run_child`/`ai_stop_child`; ai-run and ai-recover sessions |
+| T304 | G2 | opus | the same for ai-review, ai-check and dependency setup |
+| T305 | G9 | opus | escalation record helper, redaction, answers |
+| T306 | G1 | opus | ai-pipeline INT/TERM trap and `stop()` honour a stop: human stop |
+| T307 | G1 | opus | ai-recover and the watchdog never resume a human stop |
+| T308 | G1 | opus | `ai-pipeline --stop [CHECKOUT] [--wait S]` |
+| T309 | G9 | opus | escalation hints and writes at every human stop; cleared on resume |
+| T310 | G7 | opus | ai-task lock and `--commit` |
+| T311 | G6 | opus | SKIPPED status and the host skip record |
+| T312 | G4 G5 G6 | sonnet | `ai-task retry`, `model`, `skip` |
+| T313 | G11 | sonnet | `ai-pipeline --detach` |
+| T314 | docs | haiku | README, docs/workflow.md, flow chart audit, mission-control handoff note |
 
 ## Risks
-- A host reorder before the plan review makes the plan review stale; it runs again (A4). Rare.
-- A ruling hides a session's sloppiness: bounded once per kind per key per run and logged with its
-  cost, so repeats still reach the human.
-- Routed Claude reviews are same-family; mitigated by Codex on round 1, on every risky or large
-  delta, on re-checks, and a conservative risk-word list (false positives only cost Codex usage).
-- The Codex limit record could skip Codex longer than needed when the reset estimate is late;
-  bounded by the recorded reset time.
-- Model raise costs more usage on a failing task; from the third attempt only and one tier.
-- The installed `.ai/prompts` and `.ai/bin` of this repo stay old during this batch (batch 8 gate
-  rule kept in the queue header); the new behaviour reaches projects after the upgrade.
-- `tests/test_workflow.py` is very large; tasks add tests next to the related groups.
-
-## Validation strategy
-Every task: its targeted `python3 -m unittest discover -s tests -k <group>` commands (must say
-`Ran N tests`, N ≥ 1), then the full gate `.ai/bin/ai-check` run in the background and waited for
-(see the queue header). The host's post-task `ai-check` is the authority. No profiling commands.
+- Trap ordering in bash: a trap runs after the foreground child returns. T303/T304 make every long
+  child a background child waited with `wait`, so the trap runs at once; T306 tests the pipeline
+  in each long stage it can be in (session, gate, review, sleep).
+- Batch 10 conflicts: `scripts/ai-run` gets one-word changes at the session call and the traps,
+  plus two run-record calls; `ai-pipeline` gets the dispatch at the top, traps, the run-record and
+  escalation calls; nothing near line 478 (plan review entry) changes.
+- Lock interplay: `--stop` never takes the checkout lock (the pipeline holds it); `ai-task`'s
+  mutating forms never wait for it.
