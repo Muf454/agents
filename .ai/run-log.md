@@ -549,3 +549,4 @@
 | 2026-10-21T06:08:32Z | runner | triage | review triaged into dispositions/tasks | n/a | 88a8fc4 | Fix tasks run next |
 | 2026-10-21 | claude (sonnet) | T113 | DONE (review M1): run_parallel.main() reads the caller's registry before discovery; regression `test_state_isolation_guard_reads_the_registry_before_discovery` (fails on old ordering) | PASS (ai-check 1099 tests, 795.5 s; -k state_isolation 3 OK) | pending | flow unchanged (test harness only) |
 | 2026-10-21T06:38:34Z | runner | T113 | stopped (exit 1); inspect state/diff before resuming | see local logs | 6378f53 | No merge or deployment performed |
+| 2026-10-21T06:56:27Z | runner | T114 | blocked; try next independent task | not complete | 3d84f5a | See task result |
