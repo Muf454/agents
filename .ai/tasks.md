@@ -4947,7 +4947,7 @@ Evidence: `-k preflight` Ran 16 OK; `-k ruling` Ran 18 OK; `.ai/bin/ai-check` PA
 task" and needed no correction; flow unchanged.
 
 ## T115 — Routed reviews default to opus (review N1, BR-14, A12)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4989,4 +4989,9 @@ routed review is set (the `AI_CLAUDE_REVIEW_MODEL` override and effort validatio
 `-k review_routing` ran 6 tests with only the since-fixed test assertion failing; the new routed-opus test then
 passes alone (`-k routed_review_uses_opus`, Ran 1, OK). `.ai/bin/ai-check` exceeded the 600000 ms foreground
 timeout with no output, so the full gate result is unknown. The `reviewed_by` targeted run was not done.
+DONE (2026-10-21 re-run, opus): verified a13ffad against the criteria (routed branch in `claude_model` sets opus
+before the `AI_CLAUDE_REVIEW_MODEL` override; the non-routed `AI_REVIEWER=claude` review on the same queue still
+picks `claude-fable-5-1`). Targeted: `-k review_routing` Ran 6 OK; `-k reviewed_by` Ran 4 OK.
+Gate: `.ai/bin/ai-check` Ran 1103 tests, OK, exit 0 (766.5 s; the harness moved it to the background past 600 s;
+no edits until it finished). Vault flow chart routed node now says "(opus)" instead of "(usual model)".
 

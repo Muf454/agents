@@ -555,3 +555,4 @@
 | 2026-10-21T12:36:00Z | mission-control | T114, T115 | BLOCKED → TODO (gate-only block; fixes committed in 3d84f5a, a13ffad); model raised to opus; note: no edits while the gate runs | n/a | 699886d | Restarting the pipeline |
 | 2026-10-21T12:51:45Z | claude (opus) | T114 | DONE (review M2): verified 3d84f5a (`queue-moved` lines claimed as `queue-order`, no Ruling row); no source change | PASS (ai-check 1103 tests, 764.1 s, no edits during the gate; -k preflight 16 OK; -k ruling 18 OK) | 3d84f5a (fix) | flow unchanged |
 | 2026-10-21T13:04:48Z | runner | T114 | completed | PASS | 1cb14a2 | Claude checkpointed; continuing queue |
+| 2026-10-21T13:20:52Z | claude (opus) | T115 | DONE (review N1): verified a13ffad (routed Claude review uses opus, override still wins); no source change | PASS (ai-check 1103 tests, 766.5 s, no edits during the gate; -k review_routing 6 OK; -k reviewed_by 4 OK) | a13ffad (fix) | vault flow chart routed node says "(opus)" |
