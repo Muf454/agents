@@ -5,6 +5,10 @@
   (schema 1) under `<binding dir>/runs/` with `current`, a bounded `runs/.lock` and retention of
   20; no caller yet (T315, T302 and T316 wire it). Described in `docs/workflow.md` "Durable
   records".
+- T315 (2026-10-22): `run-record own|resume|pause|end|request-stop|settle-stop|stop-requested`,
+  each naming its run (`--run ID`), checked under `runs/.lock` against `current` and the recorded
+  process identity (exit 3 "not the owner"); ended records are immutable; `end … stopped` after a
+  stop request stores `human_stop`; `settle_stop()` for T319's `run-stop`. No caller yet.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -175,7 +179,10 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   stop request is `human_stop`; resolved `--knowledge-dir` in a stand-alone argv.
   Done so far (T301): `test_run_record_start_and_show`, `test_run_record_ids_unique_with_fixed_clock`,
   `test_run_record_retention_keeps_twenty`, `test_run_record_alive_identity`,
-  `test_run_record_lock_is_bounded`, `test_run_record_invalid_records`.
+  `test_run_record_lock_is_bounded`, `test_run_record_invalid_records`; T315:
+  `test_run_record_end_keeps_human_stop`, `test_run_record_end_after_stop_request_is_human_stop`,
+  `test_run_record_own_and_resume`, `test_run_record_stop_request_identity`,
+  `test_run_record_interleaving_never_touches_another_run`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
@@ -214,5 +221,5 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301 is DONE; the runner continues with the next task in queue order (T315).
+T301 and T315 are DONE; the runner continues with the next task in queue order (T305).
 Nothing is merged or deployed.

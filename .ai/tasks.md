@@ -5233,7 +5233,7 @@ fixtures are own `sleep` children in their own session, the zombie case included
 Targeted `-k run_record`: Ran 9 tests OK. Full `.ai/bin/ai-check`: Ran 1113 tests OK (1229 s).
 
 ## T315 — Run record lifecycle bound to the run id and process identity (RC-01 G3, plan review P5)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T301
 Model: opus
 

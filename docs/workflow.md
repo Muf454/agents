@@ -54,6 +54,21 @@ id, `show [ID]` the JSON, `alive [ID]` exits 0 when the recorded process exists,
 and has the recorded start ticks. A record that is not schema 1 with the right field types, a
 symlink, over 64 KB, or a `current` that is not an id is "no record" (exit 1); unknown extra
 fields are accepted.
+Lifecycle actions (T315, no caller yet) each name their run with `--run ID` and are checked under
+`runs/.lock`; an ID that is not `current`, an invalid record or a failed identity check exits 3
+with `not the owner of run ID` and changes nothing. "Ended" is any outcome but `running` and
+`paused`, and an ended record never changes again. `own --run ID --pid PID --launcher NAME`
+(recovery) and `resume --run ID --pid PID` refuse a stop request, an ended record and a recorded
+process that is alive and is not PID, then record PID's identity with outcome `running` (`own`
+sets the launcher, `resume` adds 1 to `resumes`). `pause` (outcome `paused`) and `end --run ID
+--pid PID OUTCOME [DETAIL]` (`finished`, `stopped`, `human_stop`, `crashed`; sets `ended`; DETAIL
+one line, `|` removed, at most 200 characters) need the recorded process to be PID with its
+current start ticks; `end … stopped` on a stop-requested record stores `human_stop`.
+`request-stop --run ID --via 'ai-pipeline --stop'|signal [--expect-pid P --expect-ticks T]`
+refuses an ended record or, with `--expect-*`, another recorded process; a second request keeps
+the first. `settle-stop --run ID` (also `settle_stop()` for `run-stop`) ends a stop-requested,
+not-ended run whose process is gone as `human_stop`. `stop-requested --run ID` exits 0 when a
+stop is requested or the outcome is `human_stop`, 1 when not.
 
 ## Validation and evidence
 

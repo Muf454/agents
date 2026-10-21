@@ -2046,13 +2046,176 @@ def start_run(runs, checkout, kind, branch, base, argv, pid):
     return run_id
 
 
+# Lifecycle (T315): every change names its run and is checked under `runs/.lock`; a run that
+# is not `current`, an invalid record or a failed identity check is "not the owner" (exit 3).
+RUN_END_OUTCOMES = ('finished', 'stopped', 'human_stop', 'crashed')
+RUN_STOP_VIA = ('ai-pipeline --stop', 'signal')
+
+
+def run_ended(record):
+    return record['outcome'] not in ('running', 'paused')
+
+
+def run_process_alive(process):
+    identity = process_identity(process['pid'])
+    return identity is not None and identity['start_ticks'] == process['start_ticks']
+
+
+def run_is_process(record, pid):
+    """The recorded process is `pid` with `pid`'s current start ticks (a reused pid is not)."""
+    return record['process']['pid'] == pid and run_process_alive(record['process'])
+
+
+def run_detail(text):
+    return ' '.join(text.replace('|', '').split())[:200]
+
+
+def run_change(runs, run_id, change):
+    """Under the lock: `change(record)` returns the new record, True (allowed, nothing to
+    write) or None (refused). Return False when refused, so no record is touched."""
+    with run_lock(runs):
+        record = read_run(runs, run_id) if current_run_id(runs) == run_id else None
+        result = change(record) if record is not None else None
+        if result is None:
+            return False
+        if isinstance(result, dict):
+            atomic(runs / f'{run_id}.json', json.dumps(result) + '\n')
+        return True
+
+
+def own_run(runs, run_id, pid, launcher=None):
+    """Recovery (`launcher` given) or a resumed pipeline takes over the run for `pid`."""
+    def change(record):
+        identity = process_identity(pid)
+        process = record['process']
+        if (record['stop_requested'] is not None or run_ended(record) or identity is None
+                or (process['pid'] != pid and run_process_alive(process))):
+            return None
+        record.update(process=identity, outcome='running')
+        if launcher is None:
+            record['resumes'] += 1
+        else:
+            record['launcher'] = launcher
+        return record
+    return run_change(runs, run_id, change)
+
+
+def pause_run(runs, run_id, pid):
+    def change(record):
+        if run_ended(record) or not run_is_process(record, pid):
+            return None
+        record['outcome'] = 'paused'
+        return record
+    return run_change(runs, run_id, change)
+
+
+def end_run(runs, run_id, pid, outcome, detail=''):
+    """End the run; a pending stop request makes `stopped` a `human_stop` (P16)."""
+    def change(record):
+        if run_ended(record) or not run_is_process(record, pid):
+            return None
+        stored = 'human_stop' if outcome == 'stopped' and record['stop_requested'] is not None else outcome
+        record.update(outcome=stored, ended=now(), detail=run_detail(detail))
+        return record
+    return run_change(runs, run_id, change)
+
+
+def request_stop(runs, run_id, via, expect=None):
+    """Record a stop request; `expect` = (pid, start ticks) the caller verified. A second
+    request keeps the first."""
+    def change(record):
+        process = record['process']
+        if run_ended(record) or (expect is not None and (process['pid'], process['start_ticks']) != expect):
+            return None
+        if record['stop_requested'] is not None:
+            return True
+        record['stop_requested'] = {'at': now(), 'via': via}
+        return record
+    return run_change(runs, run_id, change)
+
+
+def settle_stop(runs, run_id):
+    """A stop-requested run whose process is gone and that has not ended is a `human_stop`."""
+    def change(record):
+        if record['stop_requested'] is None or run_ended(record) or run_process_alive(record['process']):
+            return None
+        record.update(outcome='human_stop', ended=now())
+        return record
+    return run_change(runs, run_id, change)
+
+
+def stop_requested(runs, run_id):
+    """True or False for the current run `run_id`; None when it is not current or invalid."""
+    with run_lock(runs):
+        record = read_run(runs, run_id) if current_run_id(runs) == run_id else None
+    if record is None:
+        return None
+    return record['stop_requested'] is not None or record['outcome'] == 'human_stop'
+
+
+def run_lifecycle(action, rest, runs):
+    usage = {'own': '--run ID --pid PID --launcher NAME', 'resume': '--run ID --pid PID',
+             'pause': '--run ID --pid PID', 'end': '--run ID --pid PID OUTCOME [DETAIL]',
+             'request-stop': '--run ID --via VIA [--expect-pid P --expect-ticks T]',
+             'settle-stop': '--run ID', 'stop-requested': '--run ID'}[action]
+    names = {'own': ('--pid', '--launcher'), 'resume': ('--pid',), 'pause': ('--pid',), 'end': ('--pid',),
+             'request-stop': ('--via', '--expect-pid', '--expect-ticks')}.get(action, ())
+    options, positional, index = {}, [], 0
+    while index < len(rest):
+        if rest[index] in ('--run', *names) and index + 1 < len(rest) and rest[index] not in options:
+            options[rest[index]] = rest[index + 1]
+            index += 2
+        else:
+            positional.append(rest[index])
+            index += 1
+
+    def number(name):
+        value = options.get(name, '')
+        return int(value) if re.fullmatch(r'[1-9]\d{0,18}', value) else None
+
+    run_id, pid = options.get('--run', ''), number('--pid')
+    valid = (RUN_ID.fullmatch(run_id) is not None and len(positional) in ((1, 2) if action == 'end' else (0,))
+             and ('--pid' not in names or pid is not None))
+    if action == 'own':
+        valid = valid and RUN_LAUNCHER.fullmatch(options.get('--launcher', '')) is not None
+    if action == 'end':
+        valid = valid and positional[0] in RUN_END_OUTCOMES
+    if action == 'request-stop':
+        expect = (number('--expect-pid'), number('--expect-ticks'))
+        valid = (valid and options.get('--via') in RUN_STOP_VIA
+                 and ('--expect-pid' in options) == ('--expect-ticks' in options) and
+                 ('--expect-pid' not in options or None not in expect))
+    if not valid:
+        fail(f'Usage: run-record {action} {usage}')
+    if action == 'stop-requested':
+        requested = stop_requested(runs, run_id)
+        if requested is not None:
+            sys.exit(0 if requested else 1)
+    elif {'own': lambda: own_run(runs, run_id, pid, options['--launcher']),
+          'resume': lambda: own_run(runs, run_id, pid),
+          'pause': lambda: pause_run(runs, run_id, pid),
+          'end': lambda: end_run(runs, run_id, pid, *positional),
+          'request-stop': lambda: request_stop(runs, run_id, options['--via'],
+                                               expect if '--expect-pid' in options else None),
+          'settle-stop': lambda: settle_stop(runs, run_id)}[action]():
+        return
+    print(f'run-record {action}: not the owner of run {run_id}', file=sys.stderr)
+    sys.exit(3)
+
+
 def run_record(arguments):
     """`start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (prints the new id),
-    `current`, `show [ID]` and `alive [ID]`; exit 1 when there is no valid record."""
+    `current`, `show [ID]` and `alive [ID]`; exit 1 when there is no valid record. Lifecycle
+    actions (`own`, `resume`, `pause`, `end`, `request-stop`, `settle-stop`, `stop-requested`)
+    exit 3 when the caller is not the owner of the named run."""
     if not arguments:
-        fail('Usage: run-record start|current|show|alive …')
+        fail('Usage: run-record start|current|show|alive|own|resume|pause|end|request-stop|'
+             'settle-stop|stop-requested …')
     action, rest = arguments[0], arguments[1:]
     runs = runs_dir()
+    if action in ('own', 'resume', 'pause', 'end', 'request-stop', 'settle-stop', 'stop-requested'):
+        run_lifecycle(action, rest, runs)
+        return
     if action == 'start':
         if len(rest) < 7 or rest[4] != '--pid' or rest[6] != '--':
             fail('Usage: run-record start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…')

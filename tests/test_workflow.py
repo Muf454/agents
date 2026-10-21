@@ -15366,6 +15366,185 @@ PY
         self.run_record('show', '../x', expected=1)
         self.run_record('show', run_id)
 
+    # Run record lifecycle (T315): bound to the run id and the recorded process identity.
+    def run_record_bytes(self, run_id):
+        return (self.run_records() / f'{run_id}.json').read_bytes()
+
+    def run_record_data(self, run_id):
+        return json.loads(self.run_record_bytes(run_id))
+
+    def test_run_record_end_keeps_human_stop(self):
+        me = str(os.getpid())
+        run_id = self.run_record_start(os.getpid())
+        result = self.run_record('end', '--run', run_id, '--pid', me, 'human_stop', 'by | you\nnow')
+        self.assertEqual(result.stdout, '')
+        record = self.run_record_data(run_id)
+        self.assertRegex(record['ended'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        self.assertEqual((record['outcome'], record['detail']), ('human_stop', 'by you now'))
+        before = self.run_record_bytes(run_id)
+        result = self.run_record('end', '--run', run_id, '--pid', me, 'stopped', expected=3)
+        self.assertIn(f'not the owner of run {run_id}', result.stderr)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        self.run_record('pause', '--run', run_id, '--pid', me, expected=3)
+        # Paused is not ended; a paused run still ends.
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('pause', '--run', run_id, '--pid', me)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['ended']), ('paused', None))
+        self.run_record('end', '--run', run_id, '--pid', me, 'finished', 'x' * 300)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['detail']), ('finished', 'x' * 200))
+        self.assertIsNotNone(record['ended'])
+        # Usage errors change nothing.
+        before = self.run_record_bytes(run_id)
+        for args in (('end', '--run', run_id, '--pid', me, 'running'), ('end', '--run', run_id, '--pid', me),
+                     ('end', '--run', run_id, 'finished'), ('pause', '--run', 'x', '--pid', me),
+                     ('request-stop', '--run', run_id, '--via', 'mail'),
+                     ('request-stop', '--run', run_id, '--via', 'signal', '--expect-pid', me),
+                     ('own', '--run', run_id, '--pid', me, '--launcher', 'Bad Name')):
+            self.run_record(*args, expected=1)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+
+    def test_run_record_end_after_stop_request_is_human_stop(self):
+        me = str(os.getpid())
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop')
+        stop = self.run_record_data(run_id)['stop_requested']
+        self.assertEqual(stop['via'], 'ai-pipeline --stop')
+        self.assertRegex(stop['at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        # A second request keeps the first.
+        self.run_record('request-stop', '--run', run_id, '--via', 'signal')
+        self.assertEqual(self.run_record_data(run_id)['stop_requested'], stop)
+        self.run_record('end', '--run', run_id, '--pid', me, 'stopped', 'exit 143')
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['detail']), ('human_stop', 'exit 143'))
+        before = self.run_record_bytes(run_id)
+        self.run_record('end', '--run', run_id, '--pid', me, 'stopped', expected=3)
+        self.run_record('request-stop', '--run', run_id, '--via', 'signal', expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        self.run_record('stop-requested', '--run', run_id)
+        # `finished` (and `crashed`) are stored as given.
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('stop-requested', '--run', run_id, expected=1)
+        self.run_record('request-stop', '--run', run_id, '--via', 'signal')
+        self.run_record('end', '--run', run_id, '--pid', me, 'finished')
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'finished')
+
+    def test_run_record_own_and_resume(self):
+        me = str(os.getpid())
+        child = self.run_record_fixture()
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('own', '--run', run_id, '--pid', str(child.pid), '--launcher', 'ai-recover',
+                        expected=3)  # this test process is recorded and alive
+        # The recorded process is gone: a fixture recorded, then reaped.
+        gone = self.run_record_fixture()
+        run_id = self.run_record_start(gone.pid)
+        gone.kill()
+        gone.wait()
+        self.run_record('own', '--run', run_id, '--pid', str(child.pid), '--launcher', 'ai-recover')
+        record = self.run_record_data(run_id)
+        fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+        self.assertEqual(record['process'], {'pid': child.pid, 'pgid': int(fields[2]), 'sid': int(fields[3]),
+                                             'start_ticks': int(fields[19])})
+        self.assertEqual((record['launcher'], record['resumes'], record['outcome']), ('ai-recover', 0, 'running'))
+        # The owner itself may resume; another live process may not take over.
+        self.run_record('resume', '--run', run_id, '--pid', str(child.pid))
+        self.assertEqual(self.run_record_data(run_id)['resumes'], 1)
+        before = self.run_record_bytes(run_id)
+        self.run_record('own', '--run', run_id, '--pid', me, '--launcher', 'ai-recover', expected=3)
+        self.run_record('resume', '--run', run_id, '--pid', me, expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        # A paused run is resumed by a new process once the old one is gone.
+        self.run_record('pause', '--run', run_id, '--pid', str(child.pid))
+        child.kill()
+        child.wait()
+        self.run_record('resume', '--run', run_id, '--pid', me)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['process']['pid'], record['resumes'], record['outcome']),
+                         (os.getpid(), 2, 'running'))
+        # Refused with a stop request, and after `end`.
+        self.run_record('request-stop', '--run', run_id, '--via', 'signal')
+        before = self.run_record_bytes(run_id)
+        self.run_record('own', '--run', run_id, '--pid', me, '--launcher', 'ai-recover', expected=3)
+        self.run_record('resume', '--run', run_id, '--pid', me, expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('end', '--run', run_id, '--pid', me, 'finished')
+        before = self.run_record_bytes(run_id)
+        self.run_record('own', '--run', run_id, '--pid', me, '--launcher', 'ai-recover', expected=3)
+        self.run_record('resume', '--run', run_id, '--pid', me, expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+
+    def test_run_record_stop_request_identity(self):
+        process = self.run_record_fixture()
+        run_id = self.run_record_start(process.pid)
+        ticks = self.run_record_data(run_id)['process']['start_ticks']
+        before = self.run_record_bytes(run_id)
+        for pid, start in ((process.pid, ticks + 1), (process.pid + 1, ticks)):
+            self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop',
+                            '--expect-pid', str(pid), '--expect-ticks', str(start), expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        self.run_record('stop-requested', '--run', run_id, expected=1)
+        self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop',
+                        '--expect-pid', str(process.pid), '--expect-ticks', str(ticks))
+        self.run_record('stop-requested', '--run', run_id)
+        before = self.run_record_bytes(run_id)
+        self.run_record('settle-stop', '--run', run_id, expected=3)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        process.kill()
+        process.wait()
+        self.run_record('settle-stop', '--run', run_id)
+        record = self.run_record_data(run_id)
+        self.assertEqual(record['outcome'], 'human_stop')
+        self.assertIsNotNone(record['ended'])
+        self.run_record('settle-stop', '--run', run_id, expected=3)
+        # Without a stop request a dead run is not settled.
+        gone = self.run_record_fixture()
+        run_id = self.run_record_start(gone.pid)
+        gone.kill()
+        gone.wait()
+        self.run_record('settle-stop', '--run', run_id, expected=3)
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'running')
+        # The Python function used by `run-stop`.
+        wf = self.run_record_module()
+        self.run_record('request-stop', '--run', run_id, '--via', 'signal')
+        self.assertTrue(wf.settle_stop(self.run_records(), run_id))
+        self.assertFalse(wf.settle_stop(self.run_records(), run_id))
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+
+    def test_run_record_interleaving_never_touches_another_run(self):
+        me = str(os.getpid())
+        run_a = self.run_record_start(os.getpid())
+        self.run_record('request-stop', '--run', run_a, '--via', 'ai-pipeline --stop')
+        before_a = self.run_record_bytes(run_a)
+        process = self.run_record_fixture()
+        run_b = self.run_record_start(process.pid)
+        before_b = self.run_record_bytes(run_b)
+        for args in (('end', '--run', run_a, '--pid', me, 'stopped'), ('pause', '--run', run_a, '--pid', me),
+                     ('request-stop', '--run', run_a, '--via', 'signal'),
+                     ('own', '--run', run_a, '--pid', me, '--launcher', 'ai-recover'),
+                     ('resume', '--run', run_a, '--pid', me), ('settle-stop', '--run', run_a),
+                     ('stop-requested', '--run', run_a)):
+            self.run_record(*args, expected=3)
+        self.assertEqual(self.run_record_bytes(run_a), before_a)
+        self.assertEqual(self.run_record_bytes(run_b), before_b)
+        # Run B with a pid that is not B's, or B's pid with other start ticks.
+        self.run_record('end', '--run', run_b, '--pid', me, 'finished', expected=3)
+        self.run_record('pause', '--run', run_b, '--pid', me, expected=3)
+        path = self.run_records() / f'{run_b}.json'
+        record = json.loads(before_b)
+        record['process']['start_ticks'] += 1
+        path.write_text(json.dumps(record) + '\n')
+        reused = path.read_bytes()
+        self.run_record('end', '--run', run_b, '--pid', str(process.pid), 'finished', expected=3)
+        self.assertEqual(path.read_bytes(), reused)
+        # Unknown or invalid ids are not the owner either.
+        self.run_record('stop-requested', '--run', run_b.replace('-', '-9', 1), expected=3)
+        record['schema'] = 2
+        path.write_text(json.dumps(record))
+        self.run_record('stop-requested', '--run', run_b, expected=3)
+        self.run_record('request-stop', '--run', run_b, '--via', 'signal', expected=3)
+
 
 class ReviewHistoryTest(unittest.TestCase):
     """T002: review-history summarises earlier review rounds from Git (context only)."""
