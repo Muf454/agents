@@ -5141,7 +5141,7 @@ tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limi
 runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 
 ## T201 — Plan review decided against the run's base, with a skip line (FL-39)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5212,6 +5212,20 @@ Targeted: `bash -n scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `scripts/ai-pipeline` gets `plan_untouched` (`tasks newly-done "$base_sha"` empty and
+`tasks count` ≥ 1; a helper error sets `cannot read the task queue against the base` and skips,
+fail closed). A skipped review prints exactly one `Plan review skipped: <why>` line before the
+loop (`--skip-plan-review`, `resuming preserved work (armed resume)`, `tasks done since the base:
+T…` with the first three ids and `, …` if there are more). On the loop's first pass only
+(`plan_pass`), `review_due=no` prints `Plan review skipped: the current plan review is reused
+(BLOCKER b, MAJOR m)`. `tasks untouched` kept (used by `ai-run --revise-plan`, T214's scope).
+docs/workflow.md updated; vault `agents-flow.md` plan review node and skip edge, hub Log line.
+Evidence: `-k plan_review_base` Ran 4 tests OK (the 4 acceptance tests; the reuse test commits
+the first run's stop records as a human would and asserts `plan-review-info` is still current);
+`-k plan_review` Ran 27 tests OK; `-k preflight_pipeline` Ran 8 tests OK; `bash -n
+scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE). The session
+started `.ai/bin/ai-check` by mistake before reading the rule; it passed the 600 s tool limit
+and was not used as evidence.
 
 ## T214 — Plan revision and its queue repair decided against the run's base (FL-39, review P2)
 Status: TODO

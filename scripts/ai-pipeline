@@ -475,8 +475,35 @@ queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || {
 # which exists only after this loop broke out in the same run. A committed partial checkpoint
 # makes plan-review-info stale and ai-review --plan cannot run on the preserved tree; the
 # committed part is reviewed by the implementation review like any task commit.
-if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>/dev/null; then
+# The queue is untouched when no task became DONE since the run's base (FL-39): earlier
+# batches' DONE tasks do not lift the review. Fail closed: an unreadable queue is not untouched.
+plan_untouched() {
+  local done_ids ids id
+  if ! done_ids=$(ai_helper tasks newly-done "$base_sha" 2>/dev/null) || \
+      ! [[ "$(ai_helper tasks count 2>/dev/null)" =~ ^[1-9][0-9]*$ ]]; then
+    plan_skip='cannot read the task queue against the base'; return 1
+  fi
+  [[ -n "$done_ids" ]] || return 0
+  mapfile -t ids <<< "$done_ids"
+  plan_skip="tasks done since the base: ${ids[0]}"
+  for id in "${ids[@]:1:2}"; do plan_skip+=", $id"; done
+  (( ${#ids[@]} <= 3 )) || plan_skip+=', …'
+  return 1
+}
+plan_skip=''
+if [[ "$plan_review" != yes ]]; then
+  plan_skip='--skip-plan-review'
+elif armed_resume; then
+  plan_skip='resuming preserved work (armed resume)'
+else
+  plan_untouched || true
+fi
+if [[ -n "$plan_skip" ]]; then
+  printf 'Plan review skipped: %s\n' "$plan_skip"
+else
+  plan_pass=0
   while true; do
+    plan_pass=$((plan_pass + 1))
     ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
     plan_decision_check
     if [[ "$plan_revised" == yes ]]; then
@@ -503,6 +530,12 @@ if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>
         1) ;;
         *) plan_stage_fail 'the plan revision records are unreadable.' ;;
       esac
+    fi
+    # Later passes follow a revision and always review again.
+    if [[ "$review_due" == no ]] && (( plan_pass == 1 )); then
+      read -r _ plan_blockers plan_majors _ <<< "$plan_info"
+      printf 'Plan review skipped: the current plan review is reused (BLOCKER %s, MAJOR %s)\n' \
+        "$plan_blockers" "$plan_majors"
     fi
     if [[ "$review_due" == yes ]]; then
       step plan_review 'Plan review (Codex; Claude fallback)'

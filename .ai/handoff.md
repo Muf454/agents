@@ -1,7 +1,14 @@
 # Handoff
 
 ## What has been implemented?
-Nothing yet in batch 10. The plan was written 2026-10-21 in an unattended planning session on
+- T201 (FL-39, 2026-10-22): `ai-pipeline` enters the plan review when `tasks newly-done BASE`
+  is empty (earlier batches' DONE tasks no longer skip it; a helper error fails closed and
+  skips). Every skipped review prints one `Plan review skipped: <why>` line: `--skip-plan-review`,
+  `resuming preserved work (armed resume)`, `tasks done since the base: T…` (first three ids),
+  or, on the loop's first pass, `the current plan review is reused (BLOCKER b, MAJOR m)`.
+  `tasks untouched` stays as a helper (still used by `ai-run --revise-plan`; T214).
+
+The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
 T118's host verification and is not merged; this PR targets `fix/flow-batch-9` until that
 merges). Zack approved the scope on 2026-10-21.
@@ -77,7 +84,8 @@ Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour mos
   header tells them not to run the full gate.
 
 ## Flow chart
-Flow unchanged so far (planning only, 2026-10-21). T201 (plan review decision), T204 (session gate
+T201 updated the vault `agents-flow.md` plan review node ("no task DONE since the base?", skip
+line printed) and its skip edge (2026-10-22). Still to come: T204 (session gate
 rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update vault
 `agents-flow.md` and add hub Log lines; T213 audits them and adds the "Flow data (ME-01)" line.
 
@@ -114,10 +122,13 @@ rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update
    failures and the `run end` totals agree with the raw logs.
 
 ### Covered by automated tests
-Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all TODO:
-- `plan_review_base` (T201): earlier DONE tasks plus new TODO tasks get a plan review; a resumed run
-  with a task newly DONE since base skips with the line; `--skip-plan-review` prints the line; a
-  reused current plan review prints its line and calls no reviewer.
+Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE ones marked:
+- `plan_review_base` (T201, DONE): earlier DONE tasks plus new TODO tasks get a plan review
+  (`test_plan_review_base_earlier_done_tasks_get_a_plan_review`); a resumed run with a task newly
+  DONE since base skips with the line (`test_plan_review_base_resumed_run_with_new_done_task_skips`);
+  `--skip-plan-review` prints the line (`test_plan_review_base_skip_flag_prints_the_line`); a
+  reused current plan review prints its line once and calls no reviewer
+  (`test_plan_review_base_current_review_is_reused_with_a_line`).
 - `plan_review_followup` (T214): a MAJOR plan review on a follow-up batch is revised, re-reviewed
   and implemented with earlier DONE blocks unchanged; base-relative queue repair.
 - `worker_count` (T202): default and override parsing, `Workers:` first line.
@@ -156,5 +167,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all T
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-Zack: commit the plan revision, Needs you items 1–3, then approve. The runner starts with T201.
+The runner continues with the next task after T201.
 Nothing is merged or deployed.

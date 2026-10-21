@@ -477,8 +477,14 @@ clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-r
 manifest on resume). It writes nothing to the checkout. A failed check is a `Plan revision stage
 …` stop; a failed reservation is the limit stop; both always need the human.
 
-Supervised plan-review loop (`ai-pipeline`, while no task is DONE and without
-`--skip-plan-review`). Each pass: `plan-rounds sync BASE`; the decision check
+Supervised plan-review loop (`ai-pipeline`, while no task became DONE since the run's base,
+outside an armed resume and without `--skip-plan-review`). The entry check is `tasks newly-done
+BASE` (empty output = untouched; DONE tasks of earlier batches already DONE at the base do not
+lift the review; a helper error fails closed and skips). A skipped review prints exactly one
+line `Plan review skipped: <why>` (`--skip-plan-review`, `resuming preserved work (armed
+resume)`, `tasks done since the base: T…` with the first three ids, or `cannot read the task
+queue against the base`); a current, unrevised review reused on the loop's first pass prints
+`Plan review skipped: the current plan review is reused (BLOCKER b, MAJOR m)`. Each pass: `plan-rounds sync BASE`; the decision check
 (`plan-revisions decision`: exit 0 stops with `plan review needs your decision (round n):
 <stored questions>`, the bounded text from the host record; exit 2 is a `Plan revision stage`
 stop); right after a completed stage, the notification `🔁 Plan revised (round n/N): accepted a,
@@ -549,7 +555,7 @@ record yet; otherwise it does nothing and the checks reject as before (a committ
 queue is the pre-flight scan's). A repair failure stops with `Plan revision stage: task queue is
 invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
 `plan-dispositions-check`, so a complete section is recorded without a new session.
-Stages, each resumable by rerunning: plan review (only while no task is DONE;
+Stages, each resumable by rerunning: plan review (only while no task became DONE since the base;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
 host review store; committed as `chore(ai): record plan review`; reused while that digest is

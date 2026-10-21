@@ -3357,6 +3357,53 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-review', '--plan', expected=1)
         self.assertIn('Reviewed content changed', (self.project / '.ai/local/last-error').read_text())
 
+    # ---------------------------------------------- plan review decided against the base (T201)
+    def plan_review_base_fixture(self, queue):
+        # The base (main) already holds an earlier batch whose T001 is DONE.
+        self.ready(task('T001', 'DONE'))
+        self.run_cmd(['git', 'branch', '-f', 'main', 'HEAD'])
+        (self.project / '.ai/tasks.md').write_text(queue)
+        self.commit('next batch')
+
+    def test_plan_review_base_earlier_done_tasks_get_a_plan_review(self):
+        self.plan_review_base_fixture(task('T001', 'DONE') + task('T002') + task('T003'))
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertNotIn('Plan review skipped', result.stdout)
+        self.assertEqual((self.base / 'codex-plan-calls').read_text().count('call'), 1)
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+        self.assertLess(subjects.index('chore(ai): record plan review'), subjects.index('implement T002'))
+
+    def test_plan_review_base_resumed_run_with_new_done_task_skips(self):
+        self.plan_review_base_fixture(task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertEqual(result.stdout.count('Plan review skipped: tasks done since the base: T002\n'), 1)
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+        self.assertNotIn('record plan review', self.run_cmd(['git', 'log', '--format=%s']).stdout)
+
+    def test_plan_review_base_skip_flag_prints_the_line(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review')
+        self.assertEqual(result.stdout.count('Plan review skipped: --skip-plan-review\n'), 1)
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+
+    def test_plan_review_base_current_review_is_reused_with_a_line(self):
+        # Nothing is eligible (T002 waits on BLOCKED T001): the first run records a clean plan
+        # review and stops at implementation without changing the reviewed tree.
+        self.ready(task('T001', 'BLOCKED') + task('T002', dependencies='T001'))
+        first = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertNotIn('Plan review skipped', first.stdout)
+        plans = lambda: (self.base / 'codex-plan-calls').read_text().count('call')
+        reviews = lambda: self.run_cmd(['git', 'log', '--format=%s']).stdout.count('chore(ai): record plan review')
+        self.assertEqual((plans(), reviews()), (1, 1))
+        self.commit('human commits the stop records')
+        self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+        second = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
+        self.assertEqual(second.stdout.count(
+            'Plan review skipped: the current plan review is reused (BLOCKER 0, MAJOR 0)\n'), 1,
+            second.stdout + second.stderr)
+        self.assertEqual(second.stdout.count('Plan review skipped'), 1)
+        self.assertEqual((plans(), reviews()), (1, 1))
+
     def plan_round(self, findings, number, **env):
         """One hand-run plan review (host commit + record); a source change keeps plan digests distinct."""
         (self.project / 'src.txt').write_text(f'source {number}\n')
