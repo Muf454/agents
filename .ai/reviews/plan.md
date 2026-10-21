@@ -1,11 +1,11 @@
-<!-- Plan review of plan digest 2f0dccd32670e5957e125d5efece9181f0d45df2177548953f42cea3637c9f26; HEAD 86df81599a696087a84919cad49c3bfbbcd7af0a; saved 2026-10-21T21:33:41Z. -->
+<!-- Plan review of plan digest 018fcc2d622a84c355c69b1753ba44d3eec34f9112712ee85227785c9b8371e2; HEAD 4afd9ab637786a1be32dcf946f8b1f6ac0ffd18d; saved 2026-10-21T21:45:23Z. -->
 
-# Plan review — batch 11
+# Plan review
 
-Scope: `HEAD=86df81599a696087a84919cad49c3bfbbcd7af0a`, tasks T301–T322.
+Reviewed HEAD: `4afd9ab637786a1be32dcf946f8b1f6ac0ffd18d`
 
-Overall verdict: REVISE BEFORE IMPLEMENTATION
-Finding counts: BLOCKER=0 MAJOR=4 MINOR=1
+Overall verdict: Revise before implementation.
+Finding counts: BLOCKER=0 MAJOR=4 MINOR=0
 
 ## BLOCKER findings
 
@@ -13,61 +13,51 @@ None.
 
 ## MAJOR findings
 
-- P2: Signal forwarding still omits blocking publication commands.
+- P16: A stop request cannot produce `human_stop` for a stand-alone runner.
 
-  **Location:** `.ai/tasks.md:5658`; `scripts/ai-pipeline:249`, `:255`, `:679–719`.
+  **Location:** `.ai/tasks.md:5432` (T316), `.ai/tasks.md:5239` (T315), `.ai/tasks.md:5906` (T319).
 
-  T318 wraps runners, reviewers, validation and retry sleeps, but leaves `git push`, `git ls-remote` and GitHub CLI calls blocking in the foreground. A PID-only TERM cannot run the pipeline’s trap until these commands return. A stalled connection or push hook can therefore defeat the promised prompt human stop. The retry-sleep test does not exercise this case.
+  T316 makes stand-alone `ai-run` record every nonzero exit as `stopped`. Therefore, `ai-pipeline --stop` targeting that runner writes a stop request, sends TERM, and receives an already-ended `stopped` record. T315 forbids changing ended records, and `settle-stop` explicitly refuses them. T319 consequently cannot complete the promised human-stop records. The planned stop tests cover pipelines, recoveries and fixture processes, but not a real stand-alone runner.
 
-  **Plan change:** Extend forwarding to blocking publication commands, retaining child identity in the parent even when capturing command output. Add offline tests with sleeping fake `git push` and `gh` processes; signal only the pipeline PID and verify prompt termination and human-stop records.
+  **Concrete plan change:** Make the owning runner honor a pending stop request before choosing its terminal outcome, with the decision checked under the host lock. Preserve ended-record immutability. Add an integration test stopping stand-alone `ai-run` during a sleeping fake session: require exit 0 from `--stop`, the session gone, outcome and escalation `human_stop`, and an idempotent second stop.
 
-- P12: The existing log launcher rejects every proposed pipeline log name.
+- P17: Detached execution changes the meaning of relative knowledge-directory arguments.
 
-  **Location:** `.ai/tasks.md:6201–6202`, `:6218`; `scripts/lib/workflow.py:5069–5084`.
+  **Location:** `.ai/tasks.md:6328` (T313); `scripts/ai-pipeline:52`; `scripts/lib/common.sh:126`.
 
-  T313 passes `pipeline-<stamp>-<hex>.log` to `exec-logged`. Its existing `EXEC_LOG_NAME` accepts only `plan-<stamp>-<hex>.log`, so it exits before starting the pipeline. T313 neither specifies extending this validation nor lists `workflow.py` among its affected modules. Direct evaluation of the existing expression confirmed the rejection.
+  T313 dispatches before normal option parsing and calls `ai_root` before launching the child from the checkout root. Existing foreground parsing resolves `--knowledge-dir` against the caller’s working directory. Consequently, launching from `/repo/subdir` with `--knowledge-dir ./notes` would instead select `/repo/notes`, or fail although `/repo/subdir/notes` exists. The existing `ai-plan` wrapper already handles this explicitly at `scripts/ai-plan:23`.
 
-  **Plan change:** Include the narrowly scoped launcher change in T313. Accept both intended prefixes while preserving exclusive creation and path protections. Add coverage for both valid prefixes and invalid names.
+  **Concrete plan change:** Resolve `--knowledge-dir` against the original working directory before `ai_root`, preserve argument order, and forward the absolute path. Add detached-launch tests from a subdirectory with different same-named directories at both levels, plus a case where only the caller-relative directory exists. Assert the child argv and recorded arguments.
 
-- P13: Duplicate shutdown writes discard the specific escalation kind.
+- P18: A stand-alone run can receive resume commands from an unrelated earlier pipeline.
 
-  **Location:** `.ai/tasks.md:5284–5290`, `:5918–5922`; `scripts/ai-pipeline:186–188`.
+  **Location:** `.ai/tasks.md:5313` (T305), `.ai/tasks.md:5432` (T316); `scripts/lib/workflow.py:1678`.
 
-  T320 writes an escalation in both `stop()` and `ai_die()`, but the existing non-recovery `stop()` always calls `ai_die()`. T305 consumes the hint on the first write. For example, `task_blocked` is written with task IDs and actionable answers, then overwritten by the second `write other`, which has no remaining hint. The final record loses the classification the feature must provide.
+  Escalation answers always use the checkout’s existing `run.json` manifest when one exists. A stand-alone `ai-run` creates a new run record but does not replace that pipeline manifest. After an earlier pipeline invocation, a failed stand-alone run would therefore advertise `.ai/bin/ai-pipeline` with the earlier invocation’s base, limits and publication options. Those are not the current run’s arguments; following the advertised “resume” action can invoke a different workflow.
 
-  **Plan change:** Define one escalation writer for this shutdown chain, or explicitly make repeated writes preserve the established classification. Test the final record after process exit for both blocked-task and plan-review stops.
+  **Concrete plan change:** Require resume answers to belong to the current run. For `kind=ai-run`, either construct an appropriate stand-alone command from its run record or omit the pipeline resume answer. Add a regression that leaves an earlier pipeline manifest, starts stand-alone `ai-run` with different arguments, and verifies its escalation never offers the earlier pipeline command.
 
-- P14: The validation rewrite loses the output logger’s failure status.
+- P19: Fix-round escalation wiring misses two existing finish paths.
 
-  **Location:** `.ai/tasks.md:5506–5510`; `scripts/ai-check:47–52`.
+  **Location:** `.ai/tasks.md:6064` (T321); `scripts/ai-pipeline:655` and `scripts/ai-pipeline:661`.
 
-  T304 explicitly takes the result only from the validation child after replacing the pipeline with a process substitution. Today, a failing `tee` makes validation fail. Waiting for the substitution ensures completion but does not automatically propagate its exit status. A successful validator with a failed logger can therefore produce exit 0 and a PASS stamp with incomplete evidence.
+  T321 describes “both finish paths” and adds escalation writes to the explicit `--no-pr` and completed-PR branches. The source also finishes early when no `origin` exists and when `gh` is unavailable after pushing. Both branches can follow a fix-round-limit break, but they bypass the proposed writes. The run would end `finished` without the `fix_round_limit` record required for mission control to identify the remaining human decision.
 
-  **Plan change:** Capture and check both statuses before recording the stamp, preserving the existing failure behavior. Add a regression with a successful validator and failing fake `tee`, asserting a nonzero exit and no PASS stamp.
+  **Concrete plan change:** Centralize conditional fix-limit escalation in finalization so every successful finish path writes it exactly once. Extend acceptance tests to cover `--no-pr`, normal PR completion, no remote, and missing `gh`, retaining outcome `finished` and the significant finding IDs.
 
 ## MINOR findings
 
-- P15: Run IDs can collide during repeated starts by the same process.
+None.
 
-  **Location:** `.ai/tasks.md:5163–5169`, `:5193`; `.ai/project-spec.md`, assumption B17.
+## Validation and scope
 
-  Whole-second time plus PID gives identical IDs for two starts using the same PID within one second. The prescribed atomic write then replaces the earlier record. This also makes the 23-start retention scenario dependent on fixture timing.
+Observed checks passed:
 
-  **Plan change:** Guarantee uniqueness under the host lock using a nonce, sequence or finer timestamp, and update the ID format consistently. Test repeated starts with a fixed clock and PID.
+- `python3 -B scripts/lib/workflow.py tasks check`.
+- Shell syntax checks for 15 script/template/validation files.
+- Python AST parsing for `scripts/lib/*.py` and `tests/test_workflow.py`.
+- Three existing `DocsConsistencyTest` tests, extracted and executed without importing fixture initialization.
 
-## Validation observed
+Inspected the relevant source, record handling, tests, validation entry points, documentation, and earlier review dispositions. Earlier findings covered by the revised tasks are not repeated here. Explicit task models fit the described risks.
 
-- Confirmed the requested HEAD and clean working tree.
-- Inspected guidance, spec, plan, tasks, prior review/dispositions, state/handoff, relevant documentation, affected source, schemas, fixtures and validation entry points.
-- `python3 -B scripts/lib/workflow.py tasks check` passed.
-- Python AST parsing passed for nine source/test files.
-- `bash -n` passed for fifteen scripts and validation entry points.
-- File-free reproductions confirmed delayed traps during foreground commands and independent validator/logger exit statuses.
-
-The full gate and integration tests were not run because their fixtures require filesystem writes. Historical gate results do not validate this proposed implementation. No files were modified; no network or MCP integrations were invoked.
-
-## Scope and remaining acceptance
-
-Earlier findings P1 and P3–P11 are addressed by the revised plan; P2 remains partially unresolved. All current batch tasks specify models, with no additional model-assignment findings.
-
-The principal risks are process lifecycle correctness, host-record consistency and preservation of validation evidence. After implementation, retain the planned human checks for Ctrl-C, detached stopping, watchdog recovery suppression and committed skips across branches/worktrees. Review approval is not human acceptance.
+The full gate and integration tests were not run because they write stamps, logs and fixtures, which this read-only review forbids. No files were modified, and no network or MCP integrations were invoked. Real Ctrl-C, watchdog and systemd acceptance remains human validation after implementation.
