@@ -5233,7 +5233,7 @@ fixtures are own `sleep` children in their own session, the zombie case included
 Targeted `-k run_record`: Ran 9 tests OK. Full `.ai/bin/ai-check`: Ran 1113 tests OK (1229 s).
 
 ## T315 — Run record lifecycle bound to the run id and process identity (RC-01 G3, plan review P5)
-Status: IN_PROGRESS
+Status: BLOCKED
 Dependencies: T301
 Model: opus
 
@@ -5300,6 +5300,15 @@ Targeted: `python3 -m unittest discover -s tests -k run_record` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+- 2026-10-22 (claude, opus): implemented and committed in 939c66f: `run-record own|resume|pause|
+  end|request-stop|settle-stop|stop-requested` plus `settle_stop()` in `scripts/lib/workflow.py`,
+  the five acceptance tests in `tests/test_workflow.py`, docs/workflow.md "Durable records".
+  Targeted `python3 -m unittest discover -s tests -k run_record`: Ran 14 tests, OK (47.9 s).
+- BLOCKED on the gate only (FL-32 again): `.ai/bin/ai-check` ran 600 s in the foreground, was
+  moved to the background and stopped at the background limit (~1200 s total) with no result;
+  T301's gate took 1229 s. The runner rules forbid restarting it in the background. Code looks
+  complete; next step: rerun `.ai/bin/ai-check` outside the session limit (or let the runner's
+  checkpoint validation run it) and, on PASS, set T315 DONE.
 
 ## T305 — Escalation record helper: schema 1, redaction, allowed answers (RC-01 G9, helper)
 Status: TODO

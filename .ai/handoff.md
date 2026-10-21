@@ -221,5 +221,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301 and T315 are DONE; the runner continues with the next task in queue order (T305).
+T301 is DONE. T315 is implemented (939c66f, targeted `-k run_record` 14 OK) but BLOCKED because
+the full gate did not finish within the session's tool time limit (~1200 s, no result). Rerun
+`.ai/bin/ai-check`; on PASS set T315 DONE and continue with T305.
 Nothing is merged or deployed.
