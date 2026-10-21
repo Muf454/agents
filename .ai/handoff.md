@@ -1,7 +1,12 @@
 # Handoff
 
 ## What has been implemented?
-Nothing in batch 11 yet: this is the plan. Batch 11 (RC-01, run controls for humans and apps) was
+- T301 (2026-10-22): `workflow.py run-record start|current|show|alive`, the host run record
+  (schema 1) under `<binding dir>/runs/` with `current`, a bounded `runs/.lock` and retention of
+  20; no caller yet (T315, T302 and T316 wire it). Described in `docs/workflow.md` "Durable
+  records".
+
+Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
 `fix/flow-batch-9` at 4fea72d; batch 9 is nearly complete there but not merged; this PR targets
 `fix/flow-batch-9` until that merges). Mission control chose the scope on 2026-10-21 with Zack's
@@ -67,7 +72,8 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
-None on this branch yet (all three plan revisions changed only `.ai/` planning records; no shell
+2026-10-22, T301: `.ai/bin/ai-check` PASS, Ran 1113 tests OK (1229 s); `-k run_record` Ran 9 OK.
+Before T301: none on this branch (all three plan revisions changed only `.ai/` planning records; no shell
 was available in the revision sessions, so the queue was checked by reading, not with `ai-task
 check`: 91 tasks, 91 `Model:` lines, every new dependency on a task earlier in the queue). The
 round-2 reviewer ran `workflow.py tasks check` on 86df815: passed. Batch 9's last full gate: PASS, 1104 tests (T116 tree, 816.3 s).
@@ -167,6 +173,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   resume, `ai_die` after a gate change; recovery owns the run before its session; stand-alone
   `ai-run` records, refusal after publication, escalation cleared at start; `end stopped` after a
   stop request is `human_stop`; resolved `--knowledge-dir` in a stand-alone argv.
+  Done so far (T301): `test_run_record_start_and_show`, `test_run_record_ids_unique_with_fixed_clock`,
+  `test_run_record_retention_keeps_twenty`, `test_run_record_alive_identity`,
+  `test_run_record_lock_is_bounded`, `test_run_record_invalid_records`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
@@ -205,6 +214,5 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-Zack (or mission control on Zack's behalf) commits the round-3 revision and approves (no further
-plan review); then the runner starts with T301.
+T301 is DONE; the runner continues with the next task in queue order (T315).
 Nothing is merged or deployed.

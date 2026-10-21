@@ -4,6 +4,7 @@ import atexit
 import calendar
 import contextlib
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -15194,6 +15195,176 @@ PY
         self.assertEqual((record['stage'], record['state']), ('build', 'recovering'))
         self.assertEqual(log.read_text() if log.exists() else '', before)
         self.assertEqual(len(self.recovery_calls()), calls)
+
+    # Run records (RC-01 G3, T301): `run-record start|current|show|alive` under the binding dir.
+    def run_records(self):
+        top = self.run_cmd(['git', 'rev-parse', '--show-toplevel']).stdout.strip()
+        return self.base / 'host-state/reviews' / hashlib.sha256(top.encode()).hexdigest()[:16] / 'runs'
+
+    def run_record(self, *args, expected=0, **env):
+        # No launcher hints from the test's own environment, and no TTY on stdin.
+        environment = {key: value for key, value in self.env.items()
+                       if key not in ('AI_LAUNCHER', 'AI_RUN_LOG', 'INVOCATION_ID')}
+        result = subprocess.run(['python3', str(HELPER), 'run-record', *args], cwd=self.project,
+                                env=dict(environment, **env), stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def run_record_start(self, pid, **env):
+        return self.run_record('start', 'pipeline', 'fix/x', 'origin/main', 'a' * 40, '--pid', str(pid),
+                               '--', '--approved', '--base', 'main', **env).stdout.strip()
+
+    def run_record_fixture(self, stdout=subprocess.DEVNULL):
+        process = subprocess.Popen(['sleep', '60'], stdout=stdout, start_new_session=True)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process
+
+    def run_record_module(self):
+        spec = importlib.util.spec_from_file_location('workflow', HELPER)
+        wf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf)
+        return wf
+
+    def run_record_start_in_process(self, wf, runs):
+        out = io.StringIO()
+        with mock.patch.object(wf, 'run_stamp', return_value='20261021T210000Z'), \
+                mock.patch.object(wf, 'runs_dir', return_value=runs), \
+                mock.patch.object(wf, 'checkout_root', return_value=self.project), \
+                contextlib.redirect_stdout(out):
+            wf.run_record(['start', 'pipeline', 'fix/x', '-', '-', '--pid', str(os.getpid()), '--', '--approved'])
+        return out.getvalue().strip()
+
+    def test_run_record_start_and_show(self):
+        log = self.base / 'pipeline.log'
+        run_id = self.run_record_start(os.getpid(), AI_RUN_LOG=str(log))
+        self.assertRegex(run_id, rf'^\d{{8}}T\d{{6}}Z-{os.getpid()}-1$')
+        self.assertEqual(self.run_record('current').stdout, run_id + '\n')
+        record = json.loads(self.run_record('show').stdout)
+        self.assertEqual(json.loads(self.run_record('show', run_id).stdout), record)
+        self.assertRegex(record.pop('started'), r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        fields = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()
+        identity = {'pid': os.getpid(), 'pgid': int(fields[2]), 'sid': int(fields[3]),
+                    'start_ticks': int(fields[19])}
+        self.assertEqual(record, {
+            'schema': 1, 'id': run_id, 'kind': 'pipeline', 'checkout': os.path.realpath(self.project),
+            'branch': 'fix/x', 'base': {'ref': 'origin/main', 'sha': 'a' * 40},
+            'argv': ['--approved', '--base', 'main'], 'launcher': 'other', 'log': str(log),
+            'process': identity, 'resumes': 0, 'stop_requested': None, 'ended': None,
+            'outcome': 'running', 'detail': ''})
+        # Launcher: a valid AI_LAUNCHER is kept, an invalid one falls through to `other`.
+        for value, launcher in (('mission-control', 'mission-control'), ('Mission Control', 'other')):
+            run_id = self.run_record_start(os.getpid(), AI_LAUNCHER=value)
+            self.assertEqual(json.loads(self.run_record('show', run_id).stdout)['launcher'], launcher)
+        # Log without AI_RUN_LOG: the starter's stdout when it is a regular file, else null.
+        out = self.base / 'fixture-stdout.log'
+        with out.open('w') as file:
+            to_file = self.run_record_fixture(stdout=file)
+        to_null = self.run_record_fixture()
+        for process, expected in ((to_file, os.path.realpath(out)), (to_null, None)):
+            run_id = self.run_record_start(process.pid)
+            self.assertEqual(json.loads(self.run_record('show').stdout)['log'], expected)
+            self.assertEqual(self.run_record('current').stdout.strip(), run_id)
+        # Usage errors write nothing.
+        names = sorted(path.name for path in self.run_records().iterdir())
+        self.run_record('start', 'deploy', 'fix/x', '-', '-', '--pid', str(os.getpid()), '--', expected=1)
+        self.run_record('start', 'ai-run', 'fix/x', 'origin/main', '-', '--pid', str(os.getpid()), '--', expected=1)
+        self.run_record('start', 'ai-run', 'fix/x', '-', '-', '--pid', '0', '--', expected=1)
+        self.assertEqual(sorted(path.name for path in self.run_records().iterdir()), names)
+
+    def test_run_record_ids_unique_with_fixed_clock(self):
+        wf, runs = self.run_record_module(), self.base / 'runs'
+        first = self.run_record_start_in_process(wf, runs)
+        before = (runs / f'{first}.json').read_bytes()
+        second = self.run_record_start_in_process(wf, runs)
+        self.assertEqual((first, second), (f'20261021T210000Z-{os.getpid()}-1', f'20261021T210000Z-{os.getpid()}-2'))
+        self.assertEqual(sorted(runs.glob('*.json')), [runs / f'{first}.json', runs / f'{second}.json'])
+        self.assertEqual((runs / f'{first}.json').read_bytes(), before)
+        self.assertEqual(wf.read_run(runs)['id'], second)
+
+    def test_run_record_retention_keeps_twenty(self):
+        wf, runs = self.run_record_module(), self.base / 'runs'
+        runs.mkdir()
+        (runs / 'notes.txt').write_text('not a record\n')
+        ids = [self.run_record_start_in_process(wf, runs) for _ in range(23)]
+        self.assertEqual(sorted(path.name for path in runs.glob('*.json')),
+                         sorted(f'{run_id}.json' for run_id in ids[3:]))
+        self.assertEqual(wf.read_run(runs)['id'], ids[-1])
+        self.assertTrue((runs / 'notes.txt').exists())
+
+    def test_run_record_alive_identity(self):
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('alive')
+        self.run_record('alive', run_id)
+        path = self.run_records() / f'{run_id}.json'
+        record = json.loads(path.read_text())
+        record['process']['start_ticks'] += 1
+        path.write_text(json.dumps(record))
+        self.run_record('alive', expected=1)
+        self.run_record('show')  # still a valid record: only the process differs
+        # A zombie and a reaped process are not alive.
+        process = self.run_record_fixture()
+        self.run_record_start(process.pid)
+        self.run_record('alive')
+        process.kill()
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        while Path(f'/proc/{process.pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z':
+            self.assertLess(time.monotonic(), deadline, 'fixture never became a zombie')
+            time.sleep(0.05)
+        self.run_record('alive', expected=1)
+        process.wait()
+        self.run_record('alive', expected=1)
+        # An unknown schema is no record.
+        record = json.loads(self.run_record('show').stdout)
+        record['schema'] = 2
+        (self.run_records() / f'{record["id"]}.json').write_text(json.dumps(record))
+        self.run_record('alive', expected=1)
+        self.run_record('show', expected=1)
+        self.run_record('alive', run_id, expected=1)  # the edited record above, still not alive
+
+    def test_run_record_lock_is_bounded(self):
+        runs = self.run_records()
+        runs.mkdir(parents=True)
+        with open(runs / '.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            started = time.monotonic()
+            result = self.run_record('start', 'ai-run', 'fix/x', '-', '-', '--pid', str(os.getpid()), '--',
+                                     expected=1)
+            self.assertLess(time.monotonic() - started, 5 + SHORT_TIMEOUT)
+        self.assertIn('run record is locked', result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertEqual(sorted(path.name for path in runs.iterdir()), ['.lock'])
+        self.run_record_start(os.getpid())  # free again
+
+    def test_run_record_invalid_records(self):
+        run_id = self.run_record_start(os.getpid())
+        runs = self.run_records()
+        path = runs / f'{run_id}.json'
+        record = json.loads(path.read_text())
+        # A symlinked record.
+        target = self.base / 'elsewhere.json'
+        target.write_text(json.dumps(record))
+        path.unlink()
+        path.symlink_to(target)
+        self.run_record('current', expected=1)
+        self.run_record('show', expected=1)
+        self.run_record('show', run_id, expected=1)
+        # Unknown extra fields are accepted up to 64 KB; a 65 KB record is no record.
+        path.unlink()
+        path.write_text(json.dumps(dict(record, pad='x' * 60 * 1024)))
+        self.run_record('show')
+        path.write_text(json.dumps(dict(record, pad='x' * 65 * 1024)))
+        self.run_record('current', expected=1)
+        self.run_record('show', expected=1)
+        # A `current` that is not an id.
+        path.write_text(json.dumps(record))
+        self.run_record('show')
+        (runs / 'current').write_text('../x\n')
+        self.run_record('current', expected=1)
+        self.run_record('show', expected=1)
+        self.run_record('show', '../x', expected=1)
+        self.run_record('show', run_id)
 
 
 class ReviewHistoryTest(unittest.TestCase):

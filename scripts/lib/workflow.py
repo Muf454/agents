@@ -1860,6 +1860,227 @@ def run_manifest(arguments):
         fail('Unknown run-manifest action.')
 
 
+# Run records (RC-01 G3): one schema-versioned host record per run under `<binding dir>/runs/`
+# (`<id>.json`), `runs/current` (the id of the latest run) and `runs/.lock` (flock for every
+# write). The id is `<UTC stamp>-<pid>-<seq>`; `seq` is one more than the highest kept record's,
+# chosen under the lock, so two starts by one pid in one second never collide. The id is not
+# authority: lifecycle writes (T315) also check the recorded process identity.
+RUN_SCHEMA = 1
+RUN_ID = re.compile(r'\d{8}T\d{6}Z-(\d{1,10})-(\d{1,9})')
+RUN_KINDS = ('pipeline', 'ai-run')
+RUN_OUTCOMES = ('running', 'finished', 'stopped', 'human_stop', 'paused', 'crashed')
+RUN_KEEP = 20
+RUN_MAX_BYTES = 64 * 1024
+RUN_LOCK_SECONDS = 5
+RUN_LAUNCHER = re.compile(r'[a-z0-9._-]{1,32}')
+
+
+def run_stamp():
+    """UTC stamp of a new run id (one function, so tests can fix the clock)."""
+    return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def runs_dir():
+    return binding_dir() / 'runs'
+
+
+def process_identity(pid):
+    """{pid, pgid, sid, start_ticks} of a live process from /proc/<pid>/stat, or None when it
+    does not exist or is a zombie. pid plus start ticks identifies it, so a reused pid differs."""
+    try:
+        data = Path(f'/proc/{int(pid)}/stat').read_bytes()
+        # Fields after the command name (which may hold spaces and parentheses): state is field
+        # 3, pgid 5, sid 6, start ticks 22.
+        fields = data[data.rindex(b')') + 1:].split()
+        if fields[0] in (b'Z', b'X', b'x'):
+            return None
+        return {'pid': int(pid), 'pgid': int(fields[2]), 'sid': int(fields[3]),
+                'start_ticks': int(fields[19])}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+@contextlib.contextmanager
+def run_lock(runs):
+    """Hold `runs/.lock` for a read-modify-write of run records; give up after
+    RUN_LOCK_SECONDS rather than block a stop or a pipeline behind a stuck holder."""
+    runs.mkdir(parents=True, exist_ok=True)
+    fd = os.open(runs / '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        deadline = time.monotonic() + RUN_LOCK_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    fail('run record is locked')
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def read_small(path, limit):
+    """Bytes of a regular, non-symlinked file of at most `limit` bytes, else None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, 'rb') as file:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = file.read(limit + 1)
+    return data if len(data) <= limit else None
+
+
+def run_valid(data, run_id):
+    """Schema 1 with the plan's field types; unknown extra fields are accepted."""
+    def is_int(value):
+        return type(value) is int
+
+    def is_str(value):
+        return isinstance(value, str)
+
+    if not isinstance(data, dict) or not is_int(data.get('schema')) or data['schema'] != RUN_SCHEMA:
+        return False
+    base, process, stop = data.get('base'), data.get('process'), data.get('stop_requested')
+    return (data.get('id') == run_id and data.get('kind') in RUN_KINDS
+            and all(is_str(data.get(key)) for key in ('checkout', 'branch', 'launcher', 'started', 'detail'))
+            and (base is None or (isinstance(base, dict) and is_str(base.get('ref')) and is_str(base.get('sha'))))
+            and isinstance(data.get('argv'), list) and all(is_str(arg) for arg in data['argv'])
+            and (data.get('log') is None or is_str(data['log']))
+            and isinstance(process, dict)
+            and all(is_int(process.get(key)) for key in ('pid', 'pgid', 'sid', 'start_ticks'))
+            and is_int(data.get('resumes')) and data['resumes'] >= 0
+            and (stop is None or isinstance(stop, dict))
+            and (data.get('ended') is None or is_str(data['ended']))
+            and data.get('outcome') in RUN_OUTCOMES)
+
+
+def current_run_id(runs):
+    data = read_small(runs / 'current', 64)
+    try:
+        run_id = data.decode().strip('\n') if data is not None else ''
+    except UnicodeDecodeError:
+        return None
+    return run_id if RUN_ID.fullmatch(run_id) else None
+
+
+def read_run(runs, run_id=None):
+    """The valid record of `run_id` (default: the current one), else None: an invalid id, an
+    unknown schema, wrong field types, a symlink or a file over 64 KB is "no record"."""
+    if run_id is None:
+        run_id = current_run_id(runs)
+    if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
+        return None
+    data = read_small(runs / f'{run_id}.json', RUN_MAX_BYTES)
+    try:
+        record = json.loads(data) if data is not None else None
+    except ValueError:
+        return None
+    return record if run_valid(record, run_id) else None
+
+
+def run_seqs(runs):
+    """{seq: name} of the record names in `runs/` (names only; contents are not checked)."""
+    seqs = {}
+    for entry in runs.iterdir():
+        match = RUN_ID.fullmatch(entry.name.removesuffix('.json')) if entry.name.endswith('.json') else None
+        if match:
+            seqs[int(match.group(2))] = entry.name
+    return seqs
+
+
+def run_launcher():
+    launcher = os.environ.get('AI_LAUNCHER', '')
+    if RUN_LAUNCHER.fullmatch(launcher):
+        return launcher
+    if os.environ.get('INVOCATION_ID'):
+        return 'systemd'
+    return 'terminal' if os.isatty(0) else 'other'
+
+
+def run_log(pid):
+    log = os.environ.get('AI_RUN_LOG', '')
+    if os.path.isabs(log) and '\n' not in log and '\0' not in log:
+        return log
+    try:
+        target = os.readlink(f'/proc/{pid}/fd/1')
+        return target if os.path.isabs(target) and stat.S_ISREG(os.stat(target).st_mode) else None
+    except OSError:
+        return None
+
+
+def start_run(runs, checkout, kind, branch, base, argv, pid):
+    """Create the record of a new run for process `pid`, point `current` at it, keep the
+    RUN_KEEP records with the highest seq; return the id."""
+    identity = process_identity(pid)
+    if identity is None:
+        fail(f'run-record start: process {pid} is not running')
+    record = {'schema': RUN_SCHEMA, 'id': '', 'kind': kind, 'checkout': str(checkout),
+              'branch': branch, 'base': base, 'argv': list(argv), 'launcher': run_launcher(),
+              'log': run_log(pid), 'started': now(), 'process': identity, 'resumes': 0,
+              'stop_requested': None, 'ended': None, 'outcome': 'running', 'detail': ''}
+    with run_lock(runs):
+        seqs = run_seqs(runs)
+        seq = max(seqs, default=0) + 1
+        if seq >= 10 ** 9:
+            fail('run-record start: run sequence exhausted')
+        run_id = f'{run_stamp()}-{pid}-{seq}'
+        record['id'] = run_id
+        path = runs / f'{run_id}.json'
+        # Exclusive creation: an existing name fails, never replaced.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, 'w') as file:
+                file.write(json.dumps(record) + '\n')
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        atomic(runs / 'current', run_id + '\n')
+        seqs[seq] = path.name
+        for old in sorted(seqs)[:-RUN_KEEP]:
+            if seqs[old] != path.name:
+                (runs / seqs[old]).unlink(missing_ok=True)
+    return run_id
+
+
+def run_record(arguments):
+    """`start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (prints the new id),
+    `current`, `show [ID]` and `alive [ID]`; exit 1 when there is no valid record."""
+    if not arguments:
+        fail('Usage: run-record start|current|show|alive …')
+    action, rest = arguments[0], arguments[1:]
+    runs = runs_dir()
+    if action == 'start':
+        if len(rest) < 7 or rest[4] != '--pid' or rest[6] != '--':
+            fail('Usage: run-record start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…')
+        kind, branch, ref, sha, pid, argv = rest[0], rest[1], rest[2], rest[3], rest[5], rest[7:]
+        if kind not in RUN_KINDS:
+            fail(f'run-record start: KIND must be one of {", ".join(RUN_KINDS)}')
+        if not re.fullmatch(r'[1-9]\d{0,9}', pid):
+            fail('run-record start: invalid --pid')
+        if (ref == '-') != (sha == '-') or (sha != '-' and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha)):
+            fail('run-record start: BASE_REF and BASE_SHA are both "-" or a ref and a commit id')
+        base = None if ref == '-' else {'ref': ref, 'sha': sha}
+        print(start_run(runs, checkout_root(), kind, branch, base, argv, int(pid)))
+        return
+    if action not in ('current', 'show', 'alive') or len(rest) > (action != 'current'):
+        fail('Usage: run-record current | show [ID] | alive [ID]')
+    record = read_run(runs, rest[0] if rest else None)
+    if record is None:
+        sys.exit(1)
+    if action == 'current':
+        print(record['id'])
+    elif action == 'show':
+        print(json.dumps(record, indent=2))
+    else:
+        process = record['process']
+        identity = process_identity(process['pid'])
+        sys.exit(0 if identity and identity['start_ticks'] == process['start_ticks'] else 1)
+
+
 # Files a review triage may change: dispositions, the task queue and runner bookkeeping.
 TRIAGE_RECORDS = ('.ai/tasks.md', '.ai/reviews/dispositions.md', '.ai/current-plan.md',
                   '.ai/state.md', '.ai/handoff.md', '.ai/run-log.md')
@@ -5649,6 +5870,8 @@ def main():
         stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'run-record':
+        run_record(arguments)
     elif command == 'ruling-row':
         ruling_row(arguments)
     elif command == 'state-root-check':

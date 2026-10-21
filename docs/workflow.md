@@ -38,6 +38,23 @@ ready_for_acceptance. `blocked` describes a stop needing resolution. Review and
 acceptance phases are not inferred as passed simply because a CLI succeeded.
 The runner records ready_for_review, never claims that the human accepted the work.
 
+**Run records (RC-01 G3; helper only, no caller yet).** `workflow.py run-record` keeps one
+host record per run beside `run.json`: `runs/<id>.json`, `runs/current` (the latest id, one line)
+and `runs/.lock`. `start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (KIND `pipeline` or
+`ai-run`; `-` `-` for no base) prints only the new id `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>` (`seq`
+one more than the highest kept record's, chosen under the lock; the file is created exclusively,
+never replaced) and writes schema 1: kind, checkout, branch, base, the exact argv, launcher
+(a valid `AI_LAUNCHER` `[a-z0-9._-]{1,32}`, else `systemd` with `INVOCATION_ID`, `terminal` when
+stdin is a TTY, else `other`), log (an absolute `AI_RUN_LOG`, else PID's stdout when it is a
+regular file, else null), start time, process identity (pid, pgid, sid and start ticks from
+`/proc/PID/stat`), `resumes` 0, `stop_requested` null, `ended` null, outcome `running`, empty
+detail. Each write holds `runs/.lock` (flock, gives up after 5 s with `run record is locked`); a
+start keeps the 20 records with the highest `seq` (never the current one). `current` prints the
+id, `show [ID]` the JSON, `alive [ID]` exits 0 when the recorded process exists, is not a zombie
+and has the recorded start ticks. A record that is not schema 1 with the right field types, a
+symlink, over 64 KB, or a `current` that is not an id is "no record" (exit 1); unknown extra
+fields are accepted.
+
 ## Validation and evidence
 
 `.ai/validate` is the one real project gate. `.ai/bin/ai-check` invokes it from the

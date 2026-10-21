@@ -5153,7 +5153,7 @@ tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limi
 runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 
 ## T301 — Run record helper: schema 1, start, show, alive, host lock, retention (RC-01 G3, helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5220,6 +5220,17 @@ Targeted: `python3 -m unittest discover -s tests -k run_record` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (opus): `scripts/lib/workflow.py` gains `run-record start|current|show|alive` (after
+`run_manifest`) with module functions `run_stamp`, `runs_dir`, `process_identity`, `run_lock`,
+`read_run`, `start_run` for T315/T305/T308. Ids `<stamp>-<pid>-<seq>`, record created with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, `current` via `atomic()`, retention to the 20 highest `seq`, bounded
+flock (5 s, `run record is locked`), reads refuse symlinks, non-regular files, > 64 KB, wrong
+schema/types and a `current` that is not an id. Extra checks beyond the criteria: KIND outside
+`pipeline`/`ai-run`, a half `-` base and `--pid 0` fail and write nothing; BASE_SHA must be 40 or
+64 hex. Six tests named in the criteria added (`tests/test_workflow.py`, end of `ToolkitTest`;
+fixtures are own `sleep` children in their own session, the zombie case included).
+`docs/workflow.md` "Durable records" describes the helper. Flow unchanged (no caller).
+Targeted `-k run_record`: Ran 9 tests OK. Full `.ai/bin/ai-check`: Ran 1113 tests OK (1229 s).
 
 ## T315 — Run record lifecycle bound to the run id and process identity (RC-01 G3, plan review P5)
 Status: TODO
