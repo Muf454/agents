@@ -4892,9 +4892,9 @@ Targeted: `-k state_isolation` 3 OK.
 Gate: `.ai/bin/ai-check`: 1099 tests OK, 795.5 s, exit 0 (the harness moved it to the background past 600 s; waited for it).
 
 ## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
-Status: BLOCKED
+Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 A pre-flight queue repair claims `queue-order:<ID>` for every task whose position changes, not
@@ -4933,11 +4933,12 @@ Targeted: `python3 -m unittest discover -s tests -k ruling` (must say `Ran N tes
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-21 12:35Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (3d84f5a). Verify it against the acceptance criteria, run the targeted checks, then run `.ai/bin/ai-check` once in the background and wait for its result WITHOUT editing or committing anything until it finishes (an earlier attempt edited files during the gate and got "Validation modified project content"). Model raised to opus because the task failed once.
 
 ## T115 — Routed reviews default to opus (review N1, BR-14, A12)
-Status: BLOCKED
+Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 A routed Claude review (a small low-risk fix round) runs on opus as A12 specifies, even when the
@@ -4969,6 +4970,7 @@ Targeted: `python3 -m unittest discover -s tests -k reviewed_by` (must say `Ran 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-21 12:35Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (a13ffad). Verify it against the acceptance criteria, run the targeted checks, then run `.ai/bin/ai-check` once in the background and wait for its result WITHOUT editing or committing anything until it finishes (an earlier attempt edited files during the gate and got "Validation modified project content"). Model raised to opus because the task failed once.
 BLOCKED on the gate only. Implemented: `claude_model` in `scripts/ai-review` uses opus with risk `routed` when a
 routed review is set (the `AI_CLAUDE_REVIEW_MODEL` override and effort validation still apply). Added
 `test_review_routing_routed_review_uses_opus_after_an_opus_task` and

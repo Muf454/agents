@@ -552,3 +552,4 @@
 | 2026-10-21T06:56:27Z | runner | T114 | blocked; try next independent task | not complete | 3d84f5a | See task result |
 | 2026-10-21T07:15:34Z | runner | T115 | blocked; try next independent task | not complete | a13ffad | See task result |
 | 2026-10-21T07:15:35Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | b83093b | No merge or deployment performed |
+| 2026-10-21T12:36:00Z | mission-control | T114, T115 | BLOCKED → TODO (gate-only block; fixes committed in 3d84f5a, a13ffad); model raised to opus; note: no edits while the gate runs | n/a | 699886d | Restarting the pipeline |
