@@ -4995,3 +4995,120 @@ picks `claude-fable-5-1`). Targeted: `-k review_routing` Ran 6 OK; `-k reviewed_
 Gate: `.ai/bin/ai-check` Ran 1103 tests, OK, exit 0 (766.5 s; the harness moved it to the background past 600 s;
 no edits until it finished). Vault flow chart routed node now says "(opus)" instead of "(usual model)".
 
+## T116 — Routing never counts fix rounds from commit subjects (review M3, BR-14, A10)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+`review-route` treats a missing host fix-round store as zero eligible fix rounds, so a
+triage commit subject alone (agent-controlled Git history) can never route a review to Claude.
+Missing or unreadable host records keep Codex, as A10 requires.
+
+### Implementation notes
+- Review round 2, M3: `route_fix_rounds` (`scripts/lib/workflow.py`, ~line 3712) falls back to
+  counting `TRIAGE_COMMIT` subjects in `BASE..HEAD` when `fix_round_records()` returns `None`.
+  With a missing store and a matching subject, `review_route_reason` returns
+  `claude small low-risk fix round …`.
+- Make `route_fix_rounds` return 0 when `fix_round_records()` is `None` (no Git-subject
+  fallback). Keep the legacy migration in `fix-rounds init`/`count` (around the
+  `TRIAGE_SUBJECT` handling, ~line 1316) unchanged: it is a separate path and not routing
+  eligibility. Fix the docstring.
+- Check that the normal pipeline path (store written by the host at triage) still routes round 2
+  to Claude: `test_review_routing_pipeline_small_low_risk_fix_round_goes_to_claude` must still pass.
+- Flow unchanged. Only update the vault "Review routing" bullet if it mentions commit subjects.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_review_route_triage_subject_without_host_record_stays_on_codex`: missing
+  fix-round store, a commit with the triage subject, an earlier host Codex code review of this
+  branch and a one-line low-risk diff → `codex first full code review` (or another `codex …`
+  reason), never `claude …`. With a host store holding that round, the same history returns
+  `claude small low-risk fix round …`.
+- `fix-rounds` legacy migration tests still pass unchanged.
+- Existing `test_review_route_*` and `test_review_routing_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_route` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k fix_round` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+`tests/isolation.py` ensures both `AI_STATE_DIR` and `XDG_STATE_HOME` point under the temp dir,
+each checked on its own, so a temporary `AI_STATE_DIR` with an unset or external
+`XDG_STATE_HOME` still gets an isolated XDG state for the tests and their children.
+
+### Implementation notes
+- Review round 2, N2: the module checks only `AI_STATE_DIR`; when it is already under the temp
+  dir it leaves `XDG_STATE_HOME` untouched (unset or external), and
+  `test_state_isolation_env_under_temp_and_child_registers_there` then raises
+  `KeyError: 'XDG_STATE_HOME'`.
+- Apply `under_temp` to each variable separately: keep a value already under the temp dir
+  (the parallel runner's workers inherit both), otherwise create its own `mkdtemp` and register
+  its cleanup. Update the module docstring.
+- Test-only; flow unchanged.
+
+### Likely affected modules
+tests/isolation.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg`: running the
+  isolation module in a child with `AI_STATE_DIR` under the temp dir and (a) no `XDG_STATE_HOME`,
+  (b) `XDG_STATE_HOME` outside the temp dir, leaves `AI_STATE_DIR` unchanged and sets
+  `XDG_STATE_HOME` to a directory under the temp dir. Both already under the temp dir → both kept.
+- Existing `test_state_isolation_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+Every successful pre-flight scan that prints overlap lines also writes (or refreshes)
+`.ai/local/preflight.md`, as A5 requires, whether or not a queue repair or commit happens.
+
+### Implementation notes
+- Review round 2, N3: `ai_queue_ruling` (`scripts/lib/common.sh`) returns after
+  `tasks preflight --dry-run` when there is nothing to repair, and `scripts/ai-run` (planning
+  ~line 447, plan revision ~line 563) only uses `--dry-run`; `tasks_preflight`
+  (`scripts/lib/workflow.py`, ~line 718) writes `preflight.md` only when not a dry run.
+- Simplest fix: let `tasks preflight --dry-run` still write the ignored advisory report (it is not
+  a queue change), keeping the queue untouched; or add a `--report` mode that writes only the
+  report and call it on the no-repair paths. Keep the unsafe `.ai/local` skip quiet (as
+  `_reports_overlaps_between_todo_tasks` expects). A scan with no overlaps writes an empty report
+  so a stale one is not left behind. No run-log row or commit just for a report (A5).
+- Update docs/workflow.md if it says the report is written only on repair. Flow unchanged.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/lib/common.sh, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_preflight_helper_valid_queue_writes_the_overlap_report`: a valid queue with
+  two overlapping TODO tasks leaves `.ai/tasks.md` bytes unchanged and writes the overlap lines to
+  `.ai/local/preflight.md`; after removing the overlap, a second scan refreshes it (no stale line).
+- Regression `test_preflight_pipeline_no_repair_saves_the_overlap_report`: a pipeline start with a
+  valid overlapping queue makes no ruling commit and no Ruling row, and `.ai/local/preflight.md`
+  holds the printed overlap lines.
+- Existing `test_preflight_*` and `test_ruling_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+

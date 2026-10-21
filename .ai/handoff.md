@@ -194,6 +194,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
   `test_preflight_helper_claims_indirectly_moved_tasks` (T114, M2, done),
   `test_review_routing_routed_review_uses_opus_after_an_opus_task` and
   `test_review_routing_routed_review_honours_the_model_override` (T115, N1, done).
+- Review round 2 fixes (TODO): `test_review_route_triage_subject_without_host_record_stays_on_codex`
+  (T116, M3), `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` (T117, N2),
+  `test_preflight_helper_valid_queue_writes_the_overlap_report` and
+  `test_preflight_pipeline_no_repair_saves_the_overlap_report` (T118, N3).
 
 ## Human todos
 - Gate files: none need changing for this batch.
@@ -202,5 +206,8 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
 - Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107, T109 and T110 added one).
 
 ## Next action
-Review round 1 (Codex): M1, M2 and N1 were all accepted (`.ai/reviews/dispositions.md`). T113,
-T114 and T115 are DONE; the queue is complete, ready for the next review round. Nothing is merged or deployed.
+Review round 1 (Codex): M1, M2 and N1 were all accepted; T113, T114 and T115 are DONE.
+Review round 2 (Codex): M3, N2 and N3 accepted (`.ai/reviews/dispositions.md`), fix tasks T116
+(routing ignores triage commit subjects without a host fix-round record), T117 (isolation sets
+both state variables independently) and T118 (advisory scans write `.ai/local/preflight.md`) are
+TODO. Nothing is merged or deployed.
