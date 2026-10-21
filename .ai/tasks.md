@@ -5048,7 +5048,7 @@ ai-check PASS, 1104 tests, 816.3 s (no edits during the gate). Flow unchanged; t
 note already says counts never come from commit subjects.
 
 ## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5083,6 +5083,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (905bf68). Verify it against the acceptance criteria and run the targeted tests. Do NOT run the full `.ai/bin/ai-check` in the foreground: it takes about 14 minutes, longer than the 10-minute tool limit. Run it once with run_in_background and wait for the result without editing or committing anything until it finishes; or, if the targeted tests pass, mark the task DONE and let the runner's own gate after the session verify it.
+2026-10-21 (opus): verified 905bf68 against the criteria: `tests/isolation.py` applies `under_temp` to `AI_STATE_DIR` and `XDG_STATE_HOME` separately, each with its own `mkdtemp` and cleanup; docstring updated. Regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` covers unset, external and both-under-temp XDG. Targeted `-k state_isolation`: Ran 4 tests, OK. Full `.ai/bin/ai-check` not run in this session (≈816 s, beyond the 600 s tool limit; the runner prompt forbids backgrounding it); the runner's post-session gate is the gate evidence. Test-only; flow unchanged.
 
 ## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
 Status: TODO

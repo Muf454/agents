@@ -68,7 +68,7 @@ unchanged because the host protects DONE blocks).
   isolation paragraph; no other mismatch found, see the T112 result).
 
 ## Validation run
-T116 tree: PASS, 1104 tests (ai-check, 816.3 s). T115 tree: PASS, 1103 tests (ai-check, 766.5 s). T114 tree: PASS, 1103 tests (ai-check, 764.1 s). T111 tree: PASS, 1098 tests (full gate run by mission control, 766.4 s). T110 tree: gate PASS on
+T117 tree: targeted `-k state_isolation` 4 OK; full gate left to the runner. T116 tree: PASS, 1104 tests (ai-check, 816.3 s). T115 tree: PASS, 1103 tests (ai-check, 766.5 s). T114 tree: PASS, 1103 tests (ai-check, 764.1 s). T111 tree: PASS, 1098 tests (full gate run by mission control, 766.4 s). T110 tree: gate PASS on
 the rerun after one unrelated failure (`test_gate_lock_wait_runner_waits_for_the_session_gate`,
 see T110). T109 tree: PASS, 1092 tests (ai-check, 787.0 s). T108 tree: PASS, 1085 tests (736.6 s).
 T107 tree: PASS, 1076 tests (ai-check, 725.6 s). T106 tree: PASS, 1069 tests (ai-check, 743.9 s). T105 tree: PASS, 1062 tests (ai-check, 723.0 s). T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
@@ -199,8 +199,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
   `test_review_routing_routed_review_honours_the_model_override` (T115, N1, done).
 - Review round 2 fixes: `test_review_route_triage_subject_without_host_record_stays_on_codex`
   (T116, M3, done: no host store + triage subject → `codex first full code review`, no store
-  written; after `fix-rounds record` → `claude small low-risk fix round (1 lines)`); TODO:
-  `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` (T117, N2),
+  written; after `fix-rounds record` → `claude small low-risk fix round (1 lines)`),
+  `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` (T117, N2, done: a temp
+  `AI_STATE_DIR` is kept and an unset or external `XDG_STATE_HOME` gets its own temp dir; both
+  under the temp dir → both kept); TODO:
   `test_preflight_helper_valid_queue_writes_the_overlap_report` and
   `test_preflight_pipeline_no_repair_saves_the_overlap_report` (T118, N3).
 
@@ -215,5 +217,7 @@ Review round 1 (Codex): M1, M2 and N1 were all accepted; T113, T114 and T115 are
 Review round 2 (Codex): M3, N2 and N3 accepted (`.ai/reviews/dispositions.md`), fix tasks T116
 (routing ignores triage commit subjects without a host fix-round record), T117 (isolation sets
 both state variables independently) and T118 (advisory scans write `.ai/local/preflight.md`) are
-TODO; T116 is DONE (missing fix-round store counts no fix round in `route_fix_rounds`).
+TODO; T116 is DONE (missing fix-round store counts no fix round in `route_fix_rounds`); T117 is
+DONE (targeted tests only; the full gate is left to the runner's post-session gate, ≈816 s).
+T118 remains.
 Nothing is merged or deployed.
