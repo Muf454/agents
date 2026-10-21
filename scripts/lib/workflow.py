@@ -6,6 +6,7 @@ The shell scripts own the workflow. This module never invokes an AI agent.
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -3504,8 +3505,8 @@ def plan_revision_records():
     return records
 
 
-def is_ancestor(commit):
-    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'],
+def is_ancestor(commit, head='HEAD'):
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, head],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
@@ -3650,6 +3651,147 @@ def review_risk(arguments):
             print(f"high {task['id']} title names {match.group(0).lower()}")
             return
     print('normal')
+
+
+REVIEW_SMALL_LINES = 200
+REVIEW_RISK_PATHS = ('*migration*', '*.sql', 'supabase/*', '*auth*', '*polic*', '*rls*', '*security*',
+                     '*payment*', '*billing*', '.github/*', '.claude/*', '.ai/permissions.allow',
+                     'scripts/lib/common.sh', 'scripts/ai-check')
+REVIEW_RISK_WORDS = ('auth', 'RLS', r'row\s+level', 'polic(?:y|ies)', 'grant', 'revoke', r'security\s+definer',
+                     'migrat', 'payment', 'billing', 'invoice', 'money', 'price', 'lock', 'mutex', 'concurren',
+                     'race', 'transaction', 'deadlock', 'secret', 'token', 'password', 'crypt', 'permission')
+
+
+def risk_path(path, globs):
+    """The first risk glob PATH matches (case-insensitive), or None. Under `.ai/` only globs
+    naming `.ai/` count: workflow records are not reviewed code."""
+    lowered = path.lower()
+    for glob in globs:
+        if lowered.startswith('.ai/') and not glob.lower().startswith('.ai/'):
+            continue
+        if fnmatch.fnmatchcase(lowered, glob.lower()):
+            return glob
+    return None
+
+
+def risk_word(base, head, words):
+    """(word, path) of the first changed `+`/`-` line outside `.ai/` that names a risk word at a
+    word start (case-insensitive; `_` separates words, so `is_auth` names auth), or None."""
+    pattern = re.compile(r'(?<![^\W_])(' + '|'.join(f'(?:{word})' for word in words) + ')', re.I)
+    diff = git('-c', 'core.quotepath=off', 'diff', '--no-color', '--no-ext-diff', '-U0', base, head,
+               '--', '.', ':!.ai').decode(errors='replace')
+    path, header = None, False
+    for line in diff.split('\n'):
+        if line.startswith('diff --git '):
+            path, header = None, True
+        elif header and line.startswith('--- '):
+            path = line[6:] if line.startswith('--- a/') else path
+        elif header and line.startswith('+++ '):
+            path = line[6:] if line.startswith('+++ b/') else path
+        elif line.startswith('@@'):
+            header = False
+        elif not header and line[:1] in ('+', '-'):
+            match = pattern.search(line[1:])
+            if match:
+                return match.group(1).lower(), path
+    return None
+
+
+def route_fix_rounds(base):
+    """`fix-rounds count BASE` without writing: a branch without a host record counts its host
+    triage subjects, as `init` would."""
+    base = git('rev-parse', '--verify', f'{base}^{{commit}}').decode().strip()
+    history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
+    records = fix_round_records()
+    if records is None:
+        records = [line.split(' ', 1)[0] for line in history if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
+    reachable = {line.split(' ', 1)[0] for line in history}
+    return sum(1 for record in records if fix_round_commit(record) in reachable)
+
+
+def queue_at(commit):
+    try:
+        text = git('show', f'{commit}:.ai/tasks.md').decode()
+    except subprocess.CalledProcessError:
+        return []
+    return tasks(text)
+
+
+def review_route_reason(mode, base, head):
+    route = os.environ.get('AI_REVIEW_ROUTE', '')
+    if route == 'codex':
+        return 'codex routing off'
+    if route not in ('', 'risk'):
+        return 'codex invalid AI_REVIEW_ROUTE'
+    if mode == 'plan':
+        return 'codex plan review'
+    if mode == 'recheck':
+        return 'codex re-check'
+    if mode != 'code':
+        raise ValueError(f'unknown mode {mode}')
+    head = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
+    if route_fix_rounds(base) == 0:
+        return 'codex first full code review'
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    project, branch = project_name(), current_branch() or 'detached'
+    rows = [r for r in read_outcomes([outcomes_path()], strict=True)
+            if r.get('kind') == 'review' and r.get('mode') == 'code' and r.get('project') == project
+            and r.get('branch') == branch and isinstance(r.get('head'), str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['head'])]
+    reachable = [r for r in rows if is_ancestor(r['head'], head)]
+    if not any(r.get('reviewer') == 'codex' for r in reachable):
+        return 'codex no Codex review of this branch yet'
+    last = next((r['head'] for r in reversed(reachable) if r['head'] != head), None)
+    if last is None:
+        return 'codex no earlier review'
+    limit = os.environ.get('AI_REVIEW_SMALL_LINES', '')
+    limit = int(limit) if re.fullmatch(r'\d{1,9}', limit) else REVIEW_SMALL_LINES
+    lines, binary = 0, False
+    for line in git('diff', '--numstat', '--no-ext-diff', last, head, '--', '.', ':!.ai').decode().splitlines():
+        added, deleted = line.split('\t')[:2]
+        if added == '-' or deleted == '-':
+            binary = True
+        else:
+            lines += int(added) + int(deleted)
+    if binary:
+        return f'codex fix round diff {lines} lines and a binary file'
+    if lines > limit:
+        return f'codex fix round diff {lines} lines'
+    globs = REVIEW_RISK_PATHS + tuple(os.environ.get('AI_REVIEW_RISK_PATHS', '').split())
+    fields = git('diff', '--name-status', '-z', '-M', '--no-ext-diff', last, head).decode(errors='replace').split('\0')
+    paths = []
+    while len(fields) > 1:
+        status, fields = fields[0], fields[1:]
+        count = 2 if status[:1] in ('R', 'C') else 1  # a rename or copy names both paths
+        paths += fields[:count]
+        fields = fields[count:]
+    for path in paths:
+        if risk_path(path, globs):
+            return f'codex risk path {path}'
+    words = REVIEW_RISK_WORDS + tuple(re.escape(word) for word in os.environ.get('AI_REVIEW_RISK_WORDS', '').split())
+    found = risk_word(last, head, words)
+    if found:
+        return f'codex risk word {found[0]} in {found[1]}'
+    before = {t['id'] for t in queue_at(last) if t['status'] == 'DONE'}
+    for task in queue_at(head):
+        if task['status'] == 'DONE' and task['id'] not in before \
+                and task['model'].lower().startswith(('opus', 'claude-opus')):
+            return f"codex {task['id']} runs on opus"
+    return f'claude small low-risk fix round ({lines} lines)'
+
+
+def review_route(arguments):
+    """review-route MODE BASE HEAD (BR-14, A9/A10): `codex REASON` or `claude REASON`, from host
+    records only (fix-round records, outcome review rows) and the diff since the last
+    host-recorded code review; never review commit subjects (`review_rounds`). Exit 0 always;
+    any error routes to Codex."""
+    if len(arguments) != 3 or arguments[0] not in ('plan', 'code', 'recheck'):
+        fail('Usage: review-route plan|code|recheck BASE HEAD')
+    try:
+        reason = review_route_reason(*arguments)
+    except Exception:  # Routing never fails a review: Codex is the safe choice.
+        reason = 'codex routing unavailable'
+    print(reason)
 
 
 FALLBACK_LOG = Path('.ai/reviews/fallback-log.md')
@@ -5480,6 +5622,8 @@ def main():
         review_allowlist(arguments)
     elif command == 'review-risk':
         review_risk(arguments)
+    elif command == 'review-route':
+        review_route(arguments)
     elif command == 'fallback-record':
         fallback_record(arguments)
     elif command == 'outcome':

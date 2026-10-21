@@ -4502,7 +4502,7 @@ two Fresh retry bullets, hub Log line. Evidence: `-k fresh_retry` Ran 7 tests OK
 1076 tests in 725.6 s (foreground call moved to background by the tool, waited for).
 
 ## T108 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: none
 Model: opus
 

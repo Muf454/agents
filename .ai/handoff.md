@@ -21,7 +21,10 @@ from this project's/branch's/task's failed outcome rows, the model one tier up f
 a ≤ 600-character failure note from the outcome log, the last gate log and the task's result line;
 no caller yet, flow unchanged); T107 (`ai-run` uses `attempt-info` before each task session: the
 host failure note in the prompt, one model tier up from the third attempt, `Attempt N of T… on
-MODEL` printed, run-log rows `completed`/`blocked`/`stopped` name `(attempt N, MODEL)`). The plan was written 2026-10-20 in an unattended planning session on
+MODEL` printed, run-log rows `completed`/`blocked`/`stopped` name `(attempt N, MODEL)`); T108
+(`workflow.py review-route MODE BASE HEAD`: `codex REASON` or `claude REASON` from the host
+fix-round store, the outcome log's code review rows and the diff since the last recorded review;
+any error → `codex routing unavailable`; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -69,7 +72,8 @@ hub Log line added. T104 (2026-10-21) extended the Rulings bullet with the dispo
 ruling and added a hub Log line; T105 (2026-10-21) added the Flow chart line ruling to it and a
 hub Log line. T106 (2026-10-21): flow unchanged (helper only). T107 (2026-10-21): "Inside one
 task" pick node names the failure note and the model raise, plus "Fresh retry (BR-03, T107)"
-bullets under "Inside one task" and "When something goes wrong"; hub Log line. T109 and T110 still
+bullets under "Inside one task" and "When something goes wrong"; hub Log line. T108 (2026-10-21):
+flow unchanged (helper only, no caller). T109 and T110 still
 update it (reviewer choice); T112 checks it.
 
 ## Manual testing for the human
@@ -131,7 +135,14 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   (`--model opus`, `raised the model from sonnet to opus`, outcome row model `opus`, `(attempt 3,
   opus)`), `_opus_task_is_not_raised`, `_corrupt_outcome_log_runs_as_today`,
   `_blocked_row_names_the_attempt`, `_stop_row_names_the_attempt`).
-- `test_review_route_*` (T108: every routing rule, forged history ignored).
+- `test_review_route_*` (T108, done: `_plan_recheck_and_setting` (plan, re-check,
+  `AI_REVIEW_ROUTE=codex`/`x`/`risk`, usage errors), `_first_full_code_review`,
+  `_small_low_risk_fix_round_goes_to_claude` (20 lines; `.ai/`-only changes count 0 and never
+  match), `_large_fix_round_goes_to_codex` (201 lines, `AI_REVIEW_SMALL_LINES=500`/invalid, binary
+  file), `_risk_paths_and_words` (`supabase/migrations/1.sql`, `is_auth()`, extra words/paths, a
+  removed line, a rename), `_newly_done_opus_task`, `_needs_a_host_codex_review_of_this_branch`
+  (fallback row only, Codex row of another branch, forged review commit), `_no_earlier_review`,
+  `_unreadable_records` (`codex routing unavailable`, exit 0)).
 - `test_codex_limit_*`, `test_review_routing_*` (T109: limit memory, routed review, risky fix
   round on Codex, reviewer settings).
 - `test_reviewed_by_*` (T110) and `test_state_isolation_*` (T111).
@@ -143,4 +154,4 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105 and T107 added one).
 
 ## Next action
-The runner continues with T108. Nothing is merged or deployed.
+The runner continues with T109. Nothing is merged or deployed.

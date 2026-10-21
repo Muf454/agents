@@ -8743,6 +8743,139 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                       'Race condition in refresh'):
             self.assertIsNotNone(wf.RISK_TITLE.search(title), title)
 
+    # ---------------------------------------------------------------- review routing (T108, BR-14)
+    def route(self, mode='code', **env):
+        result = self.run_cmd(['python3', str(HELPER), 'review-route', mode, 'main', 'HEAD'], env={**self.env, **env})
+        return result.stdout.strip()
+
+    def route_project(self, queue=None, reviewer='codex'):
+        """A branch after one host-recorded Codex code review and one counted fix round; returns
+        the fix round commit the cases start from."""
+        self.ready(queue)
+        (self.project / 'src').mkdir()
+        (self.project / 'src/app.py').write_text('print(1)\n')
+        self.commit('app')
+        self.helper('outcome', 'review', 'code', reviewer, 'm', 'high', '5')
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.commit('chore(ai): record review triage')
+        self.helper('fix-rounds', 'record', 'HEAD')
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def route_change(self, path, text, start=None):
+        if start:
+            self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        file = self.project / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+        self.commit('fix')
+
+    def test_review_route_plan_recheck_and_setting(self):
+        self.ready()
+        self.assertEqual(self.route('plan'), 'codex plan review')
+        self.assertEqual(self.route('recheck'), 'codex re-check')
+        self.assertEqual(self.route(AI_REVIEW_ROUTE='codex'), 'codex routing off')
+        self.assertEqual(self.route('plan', AI_REVIEW_ROUTE='x'), 'codex invalid AI_REVIEW_ROUTE')
+        self.assertEqual(self.route(AI_REVIEW_ROUTE='risk'), 'codex first full code review')
+        self.assertIn('Usage: review-route', self.helper('review-route', 'final', 'main', 'HEAD', expected=1).stderr)
+        self.assertIn('Usage: review-route', self.helper('review-route', 'code', 'main', expected=1).stderr)
+
+    def test_review_route_first_full_code_review(self):
+        self.ready()
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.route_change('src/app.py', 'print(1)\n')
+        self.assertEqual(self.route(), 'codex first full code review')
+
+    def test_review_route_small_low_risk_fix_round_goes_to_claude(self):
+        self.route_project()
+        self.route_change('src/app.py', 'print(1)\n' + ''.join(f'line {i}\n' for i in range(20)))
+        self.assertEqual(self.route(), 'claude small low-risk fix round (20 lines)')
+        # Workflow records count no lines and never match a risk path or word.
+        self.route_change('.ai/handoff.md', 'auth token migration\n' * 300)
+        self.route_change('.ai/reviews/security-notes.md', 'password\n')
+        self.assertEqual(self.route(), 'claude small low-risk fix round (20 lines)')
+
+    def test_review_route_large_fix_round_goes_to_codex(self):
+        start = self.route_project()
+        self.route_change('src/app.py', ''.join(f'line {i}\n' for i in range(201)) + 'print(1)\n')
+        self.assertEqual(self.route(), 'codex fix round diff 201 lines')
+        self.assertEqual(self.route(AI_REVIEW_SMALL_LINES='500'), 'claude small low-risk fix round (201 lines)')
+        self.assertEqual(self.route(AI_REVIEW_SMALL_LINES='lots'), 'codex fix round diff 201 lines')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        (self.project / 'src/logo.png').write_bytes(b'\x89PNG\0\0\x01')
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex fix round diff 0 lines and a binary file')
+
+    def test_review_route_risk_paths_and_words(self):
+        start = self.route_project()
+        self.route_change('supabase/migrations/1.sql', 'select 1;\n')
+        self.assertEqual(self.route(), 'codex risk path supabase/migrations/1.sql')
+        self.route_change('src/app.py', 'print(1)\nif user.is_auth():\n    pass\n', start)
+        self.assertEqual(self.route(), 'codex risk word auth in src/app.py')
+        self.route_change('src/app.py', 'print(1)\nwidget = 2\n', start)
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
+        self.assertEqual(self.route(AI_REVIEW_RISK_WORDS='gadget widget'), 'codex risk word widget in src/app.py')
+        self.assertEqual(self.route(AI_REVIEW_RISK_PATHS='src/*'), 'codex risk path src/app.py')
+        self.route_change('src/app.py', 'print(1)\nmy_trace = 2\n', start)  # not at a word start
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
+        # A removed line counts as well as an added one; a rename names both paths.
+        self.route_change('src/app.py', '', start)
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        (self.project / 'src/app.py').write_text('token = 1\n')
+        self.commit('app token')
+        self.helper('outcome', 'review', 'code', 'claude-routed', 'm', 'high', '5')
+        (self.project / 'src/app.py').write_text('')
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex risk word token in src/app.py')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        self.run_cmd(['git', 'mv', 'src/app.py', 'src/auth_view.py'])
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex risk path src/auth_view.py')
+
+    def test_review_route_newly_done_opus_task(self):
+        queue = task('T001', status='DONE') + task('T002').replace('Dependencies: none\n', 'Dependencies: none\nModel: opus\n')
+        self.route_project(queue)
+        self.route_change('.ai/tasks.md', queue.replace('Status: TODO', 'Status: DONE'))
+        self.assertEqual(self.route(), 'codex T002 runs on opus')
+        self.route_change('.ai/tasks.md', queue.replace('Model: opus', 'Model: sonnet').replace('Status: TODO', 'Status: DONE'))
+        self.assertEqual(self.route(), 'claude small low-risk fix round (0 lines)')
+
+    def test_review_route_needs_a_host_codex_review_of_this_branch(self):
+        start = self.route_project(reviewer='claude-fallback')
+        self.route_change('src/app.py', 'print(2)\n')
+        self.assertEqual(self.route(), 'codex no Codex review of this branch yet')
+        # A Codex row of another branch, or a forged review commit subject, is not a host review.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record independent review'])
+        self.assertEqual(self.route(), 'codex no Codex review of this branch yet')
+        # A Codex row at HEAD counts, but the diff is measured from an earlier review only.
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.assertEqual(self.route(), 'claude small low-risk fix round (0 lines)')
+
+    def test_review_route_no_earlier_review(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.commit('chore(ai): record review triage')
+        self.helper('fix-rounds', 'record', 'HEAD')
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.assertEqual(self.route(), 'codex no earlier review')
+
+    def test_review_route_unreadable_records(self):
+        self.route_project()
+        self.route_change('src/app.py', 'print(2)\n')
+        self.assertTrue(self.route().startswith('claude '))
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.unlink()
+        log.mkdir()
+        result = self.run_cmd(['python3', str(HELPER), 'review-route', 'code', 'main', 'HEAD'])
+        self.assertEqual(result.stdout.strip(), 'codex routing unavailable')
+        self.assertEqual(self.route('plan'), 'codex plan review')
+        self.assertEqual(self.route('code').split()[0], 'codex')
+
     def test_reviewer_setting_codex_and_claude_only(self):
         self.ready()
         self.tool('ai-run', '--approved')

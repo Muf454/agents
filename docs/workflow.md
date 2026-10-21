@@ -1220,6 +1220,24 @@ label. `fallback-record` appends a row to `.ai/reviews/fallback-log.md`, which
 commits with its own record). `pr-body` titles the review section "Claude fallback,
 <model>" with a catch-up note. `outcome review …` appends to the host outcome log.
 
+Routing (`review-route MODE BASE HEAD`, BR-14, T108; no caller yet, T109 wires it into
+`ai-review`): prints `codex REASON` or `claude REASON` and exits 0; any error prints `codex
+routing unavailable`. It reads host records only (the fix-round store as `fix-rounds count`
+does, without writing; the outcome log's `review` rows), never review commit subjects. The
+first rule that applies wins: `AI_REVIEW_ROUTE=codex` → `routing off` (a value other than
+empty, `risk` or `codex` → `invalid AI_REVIEW_ROUTE`); mode `plan`/`recheck` → Codex; no
+fix round recorded for BASE → `first full code review`; no `codex` code review row of this
+project and branch whose head is an ancestor of HEAD → `no Codex review of this branch yet`;
+LAST = the newest code review row (any reviewer) whose head is an ancestor of HEAD and not
+HEAD itself, none → `no earlier review`; the diff LAST..HEAD outside `.ai/` with more than
+`AI_REVIEW_SMALL_LINES` (default 200) added + deleted lines or a binary file → `fix round
+diff N lines`; a changed path (renames name both) matching a risk glob (`REVIEW_RISK_PATHS`
+plus `AI_REVIEW_RISK_PATHS`; under `.ai/` only globs naming `.ai/`) → `risk path PATH`; a
+changed line outside `.ai/` with a risk word at a word start (`REVIEW_RISK_WORDS` plus
+`AI_REVIEW_RISK_WORDS`; `_` separates words) → `risk word WORD in PATH`; a task DONE at HEAD
+but not at LAST on `opus*`/`claude-opus*` → `T… runs on opus`; else `claude small low-risk
+fix round (N lines)`.
+
 ## Outcome log
 
 `workflow.py outcome task|review` appends one JSON line to `<state root>/outcomes.jsonl`
