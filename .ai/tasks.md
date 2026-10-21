@@ -4290,7 +4290,7 @@ line are updated. One deviation from the criteria: the helper criterion uses `T0
 fixture uses `T001`, the existing TODO task, so `triage-check` passes.
 
 ## T105 — Ruling: the handoff's `## Flow chart` line (BR-01, wiring)
-Status: TODO
+Status: DONE
 Dependencies: T101
 Model: opus
 
@@ -4343,6 +4343,20 @@ Targeted: `python3 -m unittest discover -s tests -k pr_body` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21. `workflow.py flow-line-ruling [--dry-run]` (first `## Flow chart` heading outside
+code fences; HTML comments count as empty, so the template's comment-only section is left alone;
+an empty section too). `ai_flow_line_ruling KEY TASK` in `scripts/lib/common.sh`: dry run, claim
+`run-manifest ruling flow-line KEY`, real run, `Flow chart line: "…" placed under the heading.` and
+one `Ruling (flow-line)` row. Called in `ai-run` `checkpoint_done` before `host_gate` (key = task)
+and before the final gate (key `final`, row under `none`; `.ai/handoff.md` added to the `record
+review handoff` commit), and in `ai-pipeline` before `pr-body` (key `final`; `.ai/handoff.md` added
+to the `record pull request` commit). Deviation: a correct phrase line preceded by a comment is
+moved above the comment (the comment stays below it). Tests: 5 `test_ruling_flow_line_*` (mock
+mode `flow-blank`; fixture gate fails on a blank line under the heading). Evidence: `-k
+ruling_flow_line` Ran 5 OK; `-k pr_body` Ran 4 OK (unchanged); `-k ruling -k preflight` Ran 29 OK;
+`.ai/bin/ai-check` PASS, 1062 tests, 723.0 s (the 600 s foreground call was moved to the
+background by the tool and waited for). docs/workflow.md, vault agents-flow.md Rulings bullet and
+agents.md Log updated.
 
 ## T106 — `attempt-info`: attempt number, raised model and failure note from the host outcome log (BR-03, helper)
 Status: TODO

@@ -773,7 +773,19 @@ spec objective, task list, validation stamp, review counts/verdict, and the hand
 only a human can perform and `### Covered by automated tests` for deterministic test
 scenarios; the PR summary counts only "Needs you" steps). An optional handoff section
 `## Flow chart` (one line: "Flow chart updated" or "Flow unchanged") is copied under
-Summary. State becomes `ready_for_acceptance`.
+Summary. Flow-line ruling (host, BR-01, T105; `ai_flow_line_ruling` in `lib/common.sh`): before
+the host gate of each DONE task (key = the task, row under it), before the final gate and before
+the PR body is built (key `final`, row under `none`), `workflow.py flow-line-ruling [--dry-run]`
+reads the first `## Flow chart` heading outside code fences. HTML comments count as empty. When
+the section's first non-empty line starts with one of the two phrases it moves right under the
+heading; otherwise `Flow unchanged (host ruling)` (the section says "unchanged" or "no flow
+change", any case) or `Flow chart updated (host ruling; see below)` is inserted there; the blank
+lines before it go and the text below stays. A correct, empty or missing section is left alone.
+The host claims `run-manifest ruling flow-line KEY` first (a refused claim, i.e. a repeat or no
+run manifest, leaves the handoff as written and the gate decides as before), prints `Flow chart
+line: "…" placed under the heading.` and appends one `Ruling (flow-line)` row; the handoff and
+row land in the runner checkpoint, the review handoff commit or the pull request record commit.
+State becomes `ready_for_acceptance`.
 
 Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports

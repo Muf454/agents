@@ -591,6 +591,11 @@ if mode not in ('no-progress', 'bad-format'):
     part = re.sub(r'^Status:.*$', 'Status: ' + status, part, flags=re.M)
     file.write_text(text[:start] + part + text[end:])
     pathlib.Path(task_id + '.txt').write_text('checkpointed implementation')
+    if mode == 'flow-blank':  # a Flow chart section whose first line is not one of the two phrases
+        handoff = pathlib.Path('.ai/handoff.md')
+        handoff.write_text(re.sub(r'(?m)^## Flow chart\n<!--.*-->\n', '## Flow chart\n\nFlow chart: updated '
+                                  'the Inside one task node.\n', handoff.read_text()))
+        subprocess.run(['git', 'add', '--', '.ai/handoff.md'], check=True)
     if mode == 'tamper':
         target = pathlib.Path(os.environ['MOCK_TAMPER_PATH'])
         if target.suffix == '.py':
@@ -5153,6 +5158,118 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(rows), 1)
         self.assertIn('| plan-revision | Ruling (disposition-cell): finding cell "**P1**" read as P1.', rows[0])
         self.assertIn('🏁 FINISHED', self.notifications())
+
+    # ---------------------------------------------------------------- flow-line ruling (BR-01, T105)
+    FLOW_HANDOFF = '# Handoff\n\n## Assumptions\nNone.\n\n{section}## Human todos\nNone.\n'
+    # This repo's own gate in miniature: a blank line right under the Flow chart heading fails.
+    FLOW_GATE = ('#!/usr/bin/env bash\nset -euo pipefail\n'
+                 "python3 -c \"import sys; sys.exit('## Flow chart\\n\\n' in open('.ai/handoff.md').read())\"\n")
+    FLOW_SESSION = '## Flow chart\n\nFlow chart: updated the Inside one task node.\n'
+
+    def flow_ruling(self, section, *args):
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(self.FLOW_HANDOFF.format(section=section))
+        out = self.helper('flow-line-ruling', *args).stdout
+        return out, handoff.read_text()
+
+    def test_ruling_flow_line_helper_inserts_or_moves_the_line(self):
+        self.setup_project()
+        for section, line, after in (
+                ('## Flow chart\n\nFlow chart: updated the Inside one task node.\n\n',
+                 'Flow chart updated (host ruling; see below)',
+                 '## Flow chart\nFlow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.\n\n'),
+                ('## Flow chart\nNo flow change in this batch.\n\n', 'Flow unchanged (host ruling)',
+                 '## Flow chart\nFlow unchanged (host ruling)\nNo flow change in this batch.\n\n'),
+                ('## Flow chart\nThe flow stays UNCHANGED.\n\n', 'Flow unchanged (host ruling)',
+                 '## Flow chart\nFlow unchanged (host ruling)\nThe flow stays UNCHANGED.\n\n'),
+                ('## Flow chart\n\nFlow unchanged.\n\n', 'Flow unchanged.', '## Flow chart\nFlow unchanged.\n\n'),
+                ('## Flow chart\n<!-- One line, "Flow unchanged" or not. -->\n\nFlow chart updated: audit node.\n\n',
+                 'Flow chart updated: audit node.',
+                 '## Flow chart\nFlow chart updated: audit node.\n<!-- One line, "Flow unchanged" or not. -->\n\n')):
+            with self.subTest(section=section):
+                dry, before = self.flow_ruling(section, '--dry-run')
+                self.assertEqual(dry, line + '\n')
+                self.assertEqual(before, self.FLOW_HANDOFF.format(section=section))
+                out, text = self.flow_ruling(section)
+                self.assertEqual(out, line + '\n')
+                self.assertEqual(text, self.FLOW_HANDOFF.format(section=after))
+                self.assertEqual(self.helper('flow-line-ruling').stdout, '')
+                self.assertIn(line, self.helper('pr-body', '0', '0').stdout)
+
+    def test_ruling_flow_line_helper_leaves_correct_or_missing_sections(self):
+        self.setup_project()
+        fenced = '```markdown\n## Flow chart\n\nFlow chart: in a fence.\n```\n\n'
+        for section in ('## Flow chart\nFlow chart updated: audit node.\n\n', '## Flow chart\nFlow unchanged\n',
+                        '', fenced, '## Flow chart\n<!-- Optional. One line, "Flow unchanged". -->\n\n',
+                        '## Flow chart\n\n'):
+            with self.subTest(section=section):
+                out, text = self.flow_ruling(section)
+                self.assertEqual(out, '')
+                self.assertEqual(text, self.FLOW_HANDOFF.format(section=section))
+        # A fenced heading is skipped; the real section after it is the one ruled on.
+        out, text = self.flow_ruling(fenced + '## Flow chart\nNo flow change.\n\n')
+        self.assertEqual(out, 'Flow unchanged (host ruling)\n')
+        self.assertIn(fenced + '## Flow chart\nFlow unchanged (host ruling)\nNo flow change.\n', text)
+        (self.project / '.ai/handoff.md').unlink()
+        self.assertEqual(self.helper('flow-line-ruling').stdout, '')
+        self.helper('flow-line-ruling', '--dry', expected=1)
+
+    def flow_gate_ready(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text(self.FLOW_GATE)
+        self.commit('gate that fails on a blank line under the Flow chart heading')
+
+    def test_ruling_flow_line_runner_repairs_before_the_gate(self):
+        self.flow_gate_ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CLAUDE='flow-blank')
+        self.assertIn('Flow chart line: "Flow chart updated (host ruling; see below)" placed under the heading.',
+                      result.stdout)
+        rows = self.ruling_rows('flow-line')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| T001 | Ruling (flow-line): handoff Flow chart section starts with "Flow chart updated '
+                      '(host ruling; see below)". Why: the section must start with one of the two phrases.', rows[0])
+        self.assert_one_row_cells(rows[0])
+        checkpoint = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep',
+                                   '^chore(ai): record T001 runner checkpoint$']).stdout.strip()
+        repaired = '## Flow chart\nFlow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.\n'
+        self.assertIn(repaired, self.run_cmd(['git', 'show', f'{checkpoint}:.ai/handoff.md']).stdout)
+        self.assertIn('Ruling (flow-line)', self.run_cmd(['git', 'show', f'{checkpoint}:.ai/run-log.md']).stdout)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertIn('flow-line:T001', manifest['rulings'])
+        self.assertNotIn('flow-line:final', manifest['rulings'])  # nothing left to rule on
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('Flow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.', body)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+
+    def test_ruling_flow_line_runner_repeat_claim_leaves_the_handoff(self):
+        self.flow_gate_ready()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'flow-line', 'T001')
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='flow-blank')
+        self.assertIn('Validation failed; T001 returned to IN_PROGRESS.', result.stderr)
+        self.assertIn(self.FLOW_SESSION, (self.project / '.ai/handoff.md').read_text())
+        self.assertEqual(self.ruling_rows('flow-line'), [])
+
+    def test_ruling_flow_line_final_gate_repairs_a_later_handoff(self):
+        # The task checkpoint had nothing to rule on; a handoff edited afterwards is ruled on once
+        # at the final gate (key `final`) and lands in the review handoff commit.
+        self.flow_gate_ready()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(re.sub(r'(?m)^## Flow chart\n<!--.*-->\n', '## Flow chart\n\nNo flow change.\n',
+                                  handoff.read_text()))
+        (self.project / '.ai/tasks.md').write_text(task('T001', 'DONE'))
+        self.commit('task done, handoff edited')
+        self.tool('ai-run', '--approved')
+        final = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review handoff$']).stdout.strip()
+        self.assertIn('## Flow chart\nFlow unchanged (host ruling)\nNo flow change.\n',
+                      self.run_cmd(['git', 'show', f'{final}:.ai/handoff.md']).stdout)
+        rows = self.ruling_rows('flow-line')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| none | Ruling (flow-line):', rows[0])
 
     def test_queue_repair_revision_prompt_places_new_tasks_first(self):
         start = self.revise_ready()

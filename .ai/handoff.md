@@ -12,7 +12,11 @@ shared `ai_queue_ruling`/`ai_ruling_rows`/`ai_overlap_lines` in `scripts/lib/com
 (`workflow.py disposition-ruling triage|plan [--dry-run]` plus `ai_disposition_ruling`: after
 triage and after a plan revision, a disposition row whose first cell names exactly one finding of
 the review (`**M1**`, `` `M2` (CRITICAL) ``) gets the bare ID once per finding per run, with a
-`Ruling (disposition-cell)` row in the counted commit). The plan was written 2026-10-20 in an unattended planning session on
+`Ruling (disposition-cell)` row in the counted commit); T105 (`workflow.py flow-line-ruling
+[--dry-run]` plus `ai_flow_line_ruling`: before each task's host gate, the final gate and the PR
+body, a handoff `## Flow chart` section without "Flow chart updated"/"Flow unchanged" right under
+the heading gets it moved up or a `(host ruling)` line inserted, once per key per run, with a
+`Ruling (flow-line)` row). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -33,7 +37,7 @@ unchanged because the host protects DONE blocks).
 - T112: docs, flow chart and handoff audit.
 
 ## Validation run
-T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+T105 tree: PASS, 1062 tests (ai-check, 723.0 s). T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
@@ -57,7 +61,8 @@ Flow chart updated (T103, 2026-10-21): vault `agents-flow.md` "The big picture" 
 queue scan" step before the plan review, a "Pre-flight queue scan" note, a "Rulings (BR-01/BR-02,
 T103, 2026-10-20)" bullet under "When something goes wrong" and the 🔧 Ruling notification row;
 hub Log line added. T104 (2026-10-21) extended the Rulings bullet with the disposition-cell
-ruling and added a hub Log line. T105, T107, T109 and T110 still update it (rulings, fresh retry,
+ruling and added a hub Log line; T105 (2026-10-21) added the Flow chart line ruling to it and a
+hub Log line. T107, T109 and T110 still update it (rulings, fresh retry,
 reviewer choice); T112 checks it.
 
 ## Manual testing for the human
@@ -99,8 +104,13 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `_helper_plan_touches_only_the_last_section`, `_triage_flow_reads_the_bold_cell` (row in the
   counted triage commit, `disposition-cell:<digest12>.M1` in the manifest),
   `_triage_repeat_claim_stops_as_today`, `_plan_revision_flow_reads_the_bold_cell`).
-- `test_ruling_flow_line_*` (T105: blank line, wording, unchanged text, missing section, runner and
-  PR body).
+- `test_ruling_flow_line_*` (T105, done: `_helper_inserts_or_moves_the_line` (blank line first,
+  "No flow change", "UNCHANGED", a correct line after a blank line or a comment),
+  `_helper_leaves_correct_or_missing_sections` (correct, missing, fenced, comment-only, empty),
+  `_runner_repairs_before_the_gate` (pipeline: the gate that fails on a blank line passes, one
+  `Ruling (flow-line)` row in the T001 checkpoint, `flow-line:T001` claimed, PR body has the
+  `Flow chart updated (host ruling` line), `_runner_repeat_claim_leaves_the_handoff`,
+  `_final_gate_repairs_a_later_handoff` (key `final`, in the review handoff commit)).
 - `test_attempt_info_*` (T106) and `test_fresh_retry_*` (T107: note, model raise, run-log rows).
 - `test_review_route_*` (T108: every routing rule, forged history ignored).
 - `test_codex_limit_*`, `test_review_routing_*` (T109: limit memory, routed review, risky fix
@@ -111,7 +121,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - Gate files: none need changing for this batch.
 - After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
   FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
-- Vault hub Log: each flow-changing task appends its own dated line (T103 and T104 added one).
+- Vault hub Log: each flow-changing task appends its own dated line (T103, T104 and T105 added one).
 
 ## Next action
-The runner continues with T105. Nothing is merged or deployed.
+The runner continues with T106. Nothing is merged or deployed.

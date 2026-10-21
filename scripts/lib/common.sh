@@ -399,3 +399,19 @@ ai_disposition_ruling() {
       "the row is counted for $id; a wrong reading shows in the PR's dispositions")" 'n/a' 'host ruling'
   done <<< "$out"
 }
+# ai_flow_line_ruling KEY TASK (BR-01, T105): a handoff `## Flow chart` section that does not start
+# with "Flow chart updated" or "Flow unchanged" gets that line once per KEY per run (`run-manifest
+# ruling flow-line KEY`), with a Ruling row under TASK. A refused claim (a repeat, no run manifest)
+# leaves the handoff as the session wrote it. The caller commits the handoff and run log.
+ai_flow_line_ruling() {
+  local line
+  line=$(ai_helper flow-line-ruling --dry-run 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  ai_helper run-manifest ruling flow-line "$1" >/dev/null 2>&1 || return 0
+  line=$(ai_helper flow-line-ruling 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  printf 'Flow chart line: "%s" placed under the heading.\n' "$line"
+  ai_log "$2" "$(ai_helper ruling-row flow-line "handoff Flow chart section starts with \"$line\"" \
+    'the section must start with one of the two phrases' \
+    'the PR says the flow changed or not when the other is true; the section text below it stays')" 'n/a' 'host ruling'
+}

@@ -3341,6 +3341,57 @@ def disposition_ruling(arguments):
         atomic(path, text[:start] + ''.join(lines))
 
 
+FLOW_LINE_PHRASES = ('Flow chart updated', 'Flow unchanged')
+
+
+def flow_line_ruling(arguments):
+    """`flow-line-ruling [--dry-run]` (BR-01, A6): the handoff's `## Flow chart` section (the first
+    such heading outside code fences) must start with `Flow chart updated` or `Flow unchanged` on the
+    line right after the heading. HTML comments count as empty, as in the PR body. When its first
+    non-empty line starts with one of them, it moves right under the heading; otherwise `Flow
+    unchanged (host ruling)` (the section says "unchanged" or "no flow change") or `Flow chart
+    updated (host ruling; see below)` is inserted there. Either way the blank lines before that
+    line go (comment lines stay, below it). Prints the moved or inserted line; nothing (and no
+    change) for a correct, empty or missing section. --dry-run writes nothing."""
+    dry = arguments == ['--dry-run']
+    if arguments and not dry:
+        fail('Usage: flow-line-ruling [--dry-run]')
+    path = Path('.ai/handoff.md')
+    if not path.is_file():
+        return
+    lines, fence, heading = path.read_text().splitlines(keepends=True), False, None
+    for index, line in enumerate(lines):
+        if re.match(r'\s*(```|~~~)', line):
+            fence = not fence
+        elif not fence and re.match(r'##\s+Flow chart\s*$', line):
+            heading = index
+            break
+    if heading is None:
+        return
+    end = next((i for i in range(heading + 1, len(lines)) if re.match(r'##\s', lines[i])), len(lines))
+    # The section with each comment blanked character for character, so its lines align.
+    body = re.sub(r'<!--.*?-->', lambda m: re.sub(r'[^\n]', ' ', m.group()),
+                  ''.join(lines[heading + 1:end]), flags=re.S)
+    visible = body.splitlines(keepends=True)
+    first = next((i for i, line in enumerate(visible) if line.strip()), None)
+    if first is None:
+        return
+    first += heading + 1
+    kept = [line for line in lines[heading + 1:first] if line.strip()]  # comment lines
+    if lines[first].startswith(FLOW_LINE_PHRASES):
+        if first == heading + 1:
+            return
+        new, rest = lines[first].rstrip('\n'), lines[first + 1:]
+    else:
+        new = ('Flow unchanged (host ruling)' if re.search(r'\bunchanged\b|no flow change', body, re.I)
+               else 'Flow chart updated (host ruling; see below)')
+        rest = lines[first:]
+    print(new)
+    if not dry:
+        head = lines[heading] if lines[heading].endswith('\n') else lines[heading] + '\n'
+        atomic(path, ''.join(lines[:heading] + [head, new + '\n'] + kept + rest))
+
+
 def plan_revision_scope(arguments):
     """Since START, only plan revision records changed (committed or not)."""
     if len(arguments) != 1:
@@ -5272,6 +5323,8 @@ def main():
         plan_dispositions_check(arguments)
     elif command == 'disposition-ruling':
         disposition_ruling(arguments)
+    elif command == 'flow-line-ruling':
+        flow_line_ruling(arguments)
     elif command == 'plan-revision-scope':
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':

@@ -727,6 +727,9 @@ checkpoint_done() {
   remaining=$(remaining_time)
   (( remaining > 0 )) || ai_die 'Run time limit reached before post-task validation.'
   ai_observe step checks "$task"
+  # A handoff Flow chart section without its first line: repaired once per task per run; the
+  # handoff and its Ruling row land in the runner checkpoint below.
+  ai_flow_line_ruling "$task" "$task"
   gate_started=$SECONDS
   host_gate
   ai_guard_verify
@@ -873,6 +876,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     remaining=$(remaining_time)
     (( remaining > 0 )) || ai_die 'Run time limit reached before final validation.'
     ai_observe step checks final
+    ai_flow_line_ruling final none
     gate_started=$SECONDS
     host_gate
     ai_guard_verify
@@ -884,7 +888,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     ai_observe detail checks 'final · passed'
     ai_helper state ready_for_review 'Run independent Codex review, then human testing'
     ai_log none 'queue complete; ready for independent review' PASS 'Human acceptance remains'
-    git add -- .ai/state.md .ai/run-log.md
+    git add -- .ai/state.md .ai/run-log.md .ai/handoff.md
     git commit -m 'chore(ai): record review handoff' >/dev/null
     ai_guard_verify
     # The stamp excludes metadata so this bookkeeping does not invalidate it.
