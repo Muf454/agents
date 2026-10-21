@@ -371,3 +371,31 @@ ai_queue_ruling() {
   fi
   ai_notify "🔧 Ruling: task queue $summary; see the run log."
 }
+# ai_disposition_ruling triage|plan TASK (BR-01, T104): a disposition row whose first cell holds
+# exactly one finding ID of the review in markup or with extra text gets the bare ID, each ID
+# claimed once per run (`run-manifest ruling disposition-cell DIGEST12.ID`), with Ruling rows
+# under TASK. A refused claim (a repeat, no run manifest) changes nothing and the caller's check
+# stops as before. The caller commits.
+ai_disposition_ruling() {
+  local out line digest='' ids=() id cell
+  out=$(ai_helper disposition-ruling "$1" --dry-run 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      digest\ *) digest=${line#digest } ;;
+      ?*) ids+=("${line%% *}") ;;
+    esac
+  done <<< "$out"
+  [[ -n "$digest" ]] && (( ${#ids[@]} )) || return 0
+  for id in "${ids[@]}"; do
+    ai_helper run-manifest ruling disposition-cell "$digest.$id" >/dev/null 2>&1 || return 0
+  done
+  out=$(ai_helper disposition-ruling "$1" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != digest\ * ]] || continue
+    read -r id cell <<< "$line"
+    printf 'Disposition cell "%s" read as %s.\n' "$cell" "$id"
+    ai_log "$2" "$(ai_helper ruling-row disposition-cell "finding cell \"$cell\" read as $id" \
+      'the cell held exactly one finding ID of this review' \
+      "the row is counted for $id; a wrong reading shows in the PR's dispositions")" 'n/a' 'host ruling'
+  done <<< "$out"
+}

@@ -4213,7 +4213,7 @@ name; the tests are `test_queue_repair_*`/`test_queue_recovery_*`: with `-k queu
 edits meanwhile).
 
 ## T104 — Ruling: a disposition cell with more than the bare finding ID (BR-01, FL-30, FL-25)
-Status: TODO
+Status: DONE
 Dependencies: T101
 Model: opus
 
@@ -4273,6 +4273,21 @@ Targeted: `python3 -m unittest discover -s tests -k disposition` (must say `Ran 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+Done 2026-10-21. `workflow.py disposition-ruling triage|plan [--dry-run]` prints `digest
+<sha256-12>` and then `ID <old cell>` for each rewrite. Only BLOCKER/MAJOR findings without a
+counted row are rewritten. The rest of the line must stay byte-identical and the rewritten line
+must match the row pattern for that ID, so a ruling that would not fix the row claims nothing.
+Comment lines are skipped. `ai_disposition_ruling` in `scripts/lib/common.sh` does dry run →
+claims → real run → `Ruling (disposition-cell)` rows. `ai-run` calls it before `triage-check
+--fresh` (task `triage`) and before `plan-dispositions-check` (task `plan-revision`), so both
+land in the counted commit. Mock modes added: `triage-bold-cell`, `revise-accept-bold`.
+Evidence: `-k ruling_disposition` Ran 6 tests OK (helper rewrite, ambiguous cells (`M1/M2`,
+unknown ID, two lines, already matching, `M10`), plan last section only, triage flow, repeat claim
+stops as today, plan revision flow). `-k disposition` Ran 31 OK, `-k triage_check` Ran 1 OK,
+`-k preflight` Ran 14 OK. Full gate `.ai/bin/ai-check`: PASS, 1057 tests in 689.8 s.
+docs/workflow.md (Triage paragraph), vault agents-flow.md Rulings bullet and the agents.md Log
+line are updated. One deviation from the criteria: the helper criterion uses `T012`, but the
+fixture uses `T001`, the existing TODO task, so `triage-check` passes.
 
 ## T105 — Ruling: the handoff's `## Flow chart` line (BR-01, wiring)
 Status: TODO

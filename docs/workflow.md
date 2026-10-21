@@ -588,7 +588,21 @@ row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evi
 deferred → draft PR. In both disposition tables the finding cell starts with the ID and may carry a
 severity suffix (`M1 (MAJOR)`) and a title (`M1 (MAJOR) title`, `M1 — title`, `M1: title`; a row counts
 for its first ID only); other decorations (`**M1**`, `M1 (CRITICAL)`, `M1,M2`, `M1x`) do not match, and the
-failure names the offending row and the row to write. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+failure names the offending row and the row to write. Disposition-cell ruling (host, BR-01, T104;
+`ai_disposition_ruling` in `lib/common.sh`): right before `triage-check --fresh` (task `triage`) and
+`plan-dispositions-check` (task `plan-revision`, last section only), `workflow.py disposition-ruling
+triage|plan [--dry-run]` looks at each BLOCKER/MAJOR finding of the current review that has no
+matching row; when exactly one table line (comments excluded) has a first cell that, with `*`,
+backticks and brackets removed, names that finding and no other finding of the review, and the line
+with ` ID ` as its first cell is a row for it, that cell is rewritten (the rest of the line
+byte-identical). It prints `digest <sha256-12 of the review>`, then `ID <old cell>` per rewrite. The
+host claims `run-manifest ruling disposition-cell <digest12>.<ID>` for each ID of the dry run, runs it
+for real, prints `Disposition cell "**M1**" read as M1.` and appends one row `Ruling
+(disposition-cell): finding cell "<old cell>" read as M1. Why: the cell held exactly one finding ID
+of this review. Cost if wrong: the row is counted for M1; a wrong reading shows in the PR's
+dispositions.`, all inside the counted triage or revision commit. `M1/M2`, an ID the review does not
+list, two lines naming M1 or a refused claim (a repeat, no run manifest) change nothing and the
+check stops as before. In the Evidence and Task cells (here and in plan dispositions) write a pipe
 as `\|` (and a literal backslash before it as `\\`, so `\\|` is a backslash then a separator); it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that

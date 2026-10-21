@@ -8,7 +8,11 @@ writes `.ai/local/preflight.md`); T103 (pre-flight wiring: `ai-pipeline` repairs
 queue whose only faults are TODO-task order or empty sections once per task per run, commits
 `chore(ai): ruling: task queue` with `Ruling (…)` rows and a 🔧 notification; `ai-run --triage`
 does the same inside its counted commit; `--plan`/`--revise-plan` add rows and overlap lines;
-shared `ai_queue_ruling`/`ai_ruling_rows`/`ai_overlap_lines` in `scripts/lib/common.sh`). The plan was written 2026-10-20 in an unattended planning session on
+shared `ai_queue_ruling`/`ai_ruling_rows`/`ai_overlap_lines` in `scripts/lib/common.sh`); T104
+(`workflow.py disposition-ruling triage|plan [--dry-run]` plus `ai_disposition_ruling`: after
+triage and after a plan revision, a disposition row whose first cell names exactly one finding of
+the review (`**M1**`, `` `M2` (CRITICAL) ``) gets the bare ID once per finding per run, with a
+`Ruling (disposition-cell)` row in the counted commit). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -29,7 +33,7 @@ unchanged because the host protects DONE blocks).
 - T112: docs, flow chart and handoff audit.
 
 ## Validation run
-T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
+T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
 ## Assumptions
@@ -52,7 +56,8 @@ Recorded as A1–A13 in `.ai/project-spec.md`. The ones that shape behaviour mos
 Flow chart updated (T103, 2026-10-21): vault `agents-flow.md` "The big picture" has a "Pre-flight
 queue scan" step before the plan review, a "Pre-flight queue scan" note, a "Rulings (BR-01/BR-02,
 T103, 2026-10-20)" bullet under "When something goes wrong" and the 🔧 Ruling notification row;
-hub Log line added. T104, T105, T107, T109 and T110 still update it (rulings, fresh retry,
+hub Log line added. T104 (2026-10-21) extended the Rulings bullet with the disposition-cell
+ruling and added a hub Log line. T105, T107, T109 and T110 still update it (rulings, fresh retry,
 reviewer choice); T112 checks it.
 
 ## Manual testing for the human
@@ -88,8 +93,12 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `_plan_session_logs_rulings` (row + `overlap` line), `_revision_logs_rulings_in_the_revision_commit`).
   `test_queue_check_invalid_queue_*` now use a cycle (`unfixable_queue`), since the old
   order-only queue is repaired by the pre-flight.
-- `test_ruling_disposition_*` (T104: markup and CRITICAL cells rewritten, ambiguous cells left,
-  plan section only, repeat stops).
+- `test_ruling_disposition_*` (T104, done: `_helper_rewrites_only_the_first_cell` (`**M1**` and
+  `` `M2` (CRITICAL) `` become `| M1 |`/`| M2 |`, then `triage-check` passes),
+  `_helper_leaves_ambiguous_cells` (`M1/M2`, unknown ID, two lines, already matching, `M10`),
+  `_helper_plan_touches_only_the_last_section`, `_triage_flow_reads_the_bold_cell` (row in the
+  counted triage commit, `disposition-cell:<digest12>.M1` in the manifest),
+  `_triage_repeat_claim_stops_as_today`, `_plan_revision_flow_reads_the_bold_cell`).
 - `test_ruling_flow_line_*` (T105: blank line, wording, unchanged text, missing section, runner and
   PR body).
 - `test_attempt_info_*` (T106) and `test_fresh_retry_*` (T107: note, model raise, run-log rows).
@@ -102,7 +111,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - Gate files: none need changing for this batch.
 - After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
   FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
-- Vault hub Log: each flow-changing task appends its own dated line (T103 added one).
+- Vault hub Log: each flow-changing task appends its own dated line (T103 and T104 added one).
 
 ## Next action
-The runner continues with T104. Nothing is merged or deployed.
+The runner continues with T105. Nothing is merged or deployed.

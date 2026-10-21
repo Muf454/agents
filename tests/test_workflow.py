@@ -244,7 +244,8 @@ if 'REVISION CONTRACT' in prompt:
                 if mode == 'revise-accept-cycle':
                     new_task = new_task.replace('Dependencies: none', f'Dependencies: {first}')
             tasks_file.write_text(text.rstrip('\n') + '\n\n' + new_task)
-            rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
+            cell = f'**{finding}**' if mode == 'revise-accept-bold' else finding
+            rows += f'| {cell} | accepted | the plan lacks this test | {new_id} |\n'
     if os.environ.get('MOCK_CONVERGENCE'):
         rows += os.environ['MOCK_CONVERGENCE'] + '\n'
     section.write_text(section.read_text() + rows)
@@ -434,7 +435,8 @@ if 'TRIAGE CONTRACT' in prompt:
             block = (block.replace('Dependencies: none', 'Dependencies: ' + later)
                      + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', later))
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
-        review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
+        cell = '**M1**' if mode == 'triage-bold-cell' else 'M1'
+        review.write_text(review.read_text() + f'| {cell} | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
@@ -5033,6 +5035,124 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('| plan-revision | Ruling (queue-order): T001 placed after T002.', rows[0])
         subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
         self.assertNotIn('chore(ai): ruling: task queue', subjects)
+
+    # ---------------------------------------------------------------- disposition-cell rulings (BR-01, T104)
+    def two_major_dispositions(self):
+        """The current review lists MAJOR M1 and M2; returns the opened dispositions file."""
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        current = self.project / '.ai/reviews/current.md'
+        current.write_text(current.read_text().replace('MAJOR=1', 'MAJOR=2')
+                           .replace('- M1: a short defect\n', '- M1: a short defect\n- M2: another defect\n'))
+        dispositions.write_text(rows.removesuffix('| M1 | accepted | defect confirmed in the fixture | T001 |\n'))
+        return dispositions
+
+    def test_ruling_disposition_helper_rewrites_only_the_first_cell(self):
+        dispositions = self.two_major_dispositions()
+        opened = dispositions.read_text()
+        dispositions.write_text(opened + '| **M1** | accepted | evidence | T001 |\n'
+                                '| `M2` (CRITICAL) | rejected | concrete evidence here | - |\n')
+        self.helper('triage-check', expected=1)
+        digest = hashlib.sha256((self.project / '.ai/reviews/current.md').read_bytes()).hexdigest()[:12]
+        before = dispositions.read_bytes()
+        dry = self.helper('disposition-ruling', 'triage', '--dry-run').stdout
+        self.assertEqual(dry, f'digest {digest}\nM1 **M1**\nM2 `M2` (CRITICAL)\n')
+        self.assertEqual(dispositions.read_bytes(), before)
+        self.assertEqual(self.helper('disposition-ruling', 'triage').stdout, dry)
+        self.assertEqual(dispositions.read_text(), opened + '| M1 | accepted | evidence | T001 |\n'
+                         '| M2 | rejected | concrete evidence here | - |\n')
+        self.assertEqual(self.helper('triage-check').stdout.strip(), 'accepted=1 deferred=0')
+        self.assertEqual(self.helper('disposition-ruling', 'triage').stdout, f'digest {digest}\n')
+
+    def test_ruling_disposition_helper_leaves_ambiguous_cells(self):
+        dispositions = self.two_major_dispositions()
+        opened = dispositions.read_text()
+        good = '| M2 | rejected | concrete evidence here | - |\n'
+        for rows in ('| M1/M2 | accepted | evidence | T001 |\n',
+                     '| **M9** | accepted | evidence | T001 |\n' + good,
+                     '| **M1** | accepted | evidence | T001 |\n| M1 (CRITICAL) | rejected | evidence again | - |\n',
+                     '| M1 | accepted | evidence | T001 |\n' + good,
+                     '| **M10** | accepted | evidence | T001 |\n' + good):
+            with self.subTest(rows=rows):
+                dispositions.write_text(opened + rows)
+                before = dispositions.read_bytes()
+                out = self.helper('disposition-ruling', 'triage').stdout
+                self.assertEqual(out.splitlines()[1:], [])
+                self.assertTrue(out.startswith('digest '))
+                self.assertEqual(dispositions.read_bytes(), before)
+
+    def test_ruling_disposition_helper_plan_touches_only_the_last_section(self):
+        self.ready(task('T001', 'DONE') + task('T002', dependencies='T001'))
+        bad = '| **P1** | accepted | add the missing test | T002 |\n'
+        rejected = '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n'
+        self.plan_round('P1|Gap in tests;P2|Unclear rollback', 1)
+        self.plan_dispositions(1, bad + rejected)
+        self.plan_round('P1|Gap in tests;P2|Unclear rollback', 2)
+        start = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-plan-dispositions', 'main')
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        path.write_text(opened + bad + rejected)
+        self.plan_check(start, expected=1)
+        out = self.helper('disposition-ruling', 'plan').stdout.splitlines()
+        self.assertEqual(out[1:], ['P1 **P1**'])
+        self.assertEqual(path.read_text(), opened + bad.replace('**P1**', 'P1') + rejected)
+        self.assertEqual(path.read_text().count(bad), 1)  # the earlier section keeps its cell
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.helper('disposition-ruling', 'bogus', expected=1)
+        self.helper('disposition-ruling', 'plan', '--dry', expected=1)
+
+    def test_ruling_disposition_triage_flow_reads_the_bold_cell(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-bold-cell')
+        self.assertIn('Disposition cell "**M1**" read as M1.', result.stdout)
+        counted = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.strip()
+        self.assertIn('| M1 | accepted | fixture defect confirmed |',
+                      self.run_cmd(['git', 'show', f'{counted}:.ai/reviews/dispositions.md']).stdout)
+        row = [line for line in self.run_cmd(['git', 'show', f'{counted}:.ai/run-log.md']).stdout.splitlines()
+               if 'Ruling (disposition-cell)' in line]
+        self.assertEqual(len(row), 1)
+        self.assertIn('| triage | Ruling (disposition-cell): finding cell "**M1**" read as M1. Why: the cell '
+                      'held exactly one finding ID of this review.', row[0])
+        self.assert_one_row_cells(row[0])
+        review = self.run_cmd(['git', 'show', f'{counted}:.ai/reviews/current.md']).stdout
+        digest = hashlib.sha256(review.encode()).hexdigest()[:12]
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertIn(f'disposition-cell:{digest}.M1', manifest['rulings'])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    def test_ruling_disposition_triage_repeat_claim_stops_as_today(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        digest = hashlib.sha256((self.project / '.ai/reviews/current.md').read_bytes()).hexdigest()[:12]
+        self.helper('run-manifest', 'ruling', 'disposition-cell', f'{digest}.M1')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        result = self.tool('ai-run', '--approved', '--triage', '--since', head, expected=1,
+                           MOCK_CLAUDE='triage-bold-cell')
+        self.assertIn('Triage incomplete: MAJOR finding M1 has no disposition', result.stderr)
+        self.assertIn('| **M1** | accepted |', (self.project / '.ai/reviews/dispositions.md').read_text())
+        self.assertEqual(self.ruling_rows('disposition-cell'), [])
+        self.assertEqual(self.triage_rounds(), 0)
+
+    def test_ruling_disposition_plan_revision_flow_reads_the_bold_cell(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-bold')
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        self.assertTrue(revision)
+        section = self.run_cmd(['git', 'show', f'{revision}:.ai/reviews/plan-dispositions.md']).stdout
+        self.assertRegex(section, r'\n\| P1 \| accepted \| the plan lacks this test \| T\d+ \|\n')
+        self.assertNotIn('**P1**', section)
+        rows = [line for line in self.run_cmd(['git', 'show', f'{revision}:.ai/run-log.md']).stdout.splitlines()
+                if 'Ruling (disposition-cell)' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| plan-revision | Ruling (disposition-cell): finding cell "**P1**" read as P1.', rows[0])
+        self.assertIn('🏁 FINISHED', self.notifications())
 
     def test_queue_repair_revision_prompt_places_new_tasks_first(self):
         start = self.revise_ready()

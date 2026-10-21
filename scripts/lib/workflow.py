@@ -3285,6 +3285,62 @@ def plan_dispositions_check(arguments):
     print(f"accepted={counts['accepted']} rejected={counts['rejected']} needs_human={counts['needs-human']}")
 
 
+def disposition_ruling(arguments):
+    """`disposition-ruling triage|plan [--dry-run]` (BR-01): for each BLOCKER/MAJOR finding of the
+    current review without a row (the check's own pattern), the one table line whose first cell,
+    with `*`, backticks and brackets removed, names that finding and no other finding of the review
+    gets the bare ID as its first cell, the rest of the line byte-identical (and only when the line
+    then is a row for it). Triage: all of dispositions.md; plan: the last plan-dispositions section.
+    Comments, the header and other lines are never touched. Prints `digest <sha256-12 of the
+    review>`, then `ID <old cell>` per rewrite; --dry-run writes nothing."""
+    dry = arguments[1:] == ['--dry-run']
+    mode = arguments[0] if arguments else None
+    if mode not in ('triage', 'plan') or len(arguments) != (2 if dry else 1):
+        fail('Usage: disposition-ruling triage|plan [--dry-run]')
+    review_path, path, row = ((Path('.ai/reviews/current.md'), Path('.ai/reviews/dispositions.md'), DISPOSITION_ROW)
+                              if mode == 'triage' else (PLAN_REVIEW, Path(PLAN_DISPOSITIONS), PLAN_DISPOSITION_ROW))
+    data = review_path.read_bytes()
+    print('digest ' + hashlib.sha256(data).hexdigest()[:12])
+    if not path.is_file():
+        return
+    review, text, start = data.decode(errors='replace'), path.read_text(), 0
+    if mode == 'plan':
+        marks = list(PLAN_SECTION.finditer(text))
+        if not marks:
+            return
+        start = marks[-1].end()
+    region = text[start:]
+    # The rows each check already counts: triage reads the whole file, plan its uncommented section.
+    counted = region if mode == 'triage' else re.sub(r'<!--.*?-->', '', region, flags=re.S)
+    matched = {m.group(1) for m in row.finditer(counted)}
+    required = finding_ids(review, 'BLOCKER') + finding_ids(review, 'MAJOR')
+    known = set(required + finding_ids(review, 'MINOR'))
+    mentions = {f: re.compile(r'(?<![A-Za-z0-9-])' + re.escape(f) + r'(?![A-Za-z0-9])') for f in known}
+    comments = [m.span() for m in re.finditer(r'<!--.*?-->', region, re.S)]
+    lines, offset, cells = region.splitlines(keepends=True), 0, []
+    for index, line in enumerate(lines):
+        cell = re.match(r'\|((?:\\.|[^\\|\n])*)\|', line)
+        if cell and not any(begin <= offset < end for begin, end in comments):
+            plain = re.sub(r'[*`\[\]]', '', cell.group(1))
+            cells.append((index, cell, {f for f, mention in mentions.items() if mention.search(plain)}))
+        offset += len(line)
+    changes = []
+    for finding in required:
+        found = [(index, cell) for index, cell, named in cells if named == {finding}]
+        if finding in matched or len(found) != 1:
+            continue
+        index, cell = found[0]
+        new = f'| {finding} ' + lines[index][cell.end(1):]
+        result = row.match(new)
+        if result and result.group(1) == finding:
+            lines[index] = new
+            changes.append(f'{finding} {shorten(cell.group(1), 60)}')
+    for change in changes:
+        print(change)
+    if changes and not dry:
+        atomic(path, text[:start] + ''.join(lines))
+
+
 def plan_revision_scope(arguments):
     """Since START, only plan revision records changed (committed or not)."""
     if len(arguments) != 1:
@@ -5214,6 +5270,8 @@ def main():
         start_plan_dispositions(arguments)
     elif command == 'plan-dispositions-check':
         plan_dispositions_check(arguments)
+    elif command == 'disposition-ruling':
+        disposition_ruling(arguments)
     elif command == 'plan-revision-scope':
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':

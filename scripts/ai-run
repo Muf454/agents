@@ -568,6 +568,9 @@ if [[ "$revise_plan" == yes ]]; then
     ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
   ai_overlap_lines "$preflight_out"
   revision_scope 'Plan revision stage: '
+  # A row whose first cell wraps its one finding ID (`**P1**`, `P1 (CRITICAL)`): read as that ID
+  # once per run, the change and its row land in the counted revision commit below.
+  ai_disposition_ruling plan plan-revision
   counts=$(ai_helper plan-dispositions-check "${check_args[@]}" 2>&1) || \
     ai_die "Plan revision incomplete: ${counts#Error: }"
   questions=$(ai_helper plan-dispositions-check "${check_args[@]}" --questions) || \
@@ -657,6 +660,9 @@ if [[ "$triage" == yes ]]; then
   ai_queue_ruling triage || true
   ai_helper tasks check
   triage_scope ''
+  # A row whose first cell wraps its one finding ID (`**M1**`, `M1 (CRITICAL)`): read as that ID
+  # once per run, the change and its row land in the counted triage commit below.
+  ai_disposition_ruling triage triage
   error=$(ai_helper triage-check --fresh 2>&1 >/dev/null) || ai_die "Triage incomplete: ${error#Error: }"
   ai_log triage 'review triaged into dispositions/tasks' 'n/a' 'Fix tasks run next'
   ai_helper state fixing_review 'Run the fix tasks, then review again'
