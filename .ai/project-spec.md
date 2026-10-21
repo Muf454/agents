@@ -115,8 +115,10 @@ Out (later work, recorded in the vault backlog by the human):
 - FR-2 (G2): an INT or TERM to a runner script reaches its running session, review or gate within
   a second: the script sends TERM to its long child (a `timeout` or a toolkit script) and waits
   for it, then runs its existing exit path. Every long blocking call on the pipeline, runner and
-  recovery paths is such a child, including host gates, dependency setup and pause or retry
-  sleeps, so a signal to the top process alone works at every stage (plan review P2). Below the
+  recovery paths is such a child, including host gates, dependency setup, pause or retry sleeps
+  and the publication commands (`git push`, `git ls-remote`, `gh`; their output captured through
+  a file, never a `$(…)`), so a signal to the top process alone works at every stage (plan review
+  P2, rounds 1 and 2; limits in B21). Below the
   top process every layer is stopped by TERM (a background child of a non-interactive shell
   ignores SIGINT). Exit codes 124/137 keep their meaning. The checkout is left as the session
   left it; the task attempt is logged `interrupted` as today.
@@ -158,8 +160,10 @@ Out (later work, recorded in the vault backlog by the human):
   `fix_round_limit`, `task_blocked`, `needs_human_question`, `validation`, `usage_limit`,
   `crash`, `human_stop`, `other`. It is written only for the run that is `current` (checked under
   the host lock). Every new run record (`run-record start`, a pipeline or a stand-alone `ai-run`)
-  and every automatic resume (`run-record resume`) removes it (plan review P7). Readers treat an
-  unknown kind as `other` and an unknown schema as absent.
+  and every automatic resume (`run-record resume`) removes it (plan review P7). The record a
+  stopped process leaves is the specific kind of its stop: one write per shutdown chain, and a
+  later unclassified write of the same run never replaces a specific kind (B22, plan review P13).
+  Readers treat an unknown kind as `other` and an unknown schema as absent.
 - FR-7 (G7): `ai-task set ID STATUS --commit`, and every new subcommand, takes the checkout lock
   without waiting (held: exit 75, "A run is active in this checkout; nothing changed."), refuses
   protected or detached branches, and with `--commit` refuses unless the checkout is clean before,
@@ -184,7 +188,8 @@ Out (later work, recorded in the vault backlog by the human):
 - FR-10 (G11): `ai-pipeline --detach <pipeline arguments>` validates `--approved`, requires an
   executable `systemd-run` (else exit 1, nothing started, the foreground command named), starts
   the pipeline under `systemd-run --user` with its output in
-  `.ai/local/pipeline-<UTC stamp>-<hex>.log` (created by `exec-logged`), records launcher and log
+  `.ai/local/pipeline-<UTC stamp>-<hex>.log` (created by `exec-logged`, whose name check accepts
+  this prefix beside `plan-…`; plan review P12), records launcher and log
   path in the run record, waits up to `AI_PLAN_ACK_SECONDS` (default 20) for the new run record
   and prints the pid, the log, `tail -f <log>` and `.ai/bin/ai-pipeline --stop <checkout>`.
 
@@ -274,11 +279,15 @@ Out (later work, recorded in the vault backlog by the human):
 - B15: T118 (batch 9) stays as batch 9 left it (TODO, fix committed in 38f671c). If
   `fix/flow-batch-9` finishes it first, the human merges that branch here before approving;
   otherwise this run verifies T118 first.
-- B16 (revised after plan review round 1): 22 tasks (T301–T322; the queue order, not the
+- B16 (revised after plan review rounds 1 and 2): 24 tasks (T301–T324; the queue order, not the
   number order, is the run order). The review's process-chain, ownership and skip findings and
-  the split of the old T301, T302, T306, T308, T309 and T313 added work; each task is still sized
-  for one 30-minute session including the ~13-minute self-check.
-- B17 (plan review P5): Run ids are `<UTC %Y%m%dT%H%M%SZ>-<pid>`; the starter keeps the printed id
+  the split of the old T301, T302, T306, T308, T309 and T313 added work; round 2 added T323
+  (publication commands, split from T318) and T324 (the log name check, split from T313); each
+  task is still sized for one 30-minute session including the ~13-minute self-check.
+- B17 (plan review P5, revised after round 2 P15): Run ids are `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>`,
+  `seq` one more than the highest of the checkout's kept records, chosen under the host lock, the
+  record created exclusively, so two starts by one pid in one second never collide; retention
+  orders by `seq`. The starter keeps the printed id
   in `AI_RUN_ID` (exported so `ai-recover`, which the pipeline execs, and the resumed pipeline
   get it; a watchdog-started recovery reads `current` while it holds the checkout lock). The id is
   not authority: every lifecycle write is also checked against the record's process identity
@@ -296,6 +305,16 @@ Out (later work, recorded in the vault backlog by the human):
   (`stop()`, `ai_human_stop`, the new record writes in `ai_die`); `ai-recover` keeps its present
   order because the watchdog verifies the gate before it starts a recovery and the pipeline
   verifies it before its `exec`.
+- B21 (plan review round 2, P2): the publication commands `git push`, `git ls-remote` and `gh`
+  become background children (T323, after T306 as B19 says); output that the script reads is
+  captured through a file under `.ai/local`. `ai_stop_child` ends the `git` or `gh` process; a
+  push hook it started may outlive it, and `git commit` (with its hooks) and the short local
+  helper calls stay in the foreground, so a blocking commit hook still delays the trap. Both are
+  recorded limitations, not later tasks.
+- B22 (plan review round 2, P13): one escalation writer per shutdown chain. The non-recovery
+  `stop()` writes with its stage and sets `AI_ESCALATION_WRITTEN`; the `ai_die` it always ends in
+  then writes nothing; a direct `ai_die` writes once. The helper keeps a same-run record with a
+  specific kind against a later write that is still `other` after its refinement.
 
 ## Plan review round 1 (hand-run Codex review)
 Source: `.ai/reviews/plan.md` (HEAD 6bd6e3e, BLOCKER 1, MAJOR 7, MINOR 3), run by hand because the
@@ -315,3 +334,17 @@ session; every finding was checked against the cited code at 6bd6e3e (same code 
 | P9 (MINOR) dead-process stop contradiction | Accepted | One behaviour (FR-5): a record still `running` or `paused` whose process is gone gets the stop request and `human_stop` so nothing resumes it, exit 0 with its own message; exit 3 only for no record or an ended record. Plan, FR-5, T308 and T319 aligned; the scheduled relaunch cancel is its own message and test. |
 | P10 (MINOR) skip test conflicts with refusal | Accepted | The refusal rule stays. T311's test skips a leaf task and then adds a committed dependent of it, which becomes eligible. |
 | P11 (MINOR) old T309 too broad | Accepted | Split into T309 (producer hints, sonnet), T320 (writes at stops and clearing, opus) and T321 (fix-round limit and plan kinds end to end, sonnet). |
+
+## Plan review round 2 (hand-run Codex review)
+Source: `.ai/reviews/plan.md` (HEAD 86df815, BLOCKER 0, MAJOR 4, MINOR 1), run by hand because the
+frozen pipeline would have skipped it (FL-35). Revised 2026-10-21 by an interactive planning
+session; every finding was checked against the cited code at 86df815 (scripts unchanged since
+4fea72d).
+
+| Finding | Disposition | Reason or task |
+| --- | --- | --- |
+| P2 (MAJOR) publication commands still block the trap | Accepted | Confirmed: `push()` runs `git push` (`scripts/ai-pipeline:249`) and `git ls-remote` piped to `awk` (`:255`) in the foreground, and every `gh` call of the PR stage (`:679–719`) is foreground or inside `$(…)`. New T323 (opus, after T318): `ai_run_child` or `ai_run_capture` (output through a file) for each, offline PID-only tests with a sleeping fake `git push`, `git ls-remote` and `gh pr view`; T308 depends on T323. A push hook outliving `git push` and foreground `git commit` hooks are recorded limitations (B21). |
+| P12 (MAJOR) exec-logged rejects pipeline log names | Adjusted | Confirmed: `EXEC_LOG_NAME` (`scripts/lib/workflow.py:5069`) is `plan-…` only. The change goes into a new small task T324 (sonnet; a name pattern, the exclusive no-symlink creation unchanged) instead of T313, which is already a full session; T313 depends on T324. T324 tests both prefixes and invalid names. |
+| P13 (MAJOR) second escalation write loses the kind | Accepted | Confirmed: the non-recovery `stop()` always calls `ai_die` (`scripts/ai-pipeline:186–188`), and the first write consumes the hint. B22: one writer per shutdown chain (`AI_ESCALATION_WRITTEN`, T320) plus a helper backstop (T305: a same-run `other` write keeps a specific kind). T320 tests the final record after exit for a blocked-task stop and a plan-review stop; T305 tests the repeated write. |
+| P14 (MAJOR) ai-check rewrite drops the logger status | Accepted | Confirmed: today a failing `tee` fails the gate (`scripts/ai-check:48–51`, `PIPESTATUS`). T304 now starts the logger on its own descriptor, waits for its pid and keeps today's rule (the logger's code when it failed) before `stamp record`; new regression with a passing validator and a failing fake `tee`: nonzero exit, no PASS stamp. |
+| P15 (MINOR) run ids collide within one second | Accepted | Confirmed by the format in B17 (stamp and pid only). B17 revised: id `<stamp>-<pid>-<seq>` with `seq` chosen under the host lock and exclusive creation; retention by `seq`. T301 adds a fixed-clock, fixed-pid test, and the 23-start retention test uses the fixed clock. |

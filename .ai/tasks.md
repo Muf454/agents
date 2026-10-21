@@ -10,13 +10,14 @@ checkboxes. If the vault edit is denied, record it in the result and in the hand
 "## Flow chart" section.
 Current batch (batch 11, `fix/flow-batch-11` from `fix/flow-batch-9` at 4fea72d, planned 2026-10-21
 by an unattended planning session; scope chosen by mission control 2026-10-21 with Zack's
-delegation): T301–T322, from vault `agents-backlog.md` RC-01 (gaps G1–G7, G9, G11; G8 and G10 are
-later work). Revised after plan review round 1 (`.ai/reviews/plan.md`, P1–P11): new tasks
-T315–T322 sit in the queue where their dependencies need them, so the queue order (not the
-number order) is the run order. Design: `.ai/current-plan.md` (its three round-1 rules: gate
-first, bound to the run, every layer forwards); scope, verified code facts, assumptions B1–B20
-and the round-1 dispositions: `.ai/project-spec.md`. Line references in T301–T322 are at 4fea72d;
-re-check them before editing.
+delegation): T301–T324, from vault `agents-backlog.md` RC-01 (gaps G1–G7, G9, G11; G8 and G10 are
+later work). Revised after plan review round 1 (`.ai/reviews/plan.md` at 6bd6e3e, P1–P11) and
+round 2 (at 86df815: P2 again, P12–P15): new tasks T315–T324 sit in the queue where their
+dependencies need them, so the queue order (not the number order) is the run order. Design:
+`.ai/current-plan.md` (its round-1 rules: gate first, bound to the run, every layer forwards;
+round 2 adds: one escalation writer per shutdown chain); scope, verified code facts, assumptions
+B1–B22 and the round-1 and round-2 dispositions: `.ai/project-spec.md`. Line references in
+T301–T324 are at 4fea72d (same code as 86df815); re-check them before editing.
 Batch 10 is built in parallel from the same commit: keep edits to the session contract in
 `scripts/ai-run` and to `scripts/ai-pipeline` small and local, never touch the plan-review entry
 condition (`ai-pipeline` ~478), `scripts/ai-status` or `tests/run_parallel.py`.
@@ -5165,7 +5166,11 @@ lock for every write and bounded retention; `start` prints the run id. The lifec
   (`binding_dir()`, `scripts/lib/workflow.py` ~1454): `runs/<id>.json`, `runs/current` (one line,
   the id), `runs/.lock`.
 - `start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (KIND `pipeline` or `ai-run`; `-` for
-  an absent base; id `<UTC %Y%m%dT%H%M%SZ>-<pid>`, format `^\d{8}T\d{6}Z-\d{1,10}$`; launcher and
+  an absent base; id `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>`, format `^\d{8}T\d{6}Z-\d{1,10}-\d{1,9}$`,
+  where `seq` is 1 + the highest `seq` among the valid record names in `runs/`, chosen under the
+  lock, and the record file is created with `O_CREAT|O_EXCL` (an existing name → fail, never
+  replace; plan review P15: two starts with the same pid in one second must not collide); the
+  UTC stamp comes from one small function (`run_stamp()`) so tests can fix the clock; launcher and
   log from spec B6: `AI_LAUNCHER` validated `^[a-z0-9._-]{1,32}$` else `systemd` when
   `INVOCATION_ID` is set, else `terminal` when `os.isatty(0)`, else `other`; `AI_RUN_LOG` when
   absolute and without NUL or newline, else `os.readlink('/proc/<pid>/fd/1')` when it names a
@@ -5177,8 +5182,9 @@ lock for every write and bounded retention; `start` prints the run id. The lifec
 - Process identity from `/proc/<pid>/stat` (parse after the last `)`: state, pgid (field 5), sid
   (field 6), start ticks (field 22)); `os.getpgid`/`os.getsid` are acceptable for pgid and sid.
 - Every write: `fcntl.flock` on `runs/.lock` (blocking, but bounded: `LOCK_NB` retries for 5 s,
-  then fail `run record is locked`), then `atomic()`. Retention: after `start`, keep the 20 newest
-  records by id; never remove the current one; ignore names that are not `<id>.json`.
+  then fail `run record is locked`), then `atomic()` (the new record of `start`: exclusive
+  creation, above). Retention: after `start`, keep the 20 records with the highest `seq` (compared
+  as numbers); never remove the current one; ignore names that are not `<id>.json`.
 - Validation on read: a dict with `schema == 1` and the field types of the plan; anything else
   (unknown schema, wrong types, symlink, > 64 KB, a `current` that is not an id) is "no record"
   (`current`/`show` exit 1).
@@ -5195,7 +5201,11 @@ scripts/lib/workflow.py, tests/test_workflow.py
   branch, launcher `other` (`AI_LAUNCHER=mission-control` → `mission-control`, invalid value →
   `other`), log null or the `AI_RUN_LOG` path, process identity equal to `/proc/self/stat`,
   outcome `running`; `current` prints that id; `show` prints the record.
-- `test_run_record_retention_keeps_twenty`: 23 starts leave 20 records, the current one included.
+- `test_run_record_ids_unique_with_fixed_clock`: in process (module loaded with `importlib`,
+  `run_stamp` patched to one fixed value), two starts with the same `--pid` give two different ids
+  and two records; the first record's bytes are unchanged by the second start.
+- `test_run_record_retention_keeps_twenty`: 23 starts with the same fixed clock and pid leave 20
+  records (the 20 highest `seq`), the current one included.
 - `test_run_record_alive_identity`: own pid alive; a wrong start-ticks value, a dead pid and a
   record with an unknown schema → not alive / no record.
 - `test_run_record_lock_is_bounded`: with `runs/.lock` held by the test, `start` fails within the
@@ -5295,6 +5305,11 @@ it. No other caller yet.
   `last_error` from `.ai/local/last-error` through `local_dir_fd` (regular file only), redacted
   (spec B10), one line, ≤ 400 characters; `log` from the run record. `run` and `branch` from the
   run record.
+- A repeated write never loses the classification (plan review P13): when the existing record
+  belongs to the same run and has a kind other than `other`, a write whose kind is still `other`
+  after the refinement above leaves the record unchanged (exit 0). An explicit specific kind
+  (e.g. `human_stop`) replaces it. This is the backstop; the shell side has one writer per
+  shutdown chain (T320).
 - Answers per kind as in the plan, built from the manifest's recorded args (`--approved`
   included); no manifest → no `resume` answer. `resume_more_rounds` only when the recorded
   `--max-fix-rounds` (default 2) + 1 ≤ 5. `usage_limit` adds `not_before` (epoch) from
@@ -5318,6 +5333,9 @@ scripts/lib/workflow.py, tests/test_workflow.py
   symlinked last-error is ignored.
 - `test_escalation_hint_is_consumed_once`: `hint task_blocked --run A --task T005` then `write
   other implementation --run A` → kind `task_blocked`, tasks `["T005"]`, hint removed.
+- `test_escalation_repeated_write_keeps_kind`: after that, a second `write other implementation
+  --run A` leaves the record bytes unchanged; `write human_stop implementation --run A` replaces
+  it with kind `human_stop`.
 - `test_escalation_only_for_the_current_run`: after run B starts, `write … --run A` and `hint …
   --run A` exit 3 and write nothing.
 - `test_escalation_cleared_by_new_run_and_resume`: a record of run A is removed by `run-record
@@ -5507,12 +5525,16 @@ during a 13-minute gate or a review does not wait for it.
 - `scripts/ai-review` ~137 (Claude) and ~187 (Codex): `ai_run_child timeout …`; add or extend
   INT/TERM traps with `ai_stop_child` before the existing exit (read the script's current traps
   first and keep their behaviour).
-- `scripts/ai-check` ~47: `timeout … bash .ai/validate 2>&1 | tee "$log"` becomes
-  `ai_run_child timeout … bash .ai/validate > >(tee "$log") 2>&1` (so `$!` is `timeout`) with the
-  exit code taken from the child, not `PIPESTATUS`; keep the stamp record, the lock wait and the
-  progress output exactly as they are; wait for the `tee` process substitution before reading the
-  log. Traps: `ai_stop_child` then the existing exit path (the stamp stays RUNNING/FAIL as today
-  for an interrupted gate).
+- `scripts/ai-check` ~47–51: `timeout … bash .ai/validate 2>&1 | tee "$log"` becomes a logger
+  started first on its own descriptor, `exec 7> >(tee "$log"); tee_pid=$!`, then `ai_run_child
+  timeout … bash .ai/validate >&7 2>&1` (so `AI_CHILD_PID` is `timeout`), `exec 7>&-`, and
+  `wait "$tee_pid"` for the logger's own status. Both statuses are kept exactly as today's
+  `PIPESTATUS` rule (~50–51; plan review P14): `result` is the validator's code, replaced by the
+  logger's when the logger failed; only then `stamp record "$result" "$log"`. A successful
+  validator with a failed logger therefore exits nonzero and never records PASS. Keep the lock
+  wait and the progress output exactly as they are. Traps: `ai_stop_child`, close fd 7, wait for
+  the logger (bounded), then the existing exit path (the stamp stays RUNNING/FAIL as today for an
+  interrupted gate).
 - `scripts/lib/common.sh` `ai_deps` ~249: `ai_run_child timeout …`.
 - `ai-review` and `ai-check` may themselves run as background children (T317, T318): their INT
   trap is then ineffective and TERM is what ends them, so the TERM trap must do the full job.
@@ -5528,6 +5550,9 @@ scripts/ai-review, scripts/ai-check, scripts/lib/common.sh, tests/test_workflow.
   PASS, the log holds the output written before the interrupt.
 - `test_interrupt_reaches_the_review`: `ai-review` with a fake `codex` and a fake `claude` that
   sleep: both end within the bound, also with SIGTERM to the `ai-review` pid only.
+- `test_check_logger_failure_fails_the_gate`: a fake `tee` first on `PATH` that reads all its
+  input and exits 1, with a fake `.ai/validate` that exits 0 → `ai-check` exits nonzero and the
+  stamp is not PASS (plan review P14).
 - Existing `ai-check` output, stamp and lock-wait tests pass (exit codes and the log unchanged).
 
 ### Validation
@@ -5662,7 +5687,8 @@ stop records as a group signal.
 - `scripts/ai-pipeline`: `ai_run_child` before `"$AI_BIN/ai-run"` (~288, ~332, ~552),
   `"$AI_BIN/ai-review"` (~369, ~509, ~566), `"$AI_BIN/ai-check"` (~265) and the push retry sleep
   `${AI_SLEEP:-sleep}` (~253); `|| stop …` stays as is. Nothing near the plan-review entry
-  condition (~478) changes.
+  condition (~478) changes. The publication commands (`git push`, `git ls-remote`, `gh`) are T323
+  (plan review round 2, P2).
 - The child is ended by TERM from `ai_human_stop`'s `ai_stop_child`; the child's own TERM trap
   (T303, T304, T317) ends its `timeout`. A child exit code of 130 or 143 under a stop goes to the
   pipeline's trap, not to `stop()`. If `ai_stop_child` reports the child still alive after 30 s,
@@ -5690,6 +5716,59 @@ scripts/ai-pipeline, tests/test_workflow.py, docs/workflow.md
 
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k human_stop` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T323 — The pipeline forwards a stop to its publication commands: git push, ls-remote, gh (RC-01 G2, G1, plan review round 2 P2)
+Status: TODO
+Dependencies: T318
+Model: opus
+
+### Goal
+A SIGINT or SIGTERM to the `ai-pipeline` process alone also ends the run within seconds while a
+`git push` (with its hooks), `git ls-remote` or a `gh` call of the publication stage blocks, with
+the same human stop records; captured output keeps working.
+
+### Implementation notes
+- Design: `.ai/current-plan.md` "G2" (T323 call sites); spec FR-2, B21. Comes after T318 (same
+  reason as B19).
+- `scripts/lib/common.sh`: `ai_run_capture FILE CMD…` runs `ai_run_child CMD… > FILE`, so the
+  parent keeps the child's pid in `AI_CHILD_PID` and its trap can end it, while the output lands
+  in a file instead of a command substitution (a trap does not run while the shell waits on
+  `$(…)`). Returns the child's status.
+- `scripts/ai-pipeline` `push()` (~249, ~255): `ai_run_child git push "$@"`; `ai_run_capture
+  "$pub_out" git ls-remote origin "refs/heads/$branch"`, then the existing `awk` reads the file
+  (the `|| remote=''` fallback stays). PR stage (~679–719): every `gh pr view`, `gh pr edit`,
+  `gh pr ready` and `gh pr create` through `ai_run_child` (output discarded) or `ai_run_capture`
+  (output read from the file; `gh pr create … | tail -n 1` → capture, then `tail -n 1` of the
+  file); each existing `||` / `&&` branch keeps its meaning and messages exactly. `pub_out` is one
+  `mktemp .ai/local/publish-XXXXXXXX.out` made at the first use, removed (best effort) in
+  `finish` and `ai_human_stop`.
+- `ai_stop_child` TERMs the `git` or `gh` process only. A push hook that git started may outlive
+  it; that is a known limitation (spec B21), not tested here.
+- Tests: share T318's PID-only fixture helper; fake `git` first on `PATH` that delegates to the
+  real git except `push` (and, in the second case, `ls-remote`), which sleeps 300 s after writing
+  its pid; fake `gh` (`MOCK_GH` style) whose `pr view` sleeps. Signal only the fixture pipeline's
+  pid. Docs: the `docs/workflow.md` sentence of T318 names the publication stage. Flow unchanged
+  beyond T306.
+
+### Likely affected modules
+scripts/ai-pipeline, scripts/lib/common.sh, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_human_stop_pid_only_push`: SIGTERM to the pipeline pid while the fake `git push` sleeps
+  → exit 143 within a scaled 40 s, the fake push process is gone, run record outcome
+  `human_stop`, escalation kind `human_stop`, one `⛔ STOPPED by you:` notification, marker gone.
+- `test_human_stop_pid_only_ls_remote`: the same while the fake `git ls-remote` sleeps.
+- `test_human_stop_pid_only_gh`: the same while the fake `gh pr view` sleeps; no PR is created
+  (the fake `gh pr create` was never called).
+- Existing PR-stage tests pass (PR URL, draft handling, push retry and `ls-remote` mismatch
+  messages unchanged without a signal).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k human_stop` and `-k pr_` (must say `Ran N
+tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5754,7 +5833,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ## T308 — `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]`: find, verify, signal, wait (RC-01 G1, command)
 Status: TODO
-Dependencies: T307, T318
+Dependencies: T307, T318, T323
 Model: opus
 
 ### Goal
@@ -5919,11 +5998,19 @@ record for its own run with the kind from the hint or the stage, never from `las
 no record is written by a checkout helper after the gate changed.
 
 ### Implementation notes
-- Design: `.ai/current-plan.md` "G9", "Writes (T320)"; spec FR-6, B20. Each write is `ai_helper
-  escalation write other "$stage" --run "$AI_RUN_ID" 2>/dev/null || true` (the hint or the stage
-  refines `other`), only after a passing gate check in that path:
-  - `stop()` non-recovery path (~186–188): after the existing `ai_gate_check` with `gate_ok=yes`.
-  - `ai_die` in the pipeline branch (`common.sh`): beside T302's record write, same condition.
+- Design: `.ai/current-plan.md` "G9", "Writes (T320)"; spec FR-6, B20, B22. Each write is
+  `ai_helper escalation write other "$stage" --run "$AI_RUN_ID" 2>/dev/null || true` (the hint or
+  the stage refines `other`), only after a passing gate check in that path.
+- One writer per shutdown chain (plan review P13): the non-recovery `stop()` always ends in
+  `ai_die` (`scripts/ai-pipeline` ~186–188), and the first write consumes the hint, so a second
+  write would lose the kind. Every shell write site sets `AI_ESCALATION_WRITTEN=1` after its
+  call (also when the helper failed: one attempt per chain); `ai_die` writes only when it is
+  unset. T305's helper rule (a same-run `other` write keeps a specific kind) is the backstop.
+  - `stop()` non-recovery path (~186–188): after the existing `ai_gate_check` with `gate_ok=yes`,
+    with `$stage`; then `ai_die` skips its write.
+  - `ai_die` in the pipeline branch (`common.sh`): beside T302's record write, same condition,
+    only when `AI_ESCALATION_WRITTEN` is unset (a direct `ai_die` without `stop()`), stage
+    `${AI_STAGE:-other}`.
   - `ai-recover` `escalate()` (~44–55): skipped when `AI_GATE_BROKEN` is set or `AI_RUN_ID` is
     empty; the watchdog's crash stage (`crash (pipeline killed or restarted)`) gives kind
     `crash`.
@@ -5940,8 +6027,12 @@ scripts/ai-pipeline, scripts/ai-run, scripts/ai-recover, scripts/lib/common.sh, 
 
 ### Acceptance criteria
 - `test_escalation_wiring_task_blocked`: a fixture pipeline whose only task is BLOCKED
-  (`AI_AUTO_RECOVER=0`) ends with kind `task_blocked`, tasks `["T001"]`, a `retry_task` answer, its
-  run id.
+  (`AI_AUTO_RECOVER=0`): read after the pipeline process has exited, the record has kind
+  `task_blocked`, tasks `["T001"]`, a `retry_task` answer, its run id (plan review P13: the final
+  record, after `stop()` and `ai_die`).
+- `test_escalation_wiring_plan_review_stop_final_record`: `AI_SUPERVISE=0`, `AI_AUTO_RECOVER=0`
+  and a BLOCKER plan review: read after exit, kind `plan_review_limit` with the
+  `resume_skip_plan_review` answer.
 - `test_escalation_wiring_validation_and_recovery`: a failing gate with auto-recovery that
   escalates → kind `validation` written by `ai-recover`; a recovery that resumes removes the
   record.
@@ -6186,9 +6277,45 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
+## T324 — `exec-logged` accepts the detached pipeline's log name (RC-01 G11, plan review round 2 P12)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+`workflow.py exec-logged` accepts `pipeline-<UTC stamp>-<8 hex>.log` beside today's
+`plan-<UTC stamp>-<8 hex>.log`, with the same exclusive, no-symlink creation in the pinned
+`.ai/local`, so T313 can launch the pipeline through it. Nothing else changes.
+
+### Implementation notes
+- `scripts/lib/workflow.py` `EXEC_LOG_NAME` (~5069): `(?:plan|pipeline)-\d{8}T\d{6}Z-[0-9a-f]{8}\.log`
+  with `fullmatch` as today. No other change to `exec_logged` (~5072–5112): the `O_EXCL |
+  O_NOFOLLOW | O_NONBLOCK` creation, the regular-file check and the pinned `.ai/local` stay
+  exactly as they are.
+- Extend the existing tests (`exec_logged_fixture`, `tests/test_workflow.py` ~2516–2607). Docs:
+  the `exec-logged` mention in `docs/workflow.md`, if it names the log pattern. Flow unchanged.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_exec_logged_accepts_both_log_prefixes`: `plan-20261021T210000Z-0123abcd.log` and
+  `pipeline-20261021T210000Z-0123abcd.log` both create their log and run the command.
+- `test_exec_logged_rejects_bad_names_and_a_relative_command` additionally refuses (exit 2,
+  nothing created) `pipelines-…`, `pipeline-…` with 7 hex or uppercase hex, `pipeline-….log.x`,
+  `../pipeline-….log` and a `pipeline/` prefix.
+- Existing `test_exec_logged_*` pass (symlink, FIFO, symlinked `.ai/local`, no truncation,
+  concurrent launches).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k exec_logged` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
 ## T313 — `ai-pipeline --detach`: own systemd user service, recorded log path (RC-01 G11)
 Status: TODO
-Dependencies: T319
+Dependencies: T319, T324
 Model: opus
 
 ### Goal
@@ -6203,7 +6330,8 @@ to follow and stop it; the printed stop command really stops it. Without `system
   remaining arguments (else the usual message). `systemd-run` not executable → exit 1 with the
   plan's message, nothing started. `ai_root` first (paths check); no lock (the child takes it).
 - Log name `pipeline-$(date -u +%Y%m%dT%H%M%SZ)-<8 hex>.log` in `.ai/local`, created by
-  `workflow.py exec-logged` (as `scripts/ai-plan` ~56–64). The unit form of the plan (env: `PATH`,
+  `workflow.py exec-logged` (as `scripts/ai-plan` ~56–64), which accepts this prefix since T324
+  (plan review P12). The unit form of the plan (env: `PATH`,
   `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and every `AI_*` variable without NUL or newline, except
   `AI_RUN_ID`, plus `AI_LAUNCHER=detach-systemd`, `AI_RUN_LOG=<abs log>`), unit name
   `ai-pipeline-<checkout base name, [A-Za-z0-9._-] only>-<epoch>`.
@@ -6258,7 +6386,7 @@ the new commands and record paths.
 - README: command list (`ai-pipeline --stop`, `--detach` (systemd only), `ai-task retry`,
   `model`, `skip`, `skip --reauthorize`, `--commit`). `docs/workflow.md`: one "Run controls"
   section that links the stop, escalation record, run record and task command paragraphs added
-  by T301–T322, and says that `--detach` needs `systemd-run` (the `setsid` fallback is later
+  by T301–T324, and says that `--detach` needs `systemd-run` (the `setsid` fallback is later
   work).
 - Vault `agents-flow.md`: check the "Stopped by you" path, the escalation record bullet, the
   SKIPPED note and `--detach` exist and match; `updated:` date; one hub Log line in `agents.md`
@@ -6266,7 +6394,8 @@ the new commands and record paths.
 - `.ai/handoff.md`: "For mission control (phase 2 switch)" with every command (exact argv,
   exit statuses 0/1/3/4/75), record paths (`<state root>/reviews/<16 hex>/runs/current`,
   `runs/<id>.json`, `escalation.json`, `<state root>/skips/<64 hex>`, `.ai/local/pipeline-*.log`),
-  schema versions, the kinds list, and that `--stop` sends SIGTERM; "Manual testing for the human"
+  schema versions, the run id format (`<stamp>-<pid>-<seq>`), the kinds list, and that `--stop`
+  sends SIGTERM; "Manual testing for the human"
   updated; `## Flow chart` first line "Flow chart updated (…)".
 - Add a docs consistency check if the existing `DocsConsistencyTest` pattern covers command lists
   (e.g. every `ai-task` subcommand in the usage text appears in README).
