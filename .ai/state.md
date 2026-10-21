@@ -1,16 +1,16 @@
 # Persistent workflow state
 
 Project: agents
-Branch: fix/flow-batch-9
+Branch: fix/flow-batch-10
 Phase: implementing
 Current task: none
 Last completed task: T117
 Tasks complete: 63
-Tasks remaining: 1
-Last validation: targeted only (T117 -k state_isolation 4 OK); full gate pending the runner
+Tasks remaining: 14
+Last validation: none on this branch yet; batch 9's last full gate PASS, 1104 tests (T116 tree, 816.3 s)
 Blocked: no
-Next action: Resume/implement T118
-Last updated: 2026-10-21T20:50:00Z
+Next action: Zack approves the plan (handoff Needs you); then implement T201 (batch 10: 0 of 13 done; T118 is batch 9's, TODO here)
+Last updated: 2026-10-21T22:00:00Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
