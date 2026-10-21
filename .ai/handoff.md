@@ -84,6 +84,7 @@ Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour mos
   header tells them not to run the full gate.
 
 ## Flow chart
+Flow chart updated (so far by T201; more to come).
 T201 updated the vault `agents-flow.md` plan review node ("no task DONE since the base?", skip
 line printed) and its skip edge (2026-10-22). Still to come: T204 (session gate
 rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update vault

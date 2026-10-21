@@ -5141,7 +5141,7 @@ tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limi
 runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 
 ## T201 — Plan review decided against the run's base, with a skip line (FL-39)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: none
 Model: opus
 
@@ -5212,6 +5212,7 @@ Targeted: `bash -n scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-22 00:35Z: the host gate after 333b87a failed only test_pr_body_flow_this_repo_declares_the_flow_chart: the line right after `## Flow chart` in `.ai/handoff.md` must start with "Flow chart updated" or "Flow unchanged". Mission control added "Flow chart updated (so far by T201; more to come)." as that line. Verify the T201 work, run the targeted checks, and mark DONE; keep that first line in every later task.
 2026-10-22: `scripts/ai-pipeline` gets `plan_untouched` (`tasks newly-done "$base_sha"` empty and
 `tasks count` ≥ 1; a helper error sets `cannot read the task queue against the base` and skips,
 fail closed). A skipped review prints exactly one `Plan review skipped: <why>` line before the
