@@ -9,10 +9,12 @@ date in the same task and appends a dated line to the Log of `agents.md`; never 
 checkboxes. If the vault edit is denied, record it in the result and in the handoff's
 "## Flow chart" section.
 Current batch (batch 10, `fix/flow-batch-10` from `fix/flow-batch-9` at 4fea72d, planned 2026-10-21,
-approved by Zack 2026-10-21): T201–T213, from vault `agents-backlog.md` TS-01 (1)(2), ME-01 parts 1
-and 2, and FL-39 (backlog FL-35, plan review skipped on follow-up batches). Design:
-`.ai/current-plan.md`; scope, non-goals and assumptions A1–A16: `.ai/project-spec.md`. Line
-references for T201–T213 are at 4fea72d; re-check them before editing.
+approved by Zack 2026-10-21): T201–T218, from vault `agents-backlog.md` TS-01 (1)(2), ME-01 parts 1
+and 2, and FL-39 (backlog FL-35, plan review skipped on follow-up batches). Revised after the
+hand-run plan review round 1 (spec "Plan review round 1"): T214–T218 were added and sit where their
+dependencies require, so IDs are not in file order. Design: `.ai/current-plan.md`; scope,
+non-goals and assumptions A1–A19: `.ai/project-spec.md`. Line references for T201–T218 are at
+4fea72d; re-check them before editing.
 Earlier batches' tasks stay unchanged because the host protects DONE blocks: T001–T046 are batches
 6, 7 and 8 (DONE; batch 8 on `fix/flow-batch-8`, PR #35, not merged; T044–T046 are its review
 fixes); T101–T118 are batch 9 (`fix/flow-batch-9`, not merged; T113–T118 are its review fixes).
@@ -5158,6 +5160,9 @@ prints one line saying why.
 - Keep: armed resume skips; the loop's existing "current and not revised" check
   (`plan-review-info` ~496) so a resumed run with a current plan review does not review again;
   `tasks untouched` stays as a helper (do not delete; other callers/tests may use it, grep).
+- Scope: the pipeline's review-entry decision only. The plan revision path (`ai-run
+  --revise-plan`, `revision-queue-repair`) still rejects DONE tasks until T214; do not change it
+  here.
 - The installed `.ai/bin/ai-pipeline` is a gate file: edit only `scripts/ai-pipeline`.
 - Vault: in `agents-flow.md` "The big picture", the plan review decision node now reads "no task
   DONE since the base?" with a "skip line printed" edge; bump `updated:` and append a dated line to
@@ -5175,13 +5180,83 @@ scripts/ai-pipeline, tests/test_workflow.py, vault agents-flow.md, vault agents.
   `Plan review skipped: tasks done since the base: T002`.
 - Regression `test_plan_review_base_skip_flag_prints_the_line`: `--skip-plan-review` prints
   `Plan review skipped: --skip-plan-review`.
-- Existing plan review, armed resume and pre-flight tests pass (`-k plan_review`, `-k
-  preflight_pipeline`, `-k limit_relaunch`).
+- Existing plan review and pre-flight pipeline tests pass (`-k plan_review`, `-k
+  preflight_pipeline`; armed resume is covered by `-k limit_relaunch_accept`, left to the host gate
+  because the group is slow).
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k plan_review_base` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
 Targeted: `python3 -m unittest discover -s tests -k plan_review` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k preflight_pipeline` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/ai-pipeline`.
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T214 — Plan revision and its queue repair decided against the run's base (FL-39, review P2)
+Status: TODO
+Dependencies: T201
+Model: opus
+
+### Goal
+A follow-up batch whose plan review has a BLOCKER or MAJOR finding can be revised under
+supervision: `ai-run --revise-plan` and `revision-queue-repair` accept a queue whose DONE tasks
+were all DONE at the run's base, and a revision never changes those DONE blocks.
+
+### Implementation notes
+- Review round 1 P2: `scripts/ai-run` ~476 dies `Plan revision: a task is already DONE; …` via
+  `tasks untouched`; `revision_queue_repair` (`scripts/lib/workflow.py` ~3596–3615) returns when
+  HEAD's queue has any DONE task. Both must use the base-relative rule of T201 (spec A14).
+- `workflow.py`: factor `newly_done_ids(rev, blocks)` out of `tasks newly-done` (~757–773; same
+  output). `revision-queue-repair [--base REV]`: with `--base`, the "no DONE task" condition
+  becomes "no id in `newly_done_ids(REV, HEAD's queue)`" (an unknown REV → do nothing, as other
+  errors); without it, today's rule. Update the docstring.
+- `ai-pipeline` ~457: `ai_helper revision-queue-repair --base "$base_sha"`. `ai-run` ~173: pass
+  `--base` with the merge-base of `${base:-main}` and HEAD when it resolves (as `plan_base` at
+  ~478), else call it without `--base`.
+- `ai-run --revise-plan`: move the DONE check below the `plan_base` line (~478) and use
+  `newly=$(ai_helper tasks newly-done "$plan_base" 2>&1) || ai_die "Plan revision: cannot compare
+  the task queue with the base: ${newly#Error: }"`; non-empty → `ai_die "Plan revision: a task is
+  already DONE since the base ($(…first three ids…)); the plan review gate no longer applies."`
+  (keeps the phrase `a task is already DONE` that
+  `test_queue_recovery_revise_plan_with_a_done_task_still_stops` asserts).
+- Earlier DONE blocks stay byte-identical: after the session, next to the post-session
+  `revision_scope` (~573), `keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) ||
+  ai_die "Plan revision stage: ${keep_error#Error: }"` (the planning check, ~3450; the stage
+  prefix makes `ai-recover` escalate, as other revision-stage stops).
+- Update the `--revise-plan` usage text (~21 "no task DONE" → "no task DONE since --base") and
+  docs/workflow.md where the plan revision precondition is described. Flow unchanged beyond T201
+  (same decision; T201 updated the chart): check the chart's plan revision node and record it.
+
+### Likely affected modules
+scripts/ai-run, scripts/ai-pipeline, scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_plan_review_followup_major_revised_rereviewed_and_implemented`: fixture whose
+  base has T001 DONE and whose branch adds TODO T002; the mock Codex plan review reports a MAJOR
+  first and nothing on the re-review (reuse the mock modes of the supervised plan tests; grep
+  `plan_round` and `MOCK_CODEX` in `-k supervised_plan`); `ai-pipeline` runs the plan review, one
+  revision (`chore(ai): record plan revision`), the re-review, then implements T002; T001's block
+  is byte-identical to the base's.
+- Regression `test_plan_review_followup_revision_keeps_done_blocks`: a revision session (mock
+  Claude) that edits T001's DONE block stops with `Plan revision stage:` and records nothing.
+- Regression `test_plan_review_followup_newly_done_still_stops`: a task newly DONE since the base
+  → `a task is already DONE since the base (T002)`.
+- Regression `test_plan_review_followup_queue_repair_with_base`: an uncommitted out-of-order
+  revision queue with historical DONE tasks is reordered by `revision-queue-repair --base`; the
+  same queue without `--base` is left alone (today's rule).
+- Existing `-k revise_plan`, `-k queue_recovery` and `-k plan_revision_stage` tests pass.
+
+### Validation
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k plan_review_followup` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k revise_plan` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k queue_recovery` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k plan_revision_stage` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/ai-run scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5223,11 +5298,14 @@ tests/run_parallel.py, tests/test_workflow.py, README.md, docs/workflow.md
 - Regression `test_worker_count_line_comes_first`: running `run_parallel.py --start-dir` on a tiny
   fixture test dir with `AI_TEST_WORKERS=2` prints `Workers: 2 (AI_TEST_WORKERS)` as the first
   line of output and the summary line still matches `on 2 workers`.
-- Existing `run_parallel` tests pass.
+- Existing runner tests pass (`test_parallel_runner_*`; the targeted run covers the summary,
+  worker validation and a full run; the slow process-tree ones are left to the host gate).
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k worker_count` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k run_parallel` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k parallel_runner_rejects_invalid_workers -k parallel_runner_summary -k parallel_runner_all_pass` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5244,9 +5322,10 @@ only its targeted checks (`targeted`), from the project's measured gate time and
 
 ### Implementation notes
 - `scripts/lib/workflow.py`: factor the body of `gate_seconds` (~4466–4477) into a function
-  returning the int (the command keeps printing it). New command `session-gate` (register in
-  `main()`): `AI_SESSION_GATE` empty or `auto` → `full` when 1 ≤ gate ≤ 119, else `targeted`;
-  `full`/`targeted` → that mode. Print `MODE SECONDS`. Any exception (unreadable state root, git
+  returning the project's last 3 passing gate seconds (the command keeps printing their max, 0
+  without any). New command `session-gate` (register in `main()`): `AI_SESSION_GATE` empty or
+  `auto` → `full` when at least one pass is recorded and the max is < 120 (0 included: a
+  sub-second gate), else `targeted` (spec A3); `full`/`targeted` → that mode. Print `MODE SECONDS`. Any exception (unreadable state root, git
   error) or an invalid value → `targeted 0`, exit 0 (spec A3; the validator below rejects invalid
   values before a run starts). Module constant `FAST_GATE_SECONDS = 120` with a comment (TS-01:
   projects whose gate is under 120 s keep running it in the session).
@@ -5263,18 +5342,22 @@ scripts/lib/workflow.py, scripts/lib/common.sh, scripts/ai-recover, scripts/ai-r
 
 ### Acceptance criteria
 - Regression `test_session_gate_mode_from_gate_time_and_setting`: no gate rows → `targeted 0`;
-  last passes 60, 90 → `full 90`; 60, 800 → `targeted 800` (largest of the last 3); 119 → `full`,
-  120 → `targeted`; `AI_SESSION_GATE=full` with 800 → `full 800`; `targeted` with 60 →
-  `targeted 60`; another project's rows ignored; an unreadable log → `targeted 0`, exit 0.
+  one pass of 0 s → `full 0`; last passes 60, 90 → `full 90`; 60, 800 → `targeted 800` (largest
+  of the last 3); 119 → `full`, 120 → `targeted`; `AI_SESSION_GATE=full` with 800 → `full 800`;
+  `full` with no rows → `full 0`; `targeted` with 60 → `targeted 60`; another project's rows
+  ignored; an unreadable log → `targeted 0`, exit 0.
 - Regression `test_session_gate_setting_is_validated_and_kept`: `AI_SESSION_GATE=x` makes `ai-run`
   and `ai-pipeline` die with `Invalid AI_SESSION_GATE`; the value is in the run manifest's `env`.
 - `test_supervise_settings_key_lists_are_identical` and
-  `test_recovery_restores_the_approved_runs_settings` pass with the new key; `-k gate_seconds`
-  passes.
+  `test_recovery_restores_the_approved_runs_settings` pass with the new key; the `gate-seconds`
+  tests (`test_gate_time_*`) pass unchanged.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k session_gate` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k settings` (must say `Ran N tests`, N ≥ 1).
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k session_gate_mode -k session_gate_setting` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k gate_time` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k supervise_settings_key_lists_are_identical -k recovery_restores_the_approved_runs_settings` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/lib/common.sh scripts/ai-recover scripts/ai-run scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
@@ -5296,12 +5379,14 @@ the session stays the authoritative full gate that decides DONE.
   <(ai_helper session-gate 2>/dev/null) || true`; anything but `full`/`targeted` → `targeted`.
 - RUNNER CONTRACT (~929): replace "A gate run that outlives a tool call is not a blocker: the full
   gate the runner runs after the session decides." with one sentence per mode (spec A5):
-  `targeted`: "Gate rule: run the task's Targeted: checks in the foreground and fast static
-  checks (such as bash -n on changed scripts); do not run .ai/bin/ai-check: the runner runs the
-  full gate after the session, it decides DONE, and a DONE task whose gate fails returns to
-  IN_PROGRESS." `full`: "Gate rule: run the task's Targeted: checks, then .ai/bin/ai-check with
-  run_in_background and wait for it; a gate run that outlives a tool call is not a blocker: the
-  full gate the runner runs after the session decides."
+  `targeted`: "Gate rule: run the task's Targeted: checks (a task without Targeted: lines: the
+  commands of its ### Validation section other than .ai/bin/ai-check) in the foreground and fast
+  static checks (such as bash -n on changed scripts); do not run .ai/bin/ai-check: the runner
+  runs the full gate after the session, it decides DONE, and a DONE task whose gate fails returns
+  to IN_PROGRESS." `full`: "Gate rule: run the task's Targeted: checks, then .ai/bin/ai-check
+  with run_in_background and wait for it; a gate run that outlives a tool call is not a blocker:
+  the full gate the runner runs after the session decides." The fallback clause keeps older
+  queues without `Targeted:` lines working (review P11, spec A5/A18).
 - `claude_session` (~318–328): compute the allowance only when `track_attempt == yes` and
   `gate_mode == full` (today's `min(2 × gate, session_timeout)`); `targeted` → allowance 0 and the
   `Session:` breakdown `: gate rule targeted (host gate ${gate_secs}s after the session)`. Keep the
@@ -5325,13 +5410,26 @@ scripts/ai-run, tests/test_workflow.py, vault agents-flow.md, vault agents.md
 - Regression `test_session_gate_contract_setting_overrides`: 800 s rows with
   `AI_SESSION_GATE=full` → full text and the capped allowance; 60 s rows with
   `AI_SESSION_GATE=targeted` → targeted text, no allowance.
-- Existing `-k session_allowance` (or the FL-28 allowance tests; grep `two gate runs`),
-  `-k fresh_retry` and `-k gate_only` tests pass (update expected text only where the contract
-  sentence changed).
+- Regression `test_session_gate_contract_fallback_without_targeted_lines`: a task whose
+  Validation section has no `Targeted:` line gets the targeted contract with the fallback clause
+  (`other than .ai/bin/ai-check`).
+- Migrated existing FL-28 tests (review P9; `tests/test_workflow.py` ~10979–11000): in
+  `test_session_gate_allowance_limit_grows_with_the_measured_gate` and
+  `test_session_gate_allowance_capped_by_the_remaining_run_time` set `AI_SESSION_GATE=full` for
+  the runs that expect an allowance (same expected limits and breakdowns); add to the first a
+  subTest that the same 300 s and 900 s gates under the default `auto` give `limit 1000s` and
+  `gate rule targeted`. `..._not_for_triage`, `..._records_each_host_gate_run` and
+  `..._failed_gate_records_fail` pass unchanged.
+- Existing `-k fresh_retry` and `-k gate_only` tests pass (update expected text only where the
+  contract sentence changed).
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k session_gate_contract` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19; `session_gate_allowance` includes the migrated tests):
+Targeted: `python3 -m unittest discover -s tests -k session_gate_allowance` (must say `Ran N tests`, N ≥ 1).
 Targeted: `python3 -m unittest discover -s tests -k fresh_retry` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_only` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/ai-run`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
@@ -5371,74 +5469,275 @@ templates/.ai/prompts/runner.md, templates/.ai/prompts/triage.md, templates/.ai/
   `fix-review.md` contain `RUNNER CONTRACT's gate rule`; none tells the session unconditionally to
   run the full gate (no line starting `- Run the full gate as`); `templates/CLAUDE.md` names the
   contract's gate rule; `implement.md` still names `.ai/bin/ai-check`.
-- Existing template and docs tests pass (`-k template`, `-k Docs`, `-k prompt`).
+- Existing template and docs tests pass (`-k template_rules`, `-k review_prompt_template`,
+  `DocsConsistencyTest`).
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k session_gate_templates` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k template` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k template_rules -k review_prompt_template` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
-## T206 — Event log core: schema v1, run id, rotation, tolerant reader (ME-01 part 1)
+## T215 — Task format and task-writing prompts name `Targeted:` checks (TS-01 (2), review P11)
+Status: TODO
+Dependencies: T205
+Model: sonnet
+
+### Goal
+New queues written by planning, plan revision or triage give every task explicit `Targeted:`
+check lines separate from the full gate, so the RUNNER CONTRACT's targeted rule always has
+commands to run; older queues without them keep working through the contract's fallback (T204).
+
+### Implementation notes
+- Review round 1 P11: `templates/.ai/tasks.md` (~33–34) shows `### Validation` with
+  `- <Exact deterministic commands and expected outcomes.>`; `templates/.ai/prompts/plan.md`
+  (~11–13 "exact validation commands"), `plan-revision.md` (~17) and `triage.md` (~26) only list
+  the section names (spec A18).
+- `templates/.ai/tasks.md` example Validation section: `Targeted: <fast deterministic command for
+  this task, with its expected result>` (one line per check) and `Gate: .ai/bin/ai-check`. One
+  sentence above the fence: "`Targeted:` lines are what an unattended session runs; the runner's
+  full gate (`Gate:`) runs after the session." Keep the fence and every heading (tests parse the
+  template: `test_empty_template_is_not_a_real_task`, `test_queue_check_empty_template_queue_fails`).
+- `plan.md`, `plan-revision.md`, `triage.md`: where they name `### Validation`, add "with one
+  `Targeted:` line per task-specific check (a selector that runs at least one test) and a `Gate:`
+  line". `templates/CLAUDE.md` "Architecture and planning" (~41–45): one clause naming the
+  `Targeted:` lines. Never edit `.ai/prompts/`, `.ai/tasks.md` or the root `CLAUDE.md`.
+- No parser change: `### Validation` stays free text; older queues stay valid.
+- Flow unchanged (task format text only); record it.
+
+### Likely affected modules
+templates/.ai/tasks.md, templates/.ai/prompts/plan.md, templates/.ai/prompts/plan-revision.md, templates/.ai/prompts/triage.md, templates/CLAUDE.md, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_session_gate_targeted_lines_agree`: `templates/.ai/tasks.md`'s example has a
+  `Targeted:` and a `Gate:` line inside the fence; `plan.md`, `plan-revision.md` and `triage.md`
+  name `Targeted:`; the RUNNER CONTRACT text built by `scripts/ai-run` (grep the sentence of T204)
+  names `Targeted:` and the fallback clause.
+- Existing `test_empty_template_is_not_a_real_task`, `test_queue_check_empty_template_queue_fails`
+  and `-k template_rules` pass.
+
+### Validation
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k session_gate_targeted_lines` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k empty_template -k template_rules` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T206 — Event log core: envelope, schema v1, stable lock, guarded writer, tolerant reader (ME-01 part 1)
 Status: TODO
 Dependencies: none
 Model: opus
 
 ### Goal
-Host scripts can append schema-versioned flow events to one bounded JSONL log in the host state
-dir, each tagged with the approved run's id, and readers get every event of both files once,
-skipping kinds or versions they do not know.
+Host scripts can append schema-versioned flow events to one JSONL log in the host state dir,
+tagged with the run in `AI_RUN_ID` (null without one), serialized by a stable lock file that
+readers share; no event helper ever runs after the approved gate is known to be broken; readers
+get every event once, skipping kinds or versions they do not know. Rotation is T217; the run
+context is T216.
 
 ### Implementation notes
 - Decision (spec A6): a new `events.jsonl` beside `outcomes.jsonl` (`state_root()`), not new kinds
   in `outcomes.jsonl`, because outcomes must never rotate (attempt numbering, `first_pass`, crash
   reconcile read all of it). Record this in docs/decisions.md if the repo has one, else in
   docs/workflow.md (T213 adds the full docs section).
-- `scripts/lib/workflow.py` (near `append_outcome` ~3957): `events_path()`; `EVENT_SCHEMA = 1`;
-  `EVENT_KINDS` = dict kind → {field: type} for `gate`, `stop`, `recovery`, `ruling`, `review`,
-  `pr`, `run` with the fields of spec A10–A12 (types `str`, `int`, `int|None`); `redact(text,
-  limit=200)` (one line, ≤ limit, replaces `sk-…`, `ghp_…`, `github_pat_…`, `xox[abp]-…`,
-  `AKIA[0-9A-Z]{16}`, `Bearer \S+` and `(key|token|secret|password)=\S+` values with `[redacted]`);
-  `append_event(kind, fields)` adds `v`, `id` (`secrets.token_hex(8)`), `time` (`now()`),
-  `project`, `branch`, `run` (from the run manifest's `run_id` when it names this branch, else
-  None) and writes like `append_outcome` (flock, newline guard, one write, fsync); rotation (spec
-  A9) inside the same lock: size > `AI_EVENTS_MAX_BYTES` (default 8 MiB, int ≥ 65536, invalid →
-  default) → `os.replace` to `events.1.jsonl`, new file starting with the old file's lines of the
-  same `run` (when `run` is not None).
-- `read_events(paths=None)`: `events.1.jsonl` then `events.jsonl` via `decode_outcome_lines`;
-  keep dicts with `v == 1` and a known kind; drop repeated ids.
+- `scripts/lib/workflow.py` (near `append_outcome` ~3957): `events_path()` (=
+  `state_root()/events.jsonl`), `events_archive_path()` (`events.1.jsonl`, written only by T217),
+  `events_lock_path()` (`events.lock`); `EVENT_SCHEMA = 1`; `EVENT_ENVELOPE = ('v', 'id', 'time',
+  'kind', 'project', 'branch', 'run')` (reserved: no kind may define these names; review P5);
+  `EVENT_KINDS` = dict kind → {field: type} exactly as spec A7 (the ruling category is
+  `ruling_kind`; types `str`, `int`, `int|None`); a module-level assertion or test that no kind
+  field is an envelope name.
+- `redact(text, limit=200)`: one line, ≤ limit, replaces `sk-…`, `ghp_…`, `github_pat_…`,
+  `xox[abp]-…`, `AKIA[0-9A-Z]{16}`, `Bearer \S+` and `(key|token|secret|password)=\S+` values with
+  `[redacted]`; applied to every `str` field.
+- `append_event(kind, fields)`: validates; adds `v`, `id` (`secrets.token_hex(8)`), `time`
+  (`now()`), `project`, `branch` and `run` = `AI_RUN_ID` when it matches `^[0-9a-f]{16}$`, else
+  None (never looked up from the manifest or the branch; review P8, spec A8). Locking (review P3,
+  spec A9): open `events.lock` (`O_RDWR|O_CREAT`, 0o644; never renamed or deleted), `flock
+  LOCK_EX`, THEN open `events.jsonl` (`O_RDWR|O_APPEND|O_CREAT`) and append with the
+  `append_outcome` newline guard, one write and fsync; close the log, then the lock. Comment why
+  the lock is a separate file (`next_attempt_seq` ~3997 explains the replaced-inode problem). Leave
+  a clearly named hook point where T217 adds rotation inside the lock.
+- `read_events(paths=None)`: takes `events.lock` with `LOCK_SH` (when the lock file cannot be
+  opened, read unlocked: a reader never fails on a read-only state dir), reads `events.1.jsonl`
+  then `events.jsonl` via `decode_outcome_lines`, keeps dicts with `v == 1` and a known kind,
+  drops repeated ids.
 - CLI `event KIND key=value…`: values typed per schema (`int` fields must be decimal, `-` → None);
-  unknown kind/field or bad type → usage error exit 2; OSError → `Note: could not record the KIND
-  event.` on stderr, exit 1. `check_state_root` as `outcome` does.
-- `run-manifest start` (~1680): add `run_id` (16 hex) and `started` (epoch int) to the fresh dict;
-  validation accepts both as optional (wrong type → invalid, as other fields); `run-manifest
-  run-id` prints the id (exit 1 when absent). A resume keeps them (start is not called).
-- `scripts/lib/common.sh`: `ai_event() { ai_helper event "$@" 2>/dev/null || printf 'Note: could
-  not record the %s event.\n' "$1" >&2; }` (never fails the caller).
-- No writer yet beyond tests (T207–T210); flow unchanged.
+  unknown kind, unknown or envelope field, bad type → usage error exit 2, nothing written; OSError
+  → `Note: could not record the KIND event.` on stderr, exit 1. `check_state_root` as `outcome`.
+- `scripts/lib/common.sh` (review P1, spec A17), next to `ai_observe`:
+  `ai_event() { [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0; ai_helper event "$@" 2>/dev/null ||
+  printf 'Note: could not record the %s event.\n' "$1" >&2; }` (never fails the caller) and a
+  comment stating the rule for T207–T210/T218: every helper call that prepares an event (category,
+  totals, excerpts) lives inside a `common.sh` function after this same guard, never in the
+  caller's arguments.
+- No writer yet beyond tests (T207–T210, T218); flow unchanged.
 
 ### Likely affected modules
 scripts/lib/workflow.py, scripts/lib/common.sh, tests/test_events.py (new), docs/workflow.md
 
 ### Acceptance criteria
-- New `tests/test_events.py` (uses the isolated state root like other tests):
-  `test_events_append_has_schema_and_run_id` (manifest started → `run` equals `run-manifest
-  run-id`; no manifest → `run: null`; fields typed; `v == 1`),
-  `test_events_cli_rejects_unknown_kind_field_and_type` (exit 2, nothing written),
-  `test_events_redact_tokens_and_bound` (each pattern → `[redacted]`, newlines folded, ≤ 200),
-  `test_events_rotation_keeps_the_current_run` (small `AI_EVENTS_MAX_BYTES`; after rotation the
-  new file holds every earlier line of the current run, `events.1.jsonl` holds the rest, a second
-  rotation drops only other runs' lines; `read_events` returns each id once),
-  `test_events_reader_tolerates_unknown_kinds_and_versions` (unknown kind, `v: 2`, torn line,
-  non-dict → skipped), `test_events_unwritable_state_dir_is_a_note` (exit 1 with the Note;
-  `ai_event` returns 0).
-- `-k run_manifest` tests pass with the two new fields.
+- New `tests/test_events.py` (isolated state root like other tests; class names contain
+  `EventsCore`, test names start `test_events_core_`):
+  `test_events_core_envelope_and_run_tag` (`AI_RUN_ID` of 16 hex → `run` equals it; unset or
+  malformed → `run: null`; `v == 1`; fields typed; a `ruling` event with `ruling_kind=queue-order`
+  reads back through `read_events` with `kind == "ruling"` and `ruling_kind == "queue-order"`),
+  `test_events_core_cli_rejects_unknown_kind_field_type_and_envelope_names` (exit 2, nothing
+  written, also for `kind=…`, `run=…`, `v=…`),
+  `test_events_core_redact_tokens_and_bound` (each pattern → `[redacted]`, newlines folded, ≤ 200),
+  `test_events_core_reader_tolerates_unknown_kinds_and_versions` (unknown kind, `v: 2`, torn line,
+  non-dict → skipped; a repeated id read once),
+  `test_events_core_concurrent_appends_are_whole_lines` (8 processes × 50 appends started on a
+  barrier: 400 events, each id once, every line valid JSON),
+  `test_events_core_unwritable_state_dir_is_a_note` (exit 1 with the Note; `ai_event` returns 0
+  and the caller continues),
+  `test_events_core_gate_broken_runs_no_helper` (a shell sourcing `common.sh` with `AI_BIN`
+  pointing at a copy whose `lib/workflow.py` creates a marker file when run: with
+  `AI_GATE_BROKEN=1`, `ai_event gate …` returns 0, the marker does not exist and no event is
+  written; without it the helper runs).
+- Existing `-k runs_no_helper` and `-k gate_time` tests pass.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k events` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k run_manifest` (must say `Ran N tests`, N ≥ 1).
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_core` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k runs_no_helper -k gate_time` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/lib/common.sh`.
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T216 — Run context: run id in the manifest, `AI_RUN_ID`, run on outcome rows and attempt markers (ME-01, review P8)
+Status: TODO
+Dependencies: T206
+Model: opus
+
+### Goal
+Every event and every new outcome row written during an approved pipeline run (resumes and
+recovery included) carries that run's id from explicit context; standalone commands, also after a
+run finished, carry none; a crashed attempt reconciled during a later run stays with the run it
+belonged to.
+
+### Implementation notes
+- Review round 1 P8: the run manifest survives a finished run (`clear-attempts` ~1736 keeps it),
+  so a branch lookup would tag later standalone commands; `reconcile_marker` (~4257) writes
+  `time: now()` during a later run. Spec A8.
+- `run-manifest start` (~1680): add `run_id` (`secrets.token_hex(8)`) and `started` (int epoch)
+  to the fresh dict; validation (~1708) accepts both as optional (wrong type or pattern →
+  invalid, as other fields); `run-manifest run-id` prints the id (exit 1 when absent). A resume
+  keeps them (start is not called); every human start makes a new id.
+- `scripts/ai-pipeline` after the manifest step (~155–165): `AI_RUN_ID=$(ai_helper run-manifest
+  run-id 2>/dev/null) || AI_RUN_ID=''`; keep it only when it matches `^[0-9a-f]{16}$`; `export
+  AI_RUN_ID` when set, else `unset AI_RUN_ID` (an inherited value is never trusted). Same in
+  `scripts/ai-recover` right after `approved_gate` is read (~73), so its own events and the resumed
+  pipeline (`exec env …`) have it. Not a run setting: not in `RUN_SETTINGS` or the `ai-recover`
+  lists.
+- `workflow.py`: one `current_run_id()` (validated `AI_RUN_ID` or None) used by `append_event`
+  (T206: replace its inline check) and by `outcome` (~4368): new rows of every kind get `run`
+  only when it is set (the key is absent otherwise, so standalone rows look as today).
+  `open_attempt` (~4184) adds `run` to the marker (not in `MARKER_FIELDS`: older markers stay
+  valid); `reconcile_marker` sets the crashed row's `run` from the marker's `run` when it is 16
+  hex (absent otherwise), never from the reconciling process.
+- Docs: docs/workflow.md where outcome rows and the run manifest are described (one sentence
+  each). Flow unchanged.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_events.py, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_events_run_context_manifest_id_and_resume`: `run-manifest start` writes a
+  16-hex `run_id` and an int `started`; `run-id` prints it; a second start gives a new id; a
+  wrong-typed `run_id` makes the manifest invalid; `clear-attempts` keeps both.
+- Regression `test_events_run_context_rows_carry_the_run`: a pipeline fixture run's task, review
+  and gate outcome rows have `run` equal to the manifest's id; after it finished, a standalone
+  `ai-run` (no `AI_RUN_ID` in its environment) writes rows without `run` and an `event` with
+  `run: null`.
+- Regression `test_events_run_context_consecutive_runs_on_one_branch`: two human starts on one
+  branch give two ids and each run's rows carry their own.
+- Regression `test_events_run_context_crash_reconciled_in_a_later_run`: a marker written with
+  `AI_RUN_ID=A` whose runner is gone, reconciled by `outcome attempt-reconcile` with
+  `AI_RUN_ID=B`, gives a `crashed` row with `run: A`; a marker without `run` gives a row without
+  it.
+- Existing `-k outcome_attempt`, `-k outcome_crash`, `-k ruling_manifest`,
+  `-k timeout_rerun_manifest` and `-k recovery_restores_the_approved_runs_settings` tests pass.
+
+### Validation
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_run_context` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k outcome_attempt -k outcome_crash` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k ruling_manifest -k timeout_rerun_manifest -k recovery_restores_the_approved_runs_settings` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/ai-pipeline scripts/ai-recover`.
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T217 — Event log rotation that keeps every active run (ME-01 part 1, review P3 and P4)
+Status: TODO
+Dependencies: T206
+Model: opus
+
+### Goal
+`events.jsonl` stays bounded: past `AI_EVENTS_MAX_BYTES` it is archived to `events.1.jsonl` while
+every line of every active run on the host stays in the live file, so no active run (any project,
+paused recoveries included) ever loses an event, also with concurrent writers waiting across a
+rotation.
+
+### Implementation notes
+- Review round 1 P3 (renaming a locked file does not move its lock) and P4 (keeping only the
+  writer's run loses another active run on the second rotation). Spec A9. T206's stable
+  `events.lock` already serializes writers and readers; rotation runs at T206's hook point,
+  inside the exclusive lock, before the append.
+- `events_max_bytes()`: `AI_EVENTS_MAX_BYTES` int ≥ 65536, else (unset, invalid) 8 MiB. When the
+  live file's size exceeds it: read it (`decode_outcome_lines`); active run ids = ids with no
+  `run` event `action == "end"` in the file whose latest event `time` is within
+  `EVENT_RUN_STALE_DAYS = 7` of now; keep the raw lines whose `run` is active (in file order);
+  lines with `run: null`, unknown kinds or torn lines are not kept. Rotate only when the dropped
+  bytes are at least a quarter of the cap; otherwise append without rotating (comment: the file
+  may exceed the cap while that many runs are active).
+- Order (crash-safe, duplicates instead of loss): write a temp file in the state root with the
+  whole live content, fsync, `os.replace` it to `events.1.jsonl`; write a temp file with the kept
+  lines, fsync, `os.replace` it to `events.jsonl`; fsync the directory. Temp names unique per
+  process (`tempfile.mkstemp` in the state root); a failure removes its temp and leaves both
+  files as they were (the append still happens; a `Note:` only on the append's own failure).
+- `read_events` already dedupes by id (T206), which covers a crash between the two replaces.
+- Docs: docs/workflow.md rotation paragraph (T213 audits). Flow unchanged.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_events.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_events_rotation_keeps_every_active_run`: projects A and B (two fixture
+  checkouts, one state root), `AI_EVENTS_MAX_BYTES=65536`; A's run writes a start and a few
+  events and stays open (no end, like a paused recovery); B then runs consecutive runs, each
+  ending with `run end`, writing enough to rotate at least twice while A writes nothing;
+  afterwards `read_events` holds A's complete history and B's current run; B's first ended run is
+  gone after the second rotation; the live file holds every A line.
+- Regression `test_events_rotation_waiting_writers_lose_nothing`: 6 processes started on a
+  barrier, each with its own active `AI_RUN_ID`, append 200 events of their run interleaved with
+  200 filler events written with no `AI_RUN_ID` (droppable, so rotations really happen while
+  others wait on the lock) at the minimum cap; afterwards `events.1.jsonl` exists, the live file
+  is below the size it would have without rotation, `read_events` returns all 1200 run events
+  exactly once, and every line of both files is valid JSON.
+- Regression `test_events_rotation_small_gain_and_stale_runs`: a file over the cap holding only
+  active runs is not rotated (appends continue); a run whose latest event is 8 days old and has no
+  end is dropped at the next rotation; null-run lines are dropped.
+- Regression `test_events_rotation_crash_between_replaces_duplicates_only`: simulate the state
+  after the first replace (archive = full copy, live unchanged): `read_events` returns each id
+  once, and the next rotation succeeds.
+- Existing `-k events_core` tests pass.
+
+### Validation
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_rotation` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19; `events_core` is T206's):
+Targeted: `python3 -m unittest discover -s tests -k events_core` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5453,24 +5752,29 @@ Every host-run full gate leaves one `gate` event with its task or stage, start, 
 run, failures, workers and result.
 
 ### Implementation notes
-- `workflow.py event gate --from-stamp TASK_OR_STAGE START SECONDS RESULT` (or a separate command
-  `gate-event`; keep the CLI of T206 for plain fields): reads the log path from
+- `workflow.py event-gate TASK_OR_STAGE START SECONDS RESULT` (a separate command; T206's `event`
+  CLI stays for plain fields): reads the log path from
   `.ai/local/validation.json` (the stamp record, ~870–883), opens it only as a regular file
   (`O_NOFOLLOW`, last 256 KiB), parses integers (spec A12): tests = last `Ran N tests`; failures =
   `failures=a` + `errors=b` of the last `FAILED (…)` line, or the count after `failing batches:`,
   else 0 on `OK`, else None; workers = `Workers: W` (T202) or `on W workers`. Missing or odd →
   None. `task` when the argument matches a task id (`T\d+`), else `stage`.
-- `scripts/ai-run` `record_gate CODE STARTED [WHERE]` (~265): keep the `outcome gate` row (feeds
-  `gate-seconds`), then `ai_event`-style call with the epoch start (`$(( $(date +%s) - (SECONDS -
-  STARTED) ))`). Callers: after a DONE session (~737, the task id), gate-only retry (~792, the task
-  id), final gate (~884, `final`).
-- `scripts/ai-pipeline` `ensure_validated` (~262–268): time the `ai-check` call and record stage
-  `validation` (pass/fail/timeout from the exit code like `record_gate`) before `stop validation`.
-  `scripts/ai-recover` commit_and_rerun gate (~303): stage `recovery`, before `escalate`.
-- Never let the event change an exit path (`|| true` / `ai_event`). Flow unchanged.
+- `scripts/lib/common.sh`: `ai_gate_event WHERE STARTED CODE` with T206's guard as its first
+  statement (spec A17): maps the exit code to `pass`/`fail`/`timeout` (124 and 137 → timeout, as
+  `record_gate`), computes the epoch start and seconds, then `ai_helper event-gate … 2>/dev/null
+  || printf 'Note: …'`. Callers pass only shell values.
+- `scripts/ai-run` `record_gate CODE STARTED [WHERE]` (~265; called only after `ai_guard_verify`):
+  keep the `outcome gate` row (feeds `gate-seconds`), then `ai_gate_event`. Callers: after a DONE
+  session (~737, the task id), gate-only retry (~792, the task id), final gate (~884, `final`).
+- `scripts/ai-pipeline` `ensure_validated` (~262–268): time the `ai-check` call; after
+  `ai_gate_check "$AI_APPROVED_GATE"` succeeds (a changed gate records nothing; the existing
+  `stop`/`ai_guard_verify` path then stops as today) call `ai_gate_event validation …`, then `stop
+  validation` on failure as today. `scripts/ai-recover` commit_and_rerun gate (~303): after its
+  existing `ai_gate_check` (~304) passes, `ai_gate_event recovery …`.
+- Never let the event change an exit path. Flow unchanged.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, scripts/ai-recover, tests/test_events.py, tests/test_workflow.py
+scripts/lib/workflow.py, scripts/lib/common.sh, scripts/ai-run, scripts/ai-pipeline, scripts/ai-recover, tests/test_events.py, tests/test_workflow.py
 
 ### Acceptance criteria
 - Regression `test_events_gate_parses_the_gate_log`: logs for unittest OK (`Ran 12 tests` …
@@ -5482,24 +5786,29 @@ scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, scripts/ai-recover
   a failing final gate gives `stage: final`, `result: fail`.
 - Regression `test_events_gate_pipeline_validation_and_recovery`: `ensure_validated` writes stage
   `validation`; an unwritable state dir leaves the pipeline's exit status unchanged.
+- Existing `-k gate_time`, `-k session_gate_allowance_records` and `-k runs_no_helper` tests pass
+  (the tampered-helper tests prove no gate event helper runs after a gate change).
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k events_gate` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k gate_seconds` (must say `Ran N tests`, N ≥ 1).
-Targeted: `bash -n scripts/ai-run scripts/ai-pipeline scripts/ai-recover`.
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k gate_time -k session_gate_allowance_records -k runs_no_helper` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/lib/common.sh scripts/ai-run scripts/ai-pipeline scripts/ai-recover`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
 ## T208 — `stop` and `recovery` events with a fixed stop category (ME-01 part 1, stops)
 Status: TODO
-Dependencies: T206
+Dependencies: T206, T216
 Model: opus
 
 ### Goal
-Every pipeline stop and every recovery decision leaves an event: stops with their stage, a
-category from a fixed list and a redacted message excerpt; recovery with its decision, task and
-attempt. Recording never changes what the stop or recovery does.
+Every pipeline stop and every recovery decision on a trusted gate leaves an event: stops with
+their stage, a category from a fixed list and a redacted message excerpt; recovery with its
+decision, task and attempt. Recording never changes what the stop or recovery does, and no event
+helper runs once the gate is known to be broken (those stops have no event).
 
 ### Implementation notes
 - `workflow.py stop-category STAGE` reads `.ai/local/last-error` (regular file, first 4 KiB) and
@@ -5512,97 +5821,149 @@ attempt. Recording never changes what the stop or recovery does.
   review_round_limit; `needs your decision|questions only you can answer` → needs_human;
   `crash|killed|without a checkpoint` → crash. Comment: telemetry only, never read by recovery
   (OR-04 open).
-- `scripts/ai-pipeline` `stop()` (~173): after `ai_observe stop`, `ai_event stop stage=… category=…
-  message=… recovery=yes|no` (message passed raw; `append_event` redacts and bounds it), before
-  the `exec ai-recover` / `ai_die`.
-- `scripts/ai-recover`: `recovery decision=rerun|commit_and_rerun|relaunch|escalate task=…
-  attempt=N` at each decision point (grep `resume`, `escalate`, `limit-schedule`; the attempt from
-  the reserved budget variable `attempt`), and `stop` (category from the helper, `recovery=no`) in
-  `escalate()` (~44) before its exit. Task = `run-manifest task` value if the manifest has one (grep
-  `task-set`), else `-`.
+- Review round 1 P1 (spec A17): `stop()` and `escalate()` also handle gate tampering, and
+  `ai_observe`/`ai_notify_log` (`common.sh` ~214–221) skip their helpers when `AI_GATE_BROKEN` is
+  set. So both writers below are `common.sh` functions whose FIRST statement is that guard, and the
+  category helper and the last-error read run inside them, after the guard; callers pass only the
+  stage, the hand-over flag, the decision, the task and the attempt.
+  - `ai_stop_event STAGE yes|no`: guard; `category=$(ai_helper stop-category "$1" 2>/dev/null) ||
+    category=other`; message = the first 4 KiB of `.ai/local/last-error` read in shell (regular
+    file only, as `stop()` reads it); `ai_event stop stage=… category=… message=… recovery=…`
+    (`append_event` redacts and bounds the message).
+  - `ai_recovery_event DECISION TASK ATTEMPT`: guard; `ai_event recovery …`.
+- `scripts/ai-pipeline` `stop()` (~173): after `ai_gate_check` and `ai_observe stop`,
+  `ai_stop_event "$stage" yes|no` (`yes` exactly when it is about to `exec ai-recover`), before the
+  `exec ai-recover` / `ai_die`.
+- `scripts/ai-recover`: `ai_recovery_event rerun|commit_and_rerun|relaunch|escalate TASK "$attempt"`
+  at each decision point (grep `resume`, `escalate`, `limit-schedule`; the attempt from the
+  reserved budget variable `attempt`, `-` before it is reserved), and `ai_stop_event "$stage" no`
+  in `escalate()` (~44) before its exit. Task = `run-manifest task` value if the manifest has one
+  (grep `task-set`), else `-`, read inside the event function after the guard. Escalations after
+  `ai_gate_check` failed (~156, ~223, ~304, ~314, ~367) or the unsafe-gate escalation (~153) record
+  nothing, as `ai_observe` there.
 - Vault: `agents-flow.md` "When something goes wrong": one bullet "Every stop and recovery
-  decision is recorded as an event (ME-01, T208, telemetry only)"; bump `updated:`; Log line.
+  decision on a trusted gate is recorded as an event (ME-01, T208, telemetry only; none after a
+  gate change)"; bump `updated:`; Log line.
 
 ### Likely affected modules
-scripts/lib/workflow.py, scripts/ai-pipeline, scripts/ai-recover, tests/test_events.py, tests/test_workflow.py, vault agents-flow.md, vault agents.md
+scripts/lib/workflow.py, scripts/lib/common.sh, scripts/ai-pipeline, scripts/ai-recover, tests/test_events.py, tests/test_workflow.py, vault agents-flow.md, vault agents.md
 
 ### Acceptance criteria
 - Regression `test_events_stop_category_table`: one last-error text per category (including a
   reworded unknown → `other`, a missing file → `other`, a symlinked file → `other`).
 - Regression `test_events_stop_and_recovery_written_on_a_recovered_stop`: a pipeline fixture that
   stops on a failing gate and recovers by rerun writes `stop` (`category: validation_failed`,
-  `recovery: yes`), then `recovery` (`decision: rerun`, attempt 1).
+  `recovery: yes`), then `recovery` (`decision: rerun`, attempt 1), both with the run's id.
 - Regression `test_events_stop_on_escalation`: an escalated stop writes `stop` with `recovery: no`;
   a secret-looking token in last-error appears as `[redacted]`.
 - Regression `test_events_stop_unwritable_state_dir_keeps_the_stop`: the stop's notification,
   last-error and exit status are unchanged.
-- Existing `-k recovery` and `-k limit_relaunch` tests pass.
+- Regression `test_events_stop_gate_change_runs_no_event_helper` (review P1): as
+  `test_observation_pipeline_gate_changed_by_a_hook_runs_no_helper` (a hook changes the gate and
+  the tampered `workflow.py` marks any run) and an `ai-recover` escalation for "gate files changed
+  since you approved the run": `UNTRUSTED_HELPER_RAN` is absent, no `stop`, `recovery` or
+  `stop-category` output is written, and the ⛔ notification is unchanged.
+- Existing `-k runs_no_helper`, `-k observation_gate` and `-k recovery_escalates` tests pass.
 
 ### Validation
+New tests:
 Targeted: `python3 -m unittest discover -s tests -k events_stop` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k recovery` (must say `Ran N tests`, N ≥ 1).
-Targeted: `bash -n scripts/ai-pipeline scripts/ai-recover`.
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k runs_no_helper -k observation_gate -k recovery_escalates` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/lib/common.sh scripts/ai-pipeline scripts/ai-recover`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
-## T209 — `run` and `pr` events (ME-01 part 1, run totals)
+## T209 — `run` start, resume and exactly one end per handled finish or terminal stop (ME-01 part 1, review P7)
 Status: TODO
-Dependencies: T207, T208
-Model: sonnet
+Dependencies: T207, T208, T216
+Model: opus
 
 ### Goal
-Each approved run leaves a `run` start (or resume) event and an end event with totals, and every
-PR the pipeline opens or switches between draft and ready leaves a `pr` event.
+Each approved run leaves a `run` start (or resume) event and exactly one end event with totals
+whenever it ends in a handled way: every successful finish path (PR, no PR, no origin, no `gh`)
+after its publishing work succeeded, and every terminal stop on a trusted gate. A recovery
+hand-over, a relaunch wait or a failed final push is not an end.
 
 ### Implementation notes
-- `scripts/ai-pipeline` after the manifest step (~155–165): `run action=start` on a human start,
-  `run action=resume` when `AI_RECOVERY_ATTEMPT` is set; fields `base` (short sha), `args`
-  (redacted, bounded by `append_event`).
-- `run action=end` with `result=pr` after `chore(ai): record pull request` (~726) and
-  `result=stopped` on a terminal stop (the non-recovery branch of `stop()` and `ai-recover
-  escalate`, next to T208's `stop` events). Totals from a helper `workflow.py run-totals BASE`:
-  `tasks` (count of `tasks newly-done BASE`), `gates` and `gate_failures` (this run's `gate`
-  events), `seconds` (now − manifest `started`, None when absent).
-- `pr` after `gh pr create` (~719: `action=opened state=draft|ready url=…`) and after each
-  successful `gh pr ready`/`--undo` (~684–698: `action=state`); the url as printed by `gh`
-  (bounded, redacted).
-- Event failures never change the PR or stop path. Flow unchanged (recording only).
+- Review round 1 P7: `finish()` (`scripts/ai-pipeline` ~89–96) is called at ~638 (no PR), ~658
+  (no origin), ~663 (no `gh`) and ~730 (after the final push ~727, which goes to `stop` when it
+  fails); `ai_die` (`common.sh` ~11–28) is the generic terminal stop of the pipeline and recovery
+  shells (`AI_PIPELINE_MARKER` set); `ai-recover` ends in `escalate()` (~44) or `on_exit` (~123)
+  for an unexpected exit, or pauses with exit 75 (relaunch wait). Spec A11, A17.
+- `scripts/ai-pipeline` after T216's `AI_RUN_ID` export (~165): `ai_event run action=start
+  base=<short sha> args=<the original arguments joined>` on a human start, `action=resume` when
+  `AI_RECOVERY_ATTEMPT` is set (`append_event` redacts and bounds `args`).
+- `scripts/lib/common.sh` `ai_run_end RESULT`: first the T206 guard, then return unless
+  `AI_RUN_ID` is set, `AI_RUN_ENDED` is empty and `BASHPID == $$` (never from a subshell); set
+  `AI_RUN_ENDED=1` before any helper call; totals from a new helper `workflow.py run-totals`
+  (reads only this run's records, by `AI_RUN_ID`: `tasks` = distinct task ids of this run's
+  `outcome task` rows with result `done`, `gates` and `gate_failures` = this run's `gate` events,
+  `seconds` = now − the manifest's `started`, None when absent); then `ai_event run action=end
+  result=RESULT …`.
+- Call sites: `finish RESULT` (the four callers pass `no_pr`, `no_origin`, `no_gh`, `pr`; keep the
+  `ai_observe done` text as today) calls `ai_run_end "$RESULT"` after `ai_observe done`;
+  `ai_die`'s pipeline branch (inside `if [[ -n "${AI_PIPELINE_MARKER:-}" ]]`) calls
+  `ai_run_end stopped` (this covers `stop()`'s non-recovery branch and every safe terminal
+  `ai_die` after the run started); `ai-recover` `escalate()` and `on_exit` (non-zero code, not
+  yet notified) call `ai_run_end stopped`. Nothing on `exec ai-recover`, `resume()` or exit 75.
+  `ai_die` before `AI_RUN_ID` exists writes nothing (no start was written either).
+- Event failures never change any finish or stop path (exit codes, notifications, markers stay
+  byte-identical). Vault: `agents-flow.md` "The big picture" end node gains "run end recorded
+  (ME-01)"; bump `updated:`; Log line in `agents.md`.
 
 ### Likely affected modules
-scripts/ai-pipeline, scripts/ai-recover, scripts/lib/workflow.py, tests/test_events.py, tests/test_workflow.py
+scripts/ai-pipeline, scripts/ai-recover, scripts/lib/common.sh, scripts/lib/workflow.py, tests/test_events.py, tests/test_workflow.py, vault agents-flow.md, vault agents.md
 
 ### Acceptance criteria
-- Regression `test_events_run_start_and_end_with_totals`: a full pipeline fixture to PR writes
-  `run start`, then `run end` with `result: pr`, `tasks` = number of fixture tasks, `gates` ≥ 1,
-  `seconds` ≥ 0, all with the same `run` id.
-- Regression `test_events_run_resume_and_stopped_end`: a recovered run writes `run resume` with the
-  same id; an escalated stop writes `run end` with `result: stopped`.
-- Regression `test_events_pr_opened_and_ready`: mock `gh` → `pr opened` (`state: draft` with
-  `--draft`, url from the mock) and a ready switch → `pr state` `ready`.
-- Existing `-k pull_request` and `-k pr_body` tests pass.
+- Regression `test_events_run_end_once_per_finish_path` (subTests): a pipeline fixture run to the
+  PR (mock `gh`), with `--no-pr`, without an `origin` remote, and without `gh` each writes one
+  `run start` and exactly one `run end` with `result` `pr`, `no_pr`, `no_origin`, `no_gh`, the
+  same `run` id, `tasks` = number of fixture tasks, `gates` ≥ 1, `seconds` ≥ 0.
+- Regression `test_events_run_end_failed_final_push_is_not_pr`: as
+  `test_failed_final_push_is_reported_not_hidden` with `AI_AUTO_RECOVER=0`: no `result: pr`, one
+  `run end` with `result: stopped`.
+- Regression `test_events_run_end_resume_and_terminal_stops`: a recovered run writes `run resume`
+  with the start's id and one end; an escalated stop writes one `result: stopped`; a terminal
+  `ai_die` after the start (e.g. an invalid queue with `AI_AUTO_RECOVER=0`) writes one
+  `result: stopped`; a usage-limit relaunch wait (exit 75) writes no end.
+- Regression `test_events_run_end_gate_change_runs_no_helper` (review P1): a stop after a hook
+  changed the gate writes no `run end` and `UNTRUSTED_HELPER_RAN` is absent.
+- Existing `-k observation_pipeline`, `-k failed_final_push`, `-k pipeline_without_remote` and
+  `-k runs_no_helper` tests pass.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k events_run` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k events_pr` (must say `Ran N tests`, N ≥ 1).
-Targeted: `bash -n scripts/ai-pipeline scripts/ai-recover`.
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_run_end` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k observation_pipeline -k failed_final_push -k pipeline_without_remote -k runs_no_helper` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/lib/common.sh scripts/ai-pipeline scripts/ai-recover`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
-## T210 — `ruling` and `review` routing events (ME-01 part 1, BR-01 and BR-14 records)
+## T210 — `ruling` and `review` routing events (ME-01 part 1, BR-01 and BR-14 records, review P5 and P6)
 Status: TODO
-Dependencies: T206
+Dependencies: T206, T209
 Model: sonnet
 
 ### Goal
-Every BR-01 ruling and every review's reviewer choice (with the BR-14 routing reason) is
-recorded as an event.
+Every BR-01 Ruling row the host writes (queue order, task sections, disposition cell, flow line)
+and every review's reviewer choice (with the BR-14 routing reason) is recorded as an event; a
+refused or repeated claim records nothing.
 
 ### Implementation notes
-- `scripts/lib/common.sh` `ai_ruling_rows` (~326): for each Ruling row it writes, `ai_event ruling
-  kind=KIND key=KEY task=T…|-` (task when the key starts with a task id; grep how the keys look:
-  `queue-order`, `task-sections`, `disposition-cell:<digest>.M1`, `flow-line:T001`, `final`).
+- Review round 1 P6: Ruling rows are written in three places in `scripts/lib/common.sh`:
+  `ai_ruling_rows` (~326, `queue-order` and `task-sections`), `ai_disposition_ruling` (~389,
+  `disposition-cell`) and `ai_flow_line_ruling` (~416, `flow-line`). P5: the event is `kind:
+  ruling` and the category goes in `ruling_kind` (spec A7; T206's schema).
+- One shared emitter `ai_ruling_event RULING_KIND KEY TASK` (T206 guard first; `ai_event ruling
+  ruling_kind=… key=… task=…`, task `-` when none) called right after the `ai_log` of each row
+  in all three functions: queue rows (key = the task id of the change line, task = that id),
+  disposition rows (key = `DIGEST12.ID`, task = the TASK argument when it is a task id, else `-`),
+  flow-line rows (key = the claim KEY, e.g. `T001` or `final`; task = KEY when it is a task id).
+  The early returns on a refused claim stay before the row, so they emit nothing.
 - `scripts/ai-review`: after each published review (where `outcome review … --route` is called;
   grep it), `ai_event review mode=plan|code|recheck reviewer=codex|claude|claude-routed|
   claude-fallback model=… reason=…` (the route reason or the fallback reason; `-` when none).
@@ -5612,9 +5973,20 @@ recorded as an event.
 scripts/lib/common.sh, scripts/ai-review, tests/test_events.py, tests/test_workflow.py
 
 ### Acceptance criteria
-- Regression `test_events_ruling_per_row`: the raid-f4 pre-flight fixture (as in
-  `test_preflight_pipeline_raid_f4_committed_queue`) writes one `ruling` event `kind: queue-order`
-  per Ruling row; a flow-line ruling gives `task: T001`.
+- Regression `test_events_ruling_all_writers` (subTests): the raid-f4 pre-flight fixture (as in
+  `test_preflight_pipeline_raid_f4_committed_queue`) writes one event per Ruling row with `kind:
+  ruling`, `ruling_kind: queue-order`; a missing-section fixture gives `ruling_kind:
+  task-sections`; the bold-cell triage fixture (as in
+  `test_ruling_disposition_triage_flow_reads_the_bold_cell`) gives `ruling_kind:
+  disposition-cell`; the runner flow-line fixture (as in
+  `test_ruling_flow_line_runner_repairs_before_the_gate`) gives `ruling_kind: flow-line` with
+  `task: T001`; each reads back through `read_events` and the number of events equals the number
+  of `Ruling (` rows in the run log.
+- Regression `test_events_ruling_refused_claims_write_none`: the repeat-claim fixtures (as in
+  `test_preflight_pipeline_same_ruling_twice_stops`,
+  `test_ruling_disposition_triage_repeat_claim_stops_as_today`,
+  `test_ruling_flow_line_runner_repeat_claim_leaves_the_handoff`) add no ruling event for the
+  refused claim.
 - Regression `test_events_review_routing_reason`: a Codex code review → `reviewer: codex`; a routed
   small fix round (fixture of `test_review_routing_pipeline_small_low_risk_fix_round_goes_to_claude`)
   → `reviewer: claude-routed` with the `small low-risk fix round` reason; a recorded Codex limit →
@@ -5622,16 +5994,59 @@ scripts/lib/common.sh, scripts/ai-review, tests/test_events.py, tests/test_workf
 - Existing `-k ruling` and `-k review_routing` tests pass.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k events_ruling` (must say `Ran N tests`, N ≥ 1).
-Targeted: `python3 -m unittest discover -s tests -k events_review` (must say `Ran N tests`, N ≥ 1).
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_ruling -k events_review` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k ruling` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k review_routing` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/lib/common.sh scripts/ai-review`.
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T218 — `pr` events for opened PRs and draft/ready changes (ME-01 part 1, pr)
+Status: TODO
+Dependencies: T206, T209
+Model: sonnet
+
+### Goal
+Every PR the pipeline opens, and every draft/ready change it makes, leaves a `pr` event with the
+run's id; recording never changes the PR path.
+
+### Implementation notes
+- Split from the original T209 (review round 1 P7 made the run end its own opus task).
+- `scripts/ai-pipeline`: after a successful `gh pr create` (~719) `ai_event pr action=opened
+  state=draft|ready url="$url"` (`draft` when `make_draft == yes`); after each successful and
+  verified `gh pr ready --undo` (~684–686) `action=state state=draft`, and `gh pr ready`
+  (~698–701) `action=state state=ready`. The url as printed by `gh` (`append_event` bounds and
+  redacts). Plain `ai_event` calls: no helper runs in their arguments (T206 rule).
+- Flow unchanged (recording only).
+
+### Likely affected modules
+scripts/ai-pipeline, tests/test_events.py
+
+### Acceptance criteria
+- Regression `test_events_pr_opened_and_ready`: mock `gh` → `pr opened` with `state: draft` when
+  the run drafts (as in `test_pipeline_opens_draft_when_findings_persist`) and `state: ready`
+  otherwise, url from the mock; a pipeline-drafted PR made ready by a clean run (as in
+  `test_pr_undraft_created_policy_draft_is_made_ready_by_a_clean_run`) → `pr state` `ready`; an
+  existing ready PR converted to draft (as in `test_existing_ready_pr_is_converted_to_draft`) →
+  `pr state` `draft`; all with the run's id.
+- Existing `-k pr_undraft`, `-k existing_ready_pr` and `-k failed_draft_conversion` tests pass.
+
+### Validation
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k events_pr` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k pr_undraft -k existing_ready_pr -k failed_draft_conversion` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
 ## T211 — Metrics data and JSON from outcomes and events (ME-01 part 2, helper)
 Status: TODO
-Dependencies: T207, T208, T209, T210
+Dependencies: T207, T208, T209, T210, T216, T217, T218
 Model: sonnet
 
 ### Goal
@@ -5646,9 +6061,12 @@ prints them as JSON.
   `timeouts`, `median_task_seconds`, `gates`, `median_gate_seconds` (events, fallback `outcome
   gate` rows), `stops` (dict category → count), `review_rounds` (code reviews, not re-checks),
   `findings` (dict reviewer → {blocker, major, minor}). Runs: id, project, branch, start, end,
-  result (from `run` events); task/review rows assigned to a run by project, branch and time
-  between its start and end (or now); unassigned rows → run `null` group labelled `(no run
-  record)`. Reuse `ordered_attempts` for first-pass. Medians with `statistics.median`.
+  result (from `run` events: start or resume, end; no end → `result: "open"`). Attribution
+  (review round 1 P8, spec A8/A13): an outcome row or event belongs to the run named in its own
+  `run` field (T216 writes it, a reconciled `crashed` row carries its attempt's run); rows and
+  events without `run` (history before this batch, standalone commands) go to the run `null`
+  group labelled `(no run record)`. No branch or time-window matching. Reuse `ordered_attempts`
+  for first-pass. Medians with `statistics.median`.
 - `--since`: UTC date, inclusive, compare on `time`; invalid → usage error. `--project`: exact
   match. Without `--json` print the JSON too for now (T212 adds the text output).
 - Read only; unknown kinds ignored; torn lines skipped (existing readers). Flow unchanged.
@@ -5662,12 +6080,19 @@ scripts/lib/workflow.py, tests/test_events.py
   (two runs with start/end, gates of 600 and 800 s, stops `timeout` and `queue_order`) give the
   exact expected numbers per project and per run (first-pass 1/2 = 0.5, timeouts 1, median gate
   700, stops by category, findings by reviewer).
-- Regression `test_metrics_filters_and_unassigned_rows`: `--since` drops older rows and runs,
-  `--project` keeps one project, rows outside every run land in `(no run record)`; empty logs →
-  zero counts and `None` medians, exit 0; bad `--since` → exit 2.
+- Regression `test_metrics_attribution_by_run_field`: two consecutive runs on one branch keep
+  their own rows; a `crashed` row written during run B with `run: A` counts for A; a row with no
+  `run` field lands in `(no run record)` even when its time falls inside a run; a run with a start
+  and no end has `result: "open"`.
+- Regression `test_metrics_filters_and_empty_logs`: `--since` drops older rows and runs,
+  `--project` keeps one project; empty logs → zero counts and `None` medians, exit 0; bad
+  `--since` → exit 2.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k metrics` (must say `Ran N tests`, N ≥ 1).
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k test_metrics` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19; the outcome report is read by the same readers):
+Targeted: `python3 -m unittest discover -s tests -k outcome_report` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5702,10 +6127,14 @@ scripts/ai-status, scripts/lib/workflow.py, tests/test_events.py
 - Regression `test_metrics_ai_status_flag`: `ai-status --metrics --json --project p1` (fixture state
   dir) prints valid JSON with one project; `ai-status --metrics --since x` exits non-zero with the
   usage error; `ai-status --help` lists `--metrics`.
-- Existing `-k outcomes_report` and `-k ai_status` tests pass.
+- Existing `ai-status` outcome-report tests pass (`test_outcome_report_*`,
+  `test_runner_logs_task_outcomes_and_report`, which runs `ai-status --outcomes`).
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k metrics` (must say `Ran N tests`, N ≥ 1).
+New tests:
+Targeted: `python3 -m unittest discover -s tests -k test_metrics` (must say `Ran N tests`, N ≥ 1).
+Existing regressions (verified selectors, spec A19):
+Targeted: `python3 -m unittest discover -s tests -k outcome_report -k runner_logs_task_outcomes` (must say `Ran N tests`, N ≥ 1).
 Targeted: `bash -n scripts/ai-status`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
@@ -5713,7 +6142,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ## T213 — Docs, flow chart and handoff audit (batch 10)
 Status: TODO
-Dependencies: T201, T202, T203, T204, T205, T206, T207, T208, T209, T210, T211, T212
+Dependencies: T201, T214, T202, T203, T204, T205, T215, T206, T216, T217, T207, T208, T209, T210, T218, T211, T212
 Model: haiku
 
 ### Goal
@@ -5723,13 +6152,17 @@ the worker default and the plan review decision.
 
 ### Implementation notes
 - README.md and docs/workflow.md: a "Flow data" section: `~/.local/state/ai-toolkit/events.jsonl`
-  (or `$AI_STATE_DIR`), written only by host scripts, schema `v: 1`, the seven kinds and their
-  fields, rotation to `events.1.jsonl` (`AI_EVENTS_MAX_BYTES`, current run kept), why it is not
-  `outcomes.jsonl` (spec A6), stop categories are telemetry only; "Reading the metrics":
+  (or `$AI_STATE_DIR`), written only by host scripts, schema `v: 1`, the envelope and the seven
+  kinds with their fields (`ruling_kind`), the run id (`AI_RUN_ID`, `run` on outcome rows, `(no
+  run record)` for older rows), `events.lock`, rotation to `events.1.jsonl`
+  (`AI_EVENTS_MAX_BYTES`, every active run kept, 7-day stale rule), why it is not
+  `outcomes.jsonl` (spec A6), stop categories are telemetry only, no events after a detected gate
+  change, one `run end` per handled finish or terminal stop; "Reading the metrics":
   `ai-status --metrics` examples with `--since`, `--project`, `--json`. Check the
-  `AI_SESSION_GATE` setting, the worker default and the `Plan review skipped:` line are described
-  where the related behaviour is (T202–T205 and T201 should have done it; fix gaps).
-- Vault `agents-flow.md`: verify T201, T204 and T208 edits match the code; add a "Flow data
+  `AI_SESSION_GATE` setting, the `Targeted:` lines, the worker default, the `Plan review skipped:`
+  line and the base-relative plan revision are described where the related behaviour is (T201,
+  T214, T202–T205 and T215 should have done it; fix gaps).
+- Vault `agents-flow.md`: verify T201, T204, T208 and T209 edits match the code; add a "Flow data
   (ME-01)" line under "Related" pointing to the docs section; bump `updated:`; Log line.
 - `.ai/handoff.md`: Validation, Manual testing (Needs you / Covered by automated tests with the
   final test names), Flow chart section first line "Flow chart updated (…)".
@@ -5740,8 +6173,9 @@ README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md, vault agents.
 
 ### Acceptance criteria
 - `DocsConsistencyTest` and `test_pr_body_flow_this_repo_declares_the_flow_chart` pass.
-- README and docs/workflow.md name `events.jsonl`, `events.1.jsonl`, `AI_EVENTS_MAX_BYTES`,
-  `ai-status --metrics`, `AI_SESSION_GATE` and `Plan review skipped`.
+- README and docs/workflow.md name `events.jsonl`, `events.1.jsonl`, `events.lock`,
+  `AI_EVENTS_MAX_BYTES`, `AI_RUN_ID`, `ai-status --metrics`, `AI_SESSION_GATE`, `Targeted:` and
+  `Plan review skipped`.
 - The handoff's `## Flow chart` section starts with "Flow chart updated".
 
 ### Validation
