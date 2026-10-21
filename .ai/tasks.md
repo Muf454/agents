@@ -4845,3 +4845,119 @@ Vault hub Log: one dated T112 line in `agents.md`.
 Targeted: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `-k state_isolation` 2 OK.
 Gate: `.ai/bin/ai-check` (background): 1098 tests OK, 770.0 s, exit 0.
 
+## T113 — Registry guard reads the caller's registry before discovery (review M1, FL-33)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+`tests/run_parallel.py` checks the caller's real registry, not the temp registry that
+`tests/isolation.py` installs when discovery imports the test modules.
+
+### Implementation notes
+- Review round 1, M1: `main()` calls `collect(start_dir)` (in-process `unittest` discovery, which
+  imports every test module and with it `isolation`, which rewrites `os.environ['AI_STATE_DIR']`
+  and `XDG_STATE_HOME`) before `registry = real_registry()`. So the guard lists the temp registry.
+- Capture `real_registry()` from the caller's environment before `collect()`, e.g. as the first
+  step of `main()` after argument parsing, or from a copy of `os.environ` taken at module import
+  of `run_parallel` (that is safe only if `isolation` cannot have been imported first, so the
+  start of `main()` is simpler). Leave the workers' env and the rest of the guard unchanged.
+- Flow unchanged (test harness only); say so in the result.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py
+
+### Acceptance criteria
+- A regression test `test_state_isolation_guard_reads_the_registry_before_discovery` in
+  tests/test_workflow.py runs `run_parallel.main()` (or the script as a subprocess) with
+  `AI_STATE_DIR` pointing at a fake "real" registry outside the suite temp dir, a discovery that
+  imports `isolation` (or that changes `AI_STATE_DIR` the way it does), and a leaked entry in the fake
+  registry. It asserts that the guard reports that entry and exits non-zero. It fails on the
+  current ordering.
+- The existing `test_state_isolation_*` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+A pre-flight queue repair claims `queue-order:<ID>` for every task whose position changes, not
+only for tasks with late dependencies. So a later repair that would move an already-moved task
+is refused and leaves the queue unchanged (A2).
+
+### Implementation notes
+- Review round 1, M2: `tasks_preflight` (`scripts/lib/workflow.py`) computes `moved`, but it prints
+  `queue-order ID placed after …` only for `task_id in order if late[task_id]`.
+  `ai_queue_ruling` (`scripts/lib/common.sh`) claims only the IDs it parses from those lines.
+  Prerequisites and intervening tasks move without a claim.
+- Make the claimed set equal to `moved`: e.g. emit one `queue-order ID …` line per moved task
+  (with `placed after DEPS` for late-dependency tasks and a neutral wording such as `moved` for
+  the others). Or add a separate claim line kind that `ai_queue_ruling` claims but that is kept
+  out of the Ruling rows and notification text. Keep `ai_ruling_rows` and the 🔧 summary
+  readable. Update the T102/T103 tests that pin the exact output lines.
+- All claims stay before the rewrite (a refused claim changes nothing).
+- Flow unchanged in shape. If the vault Rulings bullet says "per task with a late dependency",
+  correct it and add a hub Log line.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/lib/common.sh, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_preflight_helper_*`: queue `T001, T002, T003` with T001 depending on T002 prints a claimable
+  line for both T001 and T002.
+- Regression `test_preflight_pipeline_indirectly_moved_task_repeat_stops`: after a first repair
+  that moved T001 and T002, a second queue fault that would move T001 again (with T002 or T003 as
+  the late-dependency task) is refused: no new ruling row, `.ai/tasks.md` bytes unchanged, and
+  the run stops as the existing `_same_ruling_twice_stops` does.
+- Existing `test_preflight_*` and `test_ruling_*` groups pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k ruling` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T115 — Routed reviews default to opus (review N1, BR-14, A12)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+A routed Claude review (a small low-risk fix round) runs on opus as A12 specifies, even when the
+queue holds an earlier, already reviewed opus task. `AI_CLAUDE_REVIEW_MODEL` still overrides the
+model.
+
+### Implementation notes
+- Review round 1, N1: `scripts/ai-review` calls `claude_model` for routed reviews too, and that
+  function calls `review-risk`, which scans every task (DONE included). So an earlier opus task or
+  a risky title picks `claude-fable-5-1`.
+- When `routed` is set, use `claude_model=claude-opus-5-5`, `claude_risk='routed'` (or similar),
+  then apply the `AI_CLAUDE_REVIEW_MODEL` override and the effort validation as `claude_model` does
+  today. Fallback and `AI_REVIEWER=claude` reviews keep the full-queue risk selection.
+- Flow unchanged. If the vault "Review routing" bullet names the model, check that it says opus.
+
+### Likely affected modules
+scripts/ai-review, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_review_routing_routed_review_uses_opus_after_an_opus_task`: with an earlier
+  DONE opus task already reviewed and a one-line low-risk fix round, the routed Claude call gets
+  `--model claude-opus-5-5`, and `Reviewed by:` names it. With `AI_CLAUDE_REVIEW_MODEL=x-model`,
+  the call gets `x-model`. A fallback review on the same queue still picks `claude-fable-5-1`.
+- Existing `test_review_routing_*` and `test_reviewed_by_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_routing` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k reviewed_by` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+

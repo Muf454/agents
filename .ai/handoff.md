@@ -180,6 +180,9 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
   `test_state_isolation_registry_guard` (a registry entry naming a checkout under the suite's temp dir
   is reported; other, unreadable and missing entries are not)).
 - `Docs` and `flow_this_repo` (T112, `DocsConsistencyTest`, `test_pr_body_flow_this_repo_declares_the_flow_chart`).
+- Review round 1 fixes (TODO): `test_state_isolation_guard_reads_the_registry_before_discovery`
+  (T113, M1), `test_preflight_pipeline_indirectly_moved_task_repeat_stops` (T114, M2),
+  `test_review_routing_routed_review_uses_opus_after_an_opus_task` (T115, N1).
 
 ## Human todos
 - Gate files: none need changing for this batch.
@@ -188,5 +191,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
 - Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107, T109 and T110 added one).
 
 ## Next action
-T112 was the last task of the queue (T101–T112). The batch is ready for independent review once the
-runner's full gate passes; the host runs it after this session. Nothing is merged or deployed.
+Review round 1 (Codex): M1, M2 and N1 were all accepted (`.ai/reviews/dispositions.md`). Fix tasks
+T113–T115 are TODO and independent of each other. Nothing is merged or deployed.
