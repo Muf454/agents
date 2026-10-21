@@ -533,6 +533,10 @@ lock, race, transaction, secret, token, password, permission and similar; add wo
 reads host records only; anything missing sends the review to Codex. `AI_REVIEW_ROUTE=codex`
 turns routing off.
 
+Every published plan and code review names its reviewer in a `Reviewed by:` line (BR-14), and the
+PR lists one `Reviewed by:` bullet per plan and code round, so a Claude fallback or routed review is
+visible in the PR itself.
+
 The Claude reviewer is a separate `claude -p` session with no access to the
 implementing session and no shell: tools Read/Glob/Grep only, whatever
 `.ai/permissions.allow` contains (every Bash allow/deny list tried left a route to
@@ -998,6 +1002,11 @@ batch a temp directory there (`Temp dir: /dev/shm/ai-tests-… (tmpfs)`, removed
 The directory is probed by running a script from it; a `noexec` mount falls back to the
 default temp dir. `AI_TEST_TMPFS=0` turns it off (`AI_TEST_TMPFS_DIR` replaces `/dev/shm`, for
 the tests only).
+
+Test runs keep host state out of the real registry (FL-33): `tests/isolation.py`, imported first by
+every test module, points `AI_STATE_DIR` and `XDG_STATE_HOME` at throwaway temp directories unless a
+parallel worker already set a temp one. `run_parallel.py` then fails the run (`self-check registered
+fixture runs in the real registry: …`) if the real registry lists a checkout under its temp dir.
 
 Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
 when set (a number greater than 0, otherwise the tests stop with an error), else 2 when

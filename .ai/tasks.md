@@ -4797,7 +4797,7 @@ Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the
 - Gate: the session timed out (exit 124) before committing and recovery had used its two tries; mission control ran `.ai/bin/ai-check` on this tree: 1098 tests, 0 failing, 766.4 s, OK (2026-10-21).
 
 ## T112 — Docs, flow chart and handoff audit (batch 9)
-Status: TODO
+Status: DONE
 Dependencies: T101, T102, T103, T104, T105, T106, T107, T108, T109, T110, T111
 Model: haiku
 
@@ -4831,4 +4831,17 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+Done. Audit of README.md, docs/workflow.md, the vault flow chart and the handoff against the code.
+Helpers (`tasks preflight`, `run-manifest ruling`, `ruling-row`, `disposition-ruling`,
+`flow-line-ruling`, `attempt-info`, `review-route`, `codex-limit`) and the four routing settings
+exist and match the docs. Vault `agents-flow.md` agrees (Reviewer choice, Pre-flight, Rulings,
+Fresh retry, Review routing bullets); no change. Mismatches found and fixed:
+- README lacked the "Reviewed by:" lines (T110): added a paragraph after the routing text.
+- README lacked the FL-33 test isolation (T111): added a paragraph in the test-harness section.
+- Handoff: T111 missing from "What has been implemented", no validation entries for T108–T111,
+  "Next action" still said T111, and the live `ai-dashboard` check (FL-33) moved to covered tests
+  as `test_state_isolation_*`; flow-chart paragraph updated.
+Vault hub Log: one dated T112 line in `agents.md`.
+Targeted: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `-k state_isolation` 2 OK.
+Gate: `.ai/bin/ai-check` (background): 1098 tests OK, 770.0 s, exit 0.
 

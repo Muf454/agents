@@ -32,7 +32,9 @@ session labelled `Claude, routed (…)`, outcome reviewer `claude-routed`, no fa
 heading `Claude, routed, MODEL`; the four routing settings are validated by `ai-review` and
 `ai-pipeline` and kept in the run manifest); T110 (every published plan/code review has a
 `Reviewed by: WHO` line from `AI_REVIEW_WHO`; `outcome review … --route REASON`; the PR lists a
-"Reviewed by:" bullet per plan/code round). The plan was written 2026-10-20 in an unattended planning session on
+"Reviewed by:" bullet per plan/code round); T111 (FL-33: `tests/isolation.py` gives every test
+module throwaway `AI_STATE_DIR`/`XDG_STATE_HOME`, and `tests/run_parallel.py` fails the run when the
+real registry lists a checkout under its temp dir; test-only, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -50,9 +52,13 @@ unchanged because the host protects DONE blocks).
   `ai-review` (small low-risk fix rounds on a fresh Claude opus session), T110 "Reviewed by" in
   every review and the PR body.
 - **FL-33**: T111 isolated test state and a registry guard in `tests/run_parallel.py`.
-- T112: docs, flow chart and handoff audit.
+- T112: docs, flow chart and handoff audit (README gained the `Reviewed by:` lines and the FL-33
+  isolation paragraph; no other mismatch found, see the T112 result).
 
 ## Validation run
+T111 tree: PASS, 1098 tests (full gate run by mission control, 766.4 s). T110 tree: gate PASS on
+the rerun after one unrelated failure (`test_gate_lock_wait_runner_waits_for_the_session_gate`,
+see T110). T109 tree: PASS, 1092 tests (ai-check, 787.0 s). T108 tree: PASS, 1085 tests (736.6 s).
 T107 tree: PASS, 1076 tests (ai-check, 725.6 s). T106 tree: PASS, 1069 tests (ai-check, 743.9 s). T105 tree: PASS, 1062 tests (ai-check, 723.0 s). T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
 targeted `-k` groups and the full gate in the background (queue header).
 
@@ -84,7 +90,9 @@ bullets under "Inside one task" and "When something goes wrong"; hub Log line. T
 flow unchanged (helper only, no caller). T109 (2026-10-21): "Reviewer choice" chart has the
 recorded-limit check, the `review-route` decision, the routed Claude node and `codex-limit set`
 after a Codex limit, plus a "Review routing and Codex limit memory" bullet; hub Log line. T110
-still updates it; T112 checks it.
+(2026-10-21): the same bullet names every `Reviewed by:` line and the PR list; hub Log line. T111:
+flow unchanged (test-only). T112 (2026-10-21) checked the vault chart and the README/docs wording
+against the code: they agree; the only change is the README paragraphs (no flow change).
 
 ## Manual testing for the human
 
@@ -101,11 +109,9 @@ still updates it; T112 checks it.
 4. On the next real run that has a fix round: check the PR's "Reviewed by" list and that a small
    fix round shows `Claude, routed`, and that a run with a Codex limit sends the second review
    straight to the fallback (the `↪` notification says `(recorded)`). This needs the real CLIs.
-5. After the next self-check while a pipeline runs: `ai-dashboard --json` lists no
-   `/dev/shm/ai-tests-*` checkouts (FL-33).
 
 ### Covered by automated tests
-Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
+Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
 - `test_ruling_manifest_*` (T101, done: `_once_per_kind_and_key`,
   `_kept_on_resume_dropped_on_start`, `_wrong_shape_is_invalid`, `_row_is_one_safe_line`).
 - `test_preflight_helper_*` (T102, done: `_raid_order_is_repaired`, `_fills_todo_sections_only`,
@@ -169,7 +175,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   host header, `review-info` and `plan-review-info` still verify), `_fallback_keeps_the_label_and_adds_the_line`,
   `_routed_review_outcome_row_has_the_reason` (`route` on the row, PR bullet `code round 2: Claude, routed`),
   `_pr_body_lists_every_round_and_falls_back_to_the_report`).
-- `test_state_isolation_*` (T111).
+- `test_state_isolation_*` (T111, done: `test_state_isolation_env_under_temp_and_child_registers_there`
+  (`AI_STATE_DIR`/`XDG_STATE_HOME` are under the temp dir and a child registers its checkout there),
+  `test_state_isolation_registry_guard` (a registry entry naming a checkout under the suite's temp dir
+  is reported; other, unreadable and missing entries are not)).
+- `Docs` and `flow_this_repo` (T112, `DocsConsistencyTest`, `test_pr_body_flow_this_repo_declares_the_flow_chart`).
 
 ## Human todos
 - Gate files: none need changing for this batch.
@@ -178,4 +188,5 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107, T109 and T110 added one).
 
 ## Next action
-The runner continues with T111. Nothing is merged or deployed.
+T112 was the last task of the queue (T101–T112). The batch is ready for independent review once the
+runner's full gate passes; the host runs it after this session. Nothing is merged or deployed.
