@@ -5,18 +5,19 @@ Nothing yet in batch 10. The plan was written 2026-10-21 in an unattended planni
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
 T118's host verification and is not merged; this PR targets `fix/flow-batch-9` until that
 merges). Zack approved the scope on 2026-10-21.
-`.ai/project-spec.md` (scope, what was verified in the code, non-goals, assumptions A1–A19, plan
-review round 1 and 2 dispositions), `.ai/current-plan.md` (design) and `.ai/tasks.md`
-(T201–T221; T001–T046 and T101–T118 are earlier batches, unchanged because the host protects DONE
+`.ai/project-spec.md` (scope, what was verified in the code, non-goals, assumptions A1–A20, plan
+review round 1, 2 and 3 dispositions), `.ai/current-plan.md` (design) and `.ai/tasks.md`
+(T201–T222; T001–T046 and T101–T118 are earlier batches, unchanged because the host protects DONE
 blocks). Round 1 (Codex by hand, BLOCKER 1, MAJOR 8, MINOR 2; committed in 0848f4b): 9 accepted,
-2 adjusted (P7, P8), none rejected; T214–T218 added. Round 2 (`.ai/reviews/plan.md`, HEAD
-0848f4b, MAJOR 5): P12–P16 all confirmed in the code and accepted: the targeted fallback never
-runs a full-gate entry point such as `bash .ai/validate` (P12, T204); the event lock wait is
-bounded and a held lock never stalls a run (P13, T206, new T221); failed and timed-out recovery
-and validation gates are recorded (P14, new T220); prompt assertions only on the appended
-contract (P15, T204, T205); gate stamp and log read through the existing pinned, nonblocking
-`gate_log_lines()` (P16, T207 now opus). Redaction split from T206 into T219. IDs are not in file
-order. The round 2 revision is uncommitted.
+2 adjusted (P7, P8), none rejected; T214–T218 added. Round 2 (HEAD 0848f4b, MAJOR 5; committed
+in 369aca1): P12–P16 all accepted; T219–T221 added, T207 split into T207 and T220. Round 3, the
+last plan review (`.ai/reviews/plan.md`, HEAD 01f4093, MAJOR 3, MINOR 2): P17–P21 all confirmed
+in the code and accepted: gate events take an epoch start separately from the `$SECONDS`
+duration (P17, T220); one `gate_id` on the outcome row and the event, each gate counted once
+(P18, new T222, used by T209 and T211); metrics list runs from outcomes and events with explicit
+`unknown`/`events 0` instead of guessed `open` or zeroes after rotation (P19, T211 now opus,
+T212); the TRIAGE CONTRACT gets its own gate rule (P20, T205); a reused current plan review
+prints its skip line (P21, T201). IDs are not in file order. The round 3 revision is uncommitted.
 - **FL-39** (backlog FL-35): T201, plan review decided against `--base` (`tasks newly-done`), one
   `Plan review skipped: …` line on every skip; T214, the supervised plan revision and its queue
   repair use the same rule and keep earlier DONE blocks byte-identical (P2).
@@ -31,11 +32,13 @@ order. The round 2 revision is uncommitted.
   `events.lock` with a bounded wait, writers guarded so no helper runs after a gate change,
   tolerant reader; P1, P3, P5, P13), T219 secret redaction, T216 run context (`AI_RUN_ID`, `run`
   on outcome rows and attempt markers; P8), T217 rotation keeping every active run (P3, P4), T207
-  `event-gate` helper with safe reads (P16), T220 `gate` events from every host gate, failed
-  recovery gates included (P14), T208 `stop` (fixed categories) and `recovery`, T209 `run` start
+  `event-gate` helper with safe reads (P16), T222 shared `gate_id` and count-once merge (P18),
+  T220 `gate` events from every host gate with epoch starts, failed recovery gates included
+  (P14, P17), T208 `stop` (fixed categories) and `recovery`, T209 `run` start
   and exactly one end per finish path or terminal stop (P7), T221 a held event lock never stalls
   a run (P13), T210 `ruling` from all three writers and `review` (P5, P6), T218 `pr` events.
-- **ME-01 part 2**: T211 `metrics` data and JSON (attribution by the `run` field only), T212
+- **ME-01 part 2**: T211 `metrics` data and JSON (attribution by the `run` field only; runs from
+  outcomes and events, lifecycle `unknown` and `events 0` when events rotated away; P19), T212
   `ai-status --metrics` text tables and flag.
 - T213: docs, flow chart and handoff audit.
 - Test selectors: every `Targeted:` line now names a verified existing group or the task's own new
@@ -52,7 +55,7 @@ None on this branch yet. Batch 9's last full gate: PASS, 1104 tests (T116 tree, 
 gate after each session is the full gate (BATCH 10 GATE RULE in the queue header).
 
 ## Assumptions
-Recorded as A1–A19 in `.ai/project-spec.md`. The ones that shape behaviour most:
+Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour most:
 - A3/A4: `AI_SESSION_GATE=auto` runs the full gate in the session only when the project has a
   recorded passing gate and the largest of its last 3 passes is under 120 s; otherwise targeted
   checks only and no gate allowance. No recorded gate → targeted.
@@ -84,21 +87,22 @@ rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update
 1. Before approving: merge `fix/flow-batch-9` into this branch once T118 is DONE there (both are
    at 4fea72d now; otherwise this run's first session re-verifies T118, same fix). Optionally
    record the measured worker default above.
-2. This repo's installed `.ai/bin/ai-pipeline` still has the FL-39 defect, so this run would skip
-   its own plan review silently (T001–T117 are DONE). Rounds 1 and 2 were run by hand (Codex;
-   round 2: MAJOR 5, all accepted, spec "Plan review round 2"; uncommitted). Commit the revision,
-   then either run a third round by hand (`.ai/bin/ai-review --plan --base fix/flow-batch-9`) or
-   accept it without one. The frozen pipeline also cannot run a supervised revision here (the
-   T214 defect), so any further round is by hand too.
-3. Read the plan (`.ai/project-spec.md` A1–A19, `.ai/current-plan.md`) and approve the run
+2. This repo's installed `.ai/bin/ai-pipeline` still has the FL-39 defect, so this run skips
+   its own plan review silently (T001–T117 are DONE). Rounds 1–3 were run by hand (Codex; round 3,
+   the last: MAJOR 3, MINOR 2, all accepted, spec "Plan review round 3"; uncommitted). Commit the
+   revision; no further plan review is planned (the code reviews after implementation check it).
+3. Read the plan (`.ai/project-spec.md` A1–A20, `.ai/current-plan.md`) and approve the run
    (`ai-pipeline --approved --base fix/flow-batch-9 --pr-base fix/flow-batch-9 …`). No gate file
    changes are needed to start.
 4. After the run: run `ai-status --metrics` (and `ai-status --metrics --json`, `--since
    2026-10-21`, `--project agents`) and check the numbers look right against what you remember of
    recent runs (tasks, first-pass rate, timeouts T108/T109/T111, median gate time about 13 min,
-   review rounds), and against the raw `outcomes.jsonl`/`events.jsonl` lines of one run. Events
-   and the `run` field start only with this batch's code, so older runs show under
-   `(no run record)` and have no gate events beyond the `outcome gate` fallback.
+   review rounds), and against the raw `outcomes.jsonl`/`events.jsonl` lines of one run: one
+   run's gate durations and starts should match its raw gate rows and events (round 3 reviewer's
+   check). Events and the `run` field start only with this batch's code, so older runs show under
+   `(no run record)` and their gates come from the id-less `outcome gate` rows. Once events have
+   rotated a few times, check that older runs still appear with `unknown` and `events 0` and that
+   this reads understandably.
 5. After merging (batch 9 first, then this one): run `setup-project --upgrade --apply` here and in
    raid-planner, family-planner and family-budget, so `.ai/bin` and `.ai/prompts` get the new
    session gate rule, the FL-39 fix and the event writers. Then watch the next real run: sessions
@@ -112,7 +116,8 @@ rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update
 ### Covered by automated tests
 Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all TODO:
 - `plan_review_base` (T201): earlier DONE tasks plus new TODO tasks get a plan review; a resumed run
-  with a task newly DONE since base skips with the line; `--skip-plan-review` prints the line.
+  with a task newly DONE since base skips with the line; `--skip-plan-review` prints the line; a
+  reused current plan review prints its line and calls no reviewer.
 - `plan_review_followup` (T214): a MAJOR plan review on a follow-up batch is revised, re-reviewed
   and implemented with earlier DONE blocks unchanged; base-relative queue repair.
 - `worker_count` (T202): default and override parsing, `Workers:` first line.
@@ -121,20 +126,24 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all T
 - `session_gate_contract` and the migrated `session_gate_allowance` (T204): contract text and
   allowance per mode, fallback without `Targeted:` lines that excludes every full-gate entry
   point (`bash .ai/validate` fixture).
-- `session_gate_templates` (T205) and `session_gate_targeted_lines` (T215): templates defer to the
-  contract; task format and prompts name `Targeted:`.
+- `session_gate_templates` and `session_gate_triage` (T205) and `session_gate_targeted_lines`
+  (T215): templates defer to the contract, the triage prompt carries its own TRIAGE CONTRACT gate
+  rule; task format and prompts name `Targeted:`.
 - `events_core` (T206): envelope, `ruling_kind`, CLI errors, bounded strings, held lock is
   bounded, concurrent appends, tolerant reader, unwritable state dir, no helper after a gate
   change. `events_redact` (T219): secret tokens redacted.
 - `events_run_context` (T216): run id, rows carry the run, consecutive runs, crash in a later run.
 - `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
   nothing, stale runs, crash between replaces.
-- `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T220:
-  runner, pipeline validation and recovery gates pass/fail/timeout, none after a gate change),
+- `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T222:
+  `gate_id` on rows, each gate counted once across rows and events; T220: runner, pipeline
+  validation and recovery gates pass/fail/timeout, epoch starts and row-matching durations, none
+  after a gate change),
   `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
   terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
   (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
+  runs that survive three rotations (`unknown`, `events 0`, sums agree), gates counted once,
   filters, text tables, `ai-status --metrics`.
 - `Docs` and `flow_this_repo` (T213).
 

@@ -1,6 +1,6 @@
 # Plan: Flow batch 10: FL-39, TS-01 (1)(2), ME-01 parts 1 and 2
 
-## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review rounds 1 and 2)
+## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review rounds 1, 2 and 3)
 Details and line references: `.ai/project-spec.md` "Verified against the code". In short:
 - The plan review gate (`ai-pipeline` ~478) uses `tasks untouched` (no DONE task at all), so any
   queue that keeps earlier batches' DONE tasks skips the plan review silently. The supervised plan
@@ -24,7 +24,9 @@ Details and line references: `.ai/project-spec.md` "Verified against the code". 
   counts as "not untouched" and prints the skip line with the error, so a broken helper never
   runs a review on a started queue). Armed resume and `--skip-plan-review` keep skipping; every
   skip prints one `Plan review skipped: …` line (stdout, so it reaches the pipeline log). The
-  loop's "already current and not revised" check stays. `tasks untouched` stays as a helper.
+  loop's "already current and not revised" check stays and, on the loop's first pass, prints
+  `Plan review skipped: the current plan review is reused (BLOCKER b, MAJOR m)` once (round 3
+  P21). `tasks untouched` stays as a helper.
 - T214: the same rule for the revision. `ai-run --revise-plan` checks `tasks newly-done
   "$plan_base"` (after `plan_base` is resolved) instead of `tasks untouched`, and runs
   `plan-keeps-done "$since"` after the session so earlier batches' DONE blocks stay
@@ -51,13 +53,16 @@ module and patch `os.cpu_count` and the environment.
   targeted` or the current allowance breakdown. The existing `test_session_gate_allowance_*`
   tests that expect an allowance set `AI_SESSION_GATE=full` (review P9). Prompt assertions look
   only at the appended contract (round 2 P15).
-- T205 templates: `runner.md`, `triage.md`, `fix-review.md` say the gate rule comes from the
-  RUNNER CONTRACT; `templates/CLAUDE.md` step 4 notes it.
+- T205 templates: `runner.md`, `fix-review.md` say the gate rule comes from the RUNNER CONTRACT;
+  the "How to work here" bullet shared by `runner.md` and `triage.md` defers to "this session's
+  contract (RUNNER CONTRACT or TRIAGE CONTRACT)", and `ai-run`'s TRIAGE CONTRACT gets its own
+  gate rule (no full gate in triage), because a triage session never receives a RUNNER CONTRACT
+  (round 3 P20, spec A20); `templates/CLAUDE.md` step 4 notes it.
 - T215 task format (review P11): `templates/.ai/tasks.md`'s example Validation section shows
   `Targeted:` and `Gate:` lines; `plan.md`, `plan-revision.md` and `triage.md` ask for them; a
   test checks the four texts and the contract fallback agree.
 
-### ME-01 part 1: event log (T206, T219, T216, T217, T207, T220, T208, T209, T221, T210, T218)
+### ME-01 part 1: event log (T206, T219, T216, T217, T207, T222, T220, T208, T209, T221, T210, T218)
 - T206 core in `scripts/lib/workflow.py`: `events_path()`, `events_lock_path()` (stable
   `events.lock`), `EVENT_SCHEMA = 1`, `EVENT_ENVELOPE` (reserved names) and `EVENT_KINDS` (A7,
   ruling category in `ruling_kind`), `event_text()` (one bounded line), `append_event(kind,
@@ -75,13 +80,20 @@ module and patch `os.cpu_count` and the environment.
 - T217 rotation (review P3, P4): inside the exclusive lock, A9's active-run retention, the
   quarter-cap rule and the copy-then-replace order; regression tests with two projects and with
   concurrent writers.
-- T207 `event-gate TASK_OR_STAGE START SECONDS RESULT` helper (opus, round 2 P16): parses the
-  stamp's log read only through the existing `gate_log_lines()` (pinned `.ai/local`,
+- T207 `event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID` helper (opus, round 2 P16): parses
+  the stamp's log read only through the existing `gate_log_lines()` (pinned `.ai/local`,
   `read_record`: nonblocking, regular files, bounded; A12); FIFO and symlink regressions.
-- T220 `gate` wiring (opus, round 2 P14): guarded `ai_gate_event` from `record_gate` in `ai-run`,
-  `ensure_validated` in `ai-pipeline` and the `ai-recover` `commit_validated` gate; the pipeline
-  and recovery capture the gate's code first, record when the gate is intact, then keep their
-  existing stop or escalation, so failed and timed-out gates are recorded too.
+- T222 gate identity (opus, round 3 P18): `outcome gate … --id GATE_ID`, `ai_new_id` in
+  `common.sh`, and `merge_gates(rows, events)`: one gate per `gate_id`, row seconds win, an
+  id-less (pre-batch) row counts alone, event-only gates (validation, recovery) count once. Used
+  by T209's run totals and T211's metrics, so neither prefers one log nor double counts.
+- T220 `gate` wiring (opus, round 2 P14, round 3 P17): guarded `ai_gate_event WHERE START_EPOCH
+  SECONDS CODE [GATE_ID]` from `record_gate` in `ai-run` (duration still from `$SECONDS`, epoch
+  start = `$(date +%s) - seconds`, same seconds and id on the row and the event),
+  `ensure_validated` in `ai-pipeline` and the `ai-recover` `commit_validated` gate (both timed
+  with `date +%s`); the pipeline and recovery capture the gate's code first, record when the gate
+  is intact, then keep their existing stop or escalation, so failed and timed-out gates are
+  recorded too. Regressions check epoch starts inside the test's wall-clock window.
 - T208 `stop` and `recovery`: `stop-category STAGE` helper (A10); guarded `ai_stop_event` and
   `ai_recovery_event` in `common.sh` compute the category and the last-error excerpt after the
   guard; `ai-pipeline stop()` after `ai_gate_check`; `ai-recover` at each decision and in
@@ -90,7 +102,8 @@ module and patch `os.cpu_count` and the environment.
   (no `AI_RUN_ID`, a broken gate, a subshell or `AI_RUN_ENDED` → nothing) computes totals with a
   `run-totals` helper from this run's own records and is called by `finish()` (each finish path
   passes its result) and by the terminal paths (`ai_die`'s pipeline branch, `escalate`, the
-  recovery `on_exit`). Totals report gates as null when the event log is busy.
+  recovery `on_exit`). Totals count gates with `merge_gates` (T222) and report them as null when
+  the event log is busy.
 - T221 (round 2 P13): end-to-end regressions with a separate process holding `events.lock`:
   pipeline completion, a terminal stop and an escalation stay bounded with their exit status.
 - T210 `ruling` and `review` (review P5, P6): one `ai_ruling_event KIND KEY TASK` emitter called
@@ -99,12 +112,16 @@ module and patch `os.cpu_count` and the environment.
 - T218 `pr`: after `gh pr create` and each successful draft/ready change.
 
 ### ME-01 part 2: metrics (T211, T212)
-- T211 `workflow.py metrics [--since DATE] [--project NAME] [--json]` builds the data (A13) from
-  `read_outcomes` + `read_events`, grouping by the `run` field only (no time windows; rows without
-  it → `(no run record)`), into `{"v": 1, "projects": [...], "runs": [...]}`; a busy event log →
-  exit 1 with a busy error (round 2 P13).
-- T212 the plain-text tables (no `|` inside cells: Markdown-free aligned columns) and
-  `ai-status --metrics …`.
+- T211 (now opus, round 3 P19) `workflow.py metrics [--since DATE] [--project NAME] [--json]`
+  builds the data (A13) from `read_outcomes` + `read_events`, grouping by the `run` field only
+  (no time windows; rows without it → `(no run record)`), into `{"v": 1, "projects": [...],
+  "runs": [...]}`. Runs are the union of run ids on outcome rows and retained events, so outcomes
+  of a run whose events rotated away stay attributed; per run `result` (retained end, `open`
+  only with a retained fresh start, else `unknown`) and `events` (retained count; 0 → event-only
+  numbers null); per-project sums equal the run sums. Gates through `merge_gates`. A busy event
+  log → exit 1 with a busy error (round 2 P13).
+- T212 the plain-text tables (no `|` inside cells: Markdown-free aligned columns, `events` column,
+  `-` for null, footer explaining `unknown` and `events 0`) and `ai-status --metrics …`.
 
 ### Docs (T213)
 README and `docs/workflow.md` sections "Flow data (events.jsonl)" and "Reading the metrics";
@@ -124,13 +141,15 @@ T201 (FL-39 pipeline, opus) → T214 (FL-39 revision, opus) → T202 (workers, s
 (session-gate helper and setting, opus) → T204 (ai-run contract and allowance, opus) → T205
 (templates, sonnet) → T215 (Targeted lines, sonnet) → T206 (event core and bounded lock, opus) →
 T219 (redaction, opus) → T216 (run context, opus) → T217 (rotation, opus) → T207 (event-gate
-helper and safe reads, opus) → T220 (gate event wiring, opus) → T208 (stop and recovery events,
-opus) → T209 (run start and end, opus) → T221 (held lock end-to-end, opus) → T210 (ruling and
-review events, sonnet) → T218 (pr events, sonnet) → T211 (metrics data, sonnet) → T212 (metrics
-text and ai-status flag, sonnet) → T213 (docs audit, haiku).
-Twenty-one tasks: each must fit about 10–15 minutes of a 30-minute session that also waits for
-the ~13-minute host gate; both reviews' additions became their own tasks instead of growing
-others (round 2: T219 split from T206, T220 from T207, T221 new).
+helper and safe reads, opus) → T222 (gate id and count-once merge, opus) → T220 (gate event
+wiring and clocks, opus) → T208 (stop and recovery events, opus) → T209 (run start and end, opus)
+→ T221 (held lock end-to-end, opus) → T210 (ruling and review events, sonnet) → T218 (pr events,
+sonnet) → T211 (metrics data, run groups and coverage, opus) → T212 (metrics text and ai-status
+flag, sonnet) → T213 (docs audit, haiku).
+Twenty-two tasks: each must fit about 10–15 minutes of a 30-minute session that also waits for
+the ~13-minute host gate; the reviews' additions became their own tasks instead of growing
+others (round 2: T219 split from T206, T220 from T207, T221 new; round 3: T222 new, so T220
+keeps only the clock fix and T211 only the run grouping on top of their scope).
 
 ## Risks
 - Sessions that skip the full gate leave more failures for the host gate, which sets the task
@@ -152,6 +171,13 @@ others (round 2: T219 split from T206, T220 from T207, T221 new).
 - Rotation: concurrent writers and several active runs on one host (A9); covered by the
   multi-process and two-project regressions. Many long active runs can keep the file above the
   cap (documented).
+- Two clocks (round 3 P17): `$SECONDS` is elapsed time; only `date +%s` values go into `start`.
+  Covered by the wall-clock window regressions of T220.
+- Two gate records (round 3 P18): metrics and run totals count gates only through
+  `merge_gates` (T222); validation and recovery gates exist only as events, so an expired run's
+  gate count is partial, which its `events: 0` shows (A13).
+- Rotated history (round 3 P19): runs come from outcome rows too; lifecycle is `unknown` rather
+  than guessed `open` when the events are gone (T211, T212).
 - `run end` exactly once: a subshell `ai_die` or a second terminal path in the same process must
   not add another (`AI_RUN_ENDED`, `BASHPID` check, tested per finish path).
 - FL-39: a helper failure must not trigger a review on a started queue (fails closed to skip with
