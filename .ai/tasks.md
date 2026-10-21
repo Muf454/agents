@@ -5048,9 +5048,9 @@ ai-check PASS, 1104 tests, 816.3 s (no edits during the gate). Flow unchanged; t
 note already says counts never come from commit subjects.
 
 ## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
-Status: BLOCKED
+Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 `tests/isolation.py` ensures both `AI_STATE_DIR` and `XDG_STATE_HOME` point under the temp dir,
@@ -5082,11 +5082,12 @@ Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (905bf68). Verify it against the acceptance criteria and run the targeted tests. Do NOT run the full `.ai/bin/ai-check` in the foreground: it takes about 14 minutes, longer than the 10-minute tool limit. Run it once with run_in_background and wait for the result without editing or committing anything until it finishes; or, if the targeted tests pass, mark the task DONE and let the runner's own gate after the session verify it.
 
 ## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
-Status: BLOCKED
+Status: TODO
 Dependencies: none
-Model: sonnet
+Model: opus
 
 ### Goal
 Every successful pre-flight scan that prints overlap lines also writes (or refreshes)
@@ -5121,6 +5122,7 @@ Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (38f671c). Verify it against the acceptance criteria and run the targeted tests. Do NOT run the full `.ai/bin/ai-check` in the foreground: it takes about 14 minutes, longer than the 10-minute tool limit. Run it once with run_in_background and wait for the result without editing or committing anything until it finishes; or, if the targeted tests pass, mark the task DONE and let the runner's own gate after the session verify it.
 Implemented: `tasks_preflight` (scripts/lib/workflow.py) now writes `.ai/local/preflight.md` on
 `--dry-run` too (empty file when no overlaps); queue still untouched on dry run. docs/workflow.md
 updated; added the two named regressions and adjusted two existing dry-run assertions.
