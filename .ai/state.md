@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T214
 Tasks complete: 66
 Tasks remaining: 20
-Last validation: PASS at 2026-10-21T22:55:22Z (T214: targeted groups only; full gate left to the host)
+Last validation: PASS at 2026-10-21T23:33:01Z
 Blocked: no
-Next action: Continue queue (host gate for T214, then the next task)
-Last updated: 2026-10-21T23:15:09Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-21T23:33:02Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
