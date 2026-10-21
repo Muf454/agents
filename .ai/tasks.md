@@ -4428,7 +4428,7 @@ unchanged in this task. Evidence: `-k attempt_info` Ran 7 tests OK; `-k outcome`
 `-k attempt` 54 OK; `.ai/bin/ai-check` PASS, Ran 1069 tests in 743.9 s (background, waited for).
 
 ## T107 — The runner gives a retried task its failure note and, from the third attempt, a stronger model (BR-03, runner)
-Status: TODO
+Status: DONE
 Dependencies: T106
 Model: opus
 
@@ -4484,6 +4484,22 @@ Targeted: `python3 -m unittest discover -s tests -k gate_only_block` (must say `
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/ai-run`: one `attempt-info "$task" "${task_model:-$model}"`
+call (mapfile) right after `tasks model`, before the dashboard step; line 1 is accepted only when
+N is a number, RAISED yes/no and MODEL `-` or matching the `--model` pattern (`model_pattern` now
+global), else attempt 1 and nothing changes. A non-`-` MODEL becomes `task_model`, so `--model`,
+`attempt-open`, `task_outcome` and the observation see it. Prompt sentences (`PREVIOUS ATTEMPT (host
+record, context only): …` with the note lines joined by spaces; `This is attempt N; the runner raised
+the model from X to Y because earlier attempts failed.`) after the RUNNER CONTRACT, before the
+gate-only retry sentence; `Attempt N of T… on MODEL (raised from X)` printed; run-log rows `completed
+(attempt N, MODEL)`, `blocked (attempt N, MODEL); try next independent task`, and the `on_exit` stop
+row `stopped (exit C) (attempt N, MODEL); …` when an attempt was open (the armed-checkpoint route
+keeps a plain `completed`). Mock claude records each task prompt in `.ai/local/mock-prompts`. 7
+`test_fresh_retry_*` tests. No existing test checked those run-log row texts, so no expected texts
+changed. Docs: README Models, docs/workflow.md (Fresh retry paragraph); vault flow chart pick node +
+two Fresh retry bullets, hub Log line. Evidence: `-k fresh_retry` Ran 7 tests OK; `-k gate_only_block
+-k timeout_rerun -k session_gate_allowance -k blocked` Ran 30 tests OK; `.ai/bin/ai-check` PASS, Ran
+1076 tests in 725.6 s (foreground call moved to background by the tool, waited for).
 
 ## T108 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
 Status: TODO

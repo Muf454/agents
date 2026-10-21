@@ -342,6 +342,8 @@ if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before ever
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
+if 'RUNNER CONTRACT' in prompt:  # each task session's prompt (BR-03 fresh retry)
+    with open('.ai/local/mock-prompts', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
 if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT' in prompt:
     # The host run manifest as this session sees it (ai-run's task record).
     copy_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
@@ -10901,6 +10903,98 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertNotIn('⚠ Blocked', self.notifications())  # today the dirty check stops before it
         self.assertEqual(self.gate_rows(), [])
         self.assertEqual(self.gate_unblocks(), [])
+
+    # ---------------------------------------------------------------- fresh retry (BR-03, T107)
+    def fresh_retry_ready(self, model='sonnet', failures=(), queue=None):
+        self.ready(queue or task('T001').replace('Dependencies: none\n', f'Dependencies: none\nModel: {model}\n'))
+        self.approve_run()
+        for result in failures:  # earlier attempts of T001 on this branch, as the runner logs them
+            self.helper('outcome', 'task', 'T001', result, model, '1800')
+
+    def fresh_retry_prompts(self):
+        path = self.project / '.ai/local/mock-prompts'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def fresh_retry_models(self):
+        lines = (self.project / '.ai/local/mock-args').read_text().splitlines()
+        return [line.split('--model ', 1)[1].split()[0] if '--model ' in line else None for line in lines]
+
+    def run_log_text(self):
+        return (self.project / '.ai/run-log.md').read_text()
+
+    def test_fresh_retry_first_attempt_unchanged(self):
+        self.fresh_retry_ready()
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 1 of T001 on sonnet\n', result.stdout)
+        prompts = self.fresh_retry_prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn('PREVIOUS ATTEMPT', prompts[0])
+        self.assertNotIn('raised the model', prompts[0])
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 1, sonnet) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_second_attempt_gets_the_failure_note(self):
+        self.fresh_retry_ready(failures=('timeout',))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 2 of T001 on sonnet\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('PREVIOUS ATTEMPT (host record, context only): Attempt 1 ended timeout after 1800 s on '
+                      'sonnet.', prompt)
+        self.assertIn('Start from the current files and git history; fix what failed, do not repeat it.', prompt)
+        self.assertNotIn('raised the model', prompt)
+        # After the RUNNER CONTRACT, before the knowledge/retry sentences.
+        self.assertLess(prompt.index('RUNNER CONTRACT'), prompt.index('PREVIOUS ATTEMPT'))
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 2, sonnet) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_third_attempt_raises_the_model(self):
+        self.fresh_retry_ready(failures=('timeout', 'validation_failed'))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 3 of T001 on opus (raised from sonnet)\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('This is attempt 3; the runner raised the model from sonnet to opus because earlier '
+                      'attempts failed.', prompt)
+        self.assertIn('Attempt 2 ended validation_failed', prompt)
+        self.assertEqual(self.fresh_retry_models(), ['opus'])
+        last = [r for r in self.outcome_rows() if r['kind'] == 'task'][-1]
+        self.assertEqual((last['result'], last['model']), ('done', 'opus'))
+        self.assertIn('| T001 | completed (attempt 3, opus) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_opus_task_is_not_raised(self):
+        self.fresh_retry_ready(model='opus', failures=('error', 'error'))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 3 of T001 on opus\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('PREVIOUS ATTEMPT (host record, context only): Attempt 2 ended error', prompt)
+        self.assertNotIn('raised the model', prompt)
+        self.assertEqual(self.fresh_retry_models(), ['opus'])
+        self.assertIn('| T001 | completed (attempt 3, opus) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_corrupt_outcome_log_runs_as_today(self):
+        self.fresh_retry_ready()
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b'\xff\xfe{not json\n')
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 1 of T001 on sonnet\n', result.stdout)
+        self.assertNotIn('PREVIOUS ATTEMPT', self.fresh_retry_prompts()[0])
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 1, sonnet) |', self.run_log_text())
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+
+    def test_fresh_retry_blocked_row_names_the_attempt(self):
+        model_line = 'Dependencies: none\nModel: haiku\n'
+        self.fresh_retry_ready(queue=task('T001').replace('Dependencies: none\n', model_line)
+                               + task('T002').replace('Dependencies: none\n', model_line))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-first')
+        log = self.run_log_text()
+        self.assertIn('| T001 | blocked (attempt 1, haiku); try next independent task | not complete |', log)
+        self.assertIn('| T002 | completed (attempt 1, haiku) | PASS |', log)
+
+    def test_fresh_retry_stop_row_names_the_attempt(self):
+        self.fresh_retry_ready(model='haiku', failures=('error',))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertRegex(self.run_log_text(), r'\| T001 \| stopped \(exit \d+\) \(attempt 2, haiku\); inspect')
 
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):

@@ -51,6 +51,7 @@ EOF
 sessions=''; sessions_given=no; session_timeout=1800; run_timeout=14400; approved=no; knowledge_dir=''
 model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
 plan_file=''; plan_revision=no; session_timeout_given=no; run_timeout_given=no; read_dirs=()
+model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
@@ -72,7 +73,6 @@ while (( $# )); do
       base=$2; shift 2 ;;
     --model)
       (( $# >= 2 )) || ai_die 'Missing model name'
-      model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
       [[ "$2" =~ $model_pattern ]] || ai_die "Invalid model name: $2"
       model=$2; explicit_model=$2; shift 2 ;;
     --knowledge-dir)
@@ -197,9 +197,12 @@ finished=no
 # budget, a malformed queue) logs exactly one outcome. Triage never tracks an attempt.
 track_attempt=no
 attempt_open=no
+attempt_label=''
 session_code=
 on_exit() {
-  local code=$?
+  local code=$? stop_label=''
+  # The stop row names the open attempt (BR-03); task_outcome below closes it.
+  [[ "$attempt_open" != yes ]] || stop_label=$attempt_label
   [[ -z "${plan_baseline:-}" ]] || rm -f -- "$plan_baseline"
   # Never run a project helper after the approved gate changed: a stop for that reason logs
   # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
@@ -229,7 +232,7 @@ on_exit() {
         2>/dev/null || true
     fi
     # No host write while armed: the preserved tree stays exactly the armed one.
-    [[ "$AI_ARMED" == yes ]] || ai_log "$active_task" "stopped (exit $code); inspect state/diff before resuming" \
+    [[ "$AI_ARMED" == yes ]] || ai_log "$active_task" "stopped (exit $code)$stop_label; inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
     # Inside ai-pipeline the pipeline reports the stop itself.
     [[ -n "${AI_PIPELINE:-}" ]] || \
@@ -763,7 +766,7 @@ checkpoint_done() {
     ai_notify "🔧 $task: Claude didn't commit its validated work; the runner committed it.${new_files:+ New files: $new_files}"
   fi
   task_outcome done
-  ai_log "$task" 'completed' PASS 'Claude checkpointed; continuing queue'
+  ai_log "$task" "completed$attempt_label" PASS 'Claude checkpointed; continuing queue'
   runner_checkpoint "$task" DONE
 }
 
@@ -901,6 +904,22 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   (( iteration <= sessions )) || ai_die 'Session limit reached; inspect ai-status and rerun --approved to continue.'
   ai_helper state implementing "Resume/implement $active_task"
   task_model=$(ai_helper tasks model "$active_task")
+  # Fresh retry (BR-03): the host outcome log numbers this attempt, raises the model one tier
+  # from the third attempt and notes what failed last. Any failure: attempt 1, nothing changes.
+  attempt_n=1 attempt_raised=no attempt_note='' attempt_from=${task_model:-${model:-default}}
+  mapfile -t attempt_lines < <(ai_helper attempt-info "$active_task" "${task_model:-$model}" 2>/dev/null)
+  if (( ${#attempt_lines[@]} )) && read -r info_n info_model info_raised _ <<< "${attempt_lines[0]}" && \
+      [[ "$info_n" =~ ^[1-9][0-9]{0,5}$ && "$info_raised" =~ ^(yes|no)$ ]] && \
+      [[ "$info_model" == - || "$info_model" =~ $model_pattern ]]; then
+    attempt_n=$info_n
+    if [[ "$info_model" != - ]]; then
+      task_model=$info_model
+      attempt_raised=$info_raised
+    fi
+    attempt_note=$(printf '%s ' "${attempt_lines[@]:1}")
+    attempt_note=${attempt_note% }
+  fi
+  attempt_label=" (attempt $attempt_n, ${task_model:-${model:-default}})"
   if [[ -n "$counts_total" ]]; then
     ai_observe step build "$active_task · ${task_model:-${model:-default}} · $(( counts_done + 1 ))/$counts_total"
   fi
@@ -908,12 +927,20 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
   prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. A gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  if [[ -n "$attempt_note" ]]; then
+    prompt+=" PREVIOUS ATTEMPT (host record, context only): $attempt_note Start from the current files and git history; fix what failed, do not repeat it."
+  fi
+  if [[ "$attempt_raised" == yes ]]; then
+    prompt+=" This is attempt $attempt_n; the runner raised the model from $attempt_from to $task_model because earlier attempts failed."
+  fi
   if [[ -n "$retry_note" && "$retry_note" == "$active_task" ]]; then
     prompt+=" The previous session marked $active_task BLOCKED without a failing check; the runner's full gate then passed on this tree. If the block was only about the gate result, verify the acceptance criteria and mark it DONE; otherwise block it again with the reason."
   fi
   retry_note=''
   prompt+=$(knowledge_prompt)
   printf 'Iteration %s/%s\n' "$iteration" "$sessions"
+  printf 'Attempt %s of %s on %s%s\n' "$attempt_n" "$active_task" "${task_model:-${model:-default}}" \
+    "$([[ "$attempt_raised" != yes ]] || printf ' (raised from %s)' "$attempt_from")"
   # Best effort: a standalone run has no manifest (and no relaunch); in a pipeline a lost record
   # makes a later limit-arm fail closed. Kept through a limit stop (on_exit leaves it).
   ai_helper run-manifest task-set "$active_task" 2>/dev/null || \
@@ -934,7 +961,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
       [[ -z "$(dirty_beyond_records)" ]] || \
         ai_die 'Blocked task was not checkpointed; inspect and commit before resuming.'
       task_outcome blocked
-      ai_log "$active_task" 'blocked; try next independent task' 'not complete' 'See task result'
+      ai_log "$active_task" "blocked$attempt_label; try next independent task" 'not complete' 'See task result'
       runner_checkpoint "$active_task" BLOCKED
       retry_note=''
       gate_only_retry "$active_task"

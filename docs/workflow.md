@@ -1330,7 +1330,7 @@ project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0`
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
 
-`attempt-info TASK [BASE_MODEL]` (BR-03; wired into `ai-run` by T107) prints `N MODEL RAISED`
+`attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
 for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows
 whose result is not `done`; MODEL is the task's `Model:`, else BASE_MODEL, else `-`; from N = 3 it
 is one tier up (haiku → sonnet, sonnet → opus; opus, fable and unknown names stay; none → opus),
@@ -1342,6 +1342,19 @@ pytest `FAILED`, at most 5) or `Last gate line: …` from the log `.ai/local/val
 `Last result line: …` (the task's last non-empty `### Result / notes` line, 200 characters). Any
 error reading the queue, the state root or the outcome log prints `1 <task or base model or -> no`
 and exits 0; only a malformed call is a usage error.
+
+Fresh retry (BR-03, T107): before each task session `ai-run` calls `attempt-info "$task"
+"${task_model:-$model}"` once. A non-`-` MODEL (checked like `--model`) becomes the session model,
+so `--model`, `attempt-open`, the outcome row and the dashboard step all see it. The prompt gets,
+after the RUNNER CONTRACT, `PREVIOUS ATTEMPT (host record, context only): <note> Start from the
+current files and git history; fix what failed, do not repeat it.` when there is a note, and `This
+is attempt N; the runner raised the model from X to Y because earlier attempts failed.` when RAISED.
+The runner prints `Attempt N of T… on MODEL (raised from X)`; the run-log rows read `completed
+(attempt N, MODEL)`, `blocked (attempt N, MODEL); try next independent task` and, when a task attempt
+was open, `stopped (exit C) (attempt N, MODEL); …`. When the helper fails or prints anything
+unexpected the session runs as before (attempt 1, the task's or run's model, no note). The session
+budget, `AI_RECOVER_MAX`, timeout rerun, gate-only block retry, triage/planning models and
+`AI_SUPERVISE_ESCALATE_MODEL` are unchanged.
 
 `ai-run` times every host `ai-check` (after a task's session in `checkpoint_done`, and the final
 check) and, only after `ai_guard_verify` passed, appends `outcome gate pass|fail|timeout`

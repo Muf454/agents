@@ -599,6 +599,11 @@ A task may override it with an optional line under its `Dependencies:` line, e.g
 `Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
 stretch subscription limits.
 
+A task that failed before starts each new session fresh with a short host note of what failed
+(the last attempt's result, failing checks, its last result line). From the third attempt the
+runner raises the model one tier (haiku → sonnet → opus; opus stays) and says so in the prompt;
+the run log names each attempt's number and model, e.g. `completed (attempt 3, opus)`.
+
 Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
 default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
 default **high**). Reviews are where a stronger model pays off most: findings caught
