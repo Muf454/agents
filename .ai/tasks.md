@@ -5091,7 +5091,7 @@ Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate onl
 2026-10-21 (opus): verified 905bf68 against the criteria: `tests/isolation.py` applies `under_temp` to `AI_STATE_DIR` and `XDG_STATE_HOME` separately, each with its own `mkdtemp` and cleanup; docstring updated. Regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` covers unset, external and both-under-temp XDG. Targeted `-k state_isolation`: Ran 4 tests, OK. Full `.ai/bin/ai-check` not run in this session (≈816 s, beyond the 600 s tool limit; the runner prompt forbids backgrounding it); the runner's post-session gate is the gate evidence. Test-only; flow unchanged.
 
 ## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5135,6 +5135,10 @@ updated; added the two named regressions and adjusted two existing dry-run asser
 Evidence: `-k preflight` Ran 18 tests OK; `-k ruling` Ran 18 tests OK.
 BLOCKED: `.ai/bin/ai-check` exceeded the 600000 ms foreground timeout (same as T117), so no green
 gate was obtained; a second invocation said "Validation is already running". Human: rerun the gate.
+2026-10-21 rerun (opus): verified 38f671c against the criteria (dry-run writes the report, empty
+when no overlaps, queue bytes unchanged; both named regressions present). `-k preflight` Ran 18
+tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limit) left to the
+runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 
 ## T201 — Plan review decided against the run's base, with a skip line (FL-39)
 Status: TODO
