@@ -158,7 +158,7 @@ run_review() {
   local prompt=$1 claude_prompt=$2 code reset start_head fallback='' started=$SECONDS try_codex until route routed=''
   local route_base=-
   # Per call: a retry after a Claude fallback must not inherit its label or attribution.
-  unset AI_REVIEW_BY AI_REVIEW_LABEL
+  unset AI_REVIEW_BY AI_REVIEW_LABEL AI_REVIEW_WHO
   review_by='' review_model='' review_effort='' review_reason=''
   # Plan and code reviews pin one HEAD for both calls of a format retry ($review_head).
   start_head=${review_head:-$(git rev-parse HEAD)}
@@ -190,6 +190,7 @@ run_review() {
       if (( code == 0 )); then
         review_by=codex; review_model=${AI_REVIEW_MODEL:-default}; review_effort=$codex_effort
         fallback=''; unset AI_REVIEW_BY AI_REVIEW_LABEL
+        export AI_REVIEW_WHO="Codex ($review_model, effort $review_effort)"
         break
       fi
       if ! (( code != 124 && code != 137 )) || ! reset=$(ai_helper limit-check "$events"); then
@@ -228,6 +229,7 @@ run_review() {
     if [[ -n "$routed" ]]; then
       review_by=claude-routed
       export AI_REVIEW_BY="Claude (routed), $claude_model"
+      export AI_REVIEW_WHO="Claude, routed ($claude_model, effort $claude_effort): $routed"
       export AI_REVIEW_LABEL="Claude, routed ($claude_model, effort $claude_effort; $routed). Codex reviewed this branch earlier; no catch-up needed."
       break
     fi
@@ -235,6 +237,7 @@ run_review() {
     local who='Claude fallback'
     [[ "$reviewer" != claude ]] || who='Claude'
     export AI_REVIEW_BY="$who, $claude_model"
+    export AI_REVIEW_WHO="$who ($claude_model, effort $claude_effort): $fallback"
     export AI_REVIEW_LABEL="$who ($claude_model, effort $claude_effort; $fallback). Codex catch-up review pending: see .ai/reviews/fallback-log.md."
     break
   done
@@ -308,8 +311,10 @@ review_records() {
   if [[ "$review_by" == claude || "$review_by" == claude-fallback ]]; then
     ai_helper fallback-record "$mode" "$review_model" "$review_effort" "$head" "$base" "$review_reason"
   fi
+  local route=()
+  [[ "$review_by" == codex || -z "$review_reason" ]] || route=(--route "$review_reason")
   ai_helper outcome review "$mode" "$review_by" "$review_model" "$review_effort" "$review_seconds" "$report" \
-    2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+    "${route[@]}" 2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
 }
 reviewer_name() { [[ "$review_by" == codex ]] && printf Codex || printf 'Claude (%s)' "$review_model"; }
 

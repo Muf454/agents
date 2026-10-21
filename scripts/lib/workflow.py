@@ -1058,7 +1058,8 @@ def publish_review(arguments):
     error = review_format_error('code', content)
     if error:
         fail(f'{error.rstrip(".")}; prior review preserved. Inspect local report.')
-    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
+    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + \
+        reviewed_by_line() + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
     bind_review(head, header + content)
 
@@ -1075,6 +1076,13 @@ def reviewer_label():
     and AI_REVIEW_LABEL); empty for Codex reviews, so their files are unchanged."""
     label = ' '.join(os.environ.get('AI_REVIEW_LABEL', '').split())
     return f'> **Reviewer: {label}**\n\n' if label else ''
+
+
+def reviewed_by_line():
+    """`Reviewed by: WHO` line for every published review (ai-review sets AI_REVIEW_WHO:
+    family, model and, for Claude, the reason); empty when unset."""
+    who = ' '.join(os.environ.get('AI_REVIEW_WHO', '').split())
+    return f'Reviewed by: {who}\n\n' if who else ''
 
 
 VERDICT_LINE = re.compile(r'^(?:\*\*)?Overall verdict:(?:\*\*)?[ \t]*(.*)$', re.M)
@@ -2902,7 +2910,7 @@ def publish_plan_review(arguments):
     # even when the plan digest and the reviewer's text repeat within the same second.
     head = git('rev-parse', 'HEAD').decode().strip()
     content = f'<!-- Plan review of plan digest {arguments[1]}; HEAD {head}; saved {now()}. -->\n\n' + \
-        reviewer_label() + content
+        reviewed_by_line() + reviewer_label() + content
     atomic(PLAN_REVIEW, content)
     # Host-side binding, like implementation reviews: an edited report is not a review.
     directory = binding_dir()
@@ -4309,7 +4317,7 @@ def recheck_counts(answers, levels):
 
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
-    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
+    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT] [--route REASON]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
@@ -4390,9 +4398,18 @@ def outcome(arguments):
         if attempt_id is not None:
             record['attempt_id'] = attempt_id
     elif kind == 'review':
+        route = None
+        if '--route' in rest:
+            at = rest.index('--route')
+            if at != len(rest) - 2:
+                fail('Usage: outcome review MODE REVIEWER MODEL EFFORT SECONDS [REPORT] [--route REASON]')
+            route = ' '.join(rest[at + 1].split())[:200]
+            rest = rest[:at]
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
                       seconds=int(seconds), head=git('rev-parse', 'HEAD').decode().strip())
+        if route:
+            record['route'] = route
         if report and mode != 'recheck':
             try:
                 counts = review_counts(Path(report[0]).read_text())
@@ -4823,6 +4840,40 @@ def pr_title(arguments):
     print(line[:72])
 
 
+REVIEWER_NAMES = {'codex': 'Codex', 'claude': 'Claude', 'claude-fallback': 'Claude fallback',
+                  'claude-routed': 'Claude, routed'}
+
+
+def reviewed_by_entries(review):
+    """Who reviewed each round of this project and branch, from the outcome log (plan and code
+    reviews, oldest first, at most 10, newest kept); the current report's `Reviewed by:` line
+    when the log is unreadable or has none."""
+    entries = []
+    try:
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        project, branch = project_name(), current_branch() or 'detached'
+        rows = [r for r in read_outcomes([outcomes_path()])
+                if r.get('kind') == 'review' and r.get('mode') in ('plan', 'code')
+                and r.get('project') == project and r.get('branch') == branch]
+        code_rounds = 0
+        for row in rows:
+            name = REVIEWER_NAMES.get(row.get('reviewer'), str(row.get('reviewer')))
+            text = f"{name} ({row.get('model') or 'default'})"
+            if row.get('route'):
+                text += f": {row['route']}"
+            if row['mode'] == 'plan':
+                entries.append(f'plan: {text}')
+            else:
+                code_rounds += 1
+                entries.append(f'code round {code_rounds}: {text}')
+    except (OSError, ValueError, SystemExit, subprocess.CalledProcessError):
+        entries = []
+    if not entries:
+        line = re.search(r'^Reviewed by: (.+)$', review, re.M)
+        return [line.group(1).strip()] if line else ['not recorded']
+    return entries[-10:]
+
+
 def pr_body(arguments):
     """Markdown PR description from workflow records. Args: rounds unresolved(0/1)."""
     rounds, unresolved = int(arguments[0]), arguments[1] == '1'
@@ -4882,6 +4933,7 @@ def pr_body(arguments):
     elif fallback:
         lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
+    lines += ['Reviewed by:'] + [f'- {entry}' for entry in reviewed_by_entries(review)] + ['']
     if review:
         verdict = review_verdict(review)
         counts = COUNTS.search(review)

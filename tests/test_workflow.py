@@ -9017,6 +9017,53 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('routed to a fresh Claude session: small low-risk fix round (', body)
         self.assertNotIn('catch-up', body)
 
+    # ------------------------------------------------------- "Reviewed by" (T110, BR-14)
+    def test_reviewed_by_codex_code_and_plan_reviews(self):
+        self.ready()
+        self.tool('ai-review', '--plan')
+        plan = (self.project / '.ai/reviews/plan.md').read_text()
+        self.assertRegex(plan, r'-->\n\nReviewed by: Codex \([^,)]+, effort [^)]*\)\n')
+        self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertRegex(review, r'-->\n\nReviewed by: Codex \([^,)]+, effort [^)]*\)\n')
+        self.helper('review-info')
+
+    def test_reviewed_by_fallback_keeps_the_label_and_adds_the_line(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', AI_REVIEW_ROUTE='')
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('> **Reviewer: Claude fallback', review)
+        self.assertRegex(review, r'(?m)^Reviewed by: Claude fallback \(claude-opus-5-5, effort high\): Codex usage limit')
+        self.helper('review-info')
+
+    def test_reviewed_by_routed_review_outcome_row_has_the_reason(self):
+        self.routed_pipeline('src/widget.py')
+        rows = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        routed = [r for r in rows if r.get('kind') == 'review' and r.get('reviewer') == 'claude-routed']
+        self.assertEqual(len(routed), 1)
+        self.assertRegex(routed[0]['route'], r'^small low-risk fix round \(\d+ lines\)$')
+        self.assertNotIn('route', next(r for r in rows if r.get('reviewer') == 'codex'))
+        self.assertIn('Reviewed by: Claude, routed', (self.project / '.ai/reviews/current.md').read_text())
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('- code round 2: Claude, routed (claude-opus-5-5): small low-risk fix round (', body)
+
+    def test_reviewed_by_pr_body_lists_every_round_and_falls_back_to_the_report(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.unlink(missing_ok=True)
+        self.assertRegex(self.helper('pr-body', '1', '0').stdout, r'Reviewed by:\n- Codex \([^,)]+, effort [^)]*\)\n')
+        self.helper('outcome', 'review', 'plan', 'codex', 'm1', 'high', '5')
+        self.helper('outcome', 'review', 'code', 'codex', 'm1', 'high', '5')
+        self.helper('outcome', 'review', 'code', 'claude-routed', 'm2', 'high', '5', '--route', 'small low-risk fix round (10 lines)')
+        body = self.helper('pr-body', '2', '0').stdout
+        self.assertIn('Reviewed by:\n- plan: Codex (m1)\n- code round 1: Codex (m1)\n'
+                      '- code round 2: Claude, routed (m2): small low-risk fix round (10 lines)\n', body)
+
     def test_review_routing_pipeline_risky_fix_round_stays_on_codex(self):
         self.routed_pipeline('supabase/migrations/x.sql')
         self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')

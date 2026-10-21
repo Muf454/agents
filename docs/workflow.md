@@ -1220,6 +1220,13 @@ label. `fallback-record` appends a row to `.ai/reviews/fallback-log.md`, which
 commits with its own record). `pr-body` titles the review section "Claude fallback,
 <model>" with a catch-up note. `outcome review …` appends to the host outcome log.
 
+"Reviewed by" (BR-14, T110): `ai-review` exports `AI_REVIEW_WHO` (Codex: `Codex (MODEL, effort E)`;
+fallback and routed: `Claude … (MODEL, effort E): REASON`) and the publish helpers write
+`Reviewed by: WHO` after the host header, before the digest/binding is taken. `outcome review …
+--route REASON` (≤ 200 chars; fallback and routed reviews) stores `route`. `pr-body` lists a
+`Reviewed by:` bullet per plan/code review row of this project and branch (oldest first, last 10:
+`plan: Codex (MODEL)`, `code round K: Claude, routed (MODEL): REASON`), else the report's line.
+
 Codex limit memory (`codex-limit`, BR-14, T109, A11): after a Codex limit with a known reset
 (`limit-check` ≠ 0), `ai-review` runs `codex-limit set RESET` (any reviewer; a past or non-numeric
 RESET is a usage error), which writes the state root's `codex-limit.json` `{"reset": EPOCH,

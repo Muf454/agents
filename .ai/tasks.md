@@ -4677,7 +4677,7 @@ pipeline/convergence/review_context/outcomes 21 OK; ai-check PASS, 1092 tests (7
 the background by the tool timeout and waited for).
 
 ## T110 — "Reviewed by" in every review record and in the PR body (BR-14, records)
-Status: TODO
+Status: DONE
 Dependencies: T109
 Model: sonnet
 
@@ -4726,6 +4726,15 @@ Targeted: `python3 -m unittest discover -s tests -k pr_body` (must say `Ran N te
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+Done. `reviewed_by_line()` writes `Reviewed by: WHO` (env `AI_REVIEW_WHO`, set by `ai-review` for
+Codex, fallback and routed reviews) after the host header in `publish_review` and
+`publish_plan_review`, before the binding digest. `outcome review … --route REASON` stores `route`
+(≤ 200 chars); `review_records` passes the reason for non-Codex reviews. `pr_body` lists a
+"Reviewed by:" bullet per plan/code row (`reviewed_by_entries`), else the report's line. No existing
+test pinned the exact bytes of a Codex report (none changed). 4 new `test_reviewed_by_*` tests pass;
+`-k pr_body` (5) OK. Gate: first run had one failure, `test_gate_lock_wait_runner_waits_for_the_session_gate`
+("could not record the task in the run manifest"), which passes alone and is unrelated; the rerun
+passed (OK).
 
 ## T111 — Self-check fixtures never register in the real run registry (FL-33, tests)
 Status: TODO

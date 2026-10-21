@@ -30,7 +30,9 @@ codex-limit set|active`, host `codex-limit.json` written after a Codex limit wit
 (recorded)`) and otherwise asks `review-route`: a small low-risk fix round goes to a fresh Claude
 session labelled `Claude, routed (…)`, outcome reviewer `claude-routed`, no fallback-log row, PR
 heading `Claude, routed, MODEL`; the four routing settings are validated by `ai-review` and
-`ai-pipeline` and kept in the run manifest). The plan was written 2026-10-20 in an unattended planning session on
+`ai-pipeline` and kept in the run manifest); T110 (every published plan/code review has a
+`Reviewed by: WHO` line from `AI_REVIEW_WHO`; `outcome review … --route REASON`; the PR lists a
+"Reviewed by:" bullet per plan/code round). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -163,13 +165,17 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `_pipeline_risky_fix_round_stays_on_codex` (`supabase/migrations/x.sql`)).
   `test_recovery_restores_the_approved_runs_settings` and
   `test_supervise_settings_key_lists_are_identical` cover the four settings in the manifest.
-- `test_reviewed_by_*` (T110) and `test_state_isolation_*` (T111).
+- `test_reviewed_by_*` (T110, done: `_codex_code_and_plan_reviews` (`Reviewed by: Codex (` after the
+  host header, `review-info` and `plan-review-info` still verify), `_fallback_keeps_the_label_and_adds_the_line`,
+  `_routed_review_outcome_row_has_the_reason` (`route` on the row, PR bullet `code round 2: Claude, routed`),
+  `_pr_body_lists_every_round_and_falls_back_to_the_report`).
+- `test_state_isolation_*` (T111).
 
 ## Human todos
 - Gate files: none need changing for this batch.
 - After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
   FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
-- Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107 and T109 added one).
+- Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107, T109 and T110 added one).
 
 ## Next action
-The runner continues with T110. Nothing is merged or deployed.
+The runner continues with T111. Nothing is merged or deployed.
