@@ -241,8 +241,8 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'ai_stop_child; exit 130' INT
+trap 'ai_stop_child; exit 143' TERM
 
 # The runner owns the bookkeeping records and commits leftovers in them; anything
 # else left uncommitted means the session didn't checkpoint its work.
@@ -350,7 +350,7 @@ claude_session() {
     fi
     clear_scratch
     set +e
-    timeout --signal=TERM --kill-after=10s "$limit" claude -p \
+    ai_run_child timeout --signal=TERM --kill-after=10s "$limit" claude -p \
       --permission-mode dontAsk --output-format json \
       --tools "$tools" --allowedTools "${session_allowed[@]}" \
       --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \

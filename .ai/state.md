@@ -9,7 +9,7 @@ Tasks complete: 65
 Tasks remaining: 26
 Last validation: RUNNING at 2026-10-21T22:39:13Z
 Blocked: yes
-Next action: Continue queue; see task results for any blockers
+Next action: Resume/implement T303
 Last updated: 2026-10-21T22:59:58Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,

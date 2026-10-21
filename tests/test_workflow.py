@@ -35,6 +35,8 @@ from timeouts import TIMEOUT_SCALE  # noqa: E402
 SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
 MEDIUM_TIMEOUT = 60 * TIMEOUT_SCALE
+# An interrupted runner ends its session within this (T303: TERM, timeout's 10 s grace, then exit).
+INTERRUPT_TIMEOUT = 30 * TIMEOUT_SCALE
 PIPELINE_TIMEOUT = 120 * TIMEOUT_SCALE
 # 17 mock sessions in one ai-run (about 5 s each in parallel batches); CI runs on a 2-core runner
 # without AI_TEST_TIMEOUT_SCALE, so PIPELINE_TIMEOUT has no margin for them.
@@ -152,7 +154,11 @@ if 'RECOVERY CONTRACT' in prompt:
         # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
         os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
     mode = os.environ.get('MOCK_RECOVER', 'rerun')
-    decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
+    if mode == 'sleep':
+        # A decision session only a signal ends (T303).
+        pathlib.Path('.ai/local/mock-recover.pid').write_text(str(os.getpid()))
+        time.sleep(300)
+    decision ={'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     answer = json.dumps(decision)
     if mode == 'escalate-long':
@@ -525,6 +531,11 @@ if mode == 'sigkill-runner':
         f.write(''.join(f'{p}\n' for p in seen))
     os.kill(pid, signal.SIGKILL)
     sys.exit(0)
+if mode == 'sleep':
+    # Uncommitted partial work, then a session only a signal ends (T303).
+    pathlib.Path('partial.txt').write_text('interrupted work')
+    pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
+    time.sleep(300)
 if mode == 'hold':
     # Bounded wait for the test to signal the runner, then release and fail.
     pathlib.Path('.ai/local/mock-session.pid').write_text(str(os.getpid()))
@@ -10914,6 +10925,84 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.commit('reconcile interrupted run')
         self.tool('ai-run', '--approved')
         self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted'), (2, 'interrupted'), (3, 'done')])
+
+    def interrupt_session(self, command, pid_file, send, **env):
+        """Start COMMAND in its own session, wait until its fake session (sleeping 300 s) wrote
+        .ai/local/PID_FILE, SEND(runner) a signal and wait INTERRUPT_TIMEOUT for the runner to exit.
+        Asserts the fake session is gone; returns (exit code, output)."""
+        pid_path = self.project / '.ai/local' / pid_file
+        pid_path.unlink(missing_ok=True)
+        runner = subprocess.Popen(command, cwd=self.project, env=dict(self.env, **env), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, start_new_session=True,
+                                  # a background-launched test run inherits SIGINT ignored, which bash cannot trap
+                                  preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        session = None
+        try:
+            deadline = time.monotonic() + PIPELINE_TIMEOUT
+            while not (pid_path.exists() and pid_path.read_text()):
+                if runner.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the session never started')
+                time.sleep(0.05)
+            session = int(pid_path.read_text())
+            send(runner)
+            output = runner.communicate(timeout=INTERRUPT_TIMEOUT)[0].decode(errors='replace')
+            for _ in range(100):  # the runner waited for timeout, which reaped the session
+                try:
+                    os.kill(session, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f'the fake session {session} outlived the runner')
+            return runner.returncode, output
+        finally:
+            if runner.poll() is None:
+                os.killpg(runner.pid, signal.SIGKILL)
+                runner.communicate()
+            if session is not None:
+                with contextlib.suppress(OSError):  # GNU timeout runs the session in its own group
+                    os.kill(session, signal.SIGKILL)
+
+    def test_interrupt_reaches_the_session_ai_run(self):
+        self.ready()
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-session.pid',
+                                              lambda runner: os.killpg(runner.pid, signal.SIGINT), MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 130, output)
+        self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted')])
+        self.assertIn('stopped (exit 130)', (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
+        self.assertIn('?? partial.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_interrupt_reaches_the_session_term(self):
+        self.ready()
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-session.pid',
+                                              lambda runner: runner.send_signal(signal.SIGTERM), MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 143, output)
+        self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted')])
+        self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
+
+    def test_interrupt_reaches_the_recovery_session(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
+                                              'mock-recover.pid', lambda runner: os.killpg(runner.pid, signal.SIGINT),
+                                              AI_AUTO_RECOVER='1', MOCK_RECOVER='sleep')
+        self.assertEqual(code, 130, output)
+        self.assertIn('auto-recovery failed unexpectedly (exit 130)', self.notifications())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_session_exit_codes_unchanged(self):
+        self.ready()
+        self.tool('ai-run', '--approved', '--session-timeout', '1', expected=1, MOCK_CLAUDE='timeout')
+        self.assertIn('Claude exited 124', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
+        self.run_cmd(['git', 'clean', '-fdq'])
+        self.commit('reconcile timeout')
+        (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nexit 17\n')
+        self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Claude exited 17', (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'timeout'), (2, 'error')])
 
     def test_outcome_malformed_queue_then_retry(self):
         self.ready()

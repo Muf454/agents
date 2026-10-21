@@ -5233,7 +5233,7 @@ fixtures are own `sleep` children in their own session, the zombie case included
 Targeted `-k run_record`: Ran 9 tests OK. Full `.ai/bin/ai-check`: Ran 1113 tests OK (1229 s).
 
 ## T315 — Run record lifecycle bound to the run id and process identity (RC-01 G3, plan review P5)
-Status: BLOCKED
+Status: TODO
 Dependencies: T301
 Model: opus
 
@@ -5300,6 +5300,7 @@ Targeted: `python3 -m unittest discover -s tests -k run_record` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-22 01:35Z: returned to TODO (BLOCKED only on the gate time limit; work committed 939c66f). Verify, run targeted checks, do not run the full gate in the foreground; the runner's gate decides.
 - 2026-10-22 (claude, opus): implemented and committed in 939c66f: `run-record own|resume|pause|
   end|request-stop|settle-stop|stop-requested` plus `settle_stop()` in `scripts/lib/workflow.py`,
   the five acceptance tests in `tests/test_workflow.py`, docs/workflow.md "Durable records".
@@ -5565,6 +5566,7 @@ Targeted: `python3 -m unittest discover -s tests -k interrupt` (must say `Ran N 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-22 01:35Z: the session timed out; its partial edits are committed as WIP. Reconcile them, run targeted checks only, then mark DONE.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
 Status: TODO

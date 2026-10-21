@@ -569,3 +569,4 @@
 | 2026-10-21T22:36:17Z | runner | T301 | completed | PASS | f92be90 | Claude checkpointed; continuing queue |
 | 2026-10-22 | claude (opus) | T315 | BLOCKED (gate time only): `run-record own/resume/pause/end/request-stop/settle-stop/stop-requested` bound to run id and process identity, `settle_stop()`; five `test_run_record_*` tests; docs/workflow.md | -k run_record 14 OK; ai-check stopped at the ~1200 s tool limit, no result | 939c66f | rerun the gate, then set DONE; no caller yet, flow unchanged |
 | 2026-10-21T22:59:57Z | runner | T315 | blocked; try next independent task | not complete | ecf8bf0 | See task result |
+| 2026-10-21T23:29:59Z | runner | T303 | stopped (exit 1); inspect state/diff before resuming | see local logs | b02dc2a | No merge or deployment performed |

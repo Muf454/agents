@@ -274,7 +274,11 @@ automatically. If tools crashed mid-state-write, atomic helper writes reduce cor
 but agent-written Markdown still needs inspection. Invalid records fail explicitly.
 
 Limits bound new agent invocations and validation execution. GNU timeout terminates a
-timed-out command, with a 10-second forced termination grace. Usage limits pause and resume:
+timed-out command, with a 10-second forced termination grace. An interrupt (INT or TERM, and
+HUP for `ai-recover`) ends the running Claude session of `ai-run` or `ai-recover` at once: the
+session runs as a background child (`ai_run_child`), and the trap TERMs it (`ai_stop_child`,
+waiting up to 30 s) before the script exits 130/143; partial work stays as after a timeout.
+Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle
 stops and crashes. A timed-out implementation session whose task is IN_PROGRESS with

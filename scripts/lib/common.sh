@@ -123,6 +123,31 @@ ai_limit_pause() {
   ai_observe resume
   AI_WAITED=$(( AI_WAITED + wait ))
 }
+# Run a long child (a timeout-wrapped session or gate, a toolkit script, a sleep) in the
+# background so a trapped INT/TERM can end it at once; returns the child's status. A background
+# child of a non-interactive shell ignores SIGINT: only ai_stop_child's TERM ends it.
+AI_CHILD_PID=
+ai_run_child() {
+  local code=0
+  "$@" &
+  AI_CHILD_PID=$!
+  wait "$AI_CHILD_PID" || code=$?
+  AI_CHILD_PID=
+  return "$code"
+}
+# From a trap: TERM the recorded child (timeout forwards it and kills after 10 s), wait for it up
+# to 30 s, return 1 if it is still alive. Idempotent (a second signal in the trap is harmless);
+# a no-op without a child. The foreground sleep lets bash reap the exited child.
+ai_stop_child() {
+  local pid=${AI_CHILD_PID:-} tries=0
+  [[ -n "$pid" ]] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    (( tries++ < 300 )) || return 1
+    sleep 0.1
+  done
+  AI_CHILD_PID=
+}
 ai_root() {
   AI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ai_die 'Run inside a Git project.'
   cd -- "$AI_ROOT"

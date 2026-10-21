@@ -130,9 +130,9 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-trap 'exit 129' HUP
+trap 'ai_stop_child; exit 143' TERM
+trap 'ai_stop_child; exit 130' INT
+trap 'ai_stop_child; exit 129' HUP
 # Handlers first, then the marker. Liveness contract: this process stands in for ai-pipeline until it resumes.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
@@ -355,7 +355,7 @@ log=$(mktemp .ai/local/recover-XXXXXXXX.json)
 model_args=()
 if [[ -n "${AI_MODEL:-}" ]]; then model_args=(--model "$AI_MODEL"); fi
 set +e
-timeout --signal=TERM --kill-after=10s "${AI_RECOVER_TIMEOUT:-300}" claude -p \
+ai_run_child timeout --signal=TERM --kill-after=10s "${AI_RECOVER_TIMEOUT:-300}" claude -p \
   --permission-mode dontAsk --output-format json --tools Read,Glob,Grep --allowedTools Read,Glob,Grep \
   --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' "${model_args[@]}" \
   -- "$prompt" < /dev/null > "$log" 2> "${log%.json}.stderr.log"
