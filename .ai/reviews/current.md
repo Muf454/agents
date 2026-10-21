@@ -1,35 +1,34 @@
-<!-- Host evidence: HEAD 41e45a825380b1cc72ac2558606bc93ddbfa1496; merge-base 20fe2ab452cdd7917af6c11e715fbff0ad6b4489; saved 2026-10-21T13:53:14Z. -->
+<!-- Host evidence: HEAD 6cca6bf6879fdc22c1e3087fdcae4c970616237b; merge-base 20fe2ab452cdd7917af6c11e715fbff0ad6b4489; saved 2026-10-21T21:29:58Z. -->
 
 # Independent review
 
-Overall verdict: REQUEST CHANGES — one MAJOR routing requirement gap and two MINOR issues remain.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
+Overall verdict: APPROVE WITH MINOR FINDINGS — previous findings are fixed; two localized integration gaps remain.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `41e45a825380b1cc72ac2558606bc93ddbfa1496`
+Reviewed HEAD: `6cca6bf6879fdc22c1e3087fdcae4c970616237b`
 
 Supplied base and verified merge-base: `20fe2ab452cdd7917af6c11e715fbff0ad6b4489`
 
 ## Scope and validation
 
-Inspected the repository instructions, specification, plan, task records, state, handoff, review dispositions, relevant documentation, Git history, full supplied diff, changes since the previous review, and affected source/tests. The checkout was clean.
+Inspected repository instructions, specification, plan, tasks, state, handoff, previous review/dispositions, relevant documentation, Git history, the full supplied diff, changes since round 2, and affected source/tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json` records PASS at `2026-10-21T13:46:34Z`, on revision `1aae5fee85cda463660808ace280f5ea44830429`.
-- Its referenced log reports **1,103 tests passed**.
-- Independent `stamp verify` confirms that evidence matches the reviewed checkout.
+- `.ai/local/validation.json` records PASS at `2026-10-21T21:26:19Z`, on revision `72bda9c12cd2c8c0c2f5dcbbaf8b179df7057b65`.
+- Its referenced log reports **1,107 tests passed**.
+- Independent `stamp verify` confirms that evidence matches the reviewed content.
 
 Checks independently completed:
 
-- Discovery found 1,103 tests.
-- Three documentation-consistency tests passed.
-- Python AST checks across nine files and shell syntax checks across 14 files passed.
-- Task queue validation and `git diff --check` passed.
-- Write-free reproductions exercised the findings below and the previous fixes. Storage, discovery, and Git inputs were mocked where necessary.
+- Python AST checks across nine files and shell syntax checks across 14 files.
+- Discovery of 1,107 tests and execution of three passing documentation-consistency tests.
+- Task queue validation and `git diff --check`.
+- Write-free reproductions using actual helpers, with storage inputs and writes mocked where necessary.
 
-Previous findings **M1, M2 and N1 are fixed**: registry capture precedes discovery; indirectly moved tasks consume queue-order claims; routed reviews default to opus and preserve the human’s model override.
+Previous findings **M1, M2, M3, N1, N2 and N3 are fixed**: registry capture precedes discovery; indirectly moved tasks consume claims; missing routing records retain Codex; routed reviews default to opus while preserving overrides; both state variables are isolated independently; advisory scans refresh the overlap report.
 
-The full `./scripts/ai-check` and writable integration fixtures were not rerun because the sandbox is read-only. No project files were written or network/MCP integrations invoked.
+The full `./scripts/ai-check` and writable integration fixtures were not rerun because the sandbox is read-only. Discovery required pinning Python’s temporary-directory value to avoid its write probe. No project files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -37,80 +36,71 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M3 — Missing host records allow routing based on commit subjects
-
-**Location:** `scripts/lib/workflow.py:3718`.
-
-**Requirement:** R6, assumption A10 and T108 require routing from host records, with missing records retaining Codex.
-
-**Problem:** When `fix_round_records()` returns `None`, `route_fix_rounds()` counts commits whose subject matches the triage subject. That substitutes agent-controlled Git history for the required host record.
-
-**Impact:** A missing or deleted fix-round store can enable a routed Claude review without the required trusted fix-round evidence.
-
-**Evidence:** A write-free reproduction used the actual routing functions with a missing fix-round store, a matching triage commit subject, an earlier host Codex review and a one-line low-risk diff. It returned `claude small low-risk fix round (1 lines)`. With an empty host store and identical history, it returned `codex first full code review`.
-
-**Recommended direction:** Treat a missing store as no eligible fix round. Keep legacy migration separate from routing eligibility, and test that a triage commit subject alone cannot enable routing.
+None found in the inspected scope.
 
 ## MINOR findings
 
-### N2 — Existing temporary state skips XDG isolation
+### N4 — Triage section repairs bypass ruling claims and logging
 
-**Location:** `tests/isolation.py:18`.
+**Location:** `scripts/ai-run:658`, before `ai_queue_ruling` at line 663.
 
-**Requirement:** R8/FL-33 and T111 require both `AI_STATE_DIR` and `XDG_STATE_HOME` to be isolated for tests and subprocesses.
+**Requirement:** R2/R3 and assumption A2 require bounded, logged rulings for section repairs after triage. The uncapped exceptions cover planning and plan-revision sessions.
 
-**Problem:** Initialization checks only `AI_STATE_DIR`. If it already points under the temporary directory, the module leaves `XDG_STATE_HOME` untouched, including when it is unset.
+**Problem:** Triage calls `tasks fill-sections` before the ruling helper scans the queue. Missing sections are therefore already repaired when preflight runs, so it neither claims `task-sections:TASK` nor writes its ruling row.
 
-**Impact:** A legitimate temporary host-state setting causes the new isolation test to fail. An existing external XDG setting also remains available to children.
+**Impact:** These triage repairs remain unlogged and can repeat despite an existing claim. The impact is limited to empty sections; queue-order claims still work.
 
-**Evidence:** Executing the isolation module with `AI_STATE_DIR=/tmp/reviewer-state` and no `XDG_STATE_HOME` leaves XDG unset. The existing isolation test then raises `KeyError: 'XDG_STATE_HOME'` before creating its fixture.
+**Evidence:** Running the actual fill and preflight helpers in sequence, with queue writes held in memory, repaired a TODO task’s missing `Result / notes`. The following preflight returned no changes, leaving nothing for the ruling helper to claim or log.
 
-**Recommended direction:** Validate and initialize both variables independently. Cover temporary AI state with missing or external XDG state.
+**Recommended direction:** Let the claimed preflight path perform triage section repairs before queue validation. Test first repair, refused repeat, and the resulting run-log row.
 
-### N3 — Advisory-only scans never save the overlap report
+This is a gap in the new ruling contract around retained legacy behavior.
 
-**Location:** `scripts/lib/common.sh:362`; `scripts/ai-run:447` and `scripts/ai-run:561`.
+### N5 — Outcomes report incorrectly requests catch-up for routed reviews
 
-**Requirement:** Assumption A5 requires overlap reports to be printed and written to `.ai/local/preflight.md`.
+**Location:** `scripts/lib/workflow.py:4696`.
 
-**Problem:** For a valid queue, `ai_queue_ruling()` prints dry-run overlap output and returns before invoking the report writer. Planning and revision paths likewise use only dry-run preflight output.
+**Requirement:** R6 and assumption A12 distinguish routed reviews from fallback reviews: routed reviews need no Codex catch-up.
 
-**Impact:** Ordinary scans leave the promised report missing or stale, despite printing current overlaps.
+**Problem:** `outcomes_report()` treats every reviewer beginning with `claude` as a fallback, including the newly introduced `claude-routed`.
 
-**Evidence:** Exercising the actual shell function with a valid overlapping queue showed only `tasks preflight --dry-run` being called. The report-writing path was never reached.
+**Impact:** `ai-status --outcomes` reports a successfully routed review under “Codex catch-up pending,” contradicting its review record and PR description and suggesting unnecessary work.
 
-**Recommended direction:** Refresh the advisory report after successful scans independently of whether a queue repair or commit is needed.
+**Evidence:** The actual reporting function, given a Codex code-review row followed by a `claude-routed` row, listed the routed row under `## Claude-only reviews (Codex catch-up pending)`.
+
+**Recommended direction:** Exclude routed reviews from catch-up accounting while preserving fallback behavior. Add a reporting regression alongside the existing catch-up tests.
+
+The reporting filter predates this branch; introducing the routed reviewer category creates this integration regression.
 
 ## Missing coverage
 
-Add regressions for:
+Add automated regressions for:
 
-- Missing fix-round records combined with a matching triage commit subject.
-- Temporary `AI_STATE_DIR` with unset or external `XDG_STATE_HOME`.
-- Creating and refreshing the saved overlap report when no repair is required.
+- Triage section repairs consuming a claim and writing a ruling row, with repeats refused.
+- Routed reviews remaining visible in reviewer statistics without appearing as catch-up pending.
 
-Existing tests cover nearby behavior but do not detect these cases.
+The recorded suite covers the earlier accepted findings but misses these integration cases.
 
 ## Security concerns
 
-M3 weakens the specified boundary between host evidence and agent-controlled history. No additional demonstrated exploitable authentication or authorization defect was found in the inspected changes.
+No additional demonstrated security, authentication or authorization defect was found in the inspected changes. The previous routing authority defect, M3, is fixed.
 
-No pre-existing defects are counted. Legacy fix-round migration predates this change; its new use for routing eligibility is the issue reported in M3.
+No unrelated pre-existing defects are counted.
 
 ## Architecture concerns
 
-The implementation retains minimal dependencies and deterministic host helpers. Routing should preserve its conservative behavior when authority records are missing.
+The implementation retains standard-library helpers and minimal dependencies. The remaining issues concern inconsistent use of the shared ruling path and an existing report’s handling of a new reviewer category.
 
-**Flow chart updated:** the inspected vault note has `updated: 2026-10-21` and documents the batch’s workflow changes. Same-session editing timing was not independently established.
+**Flow chart updated:** the inspected vault note has `updated: 2026-10-21` and documents the workflow changes. Same-session editing timing was not independently established.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-After fixes and the normal toolkit upgrade, observe reviewer selection, attribution, notifications and resumption during a real fix round and Codex-limit window using the actual CLIs.
+After the normal toolkit upgrade, observe reviewer selection, attribution, notifications and resumption during a real fix round and Codex-limit window using the actual CLIs.
 
 ### Covered by automated tests
 
-The recorded suite covers queue repair, ruling lifecycle, retries, routing, limit memory, reviewer attribution and registry isolation. Add the three regressions above and rerun `./scripts/ai-check`.
+Queue repair, ruling lifecycle, retries, routing, limit memory, attribution and registry isolation have recorded automated coverage. Add the two regressions above and run `./scripts/ai-check` after any fixes.
 
 Reviewing does not constitute human acceptance.
