@@ -4996,7 +4996,7 @@ Gate: `.ai/bin/ai-check` Ran 1103 tests, OK, exit 0 (766.5 s; the harness moved 
 no edits until it finished). Vault flow chart routed node now says "(opus)" instead of "(usual model)".
 
 ## T116 — Routing never counts fix rounds from commit subjects (review M3, BR-14, A10)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5036,6 +5036,16 @@ Targeted: `python3 -m unittest discover -s tests -k fix_round` (must say `Ran N 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-21 (claude opus). `route_fix_rounds` returns 0 when `fix_round_records()` is `None`
+(no `TRIAGE_COMMIT` subject fallback) and only counts host records reachable in BASE..HEAD;
+docstring fixed. `fix-rounds init`/`count` legacy migration untouched. `route_project` gained
+`record=True`. Regression `test_review_route_triage_subject_without_host_record_stays_on_codex`:
+missing store + triage subject + host Codex code review + one-line diff → `codex first full code
+review` and no store written; after `fix-rounds record` → `claude small low-risk fix round (1
+lines)`. docs/workflow.md routing paragraph names the rule. Evidence: `-k review_route` Ran 10 OK;
+`-k fix_round` Ran 21 OK; `-k review_routing` Ran 6 OK (incl. the pipeline round-2 test);
+ai-check PASS, 1104 tests, 816.3 s (no edits during the gate). Flow unchanged; the vault flow
+note already says counts never come from commit subjects.
 
 ## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
 Status: TODO

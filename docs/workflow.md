@@ -1249,8 +1249,9 @@ naming the reason. `ai-review` and `ai-pipeline` validate `AI_REVIEW_ROUTE` (emp
 are captured in the run manifest and restored by `ai-recover`.
 
 Routing (`review-route MODE BASE HEAD`, BR-14, T108; called by `ai-review` since T109): prints `codex REASON` or `claude REASON` and exits 0; any error prints `codex
-routing unavailable`. It reads host records only (the fix-round store as `fix-rounds count`
-does, without writing; the outcome log's `review` rows), never review commit subjects. The
+routing unavailable`. It reads host records only (the fix-round store, without writing; a
+missing store counts no fix round, so a triage commit subject alone never routes to Claude,
+T116; the outcome log's `review` rows), never review commit subjects. The
 first rule that applies wins: `AI_REVIEW_ROUTE=codex` → `routing off` (a value other than
 empty, `risk` or `codex` → `invalid AI_REVIEW_ROUTE`); mode `plan`/`recheck` → Codex; no
 fix round recorded for BASE → `first full code review`; no `codex` code review row of this

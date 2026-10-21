@@ -8793,9 +8793,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.run_cmd(['python3', str(HELPER), 'review-route', mode, 'main', 'HEAD'], env={**base, **env})
         return result.stdout.strip()
 
-    def route_project(self, queue=None, reviewer='codex'):
-        """A branch after one host-recorded Codex code review and one counted fix round; returns
-        the fix round commit the cases start from."""
+    def route_project(self, queue=None, reviewer='codex', record=True):
+        """A branch after one host-recorded Codex code review and one counted fix round (or only
+        its triage commit without `record`); returns the fix round commit the cases start from."""
         self.ready(queue)
         (self.project / 'src').mkdir()
         (self.project / 'src/app.py').write_text('print(1)\n')
@@ -8804,7 +8804,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
                             '## MAJOR findings\n- M1: a real defect.\n')
         self.commit('chore(ai): record review triage')
-        self.helper('fix-rounds', 'record', 'HEAD')
+        if record:
+            self.helper('fix-rounds', 'record', 'HEAD')
         return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
 
     def route_change(self, path, text, start=None):
@@ -8908,6 +8909,16 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('fix-rounds', 'record', 'HEAD')
         self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
         self.assertEqual(self.route(), 'codex no earlier review')
+
+    def test_review_route_triage_subject_without_host_record_stays_on_codex(self):
+        # A triage commit subject is agent-controlled history, not a host fix round record (A10).
+        start = self.route_project(record=False)
+        self.route_change('src/app.py', 'print(1)\nwidget = 2\n')
+        self.assertEqual(list((self.base / 'host-state').rglob('fix-rounds-*.json')), [])
+        self.assertEqual(self.route(), 'codex first full code review')
+        self.assertEqual(list((self.base / 'host-state').rglob('fix-rounds-*.json')), [])  # routing never migrates
+        self.helper('fix-rounds', 'record', start)
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
 
     def test_review_route_unreadable_records(self):
         self.route_project()

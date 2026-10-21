@@ -3710,14 +3710,14 @@ def risk_word(base, head, words):
 
 
 def route_fix_rounds(base):
-    """`fix-rounds count BASE` without writing: a branch without a host record counts its host
-    triage subjects, as `init` would."""
+    """Host-recorded fix rounds reachable in BASE..HEAD, without writing. A branch without a host
+    record counts none: triage commit subjects are agent-controlled history and never make a
+    review eligible for routing (A10); only `fix-rounds init` migrates them."""
     base = git('rev-parse', '--verify', f'{base}^{{commit}}').decode().strip()
-    history = git('log', '--format=%H %s', f'{base}..HEAD').decode().splitlines()
     records = fix_round_records()
     if records is None:
-        records = [line.split(' ', 1)[0] for line in history if line.split(' ', 1)[1:] == [TRIAGE_COMMIT]]
-    reachable = {line.split(' ', 1)[0] for line in history}
+        return 0
+    reachable = set(git('log', '--format=%H', f'{base}..HEAD').decode().split())
     return sum(1 for record in records if fix_round_commit(record) in reachable)
 
 
