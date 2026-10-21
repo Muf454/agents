@@ -5141,7 +5141,7 @@ tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limi
 runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 
 ## T201 — Plan review decided against the run's base, with a skip line (FL-39)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5227,6 +5227,11 @@ the first run's stop records as a human would and asserts `plan-review-info` is 
 scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE). The session
 started `.ai/bin/ai-check` by mistake before reading the rule; it passed the 600 s tool limit
 and was not used as evidence.
+2026-10-22 (resume after the host gate failure): verified 333b87a unchanged; mission control's
+handoff line fixes the only failing test. Re-run: `-k plan_review_base` Ran 4 tests OK; `-k
+plan_review` Ran 27 tests OK; `-k preflight_pipeline` Ran 8 tests OK; `-k pr_body_flow` Ran 2
+tests OK (includes test_pr_body_flow_this_repo_declares_the_flow_chart); `bash -n
+scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T214 — Plan revision and its queue repair decided against the run's base (FL-39, review P2)
 Status: TODO
