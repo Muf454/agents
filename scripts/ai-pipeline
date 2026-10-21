@@ -15,6 +15,7 @@ Hands-off delivery of an approved plan on a feature branch:
   -> Claude triage + fix tasks (at most N rounds, default 2); Codex re-checks rejected
   BLOCKER/MAJOR findings (upheld ones become disputes) -> review again
   Reviews use Codex; at a Codex usage limit a read-only Claude review instead (AI_REVIEWER=auto|codex|claude).
+  With auto, small low-risk fix rounds are reviewed by a fresh Claude session (AI_REVIEW_ROUTE=codex: off).
   -> push the feature branch and open/update a pull request (draft while disputes exist) -> notify.
 --base is the review base (default main); a local branch B is replaced by origin/B when
 origin/B is strictly ahead of it (never fetched), and the resolved base is printed.
@@ -70,6 +71,7 @@ case "${AI_REVIEWER:-auto}" in
   auto) command -v codex >/dev/null || printf '%s\n' 'Codex CLI not found: reviews run on the Claude fallback reviewer.' ;;
   *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
 esac
+ai_review_route_settings
 ai_supervise_settings
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.

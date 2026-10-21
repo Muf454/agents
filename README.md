@@ -515,8 +515,23 @@ A Codex limit on a review doesn't pause by default: see "Claude fallback reviewe
 `AI_REVIEWER` picks the reviewer for plan reviews, code reviews and re-checks:
 `auto` (default) asks Codex first and, only when Codex reports a usage limit (or the
 Codex CLI is missing), runs a fresh read-only Claude review instead; `codex` keeps the
-old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried again on
-every later review, so it takes over as soon as it has usage.
+old behaviour (pause until Codex resets); `claude` skips Codex. When Codex names its reset
+time, the host remembers it (`codex-limit.json` in the host state directory): until then
+`auto` reviews go straight to the Claude fallback (labelled `(recorded)`) without calling
+Codex; afterwards Codex takes over again. `codex` ignores that record.
+
+Review routing (`auto` only): Codex reviews the plan, re-checks, the first full code review and
+every large or risky fix round. A small low-risk fix-round re-review goes to a fresh read-only
+Claude session instead, labelled `Claude, routed (…)`, with no catch-up entry (Codex reviewed
+the branch earlier). Small: at most `AI_REVIEW_SMALL_LINES` (default 200) changed lines outside
+`.ai/` since the last host-recorded code review. Risky: a changed path matching the risk globs
+(migrations, SQL, Supabase, auth, policies, RLS, security, payment, billing, `.github/`,
+`.claude/`, permissions, `scripts/lib/common.sh`, `scripts/ai-check`; add globs with
+`AI_REVIEW_RISK_PATHS`), a changed line with a risk word (auth, RLS, grant, migration, payment,
+lock, race, transaction, secret, token, password, permission and similar; add words with
+`AI_REVIEW_RISK_WORDS`), or a task finished since that review running on opus. The decision
+reads host records only; anything missing sends the review to Codex. `AI_REVIEW_ROUTE=codex`
+turns routing off.
 
 The Claude reviewer is a separate `claude -p` session with no access to the
 implementing session and no shell: tools Read/Glob/Grep only, whatever
@@ -636,7 +651,8 @@ subscribe to a hard-to-guess topic, and put this in
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
 `AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_LIMIT_RELAUNCH_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
-`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
+`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`, `AI_REVIEW_ROUTE`, `AI_REVIEW_SMALL_LINES`,
+`AI_REVIEW_RISK_PATHS`, `AI_REVIEW_RISK_WORDS`; environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>

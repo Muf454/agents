@@ -2530,7 +2530,8 @@ RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFOR
                 'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RELAUNCH_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
-                'AI_SUPERVISE_ESCALATE_MODEL')
+                'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                'AI_REVIEW_RISK_WORDS')
 
 
 def _no_duplicate_keys(pairs):
@@ -3794,6 +3795,43 @@ def review_route(arguments):
     print(reason)
 
 
+def codex_limit_reset():
+    """The recorded Codex reset (epoch seconds) while it lies in the future, else None. A missing,
+    symlinked, unreadable or malformed record counts as no record."""
+    path = state_root() / 'codex-limit.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    reset = record.get('reset') if isinstance(record, dict) else None
+    if type(reset) is not int or reset <= time.time():
+        return None
+    return reset
+
+
+def codex_limit(arguments):
+    """codex-limit set RESET | active (BR-14, A11): the host's memory of a Codex usage limit.
+    `set` records a future reset (epoch seconds) in the state root; `active` prints it and exits
+    0 while it lies ahead, else exits 1 without writing."""
+    if arguments[:1] == ['active'] and len(arguments) == 1:
+        reset = codex_limit_reset()
+        if reset is None:
+            sys.exit(1)
+        print(reset)
+        return
+    if arguments[:1] != ['set'] or len(arguments) != 2 or not re.fullmatch(r'[1-9][0-9]{0,11}', arguments[1]) \
+            or int(arguments[1]) <= time.time():
+        fail('Usage: codex-limit set RESET (epoch seconds in the future) | codex-limit active')
+    root = check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / 'codex-limit.json'
+    if path.is_symlink():
+        path.unlink()
+    atomic(path, json.dumps({'reset': int(arguments[1]), 'recorded': now()}) + '\n')
+
+
 FALLBACK_LOG = Path('.ai/reviews/fallback-log.md')
 
 
@@ -4834,8 +4872,14 @@ def pr_body(arguments):
         lines.append('No local validation evidence recorded.')
     lines.append('')
     fallback = re.search(r'^> \*\*Reviewer: (Claude(?: fallback)?) \(([^,;)]+), effort [^;]*; ([^)]*)\)', review, re.M)
-    lines += [f'## Independent review ({fallback.group(1) + ", " + fallback.group(2) if fallback else "Codex"})', '']
-    if fallback:
+    routed = re.search(r'^> \*\*Reviewer: Claude, routed \(([^,;)]+), effort [^;]*; (.*)\)\. Codex reviewed', review, re.M)
+    heading = f'Claude, routed, {routed.group(1)}' if routed else \
+        fallback.group(1) + ', ' + fallback.group(2) if fallback else 'Codex'
+    lines += [f'## Independent review ({heading})', '']
+    if routed:
+        lines += ['> [!NOTE]', f'> Codex reviewed this branch earlier; this fix round was routed to a fresh Claude '
+                  f'session: {routed.group(2)}.', '']
+    elif fallback:
         lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
     if review:
@@ -5624,6 +5668,8 @@ def main():
         review_risk(arguments)
     elif command == 'review-route':
         review_route(arguments)
+    elif command == 'codex-limit':
+        codex_limit(arguments)
     elif command == 'fallback-record':
         fallback_record(arguments)
     elif command == 'outcome':

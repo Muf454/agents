@@ -593,6 +593,10 @@ if mode not in ('no-progress', 'bad-format'):
     part = re.sub(r'^Status:.*$', 'Status: ' + status, part, flags=re.M)
     file.write_text(text[:start] + part + text[end:])
     pathlib.Path(task_id + '.txt').write_text('checkpointed implementation')
+    if os.environ.get('MOCK_FIX_PATH') and task_id != 'T001':  # a fix task's 10-line change there
+        fix = pathlib.Path(os.environ['MOCK_FIX_PATH'])
+        fix.parent.mkdir(parents=True, exist_ok=True)
+        fix.write_text(''.join(f'fix line {n}\n' for n in range(10)))
     if mode == 'flow-blank':  # a Flow chart section whose first line is not one of the two phrases
         handoff = pathlib.Path('.ai/handoff.md')
         handoff.write_text(re.sub(r'(?m)^## Flow chart\n<!--.*-->\n', '## Flow chart\n\nFlow chart: updated '
@@ -672,7 +676,10 @@ if os.path.exists('.ai/local/observation.json'):
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
     with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
-    print('ERROR: You have hit your usage limit. Try again in 7 days.')
+    # MOCK_CODEX_LIMIT=10min: a limit that resets soon (the host remembers it until then);
+    # unknown-reset: no reset time (never remembered).
+    print('ERROR: You have hit your usage limit. Try again ' +
+          {'10min': 'in 10 minutes', 'unknown-reset': 'later'}.get(os.environ['MOCK_CODEX_LIMIT'], 'in 7 days') + '.')
     sys.exit(1)
 if 'Diagnose this workflow incident' in args[-1]:
     path = pathlib.Path(args[args.index('--output-last-message')+1])
@@ -726,8 +733,9 @@ if ',' in mode:
     # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
     mode = mode.split(',')[min(count, len(mode.split(','))) - 1]
 if mode == 'error': sys.exit(17)
-if mode == 'limit-once' and count == 1:
-    print('ERROR: usage_limit_reached. You have hit your usage limit. Try again in 3 minutes.')
+if mode in ('limit-once', 'limit-once-unknown') and count == 1:
+    print('ERROR: usage_limit_reached. You have hit your usage limit. Try again ' +
+          ('later.' if mode == 'limit-once-unknown' else 'in 3 minutes.'))
     sys.exit(1)
 path = pathlib.Path(args[args.index('--output-last-message')+1])
 if mode == 'empty': sys.exit(0)
@@ -868,7 +876,8 @@ class ToolkitTest(unittest.TestCase):
         self.env = git_fixture_env()
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
                      'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
-                     'AI_SUPERVISE_ESCALATE_MODEL'):
+                     'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                     'AI_REVIEW_RISK_WORDS'):
             # set when the gate runs inside a pipeline (or one resumed by ai-recover); the
             # supervision settings would override the fixture's config file
             self.env.pop(name, None)
@@ -891,6 +900,7 @@ class ToolkitTest(unittest.TestCase):
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
         self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
+        self.env['AI_REVIEW_ROUTE'] = 'codex'  # review routing has its own tests (test_review_routing_*)
         # ai-dashboard on the host lists only real pipelines, not these fixture runners.
         self.env['AI_DASHBOARD_IGNORE'] = '1'
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
@@ -6169,11 +6179,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_recovery_restores_the_approved_runs_settings(self):
         self.ready()
+        routing = dict(AI_REVIEW_ROUTE='risk', AI_REVIEW_SMALL_LINES='50', AI_REVIEW_RISK_PATHS='docs/*',
+                       AI_REVIEW_RISK_WORDS='widget gadget')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
-                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate', **routing)
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertEqual(manifest['env']['AI_RECOVER_MAX'], '1')
         self.assertEqual(manifest['env']['AI_AUTO_RECOVER'], '1')
+        for key, value in routing.items():  # review routing settings (T109) are kept with the run
+            self.assertEqual(manifest['env'][key], value)
+        restored = self.helper('run-manifest', 'env').stdout.split('\0')
+        for key, value in routing.items():
+            self.assertIn(f'{key}={value}', restored)
         # Started without those settings (as a detached service would be), it uses the approved ones.
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
@@ -6306,6 +6323,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for name, keys in lists.items():
             self.assertEqual(keys, lists['RUN_SETTINGS'], name)
         self.assertIn('AI_SUPERVISE_ESCALATE_MODEL', lists['RUN_SETTINGS'])
+        self.assertLessEqual({'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                              'AI_REVIEW_RISK_WORDS'}, lists['RUN_SETTINGS'])
 
     def test_committed_content_must_match_validated_files(self):
         self.ready()
@@ -8745,7 +8764,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     # ---------------------------------------------------------------- review routing (T108, BR-14)
     def route(self, mode='code', **env):
-        result = self.run_cmd(['python3', str(HELPER), 'review-route', mode, 'main', 'HEAD'], env={**self.env, **env})
+        base = {key: value for key, value in self.env.items() if key != 'AI_REVIEW_ROUTE'}
+        result = self.run_cmd(['python3', str(HELPER), 'review-route', mode, 'main', 'HEAD'], env={**base, **env})
         return result.stdout.strip()
 
     def route_project(self, queue=None, reviewer='codex'):
@@ -8871,10 +8891,139 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         log = self.base / 'host-state/outcomes.jsonl'
         log.unlink()
         log.mkdir()
-        result = self.run_cmd(['python3', str(HELPER), 'review-route', 'code', 'main', 'HEAD'])
-        self.assertEqual(result.stdout.strip(), 'codex routing unavailable')
+        self.assertEqual(self.route(), 'codex routing unavailable')
         self.assertEqual(self.route('plan'), 'codex plan review')
         self.assertEqual(self.route('code').split()[0], 'codex')
+
+    # ------------------------------------------------- Codex limit memory and routing (T109, BR-14)
+    def limit_record(self):
+        return self.base / 'host-state/codex-limit.json'
+
+    def test_codex_limit_set_then_active_until_the_reset(self):
+        self.ready()
+        self.assertEqual(self.helper('codex-limit', 'active', expected=1).stdout, '')
+        self.assertFalse(self.limit_record().exists())
+        reset = str(int(time.time()) + 600)
+        self.helper('codex-limit', 'set', reset)
+        record = json.loads(self.limit_record().read_text())
+        self.assertEqual(record['reset'], int(reset))
+        self.assertRegex(record['recorded'], r'^\d{4}-\d{2}-\d{2}T')
+        self.assertEqual(self.helper('codex-limit', 'active').stdout.strip(), reset)
+        past = json.dumps({'reset': int(time.time()) - 1, 'recorded': 'x'})
+        self.limit_record().write_text(past)
+        self.assertEqual(self.helper('codex-limit', 'active', expected=1).stdout, '')
+        self.assertEqual(self.limit_record().read_text(), past)  # active never writes
+
+    def test_codex_limit_set_refuses_a_past_or_text_reset(self):
+        self.ready()
+        for value in (str(int(time.time()) - 5), '0', '-5', 'soon', '12 34', ''):
+            with self.subTest(value=value):
+                result = self.helper('codex-limit', 'set', value, expected=1)
+                self.assertIn('Usage: codex-limit', result.stderr)
+        for args in ((), ('active', 'x'), ('clear',)):
+            self.assertIn('Usage: codex-limit', self.helper('codex-limit', *args, expected=1).stderr)
+        self.assertFalse(self.limit_record().exists())
+
+    def test_codex_limit_symlinked_or_garbage_record_is_inactive(self):
+        self.ready()
+        target = self.base / 'elsewhere.json'
+        target.write_text(json.dumps({'reset': int(time.time()) + 600, 'recorded': 'x'}))
+        self.limit_record().parent.mkdir(parents=True, exist_ok=True)
+        self.limit_record().symlink_to(target)
+        self.helper('codex-limit', 'active', expected=1)
+        self.limit_record().unlink()
+        for text in ('not json', '[1]', '{"reset": "%d"}' % (time.time() + 600), '{"reset": true}', '{}'):
+            with self.subTest(text=text):
+                self.limit_record().write_text(text)
+                self.helper('codex-limit', 'active', expected=1)
+
+    def test_review_routing_recorded_codex_limit_skips_codex_until_the_reset(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        result = self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='10min', AI_REVIEW_ROUTE='')
+        self.assertIn('Codex usage limit until', result.stdout)
+        self.assertNotIn('(recorded)', result.stdout)
+        self.assertGreater(json.loads(self.limit_record().read_text())['reset'], time.time() + 500)
+        self.commit('record review')
+        # In the same window Codex (which would succeed now) is not called at all.
+        result = self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        self.assertFalse((self.base / 'codex-calls').exists())
+        self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 1)
+        self.assertIn('(recorded); reviewing with Claude instead.', result.stdout)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertRegex(review, r'> \*\*Reviewer: Claude fallback \(claude-opus-5-5, effort high; Codex usage limit '
+                                 r'until [-0-9]+ [0-9:]+ \(recorded\)\)\. Codex catch-up review pending')
+        self.assertEqual((self.project / '.ai/reviews/fallback-log.md').read_text().count('| code |'), 2)
+        self.helper('review-info')
+        self.commit('record review')
+        # Past the reset, Codex reviews again.
+        self.limit_record().write_text(json.dumps({'reset': int(time.time()) - 1, 'recorded': 'x'}))
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertNotIn('Reviewer:', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_review_routing_codex_and_claude_reviewers_and_invalid_settings(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.helper('codex-limit', 'set', str(int(time.time()) + 600))
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='codex', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertNotIn('Reviewer:', (self.project / '.ai/reviews/current.md').read_text())
+        self.commit('record review')
+        # AI_REVIEWER=codex still pauses at its limit and retries, as before.
+        (self.base / 'codex-calls').unlink()
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='codex', MOCK_CODEX='limit-once', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
+        self.commit('record review')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertIn('> **Reviewer: Claude (claude-opus-5-5, effort high; AI_REVIEWER=claude)',
+                      (self.project / '.ai/reviews/current.md').read_text())
+        self.commit('record review')
+        for key, value in (('AI_REVIEW_ROUTE', 'bogus'), ('AI_REVIEW_SMALL_LINES', '0'),
+                           ('AI_REVIEW_SMALL_LINES', 'lots'), ('AI_REVIEW_SMALL_LINES', '1234567')):
+            with self.subTest(key=key, value=value):
+                result = self.tool('ai-review', '--base', 'main', expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+                result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+
+    def routed_pipeline(self, fix_path):
+        """Codex round 1 with one MAJOR finding, one fix task changing FIX_PATH (10 lines), round 2."""
+        self.ready()
+        self.add_origin()
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once',
+                         MOCK_FIX_PATH=fix_path, AI_REVIEW_ROUTE='')
+
+    def code_review_rows(self):
+        rows = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        return [row['reviewer'] for row in rows if row.get('kind') == 'review' and row.get('mode') == 'code']
+
+    def test_review_routing_pipeline_small_low_risk_fix_round_goes_to_claude(self):
+        self.routed_pipeline('src/widget.py')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertEqual(len(self.claude_review_args()), 1)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('> **Reviewer: Claude, routed (claude-opus-5-5, effort high; small low-risk fix round (', review)
+        self.assertIn('Codex reviewed this branch earlier; no catch-up needed.', review)
+        self.assertFalse((self.project / '.ai/reviews/fallback-log.md').exists())
+        self.assertEqual(self.code_review_rows(), ['codex', 'claude-routed'])
+        self.assertNotIn('↪', self.notifications())
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('## Independent review (Claude, routed, claude-opus-5-5)', body)
+        self.assertIn('routed to a fresh Claude session: small low-risk fix round (', body)
+        self.assertNotIn('catch-up', body)
+
+    def test_review_routing_pipeline_risky_fix_round_stays_on_codex(self):
+        self.routed_pipeline('supabase/migrations/x.sql')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertFalse((self.base / 'claude-review-args.log').exists())
+        self.assertEqual(self.code_review_rows(), ['codex', 'codex'])
+        self.assertIn('## Independent review (Codex)', (self.base / 'gh.log.body.md').read_text())
 
     def test_reviewer_setting_codex_and_claude_only(self):
         self.ready()
@@ -8904,11 +9053,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_claude_review_usage_limit_pauses_then_retries_codex_first(self):
         self.ready()
         self.tool('ai-run', '--approved')
-        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='limit-once')
+        # An unknown Codex reset is not remembered: after the Claude pause Codex is asked again.
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='unknown-reset', MOCK_CLAUDE_REVIEW='limit-once')
         self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 2)
         self.assertEqual(len(self.claude_review_args()), 2)
         self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
         self.helper('review-info')
+        # A known reset is remembered (T109): the retry after the pause goes straight to Claude.
+        self.commit('record review')
+        (self.base / 'claude-review-limit').unlink()
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='limit-once')
+        self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 3)
+        self.assertEqual(len(self.claude_review_args()), 4)
+        self.assertIn('(recorded)', (self.project / '.ai/reviews/current.md').read_text())
 
     def test_plan_review_and_recheck_fall_back_to_claude(self):
         self.ready()
@@ -11412,8 +11569,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_format_retry_after_claude_fallback_attributes_the_codex_review(self):
         self.ready()
         self.tool('ai-run', '--approved')
-        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back.
-        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', MOCK_CLAUDE_REVIEW='malformed', AI_SUPERVISE='1')
+        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back. (An
+        # unknown reset, so the host does not remember the limit until it resets.)
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once-unknown', MOCK_CLAUDE_REVIEW='malformed',
+                  AI_SUPERVISE='1')
         self.assertEqual(len(self.claude_review_args()), 1)
         self.assertEqual(self.codex_calls(), 2)
         review = (self.project / '.ai/reviews/current.md').read_text()

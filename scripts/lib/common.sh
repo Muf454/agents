@@ -37,7 +37,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -61,6 +61,14 @@ ai_supervise_settings() {
   [[ "$AI_SUPERVISE_ESCALATE_MODEL" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || \
     ai_die "Invalid AI_SUPERVISE_ESCALATE_MODEL: $AI_SUPERVISE_ESCALATE_MODEL"
   export AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+}
+
+# Review routing (AI_REVIEWER=auto): AI_REVIEW_ROUTE empty/risk routes small low-risk fix
+# rounds to Claude, codex turns that off; AI_REVIEW_SMALL_LINES is the size limit.
+ai_review_route_settings() {
+  [[ "${AI_REVIEW_ROUTE:-}" =~ ^(|risk|codex)$ ]] || ai_die "Invalid AI_REVIEW_ROUTE: $AI_REVIEW_ROUTE (risk or codex)"
+  [[ -z "${AI_REVIEW_SMALL_LINES:-}" || "$AI_REVIEW_SMALL_LINES" =~ ^[1-9][0-9]{0,5}$ ]] || \
+    ai_die "Invalid AI_REVIEW_SMALL_LINES: $AI_REVIEW_SMALL_LINES (1-999999)"
 }
 
 # Codex review model/effort: reviews are where a stronger model pays off most.

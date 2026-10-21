@@ -1203,7 +1203,7 @@ before `claude` runs. The directory is removed right after the session, before a
 result check. Each mode builds `claude_prompt` next to the Codex prompt: same template,
 history and output contract, with scope lines naming the context files instead of git
 commands. A Claude usage limit pauses (`ai_limit_pause Claude`) and the loop starts
-again with Codex. The final text (`claude-text`) becomes the report (denials go to
+again with Codex (unless a recorded Codex limit is still active, see below). The final text (`claude-text`) becomes the report (denials go to
 `.ai/local/review-denials.log`; the tool list to `.ai/local/review-*.allowlist`); the
 usual "checkout unchanged" check and publish helpers follow.
 
@@ -1220,8 +1220,27 @@ label. `fallback-record` appends a row to `.ai/reviews/fallback-log.md`, which
 commits with its own record). `pr-body` titles the review section "Claude fallback,
 <model>" with a catch-up note. `outcome review …` appends to the host outcome log.
 
-Routing (`review-route MODE BASE HEAD`, BR-14, T108; no caller yet, T109 wires it into
-`ai-review`): prints `codex REASON` or `claude REASON` and exits 0; any error prints `codex
+Codex limit memory (`codex-limit`, BR-14, T109, A11): after a Codex limit with a known reset
+(`limit-check` ≠ 0), `ai-review` runs `codex-limit set RESET` (any reviewer; a past or non-numeric
+RESET is a usage error), which writes the state root's `codex-limit.json` `{"reset": EPOCH,
+"recorded": ISO}` atomically after `check_state_root`. `codex-limit active` prints RESET and
+exits 0 while it lies ahead, else exits 1 (missing, symlinked, unreadable or malformed record)
+and never writes. Under `AI_REVIEWER=auto` an active record skips the Codex call: the fallback
+path as above with the reason `Codex usage limit until DATE TIME (recorded)` (`↪` notification,
+`fallback-record`). `AI_REVIEWER=codex` ignores the record and pauses at its limit as before.
+
+Routed reviews (T109, A12): otherwise, under `auto` with Codex installed, `run_review` asks
+`review-route MODE BASE HEAD` (BASE: the merge-base for code, the plan base for plan, `-` for
+recheck; HEAD: the pinned review HEAD). `claude REASON` runs `claude_attempt` with the usual
+model choice and prints `Routed to Claude: REASON` (no `↪`); `review_by=claude-routed`, label
+`Claude, routed (MODEL, effort E; REASON). Codex reviewed this branch earlier; no catch-up
+needed.`, `AI_REVIEW_BY="Claude (routed), MODEL"`, no `fallback-record` row; the outcome row
+names `claude-routed`. `pr-body` titles the section `Claude, routed, MODEL` with a `[!NOTE]`
+naming the reason. `ai-review` and `ai-pipeline` validate `AI_REVIEW_ROUTE` (empty, `risk`,
+`codex`) and `AI_REVIEW_SMALL_LINES` (1–999999) before any agent runs; the four routing settings
+are captured in the run manifest and restored by `ai-recover`.
+
+Routing (`review-route MODE BASE HEAD`, BR-14, T108; called by `ai-review` since T109): prints `codex REASON` or `claude REASON` and exits 0; any error prints `codex
 routing unavailable`. It reads host records only (the fix-round store as `fix-rounds count`
 does, without writing; the outcome log's `review` rows), never review commit subjects. The
 first rule that applies wins: `AI_REVIEW_ROUTE=codex` → `routing off` (a value other than

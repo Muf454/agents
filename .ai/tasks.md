@@ -4577,7 +4577,7 @@ tests OK; `-k review_risk` Ran 1 test OK; `.ai/bin/ai-check` PASS, 1085 tests in
 (foreground call moved to background by the tool, waited for).
 
 ## T109 — ai-review: remember a Codex usage limit and route small low-risk fix rounds to Claude (BR-14, review)
-Status: TODO
+Status: DONE
 Dependencies: T108
 Model: opus
 
@@ -4651,6 +4651,30 @@ Targeted: `python3 -m unittest discover -s tests -k fallback` (must say `Ran N t
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+DONE 2026-10-21 (opus). `workflow.py codex-limit set RESET|active` (state root `codex-limit.json`,
+atomic after `check_state_root`; a symlink is replaced; `active` never writes; symlinked, garbage,
+non-object, non-int or past record → exit 1). `ai-review` `run_review`: under `auto` with Codex
+installed, an active record → fallback `Codex usage limit until DATE TIME (recorded)`; else
+`review-route MODE BASE HEAD` (code: merge-base, plan: plan base, recheck: `-`; helper failure →
+Codex); `claude …` → `review_by=claude-routed`, `Routed to Claude: REASON`, label `Claude, routed
+(MODEL, effort E; REASON). Codex reviewed this branch earlier; no catch-up needed.`, no `↪`, no
+`fallback-record`. A Codex limit with a known reset runs `codex-limit set` (also for
+`AI_REVIEWER=codex`, which still ignores the record and pauses). `pr_body`: heading `Claude, routed,
+MODEL` with a routed `[!NOTE]`. `ai_review_route_settings` (common.sh) validates `AI_REVIEW_ROUTE`
+and `AI_REVIEW_SMALL_LINES` in `ai-review` and `ai-pipeline`; the four settings added to the
+manifest/config/recover lists. Tests: 3 `test_codex_limit_*`, 4 `test_review_routing_*`, the
+recovery settings and key-list tests extended. Test fixture: `AI_REVIEW_ROUTE=codex` by default in
+`setUp` (routing has its own tests; old pipeline fixtures would otherwise route their fix rounds),
+`route()` drops it. Two existing tests changed for A11: `test_claude_review_usage_limit_pauses_then_retries_codex_first`
+now uses an unknown reset for the "Codex first again" case and adds the recorded case;
+`test_format_retry_after_claude_fallback_attributes_the_codex_review` uses mock mode
+`limit-once-unknown` (a 3-minute reset would now be remembered). Docs: README, docs/workflow.md,
+usage text of both scripts; vault flow chart "Reviewer choice" + bullet, hub Log line.
+Validation: -k codex_limit -k review_routing -k review_route 17 OK; -k fallback -k reviewer
+-k recheck (+ claude_review_usage, recovery_restores, key_lists, pr_body, codex_usage) 55 run, 1
+failure fixed as above, then -k format_retry -k limit_once -k codex_usage 11 OK; fix-round
+pipeline/convergence/review_context/outcomes 21 OK; ai-check PASS, 1092 tests (787.0 s; moved to
+the background by the tool timeout and waited for).
 
 ## T110 — "Reviewed by" in every review record and in the PR body (BR-14, records)
 Status: TODO

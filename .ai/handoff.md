@@ -24,7 +24,13 @@ host failure note in the prompt, one model tier up from the third attempt, `Atte
 MODEL` printed, run-log rows `completed`/`blocked`/`stopped` name `(attempt N, MODEL)`); T108
 (`workflow.py review-route MODE BASE HEAD`: `codex REASON` or `claude REASON` from the host
 fix-round store, the outcome log's code review rows and the diff since the last recorded review;
-any error → `codex routing unavailable`; no caller yet, flow unchanged). The plan was written 2026-10-20 in an unattended planning session on
+any error → `codex routing unavailable`; no caller yet, flow unchanged); T109 (`workflow.py
+codex-limit set|active`, host `codex-limit.json` written after a Codex limit with a known reset;
+`ai-review` under `AI_REVIEWER=auto` skips Codex while it is active (fallback reason `…
+(recorded)`) and otherwise asks `review-route`: a small low-risk fix round goes to a fresh Claude
+session labelled `Claude, routed (…)`, outcome reviewer `claude-routed`, no fallback-log row, PR
+heading `Claude, routed, MODEL`; the four routing settings are validated by `ai-review` and
+`ai-pipeline` and kept in the run manifest). The plan was written 2026-10-20 in an unattended planning session on
 `fix/flow-batch-9` (from `fix/flow-batch-8` at 48fd9b5; batch 8 is complete there but not merged;
 this PR targets `fix/flow-batch-8`). Zack approved the scope on 2026-10-20.
 `.ai/project-spec.md` (scope, what was verified in the code, assumptions A1–A13),
@@ -73,8 +79,10 @@ ruling and added a hub Log line; T105 (2026-10-21) added the Flow chart line rul
 hub Log line. T106 (2026-10-21): flow unchanged (helper only). T107 (2026-10-21): "Inside one
 task" pick node names the failure note and the model raise, plus "Fresh retry (BR-03, T107)"
 bullets under "Inside one task" and "When something goes wrong"; hub Log line. T108 (2026-10-21):
-flow unchanged (helper only, no caller). T109 and T110 still
-update it (reviewer choice); T112 checks it.
+flow unchanged (helper only, no caller). T109 (2026-10-21): "Reviewer choice" chart has the
+recorded-limit check, the `review-route` decision, the routed Claude node and `codex-limit set`
+after a Codex limit, plus a "Review routing and Codex limit memory" bullet; hub Log line. T110
+still updates it; T112 checks it.
 
 ## Manual testing for the human
 
@@ -143,15 +151,25 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   removed line, a rename), `_newly_done_opus_task`, `_needs_a_host_codex_review_of_this_branch`
   (fallback row only, Codex row of another branch, forged review commit), `_no_earlier_review`,
   `_unreadable_records` (`codex routing unavailable`, exit 0)).
-- `test_codex_limit_*`, `test_review_routing_*` (T109: limit memory, routed review, risky fix
-  round on Codex, reviewer settings).
+- `test_codex_limit_*` (T109, done: `_set_then_active_until_the_reset`,
+  `_set_refuses_a_past_or_text_reset`, `_symlinked_or_garbage_record_is_inactive`) and
+  `test_review_routing_*` (T109, done: `_recorded_codex_limit_skips_codex_until_the_reset` (10-minute
+  limit recorded; the second review makes no Codex call, `(recorded)` label, second fallback-log
+  row; a past record → Codex again), `_codex_and_claude_reviewers_and_invalid_settings`
+  (`AI_REVIEWER=codex` calls Codex despite the record and still pauses at its limit; `claude`
+  unchanged; `Invalid AI_REVIEW_ROUTE`/`AI_REVIEW_SMALL_LINES` from `ai-review` and `ai-pipeline`),
+  `_pipeline_small_low_risk_fix_round_goes_to_claude` (round 2 makes no Codex call, `Claude, routed`
+  in `current.md`, no fallback log, outcome rows `codex`, `claude-routed`, PR heading `routed`),
+  `_pipeline_risky_fix_round_stays_on_codex` (`supabase/migrations/x.sql`)).
+  `test_recovery_restores_the_approved_runs_settings` and
+  `test_supervise_settings_key_lists_are_identical` cover the four settings in the manifest.
 - `test_reviewed_by_*` (T110) and `test_state_isolation_*` (T111).
 
 ## Human todos
 - Gate files: none need changing for this batch.
 - After merge: the upgrades above; retire the reorder stopgap; tick BR-01, BR-02, BR-03, BR-14,
   FL-24, FL-25, FL-30 and FL-33 in the vault backlog yourself (sessions never tick them).
-- Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105 and T107 added one).
+- Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107 and T109 added one).
 
 ## Next action
-The runner continues with T109. Nothing is merged or deployed.
+The runner continues with T110. Nothing is merged or deployed.
