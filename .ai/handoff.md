@@ -6,12 +6,17 @@ Nothing yet in batch 10. The plan was written 2026-10-21 in an unattended planni
 T118's host verification and is not merged; this PR targets `fix/flow-batch-9` until that
 merges). Zack approved the scope on 2026-10-21.
 `.ai/project-spec.md` (scope, what was verified in the code, non-goals, assumptions A1–A19, plan
-review round 1 dispositions), `.ai/current-plan.md` (design) and `.ai/tasks.md` (T201–T218;
-T001–T046 and T101–T118 are earlier batches, unchanged because the host protects DONE blocks).
-Revised 2026-10-21 after Codex's hand-run plan review (`.ai/reviews/plan.md`, BLOCKER 1, MAJOR 8,
-MINOR 2): every finding was confirmed in the code; 9 accepted, 2 adjusted (P7, P8), none
-rejected; five tasks added (T214–T218), which sit where their dependencies require, so IDs are
-not in file order. The revision is uncommitted.
+review round 1 and 2 dispositions), `.ai/current-plan.md` (design) and `.ai/tasks.md`
+(T201–T221; T001–T046 and T101–T118 are earlier batches, unchanged because the host protects DONE
+blocks). Round 1 (Codex by hand, BLOCKER 1, MAJOR 8, MINOR 2; committed in 0848f4b): 9 accepted,
+2 adjusted (P7, P8), none rejected; T214–T218 added. Round 2 (`.ai/reviews/plan.md`, HEAD
+0848f4b, MAJOR 5): P12–P16 all confirmed in the code and accepted: the targeted fallback never
+runs a full-gate entry point such as `bash .ai/validate` (P12, T204); the event lock wait is
+bounded and a held lock never stalls a run (P13, T206, new T221); failed and timed-out recovery
+and validation gates are recorded (P14, new T220); prompt assertions only on the appended
+contract (P15, T204, T205); gate stamp and log read through the existing pinned, nonblocking
+`gate_log_lines()` (P16, T207 now opus). Redaction split from T206 into T219. IDs are not in file
+order. The round 2 revision is uncommitted.
 - **FL-39** (backlog FL-35): T201, plan review decided against `--base` (`tasks newly-done`), one
   `Plan review skipped: …` line on every skip; T214, the supervised plan revision and its queue
   repair use the same rule and keep earlier DONE blocks byte-identical (P2).
@@ -23,11 +28,13 @@ not in file order. The revision is uncommitted.
   templates defer to the contract, T215 the task format and task-writing prompts name
   `Targeted:` lines (P11).
 - **ME-01 part 1**: T206 `events.jsonl` core (reserved envelope, `ruling_kind`, stable
-  `events.lock`, writers guarded so no helper runs after a gate change, tolerant reader; P1, P3,
-  P5), T216 run context (`AI_RUN_ID`, `run` on outcome rows and attempt markers; P8), T217
-  rotation keeping every active run (P3, P4), T207 `gate`, T208 `stop` (fixed categories) and
-  `recovery`, T209 `run` start and exactly one end per finish path or terminal stop (P7), T210
-  `ruling` from all three writers and `review` (P5, P6), T218 `pr` events.
+  `events.lock` with a bounded wait, writers guarded so no helper runs after a gate change,
+  tolerant reader; P1, P3, P5, P13), T219 secret redaction, T216 run context (`AI_RUN_ID`, `run`
+  on outcome rows and attempt markers; P8), T217 rotation keeping every active run (P3, P4), T207
+  `event-gate` helper with safe reads (P16), T220 `gate` events from every host gate, failed
+  recovery gates included (P14), T208 `stop` (fixed categories) and `recovery`, T209 `run` start
+  and exactly one end per finish path or terminal stop (P7), T221 a held event lock never stalls
+  a run (P13), T210 `ruling` from all three writers and `review` (P5, P6), T218 `pr` events.
 - **ME-01 part 2**: T211 `metrics` data and JSON (attribution by the `run` field only), T212
   `ai-status --metrics` text tables and flag.
 - T213: docs, flow chart and handoff audit.
@@ -78,12 +85,11 @@ rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update
    at 4fea72d now; otherwise this run's first session re-verifies T118, same fix). Optionally
    record the measured worker default above.
 2. This repo's installed `.ai/bin/ai-pipeline` still has the FL-39 defect, so this run would skip
-   its own plan review silently (T001–T117 are DONE). Round 1 was run by hand (Codex, BLOCKER 1,
-   MAJOR 8, MINOR 2) and the plan was revised (spec "Plan review round 1"; uncommitted). Commit
-   the revision, then either re-run the plan review by hand on it
-   (`.ai/bin/ai-review --plan --base fix/flow-batch-9`) or accept the revision without a second
-   round. The frozen pipeline also cannot run a supervised revision here (the T214 defect), so
-   any further round is by hand too.
+   its own plan review silently (T001–T117 are DONE). Rounds 1 and 2 were run by hand (Codex;
+   round 2: MAJOR 5, all accepted, spec "Plan review round 2"; uncommitted). Commit the revision,
+   then either run a third round by hand (`.ai/bin/ai-review --plan --base fix/flow-batch-9`) or
+   accept it without one. The frozen pipeline also cannot run a supervised revision here (the
+   T214 defect), so any further round is by hand too.
 3. Read the plan (`.ai/project-spec.md` A1–A19, `.ai/current-plan.md`) and approve the run
    (`ai-pipeline --approved --base fix/flow-batch-9 --pr-base fix/flow-batch-9 …`). No gate file
    changes are needed to start.
@@ -98,7 +104,10 @@ rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update
    session gate rule, the FL-39 fix and the event writers. Then watch the next real run: sessions
    should no longer run `.ai/bin/ai-check` (the `Session:` line says `gate rule targeted`), the
    host gate decides DONE, no task should time out during its own gate, and a local-only finish
-   (`--no-pr`) leaves exactly one `run end` event (the reviewer's manual check).
+   (`--no-pr`) leaves exactly one `run end` event (the reviewer's manual check). Also observe one
+   targeted-mode run on an older queue without `Targeted:` lines (round 2 reviewer's check): only
+   task-specific checks run in the session, the host gate decides DONE, and the recorded gate
+   failures and the `run end` totals agree with the raw logs.
 
 ### Covered by automated tests
 Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all TODO:
@@ -110,16 +119,21 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`), all T
 - `session_gate_mode`, `session_gate_setting` (T203): mode from gate time and setting, validation
   and manifest.
 - `session_gate_contract` and the migrated `session_gate_allowance` (T204): contract text and
-  allowance per mode, fallback without `Targeted:` lines.
+  allowance per mode, fallback without `Targeted:` lines that excludes every full-gate entry
+  point (`bash .ai/validate` fixture).
 - `session_gate_templates` (T205) and `session_gate_targeted_lines` (T215): templates defer to the
   contract; task format and prompts name `Targeted:`.
-- `events_core` (T206): envelope, `ruling_kind`, CLI errors, redaction, concurrent appends,
-  tolerant reader, unwritable state dir, no helper after a gate change.
+- `events_core` (T206): envelope, `ruling_kind`, CLI errors, bounded strings, held lock is
+  bounded, concurrent appends, tolerant reader, unwritable state dir, no helper after a gate
+  change. `events_redact` (T219): secret tokens redacted.
 - `events_run_context` (T216): run id, rows carry the run, consecutive runs, crash in a later run.
 - `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
   nothing, stale runs, crash between replaces.
-- `events_gate` (T207), `events_stop` (T208), `events_run_end` (T209), `events_ruling` and
-  `events_review` (T210), `events_pr` (T218).
+- `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T220:
+  runner, pipeline validation and recovery gates pass/fail/timeout, none after a gate change),
+  `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
+  terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
+  (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
   filters, text tables, `ai-status --metrics`.
 - `Docs` and `flow_this_repo` (T213).

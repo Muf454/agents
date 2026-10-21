@@ -6,7 +6,7 @@ Approved by Zack on 2026-10-21, planned 2026-10-21 in an unattended planning ses
 from T118's host verification and not merged; this PR targets `fix/flow-batch-9` until that
 merges). Sources: vault `agents-backlog.md` TS-01, ME-01, FL-35 (called FL-39 in Zack's brief;
 same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. Revised
-2026-10-21 after the hand-run Codex plan review (round 1, see the last section).
+2026-10-21 after the hand-run Codex plan reviews (rounds 1 and 2, see the last two sections).
 1. **TS-01 (1) Worker count**: `tests/run_parallel.py` default raised from `min(8, cpu)` to
    `min(14, cpu - 2)` (at least 1) unless the handoff records another measured value;
    `AI_TEST_WORKERS` still overrides; the worker count and where it came from are printed in the
@@ -59,7 +59,11 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
 - **Host gates**: `ai-run` `host_gate` + `record_gate CODE STARTED` (~265–305) after a DONE
   session (~737), in the gate-only retry (~792) and the final gate (~884); `ai-pipeline`
   `ensure_validated` (~262–268, stage `validation`) and `ai-recover` commit_and_rerun (~303) call
-  `ai-check` without recording anything. `ai-check` stores its log path in
+  `ai-check` without recording anything; both leave a failing gate directly (`|| stop
+  validation`, `|| escalate …`) before their gate-integrity check (re-checked at 0848f4b for round
+  2 P14). `gate_log_lines()` (workflow.py ~4504) already reads the stamp and its log through the
+  pinned `.ai/local` with `read_record` (nonblocking, regular files, bounded); `lock_record`
+  (~5243) is the existing bounded (2 s, polling) lock. `ai-check` stores its log path in
   `.ai/local/validation.json` (`stamp record`, workflow.py ~870–883).
 - **Outcome log**: `outcomes.jsonl` in `state_root()` (workflow.py ~3868), appended by
   `append_outcome` (~3957: flock on the log's own descriptor, newline guard, single write,
@@ -121,11 +125,12 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
 - T202: worker default and the `Workers:` line.
 - T203–T205: session gate mode helper and setting, `ai-run` contract and allowance, prompt
   templates. T215: `Targeted:` lines in the task format and the task-writing prompts.
-- T206: event core (envelope, schema, stable lock, guarded writer, reader). T216: run context (run
-  id in the manifest, `AI_RUN_ID`, `run` on outcome rows and attempt markers). T217: rotation
-  that keeps every active run.
-- T207–T210, T218: the writers (gate; stop and recovery; run start and end; ruling and review;
-  pr).
+- T206: event core (envelope, schema, stable lock with a bounded wait, guarded writer, reader).
+  T219: secret redaction of text fields. T216: run context (run id in the manifest, `AI_RUN_ID`,
+  `run` on outcome rows and attempt markers). T217: rotation that keeps every active run.
+- T207: the `event-gate` helper with safe reads of the stamp and log. T220, T208–T210, T218: the
+  writers (gate, failed recovery gates included; stop and recovery; run start and end; ruling and
+  review; pr). T221: a held event lock never stalls a run (end-to-end).
 - T211–T212: `ai-status --metrics`.
 - T213: docs, flow chart and handoff audit.
 
@@ -164,10 +169,15 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
 - **A4 Allowance**: `full` keeps today's allowance (`min(2 × gate, session_timeout)`); `targeted`
   gets none (the session no longer runs the gate). The `Session:` line names the mode. Existing
   allowance tests set `AI_SESSION_GATE=full` explicitly (review P9).
-- **A5 Contract text**: `targeted`: "Run the task's `Targeted:` checks (a task without them: the
-  commands of its ### Validation section other than `.ai/bin/ai-check`) in the foreground and fast
-  static checks; do not run `.ai/bin/ai-check`: the runner's full gate after the session is
-  authoritative and decides DONE; a DONE task whose gate fails returns to IN_PROGRESS." `full`:
+- **A5 Contract text**: `targeted`: "Run the task's `Targeted:` checks in the foreground and fast
+  static checks. A task without them: the task-specific commands of its ### Validation section,
+  never a full-gate entry point (`.ai/bin/ai-check` or any other `ai-check`, `.ai/validate` in any
+  form such as `bash .ai/validate`, or a run of the whole test suite); when the section names only
+  such a command, the tests covering the changed files and the static checks instead (review
+  round 2 P12). Do not run the full gate: the runner's full gate after the session is
+  authoritative and decides DONE; a DONE task whose gate fails returns to IN_PROGRESS." Tests
+  assert on the appended contract only, not the whole prompt (the runner template keeps its
+  conditional background guidance; round 2 P15). `full`:
   today's wording plus "run `.ai/bin/ai-check` with run_in_background". The templates say "follow
   the RUNNER CONTRACT's gate rule" instead of fixing one rule. Interactive `implement.md` keeps the
   full gate (no runner, no session cap). The gate-only retry is unchanged.
@@ -183,10 +193,10 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
   {ruling_kind, key, task}; `review` {mode, reviewer, model, reason}; `pr` {action, state, url};
   `run` {action, result, base, args, tasks, gates, gate_failures, seconds}. A ruling event is
   `kind: ruling` with the BR-01 category in `ruling_kind` (review P5). Strings are capped
-  (message excerpts ≤ 200 characters, one line, secrets redacted by a new `redact()` with a fixed
-  token pattern list: no text redaction helper exists today; `SECRET_PATTERNS` (~1039) is about
-  file names). A write failure prints one `Note:` line and never changes the caller's exit status
-  or flow.
+  (message excerpts ≤ 200 characters, one line (T206), secrets redacted by a new `redact()` with a
+  fixed token pattern list (T219; no text redaction helper exists today; `SECRET_PATTERNS` (~1039)
+  is about file names). A write failure prints one `Note:` line and never changes the caller's
+  exit status or flow.
 - **A8 Run context** (review P8): `run-manifest start` adds `run_id` (16 hex) and `started`
   (epoch); a resume keeps both; `run-manifest run-id` prints the id. The run is identified only
   by explicit context, never by branch or time: `ai-pipeline` exports `AI_RUN_ID` from its own
@@ -200,7 +210,11 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
 - **A9 Rotation** (review P3, P4): writers and readers serialize on a separate, stable
   `events.lock` in the state root (created once, never renamed or deleted), taken before
   `events.jsonl` is opened; writers hold it exclusively, readers shared, so a reader sees both
-  files consistently. When `events.jsonl` exceeds `AI_EVENTS_MAX_BYTES` (default 8 MiB, int ≥
+  files consistently. Every wait for it is bounded (review round 2 P13): `AI_EVENTS_LOCK_SECONDS`
+  (float 0.1–60, default 5 s), a blocking `flock` interrupted by a timer (not a polling loop, which
+  can starve a waiter); on expiry a writer skips the event with one `Note:` (status unchanged) and
+  a reader reports the event data as unavailable (`EventsBusy`: run totals null, `metrics` exits 1
+  with a busy error); nothing waits on a stopped holder. When `events.jsonl` exceeds `AI_EVENTS_MAX_BYTES` (default 8 MiB, int ≥
   65536, invalid → default) before an append, the writer keeps the lines of every ACTIVE run in
   the new live file: a run id with no `run` end event in the live file whose latest event is
   newer than 7 days (`EVENT_RUN_STALE_DAYS`; a paused recovery or a relaunch wait is active, a
@@ -231,9 +245,15 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
   written; `review` in `ai-review` (mode, reviewer, route reason).
 - **A12 Gate event fields**: `project`, `branch`, `task` or `stage`, `start` (epoch), `seconds`,
   `tests`, `failures`, `workers`, `result` (`pass|fail|timeout`); tests, failures and workers are
-  parsed from the gate log named by `.ai/local/validation.json` (regular file, last 256 KiB,
-  integers only: `Ran N tests`, `FAILED (failures=a, errors=b)`, `Workers: W`, `on W workers`);
-  unknown → null.
+  parsed from the gate log named by `.ai/local/validation.json` (integers only: `Ran N tests`,
+  `FAILED (failures=a, errors=b)`, `Workers: W`, `on W workers`); unknown → null. Both records are
+  agent-writable, so they are read only through the existing `gate_log_lines()` (workflow.py
+  ~4504): `.ai/local` pinned by `local_dir_fd`, stamp and log opened `O_NOFOLLOW|O_NONBLOCK` by
+  `read_record` with an `fstat` regular-file check and bounded reads (stamp ≤ 64 KiB, log tail
+  256 KiB), log only directly inside `.ai/local`; a FIFO, symlink or swapped directory gives null
+  fields promptly (review round 2 P16). Every host-run gate on a trusted gate records its event
+  whatever its result, including a failing or timed-out pipeline validation or recovery gate,
+  before the existing stop or escalation (round 2 P14).
 - **A13 Metrics**: from `outcomes.jsonl` (task and review rows) and the event log. Per run = rows
   and events whose `run` equals that run's id; runs are listed from their `run` events (start,
   resume, end; no end → `open`); rows and events with no run → a `(no run record)` group. No
@@ -278,7 +298,10 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
   `runs_no_helper`, `observation_gate`, `observation_pipeline`, `recovery_escalates`,
   `outcome_attempt`, `outcome_crash`, `outcome_report`, `runner_logs_task_outcomes`,
   `ruling_manifest`, `timeout_rerun_manifest`, `pr_undraft`, `failed_final_push`,
-  `pipeline_without_remote`, `template_rules`, `Docs`, `flow_this_repo`.
+  `pipeline_without_remote`, `template_rules`, `Docs`, `flow_this_repo`; round 2 added
+  `gate_background_prompts`, `tool_contract_section`, `attempt_info_failing_checks`,
+  `recovery_commits_validated_leftovers`, `timeout_rerun`, `recovery_never_passes_a_changed_gate`,
+  `observation_recovery_validation` (checked at 0848f4b).
 
 ## Acceptance criteria (observable)
 - `AI_TEST_WORKERS` unset on a 16-CPU host → `Workers: 14 (default, CPU count 16)`; set to 3 →
@@ -292,7 +315,12 @@ same defect), with FL-28, FL-23, BR-17, CU-1, CU-5 and OR-04 read for context. R
   finish or terminal stop (local-only finishes included); outcome rows of the run carry the same
   id; a standalone command afterwards writes `run: null`. A rotation keeps every line of every
   active run, also with concurrent writers; unknown kinds and versions are skipped by readers. A
-  stop after a detected gate change runs no event helper.
+  stop after a detected gate change runs no event helper. A process holding `events.lock` delays
+  a run only by the lock deadline per event; completion and terminal stops keep their exit status.
+  A failing or timed-out recovery gate leaves a `gate` event; a planted FIFO or symlink in
+  `.ai/local` makes gate fields null without a hang.
+- A targeted-mode session of an older queue (no `Targeted:` lines, Validation only `bash
+  .ai/validate`) is told not to run any full-gate entry point.
 - `ai-status --metrics` prints per-project and per-run tables; `--json` is valid JSON with the same
   numbers; `--since` and `--project` filter.
 - A queue with earlier DONE tasks and new TODO tasks gets a plan review, and a MAJOR finding on it
@@ -319,3 +347,16 @@ against the cited code on 2026-10-21.
 | P9 | MAJOR | accepted | Confirmed: `test_session_gate_allowance_limit_grows_with_the_measured_gate` and `..._capped_by_the_remaining_run_time` seed 300 and 900 s gates with no override. T204 sets `AI_SESSION_GATE=full` there, adds the auto no-allowance assertion and runs `-k session_gate_allowance`. |
 | P10 | MINOR | accepted | Confirmed: no test matches `run_parallel`, `gate_seconds`, `outcomes_report`, `ai_status` or `session_allowance` (and `run_manifest` only matches `timeout_rerun_manifest`). Every task's selectors replaced by verified groups (A19); new-test and existing-regression selectors listed separately. |
 | P11 | MINOR | accepted | Confirmed: `templates/.ai/tasks.md` ~33 and `plan.md` ~13 ask only for generic validation commands. New T215 (task format, plan, plan-revision and triage prompts); the fallback for older queues is in the T204 contract text (A5, A18). |
+
+## Plan review round 2 (hand-run Codex review)
+Report `.ai/reviews/plan.md` (HEAD 0848f4b, BLOCKER 0, MAJOR 5, MINOR 0), each finding checked
+against the cited code on 2026-10-21. New tasks T219–T221; T207 split into T207 (helper, now opus)
+and T220 (wiring, opus). Nothing cut from scope.
+
+| ID | Severity | Disposition | Reason or task |
+| --- | --- | --- | --- |
+| P12 | MAJOR | accepted | Confirmed: the fixture `task()` (tests/test_workflow.py ~106) has only `bash .ai/validate`, so "other than .ai/bin/ai-check" would still run the full gate. The T204 fallback now excludes every full-gate entry point (any ai-check, `.ai/validate` in any form, the whole suite) and says what to run when only such a command is listed (A5); new regression `test_session_gate_contract_fallback_excludes_full_gate_entry_points` on that fixture format plus a task-specific check; T215's agreement test checks the exclusion. Still prompt text interpreted by the session (a host-side parse of free-text Validation sections would be fuzzier); the host gate stays authoritative. |
+| P13 | MAJOR | accepted | Confirmed: T206 specified blocking `flock` with no deadline, unlike `lock_record` (~5243). T206 now bounds every wait (`AI_EVENTS_LOCK_SECONDS`, default 5 s, timer-interrupted blocking flock so waiters are not starved); writers skip with a Note, readers raise `EventsBusy` (A9); unit regression in T206; T209 totals and T211 metrics handle it; new T221 proves bounded pipeline completion, terminal stop and escalation with a separate lock-holder process. |
+| P14 | MAJOR | accepted | Confirmed: `commit_validated` (scripts/ai-recover ~303) escalates on a failing gate before `ai_gate_check` (~304); `ensure_validated` (scripts/ai-pipeline ~265) has the same shape. New T220 captures the code and start, records the event only when the gate is intact, then keeps the existing stop or escalation byte-identical; regressions for pass, fail, timeout and a gate changed during the recovery gate (no event, no helper). |
+| P15 | MAJOR | accepted | Confirmed: the prompt includes `runner.md` (scripts/ai-run ~694, ~926), whose bullet has `run_in_background`, and `test_gate_background_prompts_tell_the_session_to_wait` (~1995) requires it in both templates. T204 asserts only on the appended RUNNER CONTRACT; T205 asserts the template guidance is conditional and runs the existing test and T204's tests. |
+| P16 | MAJOR | accepted | Confirmed: T207 named only `O_NOFOLLOW` for the log and nothing for the stamp. As the review suggests, no new reader: T207 reuses `gate_log_lines()` (~4504), which already uses `local_dir_fd` and `read_record` (nonblocking, `fstat` regular-file check, bounded, log only inside `.ai/local`) (A12). T207 is now opus with FIFO, symlinked log, symlinked `.ai/local`, outside-path and oversized-stamp regressions; the routine call-site wiring moved to T220 (opus, because it reorders gate handling in recovery). |

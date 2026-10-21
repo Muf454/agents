@@ -1,6 +1,6 @@
 # Plan: Flow batch 10: FL-39, TS-01 (1)(2), ME-01 parts 1 and 2
 
-## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review round 1)
+## Assessment (verified at 4fea72d, 2026-10-21; revised after plan review rounds 1 and 2)
 Details and line references: `.ai/project-spec.md` "Verified against the code". In short:
 - The plan review gate (`ai-pipeline` ~478) uses `tasks untouched` (no DONE task at all), so any
   queue that keeps earlier batches' DONE tasks skips the plan review silently. The supervised plan
@@ -46,32 +46,42 @@ module and patch `os.cpu_count` and the environment.
   `scripts/lib/common.sh` next to the routing ones.
 - T204 `ai-run`: `read -r gate_mode gate_secs < <(ai_helper session-gate)`; `claude_session`
   computes the allowance only in `full` mode; the RUNNER CONTRACT gets one of two gate sentences
-  (A5, with the fallback for tasks without `Targeted:` lines) and the `Session:` line shows `gate
-  rule targeted` or the current allowance breakdown. The existing `test_session_gate_allowance_*`
-  tests that expect an allowance set `AI_SESSION_GATE=full` (review P9).
+  (A5, with the fallback for tasks without `Targeted:` lines, which never runs a full-gate entry
+  point such as `bash .ai/validate`; round 2 P12) and the `Session:` line shows `gate rule
+  targeted` or the current allowance breakdown. The existing `test_session_gate_allowance_*`
+  tests that expect an allowance set `AI_SESSION_GATE=full` (review P9). Prompt assertions look
+  only at the appended contract (round 2 P15).
 - T205 templates: `runner.md`, `triage.md`, `fix-review.md` say the gate rule comes from the
   RUNNER CONTRACT; `templates/CLAUDE.md` step 4 notes it.
 - T215 task format (review P11): `templates/.ai/tasks.md`'s example Validation section shows
   `Targeted:` and `Gate:` lines; `plan.md`, `plan-revision.md` and `triage.md` ask for them; a
   test checks the four texts and the contract fallback agree.
 
-### ME-01 part 1: event log (T206, T216, T217, T207–T210, T218)
+### ME-01 part 1: event log (T206, T219, T216, T217, T207, T220, T208, T209, T221, T210, T218)
 - T206 core in `scripts/lib/workflow.py`: `events_path()`, `events_lock_path()` (stable
   `events.lock`), `EVENT_SCHEMA = 1`, `EVENT_ENVELOPE` (reserved names) and `EVENT_KINDS` (A7,
-  ruling category in `ruling_kind`), `redact()`, `append_event(kind, fields)` (validates, adds the
-  envelope with `run` from `AI_RUN_ID`, takes `events.lock` exclusively, then opens and appends to
-  `events.jsonl` with the `append_outcome` newline guard, one write and fsync), `read_events()`
-  (shared lock, archive then live, dedupe by id, skip unknown `v`/kind/non-dict), CLI `event KIND
-  key=value…`. `common.sh`: `ai_event` whose first statement is the `AI_GATE_BROKEN` guard (A17).
+  ruling category in `ruling_kind`), `event_text()` (one bounded line), `append_event(kind,
+  fields)` (validates, adds the envelope with `run` from `AI_RUN_ID`, takes `events.lock`
+  exclusively with a bounded wait, then opens and appends to `events.jsonl` with the
+  `append_outcome` newline guard, one write and fsync), `read_events()` (shared lock with the same
+  bound, `EventsBusy` on expiry, archive then live, dedupe by id, skip unknown `v`/kind/non-dict),
+  CLI `event KIND key=value…`. `common.sh`: `ai_event` whose first statement is the
+  `AI_GATE_BROKEN` guard (A17). Bounded wait (round 2 P13, A9): `AI_EVENTS_LOCK_SECONDS`, default
+  5 s, a timer-interrupted blocking `flock`; a busy log skips the event with a Note.
+- T219 `redact()` inside `event_text()` (split from T206 to keep it small).
 - T216 run context (review P8): `run-manifest start` adds `run_id`/`started`, `run-manifest
   run-id`; `ai-pipeline` and `ai-recover` export `AI_RUN_ID` from the manifest (A8); `outcome`
   rows and attempt markers carry `run`; a reconciled `crashed` row takes the marker's run.
 - T217 rotation (review P3, P4): inside the exclusive lock, A9's active-run retention, the
   quarter-cap rule and the copy-then-replace order; regression tests with two projects and with
   concurrent writers.
-- T207 `gate`: `event-gate TASK_OR_STAGE START SECONDS RESULT` helper (parses the stamp's log,
-  A12) called through a guarded `ai_gate_event` from `record_gate` in `ai-run`, `ensure_validated`
-  in `ai-pipeline` and the `ai-recover` commit_and_rerun gate.
+- T207 `event-gate TASK_OR_STAGE START SECONDS RESULT` helper (opus, round 2 P16): parses the
+  stamp's log read only through the existing `gate_log_lines()` (pinned `.ai/local`,
+  `read_record`: nonblocking, regular files, bounded; A12); FIFO and symlink regressions.
+- T220 `gate` wiring (opus, round 2 P14): guarded `ai_gate_event` from `record_gate` in `ai-run`,
+  `ensure_validated` in `ai-pipeline` and the `ai-recover` `commit_validated` gate; the pipeline
+  and recovery capture the gate's code first, record when the gate is intact, then keep their
+  existing stop or escalation, so failed and timed-out gates are recorded too.
 - T208 `stop` and `recovery`: `stop-category STAGE` helper (A10); guarded `ai_stop_event` and
   `ai_recovery_event` in `common.sh` compute the category and the last-error excerpt after the
   guard; `ai-pipeline stop()` after `ai_gate_check`; `ai-recover` at each decision and in
@@ -80,7 +90,9 @@ module and patch `os.cpu_count` and the environment.
   (no `AI_RUN_ID`, a broken gate, a subshell or `AI_RUN_ENDED` → nothing) computes totals with a
   `run-totals` helper from this run's own records and is called by `finish()` (each finish path
   passes its result) and by the terminal paths (`ai_die`'s pipeline branch, `escalate`, the
-  recovery `on_exit`).
+  recovery `on_exit`). Totals report gates as null when the event log is busy.
+- T221 (round 2 P13): end-to-end regressions with a separate process holding `events.lock`:
+  pipeline completion, a terminal stop and an escalation stay bounded with their exit status.
 - T210 `ruling` and `review` (review P5, P6): one `ai_ruling_event KIND KEY TASK` emitter called
   right after each Ruling row in `ai_ruling_rows`, `ai_disposition_ruling` and
   `ai_flow_line_ruling`; `ai-review` emits `review`.
@@ -89,13 +101,14 @@ module and patch `os.cpu_count` and the environment.
 ### ME-01 part 2: metrics (T211, T212)
 - T211 `workflow.py metrics [--since DATE] [--project NAME] [--json]` builds the data (A13) from
   `read_outcomes` + `read_events`, grouping by the `run` field only (no time windows; rows without
-  it → `(no run record)`), into `{"v": 1, "projects": [...], "runs": [...]}`.
+  it → `(no run record)`), into `{"v": 1, "projects": [...], "runs": [...]}`; a busy event log →
+  exit 1 with a busy error (round 2 P13).
 - T212 the plain-text tables (no `|` inside cells: Markdown-free aligned columns) and
   `ai-status --metrics …`.
 
 ### Docs (T213)
 README and `docs/workflow.md` sections "Flow data (events.jsonl)" and "Reading the metrics";
-vault flow chart and handoff audit. Flow-changing tasks (T201, T204, T208, T209) update the chart
+vault flow chart and handoff audit (including `AI_EVENTS_LOCK_SECONDS` and redaction). Flow-changing tasks (T201, T204, T208, T209) update the chart
 themselves; T213 checks.
 
 ## Affected components
@@ -109,13 +122,15 @@ docs/workflow.md, vault `agents-flow.md` (+ hub Log lines).
 ## Phases and order (file order of `.ai/tasks.md`)
 T201 (FL-39 pipeline, opus) → T214 (FL-39 revision, opus) → T202 (workers, sonnet) → T203
 (session-gate helper and setting, opus) → T204 (ai-run contract and allowance, opus) → T205
-(templates, sonnet) → T215 (Targeted lines, sonnet) → T206 (event core, opus) → T216 (run
-context, opus) → T217 (rotation, opus) → T207 (gate events, sonnet) → T208 (stop and recovery
-events, opus) → T209 (run start and end, opus) → T210 (ruling and review events, sonnet) → T218
-(pr events, sonnet) → T211 (metrics data, sonnet) → T212 (metrics text and ai-status flag,
-sonnet) → T213 (docs audit, haiku).
-Eighteen tasks: each must fit about 10–15 minutes of a 30-minute session that also waits for the
-~13-minute host gate; the review's additions became their own tasks instead of growing others.
+(templates, sonnet) → T215 (Targeted lines, sonnet) → T206 (event core and bounded lock, opus) →
+T219 (redaction, opus) → T216 (run context, opus) → T217 (rotation, opus) → T207 (event-gate
+helper and safe reads, opus) → T220 (gate event wiring, opus) → T208 (stop and recovery events,
+opus) → T209 (run start and end, opus) → T221 (held lock end-to-end, opus) → T210 (ruling and
+review events, sonnet) → T218 (pr events, sonnet) → T211 (metrics data, sonnet) → T212 (metrics
+text and ai-status flag, sonnet) → T213 (docs audit, haiku).
+Twenty-one tasks: each must fit about 10–15 minutes of a 30-minute session that also waits for
+the ~13-minute host gate; both reviews' additions became their own tasks instead of growing
+others (round 2: T219 split from T206, T220 from T207, T221 new).
 
 ## Risks
 - Sessions that skip the full gate leave more failures for the host gate, which sets the task
@@ -128,6 +143,12 @@ Eighteen tasks: each must fit about 10–15 minutes of a 30-minute session that 
 - An event helper must never run after a detected gate change (A17): tested with the tampered
   `workflow.py` fixtures, which detect any helper run.
 - Stop categories from text can be wrong; telemetry only, never read by recovery (A10).
+- A held or slow event lock: every wait is bounded (A9); a busy log loses that event (Note), never
+  the run's progress (T206, T221). The 5 s default must cover a rotation of a full 8 MiB file.
+- Gate telemetry reads agent-writable records: only through the pinned, nonblocking readers
+  (A12, T207).
+- Older queues in targeted mode: the session interprets the fallback text; a session that runs
+  the full gate anyway only costs time, the host gate still decides (A5).
 - Rotation: concurrent writers and several active runs on one host (A9); covered by the
   multi-process and two-project regressions. Many long active runs can keep the file above the
   cap (documented).
