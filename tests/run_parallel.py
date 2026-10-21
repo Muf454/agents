@@ -17,6 +17,7 @@ the run); AI_TEST_TMPFS=0 turns that off.
 """
 import argparse
 import ctypes
+import json
 import os
 from pathlib import Path
 import queue
@@ -127,6 +128,50 @@ def choose_temp_dir(candidate, probe=exec_probe, statvfs=os.statvfs):
         shutil.rmtree(created, ignore_errors=True)
     print(f'Temp dir: default ({candidate} not executable)')
     return None
+
+
+def real_registry(environ=None):
+    """The caller's host registry directory, resolved as workflow.state_root() does."""
+    environ = os.environ if environ is None else environ
+    for name, suffix in (('AI_STATE_DIR', ''), ('XDG_STATE_HOME', 'ai-toolkit')):
+        value = environ.get(name, '')
+        if value and os.path.isabs(value):
+            return Path(value, suffix, 'pipelines')
+    return Path(os.path.expanduser('~/.local/state/ai-toolkit/pipelines'))
+
+
+def registry_leaks(registry, suite_tmp):
+    """Registry entries naming a checkout under the suite's temp dir (empty when none)."""
+    try:
+        if registry.is_symlink() or not registry.is_dir():
+            return []
+        names = sorted(os.listdir(registry))
+    except OSError:
+        return []
+    bases = {os.path.abspath(suite_tmp), os.path.realpath(suite_tmp)}
+    leaks = []
+    for name in names:
+        path = registry / name
+        if not name.endswith('.json') or name.startswith('.') or path.is_symlink():
+            continue
+        try:
+            with open(path, encoding='utf-8') as handle:
+                checkout = json.loads(handle.read(65536)).get('checkout')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not isinstance(checkout, str):
+            continue
+        if any(Path(candidate).is_relative_to(base)
+               for candidate in (os.path.abspath(checkout), os.path.realpath(checkout)) for base in bases):
+            leaks.append(str(path))
+    return leaks
+
+
+def registry_problem(registry, suite_tmp):
+    leaks = registry_leaks(registry, suite_tmp)
+    if not leaks:
+        return None
+    return 'self-check registered fixture runs in the real registry: ' + ' '.join(leaks)
 
 
 def flatten(suite):
@@ -606,6 +651,7 @@ def main():
     # The batches are outside this process group, so a group-wide SIGTERM (ai-check's
     # `timeout`) misses them: turn it into an exception that makes run() stop them.
     signal.signal(signal.SIGTERM, terminated)
+    registry = real_registry()
     budget = slow_budget()
     started = time.monotonic()
 
@@ -658,6 +704,9 @@ def main():
         problems.append(f'count mismatch: ran {total} of {len(ids)} collected tests')
     if dispatcher.cleanup_failed:
         problems.append('descendants survived the stop: ' + ' '.join(map(str, dispatcher.cleanup_failed)))
+    leaked = registry_problem(registry, tmpdir or tempfile.gettempdir())
+    if leaked:
+        problems.append(leaked)
     print(f'Ran {total} tests in {elapsed:.1f}s '
           f'({len(batches)} batches on {dispatcher.workers} workers, {len(ids)} collected)')
     if problems:

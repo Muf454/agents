@@ -4737,7 +4737,7 @@ test pinned the exact bytes of a Codex report (none changed). 4 new `test_review
 passed (OK).
 
 ## T111 — Self-check fixtures never register in the real run registry (FL-33, tests)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -4784,6 +4784,17 @@ Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N 
 Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
 
 ### Result / notes
+- New `tests/isolation.py` (temp `AI_STATE_DIR` and `XDG_STATE_HOME`, removed at exit; kept when
+  `AI_STATE_DIR` is already under the temp dir), imported first in test_workflow, test_dashboard
+  and test_observation.
+- No individual test needed changing: the ones clearing `AI_STATE_DIR` (`''`) already pass a temp
+  `XDG_STATE_HOME`, and the others copy `os.environ`, which is now isolated.
+- `tests/run_parallel.py`: `real_registry`, `registry_leaks`, `registry_problem`; main() fails
+  with `self-check registered fixture runs in the real registry: PATH…` after the batches.
+- Tests `test_state_isolation_env_under_temp_and_child_registers_there` and
+  `test_state_isolation_registry_guard` pass; `-k dashboard` (108) and `-k observation` (76) pass.
+- Flow unchanged.
+- Gate: the session timed out (exit 124) before committing and recovery had used its two tries; mission control ran `.ai/bin/ai-check` on this tree: 1098 tests, 0 failing, 766.4 s, OK (2026-10-21).
 
 ## T112 — Docs, flow chart and handoff audit (batch 9)
 Status: TODO

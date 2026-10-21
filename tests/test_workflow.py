@@ -29,6 +29,7 @@ HELPER = ROOT / 'scripts/lib/workflow.py'
 # Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
 # slower than a workstation). AI_TEST_TIMEOUT_SCALE (or CI=true) stretches every bound; see timeouts.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import isolation  # noqa: E402,F401  (first: host state goes to a temp dir)
 from timeouts import TIMEOUT_SCALE  # noqa: E402
 SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
@@ -16082,6 +16083,38 @@ class ParallelRunnerTest(unittest.TestCase):
     def test_parallel_runner_startup_sigterm_during_worker_start_stops_batch(self):
         result = self.startup_interrupt('SystemExit(143)')
         self.assertIn('raised SystemExit 143', result.stdout, result.stdout + result.stderr)
+
+
+class StateIsolationTest(unittest.TestCase):
+    """FL-33: the suite never registers fixture runs in the host's real registry."""
+
+    def test_state_isolation_env_under_temp_and_child_registers_there(self):
+        temp = os.path.realpath(tempfile.gettempdir())
+        for name in ('AI_STATE_DIR', 'XDG_STATE_HOME'):
+            self.assertTrue(os.path.realpath(os.environ[name]).startswith(temp + os.sep), name)
+        with tempfile.TemporaryDirectory() as checkout:
+            result = subprocess.run([sys.executable, str(HELPER), 'pipeline-register', checkout, 'main'],
+                                    env=dict(os.environ), capture_output=True, text=True,
+                                    timeout=COMMAND_TIMEOUT)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = list((Path(os.environ['AI_STATE_DIR']) / 'pipelines').glob('*.json'))
+            self.assertTrue(any(json.loads(e.read_text())['checkout'] == checkout for e in entries))
+
+    def test_state_isolation_registry_guard(self):
+        import run_parallel
+        with tempfile.TemporaryDirectory() as base:
+            suite = Path(base, 'suite')
+            registry = Path(base, 'real/pipelines')
+            self.assertIsNone(run_parallel.registry_problem(registry, suite))  # missing registry
+            registry.mkdir(parents=True)
+            Path(registry, 'a.json').write_text(json.dumps({'checkout': str(suite / 'fixture')}))
+            Path(registry, 'b.json').write_text(json.dumps({'checkout': str(Path(base, 'other'))}))
+            Path(registry, 'c.json').write_text('not json')
+            problem = run_parallel.registry_problem(registry, suite)
+            self.assertEqual(problem, 'self-check registered fixture runs in the real registry: '
+                             + str(registry / 'a.json'))
+            Path(registry, 'a.json').unlink()
+            self.assertIsNone(run_parallel.registry_problem(registry, suite))
 
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
