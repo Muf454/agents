@@ -4892,7 +4892,7 @@ Targeted: `-k state_isolation` 3 OK.
 Gate: `.ai/bin/ai-check`: 1099 tests OK, 795.5 s, exit 0 (the harness moved it to the background past 600 s; waited for it).
 
 ## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -4934,6 +4934,17 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 Mission control 2026-10-21 12:35Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (3d84f5a). Verify it against the acceptance criteria, run the targeted checks, then run `.ai/bin/ai-check` once in the background and wait for its result WITHOUT editing or committing anything until it finishes (an earlier attempt edited files during the gate and got "Validation modified project content"). Model raised to opus because the task failed once.
+
+2026-10-21 (opus, re-run): verified 3d84f5a against the criteria with no further source change.
+`tasks preflight` prints `queue-order T placed after …` for late-dependency tasks and
+`queue-moved T` for every other moved task; `ai_queue_ruling` claims both as `queue-order` before
+the rewrite, and `ai_ruling_rows` skips `queue-moved` (no Ruling row; the 🔧 summary lists only
+late-dependency tasks). `test_preflight_helper_claims_indirectly_moved_tasks` (T001→T002, T003
+prints lines for T001 and T002) and `test_preflight_pipeline_indirectly_moved_task_repeat_stops`
+(T002 already claimed: refused, tasks.md bytes and HEAD unchanged, no Ruling row, no 🔧) pass.
+Evidence: `-k preflight` Ran 16 OK; `-k ruling` Ran 18 OK; `.ai/bin/ai-check` PASS, 1103 tests,
+764.1 s, with no edits during the gate. Vault Rulings text already says "one ruling per changed
+task" and needed no correction; flow unchanged.
 
 ## T115 — Routed reviews default to opus (review N1, BR-14, A12)
 Status: TODO

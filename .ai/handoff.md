@@ -54,11 +54,15 @@ unchanged because the host protects DONE blocks).
 - **FL-33**: T111 isolated test state and a registry guard in `tests/run_parallel.py`.
 - T113 (review M1): the parallel runner reads the caller's registry before discovery, so the FL-33 guard
   checks the real registry (`test_state_isolation_guard_reads_the_registry_before_discovery`).
+- T114 (review M2): the queue pre-flight prints `queue-moved TASK` for every other task the repair
+  moves, and `ai_queue_ruling` claims it as `queue-order` (no Ruling row or 🔧 text), so a repeat
+  repair moving any already-moved task is refused
+  (`test_preflight_pipeline_indirectly_moved_task_repeat_stops`).
 - T112: docs, flow chart and handoff audit (README gained the `Reviewed by:` lines and the FL-33
   isolation paragraph; no other mismatch found, see the T112 result).
 
 ## Validation run
-T111 tree: PASS, 1098 tests (full gate run by mission control, 766.4 s). T110 tree: gate PASS on
+T114 tree: PASS, 1103 tests (ai-check, 764.1 s). T111 tree: PASS, 1098 tests (full gate run by mission control, 766.4 s). T110 tree: gate PASS on
 the rerun after one unrelated failure (`test_gate_lock_wait_runner_waits_for_the_session_gate`,
 see T110). T109 tree: PASS, 1092 tests (ai-check, 787.0 s). T108 tree: PASS, 1085 tests (736.6 s).
 T107 tree: PASS, 1076 tests (ai-check, 725.6 s). T106 tree: PASS, 1069 tests (ai-check, 743.9 s). T105 tree: PASS, 1062 tests (ai-check, 723.0 s). T104 tree: PASS, 1057 tests (ai-check, 689.8 s). T103 tree: see the T103 result in `.ai/tasks.md`. T102 tree: PASS, 1046 tests (ai-check, 706.7 s). T101 tree: PASS, 1039 tests (ai-check, 701.4 s). Batch 8's last tree (48fd9b5): PASS, 1027 tests (T043). Each task runs its
@@ -182,9 +186,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
   `test_state_isolation_registry_guard` (a registry entry naming a checkout under the suite's temp dir
   is reported; other, unreadable and missing entries are not)).
 - `Docs` and `flow_this_repo` (T112, `DocsConsistencyTest`, `test_pr_body_flow_this_repo_declares_the_flow_chart`).
-- Review round 1 fixes (TODO): `test_state_isolation_guard_reads_the_registry_before_discovery`
-  (T113, M1), `test_preflight_pipeline_indirectly_moved_task_repeat_stops` (T114, M2),
-  `test_review_routing_routed_review_uses_opus_after_an_opus_task` (T115, N1).
+- Review round 1 fixes: `test_state_isolation_guard_reads_the_registry_before_discovery`
+  (T113, M1, done), `test_preflight_pipeline_indirectly_moved_task_repeat_stops` and
+  `test_preflight_helper_claims_indirectly_moved_tasks` (T114, M2, done),
+  `test_review_routing_routed_review_uses_opus_after_an_opus_task` (T115, N1, TODO).
 
 ## Human todos
 - Gate files: none need changing for this batch.
@@ -193,5 +198,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`):
 - Vault hub Log: each flow-changing task appends its own dated line (T103, T104, T105, T107, T109 and T110 added one).
 
 ## Next action
-Review round 1 (Codex): M1, M2 and N1 were all accepted (`.ai/reviews/dispositions.md`). Fix tasks
-T113–T115 are TODO and independent of each other. Nothing is merged or deployed.
+Review round 1 (Codex): M1, M2 and N1 were all accepted (`.ai/reviews/dispositions.md`). T113 and
+T114 are DONE; T115 is TODO. Nothing is merged or deployed.
