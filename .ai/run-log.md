@@ -563,3 +563,4 @@
 | 2026-10-21T14:35:10Z | runner | T116 | completed | PASS | e048cac | Claude checkpointed; continuing queue |
 | 2026-10-21 | claude (sonnet) | T117 | BLOCKED: implemented (tests/isolation.py checks AI_STATE_DIR and XDG_STATE_HOME separately; regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg`) but the full gate did not finish within the 600 s tool timeout (T116's gate took 816 s) | targeted `StateIsolationTest` 4 OK; ai-check NOT completed | pending | needs gate run with longer timeout, then `ai-task set T117 DONE` |
 | 2026-10-21T15:54:22Z | runner | T117 | blocked; try next independent task | not complete | 905bf68 | See task result |
+| 2026-10-21T16:24:24Z | runner | T118 | stopped (exit 1); inspect state/diff before resuming | see local logs | 38f671c | No merge or deployment performed |
