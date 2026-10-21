@@ -5234,7 +5234,7 @@ tests OK (includes test_pr_body_flow_this_repo_declares_the_flow_chart); `bash -
 scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T214 — Plan revision and its queue repair decided against the run's base (FL-39, review P2)
-Status: TODO
+Status: DONE
 Dependencies: T201
 Model: opus
 
@@ -5298,6 +5298,19 @@ Targeted: `bash -n scripts/ai-run scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `workflow.py` `newly_done_ids(rev, blocks)` (shared by `tasks newly-done`, same
+output); `revision-queue-repair [--base REV]` counts only tasks newly DONE since REV (unknown REV
+→ nothing), without `--base` the old rule. `ai-pipeline` passes `--base "$base_sha"`; `ai-run`
+passes the merge-base of `${base:-main}` and HEAD when it resolves. `ai-run --revise-plan`: the
+DONE check moved below `plan_base` and uses `tasks newly-done` (`a task is already DONE since the
+base (T…)`, first three ids; helper error stops); after the session `plan-keeps-done "$since"`
+stops with `Plan revision stage: …`. Usage text and docs/workflow.md (precondition, host checks,
+queue repair) updated. Mock Claude mode `revise-edit-done` added. Flow unchanged beyond T201
+(vault chart's plan review node already says "no task DONE since the base?").
+Evidence: `-k plan_review_followup` Ran 4 tests OK; `-k revise_plan` Ran 12 OK; `-k
+queue_recovery` Ran 10 OK; `-k plan_revision_stage` Ran 9 OK; `-k plan_review` Ran 31 OK; `-k
+pr_body_flow` Ran 2 OK; `-k Docs` Ran 3 OK; `-k supervised_plan` Ran 36 OK; `bash -n
+scripts/ai-run scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T202 — Default test worker count raised and printed first (TS-01 (1))
 Status: TODO

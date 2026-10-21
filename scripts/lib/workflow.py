@@ -732,6 +732,21 @@ def tasks_preflight(arguments):
         print(line)
 
 
+def newly_done_ids(rev, blocks):
+    """IDs of the tasks DONE in BLOCKS but not (or absent) at REV, in file order. An unknown REV
+    raises ValueError."""
+    try:
+        commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
+    except subprocess.CalledProcessError:
+        raise ValueError(f'Unknown revision: {rev}') from None
+    try:
+        before = git('show', f'{commit}:.ai/tasks.md').decode()
+    except subprocess.CalledProcessError:
+        before = ''  # no queue at REV: every DONE task is new
+    done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+    return [task['id'] for task in blocks if task['status'] == 'DONE' and task['id'] not in done]
+
+
 def task_command(arguments):
     if arguments[0] == 'reorder':
         tasks_reorder()
@@ -760,17 +775,11 @@ def task_command(arguments):
         if not rev or rev.startswith('-'):
             fail('Usage: tasks newly-done REV')
         try:
-            commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
-        except subprocess.CalledProcessError:
-            fail(f'Unknown revision: {rev}')
-        try:
-            before = git('show', f'{commit}:.ai/tasks.md').decode()
-        except subprocess.CalledProcessError:
-            before = ''  # no queue at REV: every DONE task is new
-        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
-        for task in blocks:
-            if task['status'] == 'DONE' and task['id'] not in done:
-                print(task['id'])
+            ids = newly_done_ids(rev, blocks)
+        except ValueError as error:
+            fail(str(error))
+        for task_id in ids:
+            print(task_id)
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -3596,10 +3605,13 @@ def plan_revisions(arguments):
 def revision_queue_repair(arguments):
     """Reorder the uncommitted queue of an interrupted plan revision (as `tasks reorder`) before
     any queue check, only when: .ai/tasks.md differs from HEAD's, only plan revision records are
-    dirty, HEAD's queue is valid with no DONE task, and the verified current plan review is not
-    revised yet. Otherwise do nothing: the usual checks reject the queue as before."""
-    if arguments:
-        fail('Usage: revision-queue-repair')
+    dirty, HEAD's queue is valid with no DONE task (with --base REV: no task DONE that was not
+    DONE at REV, so earlier batches' DONE tasks don't count; an unknown REV does nothing), and
+    the verified current plan review is not revised yet. Otherwise do nothing: the usual checks
+    reject the queue as before."""
+    if arguments and (len(arguments) != 2 or arguments[0] != '--base' or not arguments[1]
+                      or arguments[1].startswith('-')):
+        fail('Usage: revision-queue-repair [--base REV]')
     path = Path('.ai/tasks.md')
     committed = committed_file('HEAD', str(path))
     if not path.is_file() or path.read_text() == committed:
@@ -3607,10 +3619,14 @@ def revision_queue_repair(arguments):
     try:
         records_scope('HEAD', PLAN_REVISION_RECORDS, 'Plan revision')
         before = tasks(committed)
+        if arguments:
+            done = newly_done_ids(arguments[1], before)
+        else:
+            done = [task['id'] for task in before if task['status'] == 'DONE']
         record, verified, _ = plan_revision_lookup()
     except (ValueError, OSError, subprocess.CalledProcessError):
         return
-    if not before or any(task['status'] == 'DONE' for task in before) or not verified or record:
+    if not before or done or not verified or record:
         return
     tasks_reorder()
 

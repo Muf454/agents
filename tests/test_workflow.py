@@ -229,7 +229,8 @@ if 'REVISION CONTRACT' in prompt:
     for number, finding in enumerate(ids):
         if mode == 'revise-needs-human' and number == 0:
             rows += f'| {finding} | needs-human | ' + os.environ.get('MOCK_QUESTION', 'Should the rollback keep option A or switch to B?') + ' | |\n'
-        elif mode in ('revise-reject', 'revise-needs-human', 'revise-touch-source', 'revise-edit-plan-review'):
+        elif mode in ('revise-reject', 'revise-needs-human', 'revise-touch-source', 'revise-edit-plan-review',
+                      'revise-edit-done'):
             rows += f'| {finding} | rejected | the plan covers it in current-plan.md:12 | |\n'
         else:
             text = tasks_file.read_text()
@@ -254,6 +255,11 @@ if 'REVISION CONTRACT' in prompt:
         with open(os.environ.get('MOCK_SOURCE_PATH', 'src.txt'), 'a') as f: f.write('# not allowed in a plan revision\n')
     if mode == 'revise-edit-plan-review':
         pathlib.Path('.ai/reviews/plan.md').write_text(review.replace('MAJOR=', 'MAJOR=0 was '))
+    if mode == 'revise-edit-done':
+        # Rewrites the result of the first DONE task (an earlier batch's), which a revision never may.
+        text = tasks_file.read_text()
+        done = text.index('Status: DONE')
+        tasks_file.write_text(text[:done] + text[done:].replace('Pending.', 'Rewritten by the revision.', 1))
     crash('after')
     if mode == 'revise-error':
         print(json.dumps({'type':'result','subtype':'error','is_error':True}))
@@ -5480,6 +5486,53 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_queue_recovery_revise_plan_with_a_done_task_still_stops(self):
         start = self.revise_ready(queue=task('T001', 'DONE') + task('T002'))
         self.assertIn('a task is already DONE', self.revise('--since', start, expected=1).stderr)
+
+    # ------------------------------------- follow-up batch plan revision against the base (T214)
+    def done_block(self, text, task_id='T001'):
+        return re.search(rf'^## {task_id} .*?(?=^## T|\Z)', text, re.M | re.S).group(0)
+
+    def followup_revise_ready(self, queue):
+        """A follow-up batch (main holds an earlier batch whose T001 is DONE) with a MAJOR plan review."""
+        self.plan_review_base_fixture(queue)
+        self.plan_round('P1|Gap in tests', 1)
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def test_plan_review_followup_major_revised_rereviewed_and_implemented(self):
+        self.plan_review_base_fixture(task('T001', 'DONE') + task('T002'))
+        base_queue = self.run_cmd(['git', 'show', 'main:.ai/tasks.md']).stdout
+        result = self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once')
+        self.assertNotIn('Plan review skipped', result.stdout)
+        self.assertEqual(self.plan_calls(), 2)
+        self.assertEqual(self.revision_commits(), 1)
+        subjects = self.subjects_oldest_first()
+        revision = subjects.index('chore(ai): record plan revision')
+        self.assertLess(revision, max(i for i, s in enumerate(subjects) if s == 'chore(ai): record plan review'))
+        self.assertLess(revision, subjects.index('implement T002'))
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual(self.done_block((self.project / '.ai/tasks.md').read_text()), self.done_block(base_queue))
+
+    def test_plan_review_followup_revision_keeps_done_blocks(self):
+        start = self.followup_revise_ready(task('T001', 'DONE') + task('T002'))
+        result = self.revise('--since', start, '--base', 'main', expected=1, MOCK_CLAUDE='revise-edit-done')
+        self.assertIn('Plan revision stage: DONE task T001 was changed or removed', result.stderr)
+        self.assertEqual(self.revision_commits(), 0)
+        self.revisions('revised', expected=1)
+
+    def test_plan_review_followup_newly_done_still_stops(self):
+        start = self.followup_revise_ready(task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
+        result = self.revise('--since', start, '--base', 'main', expected=1)
+        self.assertIn('a task is already DONE since the base (T002)', result.stderr)
+        self.assertFalse((self.base / 'revision-args.log').exists())
+
+    def test_plan_review_followup_queue_repair_with_base(self):
+        self.followup_revise_ready(task('T001', 'DONE') + task('T002'))
+        queue = task('T001', 'DONE') + task('T002', dependencies='T003') + task('T003')
+        (self.project / '.ai/tasks.md').write_text(queue)
+        self.assert_repair_noop(queue)  # without --base: today's rule (HEAD has a DONE task)
+        result = self.helper('revision-queue-repair', '--base', 'main')
+        self.assertIn('Task queue reordered (dependencies first)', result.stdout)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T003', 'T002'])
+        self.helper('tasks', 'check')
 
     # ---------------------------------------------------------------- supervised plan resume (T007)
     def test_supervised_plan_resume_crash_kill_stays_inside_the_fixture(self):

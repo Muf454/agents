@@ -19,7 +19,7 @@ dispositions are already complete (an interrupted triage), it records the round
 without a new session. --since (ai-pipeline's stage start) bounds what triage may
 have changed: only workflow records, committed or not.
 --revise-plan answers the current plan review (.ai/reviews/plan.md, BLOCKER+MAJOR > 0, no
-task DONE) in one Claude session (default model opus) that may only read and Edit the plan
+task DONE since --base) in one Claude session (default model opus) that may only read and Edit the plan
 records: one row per finding in the round's section of .ai/reviews/plan-dispositions.md
 (accepted with new TODO tasks, rejected with evidence, or needs-human with a question).
 The host validates the section, then records it in one "chore(ai): record plan revision"
@@ -169,8 +169,13 @@ else
   fi
   # An interrupted revision's uncommitted queue is repaired as its session's would have been
   # (the helper decides; a committed or non-revision queue is left to the checks).
+  # Earlier batches' DONE tasks (DONE at the run's base) don't prevent the repair (FL-39).
   if [[ "$revise_plan" == yes ]]; then
-    repair_out=$(ai_helper revision-queue-repair 2>&1) || \
+    repair_args=()
+    if repair_base=$(git merge-base "${base:-main}" HEAD 2>/dev/null); then
+      repair_args=(--base "$repair_base")
+    fi
+    repair_out=$(ai_helper revision-queue-repair "${repair_args[@]}" 2>&1) || \
       ai_die "Plan revision stage: task queue is invalid: ${repair_out#Error: }"
     [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
   fi
@@ -473,10 +478,18 @@ if [[ "$revise_plan" == yes ]]; then
   active_task=plan-revision
   [[ -f .ai/prompts/plan-revision.md ]] || \
     ai_die 'Missing .ai/prompts/plan-revision.md; install it with setup-project --upgrade.'
-  ai_helper tasks untouched >/dev/null 2>&1 || \
-    ai_die 'Plan revision: a task is already DONE; the plan review gate no longer applies.'
   plan_base=$(git merge-base "${base:-main}" HEAD 2>/dev/null) || \
     ai_die "Plan revision: invalid base ${base:-main} (pass --base REF)."
+  # Only tasks DONE since the base lift the plan review gate; earlier batches' don't (FL-39).
+  newly=$(ai_helper tasks newly-done "$plan_base" 2>&1) || \
+    ai_die "Plan revision: cannot compare the task queue with the base: ${newly#Error: }"
+  if [[ -n "$newly" ]]; then
+    mapfile -t newly_ids <<< "$newly"
+    newly_list=$(printf '%s, ' "${newly_ids[@]:0:3}")
+    newly_list=${newly_list%, }
+    (( ${#newly_ids[@]} <= 3 )) || newly_list+=', …'
+    ai_die "Plan revision: a task is already DONE since the base ($newly_list); the plan review gate no longer applies."
+  fi
   info=$(ai_helper plan-review-info 2>&1) || ai_die "Plan revision: ${info#Error: }"
   read -r _ blockers majors _ <<< "$info"
   (( blockers + majors > 0 )) || ai_die 'Plan revision: the plan review has no BLOCKER or MAJOR finding.'
@@ -571,6 +584,9 @@ if [[ "$revise_plan" == yes ]]; then
     ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
   ai_overlap_lines "$preflight_out"
   revision_scope 'Plan revision stage: '
+  # DONE blocks stay byte-identical (as after planning); the stage prefix makes ai-recover escalate.
+  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: ${keep_error#Error: }"
   # A row whose first cell wraps its one finding ID (`**P1**`, `P1 (CRITICAL)`): read as that ID
   # once per run, the change and its row land in the counted revision commit below.
   ai_disposition_ruling plan plan-revision

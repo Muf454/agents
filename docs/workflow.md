@@ -410,7 +410,10 @@ START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
 
 Plan revision (`ai-run --approved --revise-plan [--since COMMIT] [--base REF] [--model M]`; the
-pipeline calls it through the plan revision stage below). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE,
+pipeline calls it through the plan revision stage below). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE
+since the base (`tasks newly-done BASE` empty, so a follow-up batch whose earlier tasks were
+already DONE at the base can be revised; otherwise `Plan revision: a task is already DONE since
+the base (T…)`, first three ids; a helper error stops too),
 syncs and reads the round (`plan-rounds current BASE`, BASE = merge-base with `--base`, default
 `main`) and refuses a report that already has a revision record (`this plan review was already
 revised; review again (ai-review --plan)`). When the section already validates (an interrupted
@@ -431,7 +434,9 @@ sections: …`; any other missing section still stops), `tasks reorder` (the con
 place new tasks before the first task that depends on them; the host repairs a prerequisite
 appended after its dependents, and the reordered queue goes into the revision commit), `tasks
 check` (either failure stops with `Plan revision stage: task queue is invalid: …`, which
-`ai-recover` escalates at once: no recovery session, no second revision), the scope and
+`ai-recover` escalates at once: no recovery session, no second revision), the scope,
+`plan-keeps-done START` (every block DONE at START byte-identical; else `Plan revision stage:
+DONE task T… was changed or removed`, escalated the same way) and
 `plan-dispositions-check --fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
 needs-human h`) and the state line, `git add` of the plan revision records, `git commit
 --allow-empty -m 'chore(ai): record plan revision'`, the gate check, and ONE host record
@@ -547,13 +552,16 @@ per change named by a dry run taken before it (task `planning`, left uncommitted
 or `plan-revision`, in the revision commit) and print the overlap lines; a dry run that fails
 (e.g. a `--revision` plan that moves a DONE task) only means no rows.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
-`workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
-is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
-when it differs from HEAD's, only plan revision records are dirty (`plan-revision-scope HEAD`),
-HEAD's queue is valid with no DONE task, and the verified current plan review has no revision
-record yet; otherwise it does nothing and the checks reject as before (a committed out-of-order
-queue is the pre-flight scan's). A repair failure stops with `Plan revision stage: task queue is
-invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
+`workflow.py revision-queue-repair [--base REV]` (run by `ai-pipeline` with `--base BASE` before
+this check when the plan review is on, and by `ai-run --revise-plan` before its own `tasks check`,
+with `--base` the merge-base of `--base` (default `main`) and HEAD when it resolves) reorders
+`.ai/tasks.md` only when it differs from HEAD's, only plan revision records are dirty
+(`plan-revision-scope HEAD`), HEAD's queue is valid with no DONE task (with `--base`: no task
+DONE that was not DONE at REV, so an earlier batch's DONE tasks don't count; an unknown REV does
+nothing), and the verified current plan review has no revision record yet; otherwise it does
+nothing and the checks reject as before (a committed out-of-order queue is the pre-flight
+scan's). A repair failure stops with `Plan revision stage: task queue is invalid: …`
+(escalated). The repaired queue then passes the revision's `tasks newly-done BASE` check and
 `plan-dispositions-check`, so a complete section is recorded without a new session.
 Stages, each resumable by rerunning: plan review (only while no task became DONE since the base;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree

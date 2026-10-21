@@ -454,7 +454,7 @@ queue_stage='plan review'; [[ "$plan_review" == yes ]] || queue_stage=implementa
 # decides); a committed out-of-order queue still stops below. Never on preserved task work
 # (no host write while armed).
 if [[ "$plan_review" == yes ]] && ! armed_resume; then
-  repair_out=$(ai_helper revision-queue-repair 2>&1) || {
+  repair_out=$(ai_helper revision-queue-repair --base "$base_sha" 2>&1) || {
     printf 'Plan revision stage: task queue is invalid: %s\n' "${repair_out#Error: }" > .ai/local/last-error
     stop 'plan revision'
   }

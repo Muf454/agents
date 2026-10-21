@@ -7,6 +7,13 @@
   `resuming preserved work (armed resume)`, `tasks done since the base: T…` (first three ids),
   or, on the loop's first pass, `the current plan review is reused (BLOCKER b, MAJOR m)`.
   `tasks untouched` stays as a helper (still used by `ai-run --revise-plan`; T214).
+- T214 (FL-39 review P2, 2026-10-22): `ai-run --revise-plan` refuses only when a task became DONE
+  since the base (`a task is already DONE since the base (T…)`), and after the session checks
+  `plan-keeps-done START` (an edited DONE block stops with `Plan revision stage: …`).
+  `revision-queue-repair --base REV` ignores tasks already DONE at REV (`ai-pipeline` passes its
+  base, `ai-run` the merge-base of `--base`); without `--base` the old rule stays. The helper
+  `newly_done_ids` is shared with `tasks newly-done`. `tasks untouched` is now unused by the
+  runner scripts (kept as a helper).
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -86,7 +93,9 @@ Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour mos
 ## Flow chart
 Flow chart updated (so far by T201; more to come).
 T201 updated the vault `agents-flow.md` plan review node ("no task DONE since the base?", skip
-line printed) and its skip edge (2026-10-22). Still to come: T204 (session gate
+line printed) and its skip edge (2026-10-22). T214: flow unchanged (checked the chart's plan
+revision nodes: the entry rule is T201's; an edited DONE block is a revision stop like the
+others). Still to come: T204 (session gate
 rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update vault
 `agents-flow.md` and add hub Log lines; T213 audits them and adds the "Flow data (ME-01)" line.
 
@@ -130,8 +139,13 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   `--skip-plan-review` prints the line (`test_plan_review_base_skip_flag_prints_the_line`); a
   reused current plan review prints its line once and calls no reviewer
   (`test_plan_review_base_current_review_is_reused_with_a_line`).
-- `plan_review_followup` (T214): a MAJOR plan review on a follow-up batch is revised, re-reviewed
-  and implemented with earlier DONE blocks unchanged; base-relative queue repair.
+- `plan_review_followup` (T214, DONE): a MAJOR plan review on a follow-up batch is revised,
+  re-reviewed and implemented with earlier DONE blocks unchanged
+  (`test_plan_review_followup_major_revised_rereviewed_and_implemented`); a revision that edits a
+  DONE block stops with `Plan revision stage:` and records nothing
+  (`test_plan_review_followup_revision_keeps_done_blocks`); a task newly DONE since the base still
+  stops the revision (`test_plan_review_followup_newly_done_still_stops`); the queue repair with
+  `--base` reorders, without it does nothing (`test_plan_review_followup_queue_repair_with_base`).
 - `worker_count` (T202): default and override parsing, `Workers:` first line.
 - `session_gate_mode`, `session_gate_setting` (T203): mode from gate time and setting, validation
   and manifest.
@@ -168,5 +182,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T201.
+The runner continues with the next task after T214.
 Nothing is merged or deployed.
