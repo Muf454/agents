@@ -715,19 +715,19 @@ def tasks_preflight(arguments):
     if len(overlaps) > PREFLIGHT_OVERLAP_LINES:
         overlaps = (overlaps[:PREFLIGHT_OVERLAP_LINES]
                     + [f'overlap … {len(overlaps) - PREFLIGHT_OVERLAP_LINES} more'])
-    if not dry_run:
-        if new != text:
-            mode = stat.S_IMODE(path.stat().st_mode)
-            atomic(path, new)
-            path.chmod(mode)
-        local_fd = local_dir_fd(os.getcwd())
-        if local_fd is not None:
-            try:
-                write_record(local_fd, 'preflight.md', ''.join(line + '\n' for line in overlaps))
-            except (RecordError, OSError):
-                pass  # The report is advisory; an unsafe .ai/local skips it quietly.
-            finally:
-                close_fds(local_fd)
+    if not dry_run and new != text:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        atomic(path, new)
+        path.chmod(mode)
+    # The overlap report is advisory and not a queue change, so a dry run refreshes it too.
+    local_fd = local_dir_fd(os.getcwd())
+    if local_fd is not None:
+        try:
+            write_record(local_fd, 'preflight.md', ''.join(line + '\n' for line in overlaps))
+        except (RecordError, OSError):
+            pass  # An unsafe .ai/local skips the report quietly.
+        finally:
+            close_fds(local_fd)
     for line in changes + overlaps:
         print(line)
 

@@ -5084,7 +5084,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -5121,4 +5121,10 @@ Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Implemented: `tasks_preflight` (scripts/lib/workflow.py) now writes `.ai/local/preflight.md` on
+`--dry-run` too (empty file when no overlaps); queue still untouched on dry run. docs/workflow.md
+updated; added the two named regressions and adjusted two existing dry-run assertions.
+Evidence: `-k preflight` Ran 18 tests OK; `-k ruling` Ran 18 tests OK.
+BLOCKED: `.ai/bin/ai-check` exceeded the 600000 ms foreground timeout (same as T117), so no green
+gate was obtained; a second invocation said "Validation is already running". Human: rerun the gate.
 

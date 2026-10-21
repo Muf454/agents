@@ -3085,7 +3085,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
                                         'queue-moved T005\nqueue-moved T006\n')
         self.assertEqual(queue.read_bytes(), before)
-        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(), '')
         result = self.helper('tasks', 'preflight')
         self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
                                         'queue-moved T005\nqueue-moved T006\n')
@@ -3181,6 +3181,23 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((result.stdout, result.stderr), ('overlap T002 T005 scripts/ai-run\n', ''))
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_preflight_helper_valid_queue_writes_the_overlap_report(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        overlapping = ''.join(task(f'T00{n}').replace(f'### Likely affected modules\nT00{n}.txt\n', shared)
+                              for n in (1, 2))
+        queue = self.preflight_queue(overlapping)
+        before = queue.read_bytes()
+        report = self.project / '.ai/local/preflight.md'
+        for args in (('--dry-run',), ()):
+            report.unlink(missing_ok=True)
+            result = self.helper('tasks', 'preflight', *args)
+            self.assertEqual(result.stdout, 'overlap T001 T002 scripts/ai-run\n')
+            self.assertEqual(queue.read_bytes(), before)
+            self.assertEqual(report.read_text(), 'overlap T001 T002 scripts/ai-run\n')
+        queue.write_text(task('T001') + task('T002'))
+        self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(report.read_text(), '')
+
     def test_preflight_helper_caps_overlap_lines(self):
         shared = '### Likely affected modules\nscripts/ai-run\n'
         queue = self.preflight_queue(''.join(
@@ -3190,7 +3207,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(len(lines), 21)
         self.assertEqual(lines[0], 'overlap T001 T002 scripts/ai-run')
         self.assertEqual(lines[-1], 'overlap … 8 more')
-        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+        self.assertEqual(len((self.project / '.ai/local/preflight.md').read_text().splitlines()), 21)
         self.assertIn('T001', queue.read_text())
 
     def test_queue_check_empty_template_queue_fails(self):
@@ -4994,6 +5011,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'complete')
         done = [s.split()[1] for s in subjects if re.fullmatch(r'implement T\d{3}', s)]
         self.assertEqual(done, ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+
+    def test_preflight_pipeline_no_repair_saves_the_overlap_report(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        self.ready(''.join(task(f'T00{n}').replace(f'### Likely affected modules\nT00{n}.txt\n', shared)
+                           for n in (1, 2)))
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('overlap T001 T002 scripts/ai-run', result.stdout)
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(),
+                         'overlap T001 T002 scripts/ai-run\n')
 
     def test_preflight_pipeline_same_ruling_twice_stops(self):
         self.ready(self.raid_queue())

@@ -518,8 +518,9 @@ repaired queue is still invalid; in every failure nothing is written. Otherwise 
 for every other task whose position changes (claimed like `queue-order`, but no run-log row or notification text), `task-sections
 TASK added SECTION, …`), then `overlap A B PATH, …` for each pair of TODO tasks whose `### Likely
 affected modules` share a path-like token (contains `/` or `.`; at most 20 lines, then `overlap …
-N more`). The real run writes the queue once (mode kept) and the overlap lines to
-`.ai/local/preflight.md` (skipped quietly when `.ai/local` is unsafe); `--dry-run` writes nothing.
+N more`). The real run writes the queue once (mode kept); both the real run and `--dry-run` write the overlap
+lines (an empty file when there are none, so no stale report stays) to `.ai/local/preflight.md`
+(skipped quietly when `.ai/local` is unsafe). `--dry-run` never changes the queue.
 Pre-flight queue scan (host ruling, T103; `ai_queue_ruling` in `lib/common.sh`): right before
 the queue check, on a clean checkout and never on an armed resume, `ai-pipeline` dry-runs
 `tasks preflight`; when it succeeds with change lines it claims `run-manifest ruling queue-order
