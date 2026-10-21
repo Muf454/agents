@@ -558,3 +558,4 @@
 | 2026-10-21T13:20:52Z | claude (opus) | T115 | DONE (review N1): verified a13ffad (routed Claude review uses opus, override still wins); no source change | PASS (ai-check 1103 tests, 766.5 s, no edits during the gate; -k review_routing 6 OK; -k reviewed_by 4 OK) | a13ffad (fix) | vault flow chart routed node says "(opus)" |
 | 2026-10-21T13:33:55Z | runner | T115 | completed | PASS | a4ce86b | Claude checkpointed; continuing queue |
 | 2026-10-21T13:46:34Z | runner | none | queue complete; ready for independent review | PASS | 1aae5fe | Human acceptance remains |
+| 2026-10-21T13:54:56Z | runner | triage | review triaged into dispositions/tasks | n/a | 5236dfe | Fix tasks run next |
