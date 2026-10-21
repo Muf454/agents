@@ -52,6 +52,8 @@ unchanged because the host protects DONE blocks).
   `ai-review` (small low-risk fix rounds on a fresh Claude opus session), T110 "Reviewed by" in
   every review and the PR body.
 - **FL-33**: T111 isolated test state and a registry guard in `tests/run_parallel.py`.
+- T113 (review M1): the parallel runner reads the caller's registry before discovery, so the FL-33 guard
+  checks the real registry (`test_state_isolation_guard_reads_the_registry_before_discovery`).
 - T112: docs, flow chart and handoff audit (README gained the `Reviewed by:` lines and the FL-33
   isolation paragraph; no other mismatch found, see the T112 result).
 

@@ -4846,7 +4846,7 @@ Targeted: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `-k state_isolation` 2 OK.
 Gate: `.ai/bin/ai-check` (background): 1098 tests OK, 770.0 s, exit 0.
 
 ## T113 — Registry guard reads the caller's registry before discovery (review M1, FL-33)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -4881,6 +4881,15 @@ Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Done. `main()` in tests/run_parallel.py now captures `real_registry()` first (before `worker_count()`
+and `collect()`), so the guard lists the caller's registry, not the one `isolation` installs during
+discovery. Workers' env and the rest of the guard are unchanged. Flow unchanged (test harness only).
+New `test_state_isolation_guard_reads_the_registry_before_discovery` runs the script as a subprocess
+with a fake host registry holding a leaked entry and a fake test module that rewrites `AI_STATE_DIR`
+on import; it asserts a non-zero exit and the leak path in the output. Verified it fails with the old
+ordering (temporarily restored) and passes with the fix.
+Targeted: `-k state_isolation` 3 OK.
+Gate: `.ai/bin/ai-check`: 1099 tests OK, 795.5 s, exit 0 (the harness moved it to the background past 600 s; waited for it).
 
 ## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
 Status: TODO

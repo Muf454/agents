@@ -633,6 +633,9 @@ def main():
     start_dir = Path(args.start_dir).resolve()
     if not start_dir.is_dir():
         parser.error(f'--start-dir is not a directory: {start_dir}')
+    # Before collect(): discovery imports the test modules, and `isolation` rewrites the state env.
+    # Before collect(): discovery imports the test modules, and `isolation` rewrites the state env.
+    registry = real_registry()
     workers = worker_count()
     ids = collect(start_dir)
     if args.collect_only:
@@ -651,7 +654,6 @@ def main():
     # The batches are outside this process group, so a group-wide SIGTERM (ai-check's
     # `timeout`) misses them: turn it into an exception that makes run() stop them.
     signal.signal(signal.SIGTERM, terminated)
-    registry = real_registry()
     budget = slow_budget()
     started = time.monotonic()
 

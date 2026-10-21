@@ -16116,6 +16116,30 @@ class StateIsolationTest(unittest.TestCase):
             Path(registry, 'a.json').unlink()
             self.assertIsNone(run_parallel.registry_problem(registry, suite))
 
+    def test_state_isolation_guard_reads_the_registry_before_discovery(self):
+        with tempfile.TemporaryDirectory() as base:
+            suite_tmp = Path(base, 'tmp')
+            registry = Path(base, 'host-state/pipelines')
+            tests_dir = Path(base, 'fake-tests')
+            for path in (suite_tmp, registry, tests_dir):
+                path.mkdir(parents=True)
+            Path(registry, 'leak.json').write_text(json.dumps({'checkout': str(suite_tmp / 'fixture')}))
+            # Discovery rewrites the state env on import, the way `isolation` does.
+            Path(tests_dir, 'test_fake.py').write_text(
+                'import os, unittest\n'
+                "os.environ['AI_STATE_DIR'] = os.path.join(os.environ['TMPDIR'], 'isolated-state')\n"
+                'class FakeTest(unittest.TestCase):\n'
+                '    def test_ok(self):\n'
+                '        pass\n')
+            env = dict(os.environ, AI_STATE_DIR=str(Path(base, 'host-state')), TMPDIR=str(suite_tmp))
+            env.pop('XDG_STATE_HOME', None)
+            result = subprocess.run([sys.executable, str(ROOT / 'tests/run_parallel.py'),
+                                     '--start-dir', str(tests_dir)],
+                                    env=env, capture_output=True, text=True, timeout=PIPELINE_TIMEOUT)
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn(str(registry / 'leak.json'), output)
+
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
     def scale(self, **env):
