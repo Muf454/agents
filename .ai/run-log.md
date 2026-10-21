@@ -560,3 +560,4 @@
 | 2026-10-21T13:46:34Z | runner | none | queue complete; ready for independent review | PASS | 1aae5fe | Human acceptance remains |
 | 2026-10-21T13:54:56Z | runner | triage | review triaged into dispositions/tasks | n/a | 5236dfe | Fix tasks run next |
 | 2026-10-21 | claude (opus) | T116 | DONE (review M3): `route_fix_rounds` counts host fix-round records only; missing store → 0 (no triage-subject fallback); regression `test_review_route_triage_subject_without_host_record_stays_on_codex`; docs/workflow.md, vault hub Log | PASS (ai-check 1104 tests, 816.3 s, no edits during the gate; -k review_route 10 OK; -k fix_round 21 OK; -k review_routing 6 OK) | pending | flow unchanged |
+| 2026-10-21T14:35:10Z | runner | T116 | completed | PASS | e048cac | Claude checkpointed; continuing queue |
