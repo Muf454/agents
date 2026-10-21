@@ -69,6 +69,8 @@ claude_model() {
   [[ "$claude_effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_CLAUDE_REVIEW_EFFORT: $claude_effort"
   if [[ "$mode" == recheck ]]; then
     claude_risk='re-check'; claude_model=claude-opus-5-5
+  elif [[ -n "${routed:-}" ]]; then
+    claude_risk='routed'; claude_model=claude-opus-5-5
   else
     risk=$(ai_helper review-risk)
     claude_risk=${risk#* }

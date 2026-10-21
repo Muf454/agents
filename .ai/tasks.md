@@ -4935,7 +4935,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T115 — Routed reviews default to opus (review N1, BR-14, A12)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -4969,4 +4969,11 @@ Targeted: `python3 -m unittest discover -s tests -k reviewed_by` (must say `Ran 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+BLOCKED on the gate only. Implemented: `claude_model` in `scripts/ai-review` uses opus with risk `routed` when a
+routed review is set (the `AI_CLAUDE_REVIEW_MODEL` override and effort validation still apply). Added
+`test_review_routing_routed_review_uses_opus_after_an_opus_task` and
+`test_review_routing_routed_review_honours_the_model_override`; `routed_pipeline` takes a queue and env.
+`-k review_routing` ran 6 tests with only the since-fixed test assertion failing; the new routed-opus test then
+passes alone (`-k routed_review_uses_opus`, Ran 1, OK). `.ai/bin/ai-check` exceeded the 600000 ms foreground
+timeout with no output, so the full gate result is unknown. The `reviewed_by` targeted run was not done.
 

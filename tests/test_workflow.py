@@ -9015,12 +9015,12 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.assertIn(f'Invalid {key}: {value}', result.stderr)
         self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
 
-    def routed_pipeline(self, fix_path):
+    def routed_pipeline(self, fix_path, queue=None, **env):
         """Codex round 1 with one MAJOR finding, one fix task changing FIX_PATH (10 lines), round 2."""
-        self.ready()
+        self.ready(queue)
         self.add_origin()
         return self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once',
-                         MOCK_FIX_PATH=fix_path, AI_REVIEW_ROUTE='')
+                         MOCK_FIX_PATH=fix_path, AI_REVIEW_ROUTE='', **env)
 
     def code_review_rows(self):
         rows = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
@@ -9041,6 +9041,26 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('## Independent review (Claude, routed, claude-opus-5-5)', body)
         self.assertIn('routed to a fresh Claude session: small low-risk fix round (', body)
         self.assertNotIn('catch-up', body)
+
+    def test_review_routing_routed_review_uses_opus_after_an_opus_task(self):
+        opus = task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: opus')
+        self.routed_pipeline('src/widget.py', opus)
+        args = self.claude_review_args()
+        self.assertEqual(len(args), 1)
+        self.assertEqual(args[0][args[0].index('--model') + 1], 'claude-opus-5-5')
+        self.assertIn('Reviewed by: Claude, routed (claude-opus-5-5', (self.project / '.ai/reviews/current.md').read_text())
+        # A non-routed Claude review on the same queue still picks the full-queue risk model.
+        result = self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude', AI_REVIEW_ROUTE='')
+        self.assertEqual(len(self.claude_review_args()), 2, result.stdout)
+        args = self.claude_review_args()[-1]
+        self.assertEqual(args[args.index('--model') + 1], 'claude-fable-5-1', result.stdout)
+
+    def test_review_routing_routed_review_honours_the_model_override(self):
+        opus = task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: opus')
+        self.routed_pipeline('src/widget.py', opus, AI_CLAUDE_REVIEW_MODEL='x-model')
+        args = self.claude_review_args()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'x-model')
+        self.assertIn('Reviewed by: Claude, routed (x-model', (self.project / '.ai/reviews/current.md').read_text())
 
     # ------------------------------------------------------- "Reviewed by" (T110, BR-14)
     def test_reviewed_by_codex_code_and_plan_reviews(self):
