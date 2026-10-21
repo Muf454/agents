@@ -698,6 +698,9 @@ def tasks_preflight(arguments):
         new = reordered_text(text, order)
         changes += [f"queue-order {task_id} placed after {', '.join(late[task_id])}"
                     for task_id in order if late[task_id]]
+        # Prerequisites and intervening tasks move too; the host claims them like the rest.
+        changes += [f'queue-moved {task_id}' for task_id in order
+                    if task_id in moved and not late[task_id]]
     new, filled = filled_text(new)
     changes += [f"task-sections {key} added {', '.join(added)}" for key, added in filled]
     final = tasks(new)

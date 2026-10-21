@@ -4892,7 +4892,7 @@ Targeted: `-k state_isolation` 3 OK.
 Gate: `.ai/bin/ai-check`: 1099 tests OK, 795.5 s, exit 0 (the harness moved it to the background past 600 s; waited for it).
 
 ## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 

@@ -3082,11 +3082,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         queue.chmod(0o640)
         before = queue.read_bytes()
         result = self.helper('tasks', 'preflight', '--dry-run')
-        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
+                                        'queue-moved T005\nqueue-moved T006\n')
         self.assertEqual(queue.read_bytes(), before)
         self.assertFalse((self.project / '.ai/local/preflight.md').exists())
         result = self.helper('tasks', 'preflight')
-        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
+                                        'queue-moved T005\nqueue-moved T006\n')
         text = queue.read_text()
         self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text),
                          ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
@@ -3094,6 +3096,13 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(stat.S_IMODE(queue.stat().st_mode), 0o640)
         self.assertEqual((self.project / '.ai/local/preflight.md').read_text(), '')
         self.helper('tasks', 'check')
+
+    def test_preflight_helper_claims_indirectly_moved_tasks(self):
+        queue = self.preflight_queue(task('T001', dependencies='T002') + task('T002') + task('T003'))
+        result = self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(result.stdout.splitlines(),
+                         ['queue-order T001 placed after T002', 'queue-moved T002'])
+        self.assertEqual(self.queue_ids(queue.read_text()), ['T001', 'T002', 'T003'])
 
     def test_preflight_helper_fills_todo_sections_only(self):
         bare = task('T002').replace('### Likely affected modules\nT002.txt\n', '') \
@@ -4998,6 +5007,21 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
         self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()),
                          ['T001', 'T002', 'T003', 'T004', 'T005', 'T006'])
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_indirectly_moved_task_repeat_stops(self):
+        self.ready(task('T001', dependencies='T002') + task('T002') + task('T003'))
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T002')
+        before = (self.project / '.ai/tasks.md').read_bytes()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Task queue is invalid: T001: dependencies must exist earlier in the queue',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual((self.project / '.ai/tasks.md').read_bytes(), before)
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
         self.assertEqual(self.ruling_rows('queue-order'), [])
         self.assertNotIn('🔧 Ruling', self.notifications())
 

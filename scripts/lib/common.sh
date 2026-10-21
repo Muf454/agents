@@ -355,6 +355,7 @@ ai_queue_ruling() {
     read -r kind id rest <<< "$line"
     case "$kind" in
       queue-order) changes+=("$line"); moved+=("$id ${rest#placed }") ;;
+      queue-moved) changes+=("$line") ;;
       task-sections) changes+=("$line"); filled+=("$id") ;;
     esac
   done <<< "$out"
@@ -364,6 +365,7 @@ ai_queue_ruling() {
   fi
   for line in "${changes[@]}"; do
     read -r kind id _ <<< "$line"
+    [[ "$kind" != queue-moved ]] || kind=queue-order
     ai_helper run-manifest ruling "$kind" "$id" >/dev/null 2>&1 || return 1
   done
   out=$(ai_helper tasks preflight 2>/dev/null) || return 1

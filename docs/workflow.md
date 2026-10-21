@@ -514,7 +514,8 @@ cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before
 with the `tasks reorder` errors, or with `T: dependencies must exist earlier in the queue: DEP`
 when a DONE, IN_PROGRESS or BLOCKED task would move, and with the `ai-task check` message when the
 repaired queue is still invalid; in every failure nothing is written. Otherwise it prints one line per change
-(`queue-order TASK placed after DEP, …` for each task whose dependencies were later, `task-sections
+(`queue-order TASK placed after DEP, …` for each task whose dependencies were later, `queue-moved TASK`
+for every other task whose position changes (claimed like `queue-order`, but no run-log row or notification text), `task-sections
 TASK added SECTION, …`), then `overlap A B PATH, …` for each pair of TODO tasks whose `### Likely
 affected modules` share a path-like token (contains `/` or `.`; at most 20 lines, then `overlap …
 N more`). The real run writes the queue once (mode kept) and the overlap lines to
