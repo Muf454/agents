@@ -6,6 +6,8 @@ Usage: ai-status                      workflow state of this checkout
        ai-status --outcomes [FILE...]  task/review outcomes per model, category and reviewer
                                        (default: the host outcome log of all projects,
                                        $AI_STATE_DIR/outcomes.jsonl)
+       ai-status --metrics [--since DATE] [--project NAME] [--json]
+                                       flow metrics per project and run (outcomes + events)
        ai-status --catch-up-done BRANCH...
                                        record that Codex caught up on BRANCH's Claude-only
                                        reviews (they leave "Codex catch-up pending")
@@ -25,6 +27,11 @@ fi
 if [[ "${1:-}" == --outcomes ]]; then
   shift
   ai_helper outcomes-report "$@"
+  exit 0
+fi
+if [[ "${1:-}" == --metrics ]]; then
+  shift
+  ai_helper metrics "$@"
   exit 0
 fi
 ai_root

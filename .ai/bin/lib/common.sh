@@ -19,6 +19,8 @@ ai_die() {
       ai_observe stop '' "$*" 2>/dev/null || true
     fi
     AI_STOP_NOTIFIED=1
+    # The run's one end event (nothing before the run has an id, or after a gate change).
+    ai_run_end stopped
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker
   fi
@@ -37,7 +39,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS|AI_SESSION_GATE) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -61,6 +63,21 @@ ai_supervise_settings() {
   [[ "$AI_SUPERVISE_ESCALATE_MODEL" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || \
     ai_die "Invalid AI_SUPERVISE_ESCALATE_MODEL: $AI_SUPERVISE_ESCALATE_MODEL"
   export AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+}
+
+# Review routing (AI_REVIEWER=auto): AI_REVIEW_ROUTE empty/risk routes small low-risk fix
+# rounds to Claude, codex turns that off; AI_REVIEW_SMALL_LINES is the size limit.
+ai_review_route_settings() {
+  [[ "${AI_REVIEW_ROUTE:-}" =~ ^(|risk|codex)$ ]] || ai_die "Invalid AI_REVIEW_ROUTE: $AI_REVIEW_ROUTE (risk or codex)"
+  [[ -z "${AI_REVIEW_SMALL_LINES:-}" || "$AI_REVIEW_SMALL_LINES" =~ ^[1-9][0-9]{0,5}$ ]] || \
+    ai_die "Invalid AI_REVIEW_SMALL_LINES: $AI_REVIEW_SMALL_LINES (1-999999)"
+}
+
+# Session gate (TS-01): AI_SESSION_GATE empty/auto lets the measured gate time decide whether an
+# implementation session runs the full gate itself; full or targeted forces it (workflow.py session-gate).
+ai_session_gate_settings() {
+  [[ "${AI_SESSION_GATE:-}" =~ ^(|auto|full|targeted)$ ]] || \
+    ai_die "Invalid AI_SESSION_GATE: $AI_SESSION_GATE (auto, full or targeted)"
 }
 
 # Codex review model/effort: reviews are where a stronger model pays off most.
@@ -139,20 +156,24 @@ clean_or_armed() {
   armed_resume || return 1
   AI_ARMED=yes
 }
+# The ONLY protected-path list: the gate guard digests it and `exec-bits` never touches it.
+AI_PROTECTED_PATHS=(.ai/validate .ai/ci-setup .ai/bin .ai/prompts .ai/permissions.allow
+  .claude/settings.json .github/workflows/ai-validate.yml)
+AI_PROTECTED_OPTIONAL=(.claude/settings.json .github/workflows/ai-validate.yml)
 ai_guard_digest() {
   # Inline verifier is loaded before Claude starts. Never ask a potentially
-  # modified project helper to verify its own integrity.
-  python3 -I - <<'PY'
+  # modified project helper to verify its own integrity. Arguments: the roots, `--`, the
+  # optional ones.
+  python3 -I - "${AI_PROTECTED_PATHS[@]}" -- "${AI_PROTECTED_OPTIONAL[@]}" <<'PY'
 import hashlib
 from pathlib import Path
 import stat
 import sys
 
 digest = hashlib.sha256()
-roots = ('.ai/validate', '.ai/ci-setup', '.ai/bin', '.ai/prompts',
-         '.ai/permissions.allow', '.claude/settings.json',
-         '.github/workflows/ai-validate.yml')
-optional = ('.claude/settings.json', '.github/workflows/ai-validate.yml')
+separator = sys.argv.index('--')
+roots = tuple(sys.argv[1:separator])
+optional = tuple(sys.argv[separator + 1:])
 try:
     for name in roots:
         root = Path(name)
@@ -202,6 +223,77 @@ ai_guard_verify() {
 ai_observe() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   ai_helper observe "$@" || true
+}
+# Flow event (events.jsonl; best effort, never fails the caller): skipped once the gate is
+# known bad, so no helper runs after a detected gate change (spec A17). Rule for every event
+# writer (T208-T210, T218, T220): any helper call that prepares an event (stop category, run
+# totals, excerpts) lives inside a common.sh function after this same guard, never in the
+# caller's arguments to ai_event.
+ai_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  ai_helper event "$@" 2>/dev/null || printf 'Note: could not record the %s event.\n' "$1" >&2
+}
+# One `ruling` event per Ruling row (T210). Usage: ai_ruling_event RULING_KIND KEY TASK; TASK is
+# recorded only when it is a task id, else `-`. Called right after the row's ai_log, so a refused
+# claim (which returns before the row) records nothing. Returns 0 always.
+ai_ruling_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local task=-
+  [[ ! "$3" =~ ^T[0-9]+$ ]] || task=$3
+  ai_event ruling "ruling_kind=$1" "key=$2" "task=$task"
+  return 0
+}
+# 16 lowercase hex for a gate id (spec A12): the same id goes on the `outcome gate` row and the
+# `gate` event of one gate. Plain od, no helper, so it runs even when the gate is known bad.
+ai_new_id() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
+# One `gate` event per host gate (spec A12). Usage: ai_gate_event WHERE START_EPOCH SECONDS CODE
+# [GATE_ID]: WHERE is the task id or a stage; the caller measures SECONDS on its own clock and
+# passes the epoch start separately. Exit 124/137 is a timeout, as record_gate. Returns 0 always.
+ai_gate_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local result=fail id=${5:-}
+  if (( $4 == 0 )); then result=pass; elif (( $4 == 124 || $4 == 137 )); then result=timeout; fi
+  [[ -n "$id" ]] || id=$(ai_new_id)
+  ai_helper event-gate "$1" "$2" "$3" "$result" "$id" 2>/dev/null || \
+    printf '%s\n' 'Note: could not record the gate event.' >&2
+  return 0
+}
+# One `stop` event (T208). Usage: ai_stop_event STAGE yes|no (yes: handed over to ai-recover).
+# The category helper and the last-error read run only after the guard. Returns 0 always.
+ai_stop_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local category message='' file=.ai/local/last-error
+  category=$(ai_helper stop-category "$1" 2>/dev/null) || category=other
+  # As stop() reads it, but never through a symlink and at most 4 KiB.
+  if [[ -f "$file" && ! -L "$file" ]]; then message=$(head -c 4096 -- "$file" 2>/dev/null) || message=''; fi
+  ai_event stop "stage=$1" "category=$category" "message=$message" "recovery=$2"
+  return 0
+}
+# One `recovery` event (T208). Usage: ai_recovery_event DECISION ATTEMPT (ATTEMPT `-` before
+# ai-recover reserved one); the task is the run manifest's, else `-`. Returns 0 always.
+ai_recovery_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local task attempt=$2
+  task=$(ai_helper run-manifest task 2>/dev/null) && [[ -n "$task" ]] || task=-
+  [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || attempt=-
+  ai_event recovery "decision=$1" "task=$task" "attempt=$attempt"
+  return 0
+}
+# The one `run` end event of a handled finish or terminal stop (T209). Usage: ai_run_end RESULT
+# (pr, no_pr, no_origin, no_gh or stopped). Only in the run's own shell (never a subshell), only
+# with a run id, and once: AI_RUN_ENDED is set before any helper runs. Returns 0 always.
+AI_RUN_ENDED=''
+ai_run_end() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  [[ -n "${AI_RUN_ID:-}" && -z "$AI_RUN_ENDED" && "$BASHPID" == "$$" ]] || return 0
+  AI_RUN_ENDED=1
+  local totals=() field
+  read -ra totals <<< "$(ai_helper run-totals 2>/dev/null)" || true
+  for field in "${totals[@]}"; do
+    [[ "$field" =~ ^(tasks|gates|gate_failures|seconds)=([0-9]{1,18}|-)$ ]] || { totals=(); break; }
+  done
+  ai_event run action=end "result=$1" "${totals[@]}"
+  return 0
 }
 ai_notify_log() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
@@ -307,4 +399,112 @@ ai_log() {
   printf '| %s | runner | %s | %s | %s | %s | %s |\n' \
     "$(date -u +%FT%TZ)" "$1" "$2" "$3" \
     "$(git rev-parse --short HEAD 2>/dev/null || printf none)" "$4" >> .ai/run-log.md
+}
+# BR-02 host rulings (T103). OUT is `tasks preflight` output: `queue-order`/`task-sections`
+# change lines, then `overlap` lines. ai_ruling_rows TASK OUT appends one run-log Ruling row per
+# change line under TASK.
+ai_ruling_rows() {
+  local line kind rest why cost
+  while IFS= read -r line; do
+    read -r kind rest <<< "$line"
+    case "$kind" in
+      queue-order) why='only the order was wrong; dependencies first, no DONE task moved'
+                   cost='a task runs later than planned' ;;
+      task-sections) why='empty section added to a TODO task'; cost='none, the section is empty' ;;
+      *) continue ;;
+    esac
+    ai_log "$1" "$(ai_helper ruling-row "$kind" "$rest" "$why" "$cost")" 'n/a' 'host ruling'
+    ai_ruling_event "$kind" "${rest%% *}" "${rest%% *}"
+  done <<< "$2"
+}
+# The overlap report of OUT (advisory: never stops a run).
+ai_overlap_lines() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" != overlap\ * ]] || printf '%s\n' "$line"
+  done <<< "$1"
+}
+# ai_queue_ruling TASK: repair .ai/tasks.md when its only faults are the order of TODO tasks or
+# their empty sections, each moved or filled task claimed once per run (`run-manifest ruling`),
+# with Ruling rows under TASK and one 🔧 notification. Returns 0 when it changed the queue; 1
+# when it changed nothing (valid, unfixable or a refused claim, e.g. a repeat or no run
+# manifest), and the caller's queue check decides as before. The caller commits.
+ai_queue_ruling() {
+  local out line kind id rest changes=() moved=() filled=() summary=''
+  out=$(ai_helper tasks preflight --dry-run 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    read -r kind id rest <<< "$line"
+    case "$kind" in
+      queue-order) changes+=("$line"); moved+=("$id ${rest#placed }") ;;
+      queue-moved) changes+=("$line") ;;
+      task-sections) changes+=("$line"); filled+=("$id") ;;
+    esac
+  done <<< "$out"
+  if (( ${#changes[@]} == 0 )); then
+    ai_overlap_lines "$out"
+    return 1
+  fi
+  for line in "${changes[@]}"; do
+    read -r kind id _ <<< "$line"
+    [[ "$kind" != queue-moved ]] || kind=queue-order
+    ai_helper run-manifest ruling "$kind" "$id" >/dev/null 2>&1 || return 1
+  done
+  out=$(ai_helper tasks preflight 2>/dev/null) || return 1
+  printf '%s\n' "$out"
+  ai_ruling_rows "$1" "$out"
+  if (( ${#moved[@]} )); then
+    summary=$(printf '; %s' "${moved[@]}")
+    summary="reordered (${summary#; })"
+  fi
+  if (( ${#filled[@]} )); then
+    line=$(printf ', %s' "${filled[@]}")
+    summary+="${summary:+, }sections added (${line#, })"
+  fi
+  ai_notify "🔧 Ruling: task queue $summary; see the run log."
+}
+# ai_disposition_ruling triage|plan TASK (BR-01, T104): a disposition row whose first cell holds
+# exactly one finding ID of the review in markup or with extra text gets the bare ID, each ID
+# claimed once per run (`run-manifest ruling disposition-cell DIGEST12.ID`), with Ruling rows
+# under TASK. A refused claim (a repeat, no run manifest) changes nothing and the caller's check
+# stops as before. The caller commits.
+ai_disposition_ruling() {
+  local out line digest='' ids=() id cell
+  out=$(ai_helper disposition-ruling "$1" --dry-run 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      digest\ *) digest=${line#digest } ;;
+      ?*) ids+=("${line%% *}") ;;
+    esac
+  done <<< "$out"
+  [[ -n "$digest" ]] && (( ${#ids[@]} )) || return 0
+  for id in "${ids[@]}"; do
+    ai_helper run-manifest ruling disposition-cell "$digest.$id" >/dev/null 2>&1 || return 0
+  done
+  out=$(ai_helper disposition-ruling "$1" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != digest\ * ]] || continue
+    read -r id cell <<< "$line"
+    printf 'Disposition cell "%s" read as %s.\n' "$cell" "$id"
+    ai_log "$2" "$(ai_helper ruling-row disposition-cell "finding cell \"$cell\" read as $id" \
+      'the cell held exactly one finding ID of this review' \
+      "the row is counted for $id; a wrong reading shows in the PR's dispositions")" 'n/a' 'host ruling'
+    ai_ruling_event disposition-cell "${digest:0:12}.$id" "$2"
+  done <<< "$out"
+}
+# ai_flow_line_ruling KEY TASK (BR-01, T105): a handoff `## Flow chart` section that does not start
+# with "Flow chart updated" or "Flow unchanged" gets that line once per KEY per run (`run-manifest
+# ruling flow-line KEY`), with a Ruling row under TASK. A refused claim (a repeat, no run manifest)
+# leaves the handoff as the session wrote it. The caller commits the handoff and run log.
+ai_flow_line_ruling() {
+  local line
+  line=$(ai_helper flow-line-ruling --dry-run 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  ai_helper run-manifest ruling flow-line "$1" >/dev/null 2>&1 || return 0
+  line=$(ai_helper flow-line-ruling 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  printf 'Flow chart line: "%s" placed under the heading.\n' "$line"
+  ai_log "$2" "$(ai_helper ruling-row flow-line "handoff Flow chart section starts with \"$line\"" \
+    'the section must start with one of the two phrases' \
+    'the PR says the flow changed or not when the other is true; the section text below it stays')" 'n/a' 'host ruling'
+  ai_ruling_event flow-line "$1" "$1"
 }

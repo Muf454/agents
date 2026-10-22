@@ -17,6 +17,10 @@ locks, migrations, deletion ...), else claude-opus-5-5, effort high; re-checks o
 claude-opus-5-5. Overrides: AI_CLAUDE_REVIEW_MODEL, AI_CLAUDE_REVIEW_EFFORT.
 Claude-written reviews are labelled and listed in .ai/reviews/fallback-log.md for a
 later Codex catch-up review.
+Routing (auto only): a recorded Codex limit sends reviews to the fallback until its reset, and a
+small low-risk fix round (AI_REVIEW_SMALL_LINES, default 200; risk paths/words extendable with
+AI_REVIEW_RISK_PATHS/AI_REVIEW_RISK_WORDS) goes to a fresh Claude session; AI_REVIEW_ROUTE=codex
+turns that off.
 A plan or code review that fails only the format checks is requested once more with the
 error (AI_SUPERVISE=1, the default); re-checks and integrity failures are never retried.
 EOF
@@ -48,6 +52,7 @@ case "$reviewer" in
           ai_die 'Install and authenticate Codex CLI (reviewer) or Claude Code (fallback reviewer) first.' ;;
   *) ai_die "Invalid AI_REVIEWER: $reviewer (auto, codex or claude)" ;;
 esac
+ai_review_route_settings
 if [[ "$recheck" == yes ]]; then
   codex_effort=${AI_RECHECK_EFFORT:-medium}; ai_review_args AI_RECHECK_EFFORT medium
 else
@@ -64,6 +69,8 @@ claude_model() {
   [[ "$claude_effort" =~ ^(low|medium|high|xhigh|max)$ ]] || ai_die "Invalid AI_CLAUDE_REVIEW_EFFORT: $claude_effort"
   if [[ "$mode" == recheck ]]; then
     claude_risk='re-check'; claude_model=claude-opus-5-5
+  elif [[ -n "${routed:-}" ]]; then
+    claude_risk='routed'; claude_model=claude-opus-5-5
   else
     risk=$(ai_helper review-risk)
     claude_risk=${risk#* }
@@ -150,18 +157,31 @@ claude_attempt() {
 # reviewer label ($review_by, AI_REVIEW_LABEL for the publish helpers); $1 is the prompt,
 # $2 the Claude prompt (the same, naming the prepared context files instead of git commands).
 run_review() {
-  local prompt=$1 claude_prompt=$2 code reset start_head fallback='' started=$SECONDS try_codex
+  local prompt=$1 claude_prompt=$2 code reset start_head fallback='' started=$SECONDS try_codex until route routed=''
+  local route_base=-
   # Per call: a retry after a Claude fallback must not inherit its label or attribution.
-  unset AI_REVIEW_BY AI_REVIEW_LABEL
+  unset AI_REVIEW_BY AI_REVIEW_LABEL AI_REVIEW_WHO
   review_by='' review_model='' review_effort='' review_reason=''
   # Plan and code reviews pin one HEAD for both calls of a format retry ($review_head).
   start_head=${review_head:-$(git rev-parse HEAD)}
   report=$(mktemp .ai/local/review-XXXXXXXX.md)
   events="${report%.md}.events.log"
   unchanged() { checkout_unchanged "$start_head"; }
+  if [[ "$mode" == code ]]; then route_base=$merge_base; elif [[ "$mode" == plan ]]; then route_base=${plan_base:--}; fi
   while true; do
-    try_codex=no
+    try_codex=no fallback='' routed=''
     if [[ "$reviewer" == codex ]] || { [[ "$reviewer" == auto ]] && command -v codex >/dev/null; }; then try_codex=yes; fi
+    # auto only: a recorded Codex limit goes straight to the fallback; a small low-risk fix
+    # round goes to a fresh Claude session (host records decide; any doubt keeps Codex).
+    if [[ "$reviewer" == auto && "$try_codex" == yes ]]; then
+      if until=$(ai_helper codex-limit active 2>/dev/null); then
+        try_codex=no
+        fallback="Codex usage limit until $(date -d "@$until" '+%F %H:%M') (recorded)"
+      else
+        route=$(ai_helper review-route "$mode" "$route_base" "$start_head" 2>/dev/null) || route='codex routing unavailable'
+        [[ "$route" != 'claude '* ]] || { try_codex=no; routed=${route#claude }; }
+      fi
+    fi
     if [[ "$try_codex" == yes ]]; then
       set +e
       timeout --signal=TERM --kill-after=10s "$limit" codex exec \
@@ -172,11 +192,14 @@ run_review() {
       if (( code == 0 )); then
         review_by=codex; review_model=${AI_REVIEW_MODEL:-default}; review_effort=$codex_effort
         fallback=''; unset AI_REVIEW_BY AI_REVIEW_LABEL
+        export AI_REVIEW_WHO="Codex ($review_model, effort $review_effort)"
         break
       fi
       if ! (( code != 124 && code != 137 )) || ! reset=$(ai_helper limit-check "$events"); then
         ai_die "Codex failed; prior review preserved. See $events."
       fi
+      # Remembered until the reset, so later reviews skip the call (AI_REVIEWER=codex ignores it).
+      [[ "$reset" == 0 ]] || ai_helper codex-limit set "$reset" 2>/dev/null || true
       if [[ "$reviewer" == codex ]]; then
         ai_limit_pause Codex "$reset"
         unchanged || ai_die 'Checkout changed while waiting for the Codex limit; rerun the review.'
@@ -184,14 +207,18 @@ run_review() {
       fi
       fallback='Codex usage limit'
       [[ "$reset" == 0 ]] || fallback+=" until $(date -d "@$reset" '+%F %H:%M')"
-    else
+    elif [[ -z "$fallback$routed" ]]; then
       fallback=$([[ "$reviewer" == claude ]] && printf 'AI_REVIEWER=claude' || printf 'Codex CLI not installed')
     fi
     [[ -n "${claude_model:-}" ]] || claude_model
-    printf '%s; reviewing with Claude instead.\n' "$fallback"
-    [[ -n "${AI_PIPELINE:-}" && -z "${fallback_notified:-}" && "$reviewer" == auto ]] && \
-      ai_notify "↪ $fallback: the $mode review runs on Claude ($claude_model) instead." || true
-    fallback_notified=1
+    if [[ -n "$routed" ]]; then
+      printf 'Routed to Claude: %s\n' "$routed"
+    else
+      printf '%s; reviewing with Claude instead.\n' "$fallback"
+      [[ -n "${AI_PIPELINE:-}" && -z "${fallback_notified:-}" && "$reviewer" == auto ]] && \
+        ai_notify "↪ $fallback: the $mode review runs on Claude ($claude_model) instead." || true
+      fallback_notified=1
+    fi
     rm -f -- "$report"
     code=0
     claude_attempt "$claude_prompt" || code=$?
@@ -200,11 +227,19 @@ run_review() {
       unchanged || ai_die 'Checkout changed while waiting for the usage limit; rerun the review.'
       continue
     fi
-    review_by=$([[ "$reviewer" == claude ]] && printf claude || printf claude-fallback)
     review_model=$claude_model; review_effort=$claude_effort
+    if [[ -n "$routed" ]]; then
+      review_by=claude-routed
+      export AI_REVIEW_BY="Claude (routed), $claude_model"
+      export AI_REVIEW_WHO="Claude, routed ($claude_model, effort $claude_effort): $routed"
+      export AI_REVIEW_LABEL="Claude, routed ($claude_model, effort $claude_effort; $routed). Codex reviewed this branch earlier; no catch-up needed."
+      break
+    fi
+    review_by=$([[ "$reviewer" == claude ]] && printf claude || printf claude-fallback)
     local who='Claude fallback'
     [[ "$reviewer" != claude ]] || who='Claude'
     export AI_REVIEW_BY="$who, $claude_model"
+    export AI_REVIEW_WHO="$who ($claude_model, effort $claude_effort): $fallback"
     export AI_REVIEW_LABEL="$who ($claude_model, effort $claude_effort; $fallback). Codex catch-up review pending: see .ai/reviews/fallback-log.md."
     break
   done
@@ -213,7 +248,7 @@ run_review() {
   [[ -f "$report" && -r "$report" ]] || ai_die "Cannot read the review report $report; prior review preserved."
   [[ -s "$report" || -n "$allow_empty" ]] || ai_die "The reviewer produced no review; see $events."
   unchanged || ai_die 'Checkout changed during review; report kept locally, not published as current.'
-  review_reason=$fallback
+  review_reason=${routed:-$fallback}
 }
 
 # Markdown reviews (plan, code) whose only fault is the format get ONE more reviewer call
@@ -274,11 +309,15 @@ allow_empty=''
 # After publishing: the fallback list (for the Codex catch-up) and the outcome log (never fatal).
 review_records() {
   local head=$1 base=$2
-  if [[ "$review_by" == claude* ]]; then
+  # A routed review needs no catch-up: Codex reviewed this branch in an earlier round.
+  if [[ "$review_by" == claude || "$review_by" == claude-fallback ]]; then
     ai_helper fallback-record "$mode" "$review_model" "$review_effort" "$head" "$base" "$review_reason"
   fi
+  local route=()
+  [[ "$review_by" == codex || -z "$review_reason" ]] || route=(--route "$review_reason")
   ai_helper outcome review "$mode" "$review_by" "$review_model" "$review_effort" "$review_seconds" "$report" \
-    2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+    "${route[@]}" 2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+  ai_event review "mode=$mode" "reviewer=$review_by" "model=${review_model:-default}" "reason=${review_reason:--}"
 }
 reviewer_name() { [[ "$review_by" == codex ]] && printf Codex || printf 'Claude (%s)' "$review_model"; }
 
