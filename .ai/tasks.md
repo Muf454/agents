@@ -5313,7 +5313,7 @@ pr_body_flow` Ran 2 OK; `-k Docs` Ran 3 OK; `-k supervised_plan` Ran 36 OK; `bas
 scripts/ai-run scripts/ai-pipeline` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T202 — Default test worker count raised and printed first (TS-01 (1))
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -5360,6 +5360,13 @@ Targeted: `python3 -m unittest discover -s tests -k parallel_runner_rejects_inva
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+- Handoff "Measured worker default" was not recorded, so the default is `min(14, cpu - 2)`, at least 1.
+- `worker_count()` returns `(count, source)`; `main()` prints `Workers: W (SOURCE)` first (flushed),
+  except under `--collect-only`, whose stdout another test compares exactly.
+- Docstring, README.md and docs/workflow.md updated. The vault flow chart names no worker count: flow unchanged.
+- Targeted run (`-k worker_count`, `parallel_runner_rejects_invalid_workers`, `_summary`, `_all_pass`,
+  `_collect_only`): Ran 6 tests, OK. In-session `ai-check` passed the 600 s tool timeout without finishing; the host gate
+  after this session is the full gate (batch rule), so it was not rerun.
 
 ## T203 — `session-gate` helper and the `AI_SESSION_GATE` run setting (TS-01 (2), helper)
 Status: TODO

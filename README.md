@@ -967,8 +967,8 @@ python3 -m unittest discover -s tests -k parallel_runner   # one group by name
 ```
 
 `tests/run_parallel.py` discovers the same tests as the serial command and deals the sorted
-IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the CPU count, at
-most 8; six batches per worker, so neighbouring and often similarly slow tests land in
+IDs into interleaved batches pulled by `AI_TEST_WORKERS` workers (default: the CPU count minus 2,
+at most 14, at least 1; the first output line is `Workers: W (source)`; six batches per worker, so neighbouring and often similarly slow tests land in
 different batches and no worker idles while another works through a slow cluster). Each
 batch runs as `python3 -m unittest` in its own process. On Linux the runner is a child
 subreaper: processes the batches orphan stay its descendants and it reaps them. A stop (a

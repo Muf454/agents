@@ -48,8 +48,8 @@ changes during the gate cause a failure, even if the command itself exits zero.
 
 Gate speed (FL-11, FL-23): test suites can run in parallel. A stdlib-only runner
 `tests/run_parallel.py` discovers every test ID, deals the sorted IDs into interleaved
-batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six batches per
-worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
+batches pulled by `AI_TEST_WORKERS` workers (default `min(14, cpu count - 2)`, at least 1, printed
+as the first output line `Workers: W (source)`; six batches per worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
 (FL-27): orphans of the batches are reparented to it and reaped without touching a batch's
 exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). A stop
 (worker error, interrupt, SIGTERM, also one that arrives while the workers are still being

@@ -15576,6 +15576,35 @@ class ParallelRunnerTest(unittest.TestCase):
             self.assertIn('AI_TEST_WORKERS must be a positive integer', result.stderr)
         self.runner('--start-dir', str(self.suite), workers='')  # empty means the default
 
+    def test_worker_count_default_and_override(self):
+        spec = importlib.util.spec_from_file_location('run_parallel_under_test', self.RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        base = {k: v for k, v in os.environ.items() if k != 'AI_TEST_WORKERS'}
+
+        def count(cpu, **extra):
+            with mock.patch.dict(os.environ, {**base, **extra}, clear=True), \
+                    mock.patch('os.cpu_count', return_value=cpu):
+                return module.worker_count()
+
+        self.assertEqual(count(16), (14, 'default, CPU count 16'))
+        self.assertEqual(count(8)[0], 6)
+        self.assertEqual(count(2)[0], 1)
+        self.assertEqual(count(1)[0], 1)
+        self.assertEqual(count(None), (1, 'default, CPU count 1'))
+        self.assertEqual(count(2, AI_TEST_WORKERS='3'), (3, 'AI_TEST_WORKERS'))
+        self.assertEqual(count(16, AI_TEST_WORKERS=' 5 '), (5, 'AI_TEST_WORKERS'))
+        for bad in ('0', '-1', 'x'):
+            with self.assertRaises(SystemExit) as caught:
+                count(16, AI_TEST_WORKERS=bad)
+            self.assertIn('AI_TEST_WORKERS must be a positive integer', str(caught.exception))
+
+    def test_worker_count_line_comes_first(self):
+        self.write('test_one.py', '    def test_a(self): pass\n    def test_b(self): pass\n')
+        result = self.runner('--start-dir', str(self.suite), workers='2')
+        self.assertEqual(result.stdout.splitlines()[0], 'Workers: 2 (AI_TEST_WORKERS)')
+        self.assertIn('on 2 workers', result.stdout)
+
     def test_parallel_runner_collect_only_matches_serial_discovery(self):
         # A fresh loader: `unittest -k` sets name patterns on the default loader of this process.
         expected = unittest.TestLoader().discover(str(ROOT / 'tests')).countTestCases()
