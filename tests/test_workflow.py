@@ -16814,6 +16814,34 @@ PY
         self.assertIn(('resume_skip_plan_review', None), self.answer_ids(data))
         self.assertEqual(data['run'], self.pipeline_records()[-1]['id'])
 
+    def test_escalation_wiring_plan_kinds(self):
+        args = ('--approved', '--base', 'main', '--no-pr')
+        with self.subTest('supervision limit'):
+            self.ready()
+            self.tool('ai-pipeline', *args, '--max-fix-rounds', '3', expected=1, AI_AUTO_RECOVER='0',
+                      MOCK_CODEX_PLAN='major', MOCK_CLAUDE='revise-reject', AI_SUPERVISE='1', AI_SUPERVISE_PLAN_ROUNDS='1')
+            data, record = self.escalation_data(), self.pipeline_records()[-1]
+            self.assertEqual((data['kind'], data['run']), ('plan_review_limit', record['id']))
+            [skip] = [a['argv'] for a in data['answers'] if a['id'] == 'resume_skip_plan_review']
+            self.assertEqual(skip, ['.ai/bin/ai-pipeline'] + record['argv'] + ['--skip-plan-review'])
+        with self.subTest('supervision off'):
+            self.fix_round_project('off')
+            self.tool('ai-pipeline', *args, expected=1, AI_AUTO_RECOVER='0', AI_SUPERVISE='0',
+                      MOCK_CODEX_PLAN='major')
+            data, record = self.escalation_data(), self.pipeline_records()[-1]
+            self.assertEqual((data['kind'], data['run']), ('plan_review_limit', record['id']))
+            self.assertIn(('resume_skip_plan_review', None), self.answer_ids(data))
+        with self.subTest('needs-human disposition'):
+            self.fix_round_project('human')
+            self.tool('ai-pipeline', *args, expected=1, AI_AUTO_RECOVER='0',
+                      MOCK_CODEX_PLAN='major', MOCK_CODEX_PLAN_FINDINGS='P1|Rollback choice;P2|Gap in tests',
+                      MOCK_CLAUDE='revise-needs-human', MOCK_QUESTION='Keep option A or switch to B?',
+                      AI_SUPERVISE='1')
+            data, record = self.escalation_data(), self.pipeline_records()[-1]
+            self.assertEqual((data['kind'], data['run']), ('needs_human_question', record['id']))
+            self.assertIn('review_plan', [a['id'] for a in data['answers']])
+            self.assertTrue(data['evidence']['findings'])
+
     def test_escalation_wiring_validation_and_recovery(self):
         self.ready(queue=task('T001', 'DONE'))
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 1\n')

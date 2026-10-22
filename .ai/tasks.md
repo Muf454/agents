@@ -6478,7 +6478,7 @@ exceeded the 600000 ms foreground timeout in this session (T320 saw a load-induc
 no pass is claimed. Needs one rerun of the gate on an unloaded machine, then `ai-task set T321 DONE`.
 
 ## T327 — Plan-review escalation kinds end to end (RC-01 G9, split from T321 after plan review round 3)
-Status: TODO
+Status: BLOCKED
 Dependencies: T320
 Model: sonnet
 
@@ -6512,6 +6512,11 @@ Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Added `test_escalation_wiring_plan_kinds` (three subtests: supervision limit, `AI_SUPERVISE=0`,
+needs-human disposition). It passes (`python3 -m unittest tests.test_workflow -k
+escalation_wiring_plan_kinds`: Ran 1 test, OK); the wiring needed no script change. BLOCKED only
+because `.ai/bin/ai-check` did not finish within the 600 s foreground limit (no failure output;
+same load-induced timeout seen for T320). Rerun the gate; if green, set DONE.
 
 ## T325 — `--stop` of a stand-alone `ai-run` is a human stop (RC-01 G1, plan review round 3 P16)
 Status: TODO
