@@ -31,7 +31,8 @@ is already gone), 3 no run to stop, 4 signalled but still ending (rerun to wait 
 EOF
 }
 # Stop the checkout's run (RC-01 G1): found through its run record, never by command line; no
-# checkout lock (the running pipeline holds it) and no last-error write.
+# checkout lock while signalling (the running pipeline holds it). Only a run that ended without
+# its own records is completed, under the lock taken with flock -n (run-stop, T319).
 if [[ "${1:-}" == --stop ]]; then
   shift
   stop_checkout=. stop_wait=60

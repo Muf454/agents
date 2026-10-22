@@ -61,6 +61,15 @@
   ended run or "already stopped by you" (nothing written); 4 still ending after the wait; 1
   error. The local completion (escalation, marker, last-error) is T319's. README, `docs/workflow.md`
   (exit-status table), vault flow chart and hub Log updated.
+- T319 (2026-10-22): `run-stop` completes the records of a run that ended (or was found gone)
+  without its own: `settle-stop` for the kept id (refused → it ended by itself or was replaced:
+  nothing more), then `.ai/local/workflow.lock` with `flock -n` through the pinned `.ai/local`
+  (held → "another runner owns <checkout> now", exit 0); holding it with the id still current:
+  escalation `human_stop` (stage from `observation.json`, else `unknown`), marker removed only
+  when it names the recorded pid, `last-error` and a strictly newer `last-error.notified`. A
+  `paused` run with `limit_relaunch_at` prints "Cancelled the scheduled usage-limit relaunch of
+  <id>."; a recovery is stopped through its own record and trap. `.ai/local` is created when
+  missing (as `ai_root`). `docs/workflow.md` "Completion (T319)". Flow unchanged beyond T308.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -128,6 +137,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T319: `-k stop_command` Ran 11 OK (21.0 s); full gate result in the T319 notes.
 2026-10-22, T308: `-k stop_command` Ran 7 OK (15.6 s); full gate result in the T308 notes.
 2026-10-22, T307: `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK; full gate PASS 16:08:15Z on
 recovery checkpoint 8d45821.
@@ -318,7 +328,15 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   nothing), `test_stop_command_identity_mismatch` (an unrelated live pid is not signalled),
   `test_stop_command_wait_expires` (TERM-ignoring runner: exit 4 after `--wait 2`, request kept,
   `ai-recover` refuses), `test_stop_command_arguments` (invalid `--wait`, not a checkout, default
-  checkout, no `last-error`).
+  checkout, no `last-error`). T319: `test_stop_command_completes_records` (a runner that exits
+  on TERM without records: `human_stop`, escalation `human_stop` at stage `build`, marker
+  removed, `last-error` and a newer `last-error.notified`; found gone: stage `unknown`, a marker
+  naming another pid kept), `test_stop_command_never_touches_a_replacing_run` (A starts B on
+  TERM: with a new record "another run replaced it", B's record, marker and no escalation
+  untouched; B holding only the lock: "another runner owns"), `test_stop_command_cancels_scheduled_relaunch`
+  (cancel message, `human_stop`, the due `ai-recover` refuses quietly, no session),
+  `test_stop_command_stops_a_watchdog_recovery` (`ai-recover` with a sleeping decision session:
+  exit 0, recovery 143, `human_stop`, no ▶ RESUMED, no implementation session).
 - `ai_task` (T310, T312, T322): lock, `--commit`, dirty or protected refusal, hook failure, plain
   `set` unchanged; retry, model, skip; reauthorize and its refusals.
 - `skip` (T311): SKIPPED semantics, forged status refused, new branch, merge and second worktree,

@@ -6230,7 +6230,7 @@ Exit 0 / 3 / 4 / 1 with the planned messages; an ended record is never rewritten
 table), vault flow chart and hub Log. T319 adds the local completion and relaunch message.
 
 ## T319 — `--stop` completion bound to its run; relaunch cancel; stopping a recovery (RC-01 G1, plan review P4, P5, P9)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T308
 Model: opus
 

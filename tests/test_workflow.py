@@ -11499,6 +11499,154 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertFalse((self.project / '.ai/local/last-error').exists())
 
+    # T319: `--stop` completes the records of a run that ended without them, bound to that run.
+    def stop_fixture_runner(self, on_term='exit 143'):
+        """A fixture runner in its own session: records its run, writes the liveness marker,
+        sleeps; on TERM it runs ON_TERM (default: exit at once, writing no record). Returns
+        (process, run id)."""
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        ids = self.base / f'runner-{len(list(self.base.glob("runner-*")))}'
+        script = (f'trap {shlex.quote(on_term)} TERM\n'
+                  'python3 "$0" run-record start pipeline feature/test - - --pid $$ -- '
+                  '--approved --base main --no-pr > "$1.tmp"\n'
+                  'printf "%s\\n" $$ > .ai/local/pipeline.active\nmv "$1.tmp" "$1"\n'
+                  'sleep 300 & wait\n')
+        runner = subprocess.Popen(['bash', '-c', script, str(HELPER), str(ids)], cwd=self.project, env=self.env,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
+
+        def cleanup():
+            with contextlib.suppress(OSError):
+                os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        while not ids.exists():
+            if runner.poll() is not None or time.monotonic() > deadline:
+                self.fail('the fixture runner never recorded its run')
+            time.sleep(0.05)
+        return runner, ids.read_text().strip()
+
+    def test_stop_command_completes_records(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        runner, run_id = self.stop_fixture_runner()
+        self.helper('observe', 'step', 'build', 'T001')
+        result = self.stop_command()
+        self.assertIn(f'Run {run_id} stopped (stopped by you).', result.stdout)
+        self.assertEqual(runner.wait(timeout=SHORT_TIMEOUT), 143)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'ai-pipeline --stop'))
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage'], self.escalation_data()['run']),
+                         ('human_stop', 'build', run_id))
+        self.assertFalse((local / 'pipeline.active').exists())
+        self.assertEqual((local / 'last-error').read_text(), 'stopped by the human during build\n')
+        self.assertGreater((local / 'last-error.notified').stat().st_mtime_ns,
+                           (local / 'last-error').stat().st_mtime_ns)
+        self.assertEqual(self.notifications(), '')
+        # Found gone (T308's case): completed too; a marker naming another pid is kept.
+        run_id = self.dead_run_record()
+        marker = self.crashed_marker()
+        before = marker.read_bytes()
+        (local / 'observation.json').unlink()
+        result = self.stop_command()
+        self.assertIn(f'Run {run_id} was not running', result.stdout)
+        self.assertEqual(marker.read_bytes(), before)
+        self.assertEqual((self.escalation_data()['stage'], self.escalation_data()['run']), ('unknown', run_id))
+        self.assertEqual((local / 'last-error').read_text(), 'stopped by the human during unknown\n')
+
+    def test_stop_command_never_touches_a_replacing_run(self):
+        self.ready()
+        local = self.project / '.ai/local'
+        # B: a runner that owns the checkout lock (and, with RECORD, a new run record), then sleeps.
+        replacing = ('exec 9>.ai/local/workflow.lock; flock -n 9 || exit 1\n'
+                     'printf "%s\\n" $$ > .ai/local/pipeline.active\n'
+                     '[[ -z "$RECORD" ]] || python3 "$HELPER" run-record start pipeline feature/test - - '
+                     '--pid $$ -- --approved > "$B.tmp"\n'
+                     'printf "%s\\n" $$ >> "$B.tmp"; mv "$B.tmp" "$B"\nexec sleep 300\n')
+        for record_b in ('1', ''):
+            with self.subTest(new_record=bool(record_b)):
+                b_file = self.base / f'b-{record_b or "lock"}'
+                env = f'RECORD={record_b} HELPER={shlex.quote(str(HELPER))} B={shlex.quote(str(b_file))}'
+                # A on TERM starts B in its own group (A's group was already signalled) and exits.
+                on_term = (f'{env} setsid bash -c {shlex.quote(replacing)} & '
+                           f'while [[ ! -e {shlex.quote(str(b_file))} ]]; do sleep 0.05; done; exit 143')
+                runner, run_a = self.stop_fixture_runner(on_term)
+                self.escalation('clear')
+                for name in ('last-error', 'last-error.notified'):
+                    (local / name).unlink(missing_ok=True)
+                try:
+                    result = self.stop_command()
+                    self.assertEqual(runner.wait(timeout=SHORT_TIMEOUT), 143)
+                    *b_lines, b_pid = b_file.read_text().split()
+                    if record_b:
+                        [run_b] = b_lines
+                        self.assertIn(f'Run {run_a} ended; another run replaced it in {self.project}; '
+                                      'nothing else recorded.', result.stdout)
+                        b_record = self.run_record_data(run_b)
+                        self.assertEqual((b_record['outcome'], b_record['stop_requested'], b_record['process']['pid']),
+                                         ('running', None, int(b_pid)))
+                        self.assertEqual(self.run_record('current').stdout.strip(), run_b)
+                        self.assertEqual(self.run_record_data(run_a)['outcome'], 'running')
+                    else:
+                        self.assertIn(f'Run {run_a} ended; another runner owns {self.project} now; '
+                                      'nothing else recorded.', result.stdout)
+                        self.assertEqual(self.run_record_data(run_a)['outcome'], 'human_stop')
+                    self.assertFalse(self.escalation_path().exists())
+                    self.assertEqual((local / 'pipeline.active').read_text(), f'{b_pid}\n')
+                    self.assertFalse((local / 'last-error').exists())
+                    self.assertFalse((local / 'last-error.notified').exists())
+                finally:
+                    if b_file.exists():
+                        with contextlib.suppress(OSError, ValueError):
+                            os.kill(int(b_file.read_text().split()[-1]), signal.SIGKILL)
+
+    def test_stop_command_cancels_scheduled_relaunch(self):
+        self.ready()
+        self.start_recoverable_run()
+        self.helper('run-manifest', 'limit-schedule', str(int(time.time()) - 10), '2', 'implementation')
+        paused = ('id=$(python3 "$0" run-record start pipeline feature/test - - --pid $$ -- --approved --base main '
+                  '--no-pr) && python3 "$0" run-record pause --run "$id" --pid $$ && printf "%s\\n" "$id"')
+        run_id = self.run_cmd(['bash', '-c', paused, str(HELPER)]).stdout.strip()
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'paused')
+        result = self.stop_command()
+        self.assertIn(f'Cancelled the scheduled usage-limit relaunch of {run_id}.', result.stdout)
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+        self.assertEqual(self.escalation_data()['kind'], 'human_stop')
+        # The due relaunch: refused, quietly (--stop already told the human), no session.
+        result = self.tool('ai-recover', '--stage', 'implementation', expected=1, crashed_run=False,
+                           AI_AUTO_RECOVER='1')
+        self.assertIn('the run was stopped by you; not resumed automatically', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertNotIn('▶ RESUMED', self.notifications())
+        self.assertEqual(self.human_stop_lines(), [])
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+
+    def test_stop_command_stops_a_watchdog_recovery(self):
+        self.ready()
+        self.start_recoverable_run()
+        run_id = self.dead_run_record()
+        stopped = {}
+
+        def send(runner):
+            started = time.monotonic()
+            stopped['result'] = self.stop_command()
+            stopped['seconds'] = time.monotonic() - started
+        recover = [str(self.project / '.ai/bin/ai-recover'), '--stage', 'crash (pipeline killed or restarted)']
+        code, output = self.interrupt_session(recover, 'mock-recover.pid', send, AI_AUTO_RECOVER='1',
+                                              MOCK_RECOVER='sleep')
+        self.assertEqual(code, 143, output)
+        self.assertLess(stopped['seconds'], 60 * TIMEOUT_SCALE)
+        self.assertIn(f'Run {run_id} stopped (stopped by you).', stopped['result'].stdout)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['stop_requested']['via'], record['launcher'], record['resumes']),
+                         ('human_stop', 'ai-pipeline --stop', 'ai-recover', 0))
+        self.assertEqual(len(self.recovery_calls()), 1)
+        self.assertNotIn('▶ RESUMED', self.notifications())
+        self.assertNotIn('Resuming the pipeline', self.notifications())
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.assertEqual(self.escalation_data()['kind'], 'human_stop')
+
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')

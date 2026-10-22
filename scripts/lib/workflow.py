@@ -2170,16 +2170,102 @@ def stop_ended_message(record):
     return f'Run {record["id"]} ended ({record["outcome"]}) before the stop took effect; nothing will resume it.'
 
 
-def stop_gone(runs, run_id, message):
+def stop_replaced(run_id, checkout):
+    return f'Run {run_id} ended; another run replaced it in {checkout}; nothing else recorded.'
+
+
+def stop_gone(runs, checkout, run_id, message):
     """The run's process is gone but its record has not ended: record the request and settle it
-    as `human_stop`, so nothing resumes it. Return MESSAGE, or the ended record's own message
-    when the run ended by itself in between."""
+    as `human_stop`, so nothing resumes it, then complete the records it left (T319). Return
+    MESSAGE, or what happened instead: it ended by itself in between, or another run replaced
+    it (then nothing more is written)."""
     request_stop(runs, run_id, STOP_VIA)
-    settled = settle_stop(runs, run_id)
+    if not settle_stop(runs, run_id):
+        record = read_run(runs, run_id)
+        if current_run_id(runs) != run_id:
+            return stop_replaced(run_id, checkout)
+        if record is None or not run_ended(record):
+            fail(f'Run {run_id} could not be recorded as stopped.')
+        return stop_ended_message(record)
+    return stop_complete(runs, checkout, run_id, message)
+
+
+def stop_stage(local_fd):
+    """The run's last pipeline step (a box key of the observation record), else `unknown`."""
+    found = read_record(local_fd, 'observation.json', OBSERVATION_LIMIT)
+    try:
+        stage = json.loads(found[0]).get('stage') if found is not None else None
+    except (ValueError, AttributeError):
+        stage = None
+    return stage if stage in BOX_KEYS else 'unknown'
+
+
+def stop_complete(runs, checkout, run_id, message):
+    """Completion (T319): the settled run's process ended without its own stop records. Only
+    while this process holds `.ai/local/workflow.lock` (`flock -n`; held: another runner owns
+    the checkout) and `run_id` is still current: the escalation record, the liveness marker
+    when it names the recorded pid, `last-error` and `last-error.notified` (the human was told
+    here), all through the pinned `.ai/local`."""
     record = read_run(runs, run_id)
-    if record is None or not run_ended(record):
-        fail(f'Run {run_id} could not be recorded as stopped.')
-    return message if settled else stop_ended_message(record)
+    fds = checkout_fds(checkout)
+    local_fd = None
+    if fds is not None:
+        local_fd = fds[2]
+        if local_fd is None:  # as ai_root's `mkdir -p .ai/local`, on the pinned `.ai`
+            with contextlib.suppress(OSError):
+                os.mkdir('local', 0o755, dir_fd=fds[1])
+            local_fd = open_dir(fds[1], 'local')
+        close_fds(fds[0], fds[1])
+    if record is None or local_fd is None:
+        fail(f'Run {run_id} was recorded as stopped by you, but .ai/local is missing or unsafe; nothing else recorded.')
+    try:
+        try:
+            lock_fd = os.open('workflow.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+                              | os.O_CLOEXEC, 0o600, dir_fd=local_fd)
+        except OSError as error:
+            fail(f'Run {run_id} was recorded as stopped by you; cannot open the checkout lock: {error.strerror}')
+        try:
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                fail(f'Run {run_id} was recorded as stopped by you; the checkout lock is not a regular file.')
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return f'Run {run_id} ended; another runner owns {checkout} now; nothing else recorded.'
+            if current_run_id(runs) != run_id:
+                return stop_replaced(run_id, checkout)
+            stage = stop_stage(local_fd)
+            write_escalation(runs, 'human_stop', stage, run_id, [], [], None)
+            marker = read_record(local_fd, 'pipeline.active', SMALL_LIMIT)
+            if marker is not None and marker[0].strip() == str(record['process']['pid']):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink('pipeline.active', dir_fd=local_fd)
+            try:
+                write_record(local_fd, 'last-error', f'stopped by the human during {stage}\n')
+                write_record(local_fd, 'last-error.notified', '')
+                # Strictly newer, also within one coarse timestamp tick: nothing announces it again.
+                error_ns = os.stat('last-error', dir_fd=local_fd, follow_symlinks=False).st_mtime_ns
+                os.utime('last-error.notified', ns=(error_ns + 1000, error_ns + 1000), dir_fd=local_fd,
+                         follow_symlinks=False)
+            except (RecordError, OSError) as error:
+                fail(f'Run {run_id} was recorded as stopped by you; cannot write last-error: {error}')
+        finally:
+            os.close(lock_fd)  # releases the lock
+    finally:
+        os.close(local_fd)
+    return message
+
+
+def stop_relaunch_scheduled(record):
+    """The paused run has a scheduled usage-limit relaunch in its manifest."""
+    if record['outcome'] != 'paused':
+        return False
+    data = read_small(binding_dir() / 'run.json', RUN_MAX_BYTES)
+    try:
+        manifest = json.loads(data) if data is not None else None
+    except ValueError:
+        return False
+    at = manifest.get('limit_relaunch_at') if isinstance(manifest, dict) else None
+    return type(at) is int and at > 0
 
 
 def stop_not_running(run_id):
@@ -2222,7 +2308,9 @@ def run_stop(arguments):
         sys.exit(3)
     process = record['process']
     if not run_process_alive(process):
-        print(stop_gone(runs, run_id, stop_not_running(run_id)))
+        message = (f'Cancelled the scheduled usage-limit relaunch of {run_id}.'
+                   if stop_relaunch_scheduled(record) else stop_not_running(run_id))
+        print(stop_gone(runs, checkout, run_id, message))
         return
     if not request_stop(runs, run_id, STOP_VIA, expect=(process['pid'], process['start_ticks'])):
         latest = read_run(runs, run_id)
@@ -2233,7 +2321,7 @@ def run_stop(arguments):
     # Checked again just before the signal: a pid reused since the request is never signalled.
     identity = process_identity(process['pid'])
     if identity is None or identity['start_ticks'] != process['start_ticks']:
-        print(stop_gone(runs, run_id, stop_not_running(run_id)))
+        print(stop_gone(runs, checkout, run_id, stop_not_running(run_id)))
         return
     stop_signal(identity)
     deadline = time.monotonic() + wait
@@ -2245,7 +2333,7 @@ def run_stop(arguments):
             print(stop_ended_message(latest))
             return
         if not alive:
-            print(stop_gone(runs, run_id, f'Run {run_id} stopped (stopped by you).'))
+            print(stop_gone(runs, checkout, run_id, f'Run {run_id} stopped (stopped by you).'))
             return
         if time.monotonic() >= deadline:
             break

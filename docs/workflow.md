@@ -337,7 +337,7 @@ process only: a push hook that git started may outlive it (known limitation).
 
 `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` stops a checkout's run from anywhere (default
 CHECKOUT `.`, wait 60 s, 1–9999). It changes into the checkout, runs the paths safety check
-(no checkout lock: the running pipeline holds it; no `last-error` write) and runs `workflow.py
+(no checkout lock while signalling: the running pipeline holds it) and runs `workflow.py
 run-stop`, which finds the run only through the current run record and keeps that id for every
 later step. A live run: it checks the recorded identity (pid and start ticks), records the stop
 request `via ai-pipeline --stop` (refused when the identity changed meanwhile), checks the
@@ -352,6 +352,24 @@ run's own trap then ends it as a human stop with the records above, the run-log 
 | 3 | Nothing to stop, nothing written: `No run active in <checkout>.`, `No run active in <checkout> (run <id> ended <outcome>).` or, after an earlier stop, `Run <id> was already stopped by you.` |
 | 4 | `Signalled run <id>; still ending after N s. Rerun to wait again.` The request stays recorded, so recovery refuses the run. |
 | 1 | Invalid arguments, not a Git checkout, unsafe paths, the run replaced meanwhile, or another error. |
+
+Completion (T319). When the run's process ended (or was found gone) without its own stop
+records, `run-stop` settles the kept id as `human_stop` (`settle-stop`; refused when the run
+ended by itself or another run became current: then nothing more is written). It then takes
+`.ai/local/workflow.lock` with `flock -n` through the pinned `.ai/local`: held → `Run <id>
+ended; another runner owns <checkout> now; nothing else recorded.` (exit 0); the run is no
+longer current → `Run <id> ended; another run replaced it in <checkout>; nothing else
+recorded.` (exit 0). Holding it, with the id still current, it writes the escalation record
+`human_stop` (stage: the last pipeline step of `.ai/local/observation.json`, else `unknown`),
+removes `.ai/local/pipeline.active` only when it holds the recorded pid, writes `last-error`
+(`stopped by the human during <stage>`) and a strictly newer `last-error.notified` (the
+command's own output told the human; recovery announces nothing again), and releases the
+lock. A `paused` run whose manifest has `limit_relaunch_at` (a scheduled usage-limit
+relaunch, its process gone) is handled the same way and prints `Cancelled the scheduled
+usage-limit relaunch of <id>.`; the due relaunch's `ai-recover` then refuses the human stop.
+A recovery (`ai-recover`, also one the watchdog started) owns the run record with its own
+process (T316), so `--stop` signals the recovery; its trap records the human stop and nothing
+resumes.
 
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
