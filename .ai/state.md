@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T209
 Tasks complete: 80
 Tasks remaining: 6
-Last validation: PASS at 2026-10-22T09:26:43Z
+Last validation: PASS at 2026-10-22T10:01:18Z
 Blocked: no
-Next action: Continue queue (T221 next; host gate decides T209)
-Last updated: 2026-10-22T10:10:00Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-22T10:01:18Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
