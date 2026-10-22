@@ -5612,7 +5612,7 @@ Evidence: new tests + `template_rules`, `review_prompt_template`, `Docs`, `gate_
 (Ran 1125 tests, OK, 1024 s; it outlived the 600 s tool call and was awaited as a background job).
 
 ## T215 — Task format and task-writing prompts name `Targeted:` checks (TS-01 (2), review P11)
-Status: TODO
+Status: DONE
 Dependencies: T205
 Model: sonnet
 
@@ -5658,6 +5658,11 @@ Targeted: `python3 -m unittest discover -s tests -k empty_template -k template_r
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: done. `templates/.ai/tasks.md` example Validation now has `Targeted:` and `Gate:` lines plus the
+sentence above the fence; `plan.md`, `plan-revision.md`, `triage.md` and `templates/CLAUDE.md` name them. No parser
+change; flow unchanged. Test `test_session_gate_targeted_lines_agree`. Targeted: that test + `-k empty_template -k
+template_rules -k queue_check_empty_template` 6 OK; `-k Docs -k session_gate -k prompt` 38 OK. Full gate left to the
+host (session gate rule: targeted).
 
 ## T206 — Event log core: envelope, schema v1, bounded stable lock, guarded writer, tolerant reader (ME-01 part 1)
 Status: TODO

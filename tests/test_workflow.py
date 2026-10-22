@@ -11284,6 +11284,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn("RUNNER CONTRACT's gate rule", (templates / 'CLAUDE.md').read_text())
         self.assertIn('.ai/bin/ai-check', (templates / '.ai/prompts/implement.md').read_text())
 
+    def test_session_gate_targeted_lines_agree(self):
+        templates = ROOT / 'templates'
+        text = (templates / '.ai/tasks.md').read_text()
+        fence = text[text.index('```markdown'):]
+        self.assertRegex(fence, r'(?m)^Targeted: ')
+        self.assertRegex(fence, r'(?m)^Gate: ')
+        for name in ('plan', 'plan-revision', 'triage'):
+            self.assertIn('Targeted:', (templates / f'.ai/prompts/{name}.md').read_text())
+        runner = ' '.join((ROOT / 'scripts/ai-run').read_text().split())
+        self.assertIn("run the task'\"'\"'s Targeted: checks in the foreground", runner)
+        self.assertIn('A task without Targeted: lines', runner)
+        self.assertIn('never a full-gate entry point', runner)
+
     def test_session_gate_triage_contract_has_its_own_gate_rule(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')

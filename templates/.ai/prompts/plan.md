@@ -10,7 +10,8 @@ and observable acceptance criteria. Create/update `.ai/current-plan.md` with the
 current assessment, simplest architecture, affected components, phases, API/data
 changes, risks, and validation strategy. Decompose into `.ai/tasks.md` using its
 exact format and TODO/IN_PROGRESS/BLOCKED/DONE statuses. Each task needs clear
-dependencies, acceptance criteria, actual modules, and exact validation commands.
+dependencies, acceptance criteria, actual modules, and exact validation commands: `### Validation` has one `Targeted:` line per
+task-specific check (a selector that runs at least one test) and a `Gate:` line.
 
 Inspect `.ai/validation-candidates.md` if present. Propose a real `.ai/validate`
 entry point using existing tooling; distinguish missing tools/tests and baseline

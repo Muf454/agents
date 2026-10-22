@@ -23,7 +23,8 @@ to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
 practical. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`, `Status: TODO`,
 `Dependencies:` (`none` or IDs), `Model:`, then `### Goal`, `### Implementation notes`,
-`### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+`### Likely affected modules`, `### Acceptance criteria`, `### Validation` (one `Targeted:` line per task-specific check, a
+selector that runs at least one test, and a `Gate:` line), and an empty
 `### Result / notes`. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
 human must do, everything a test reproduces under "Covered by automated tests" with the
 test name in backticks.

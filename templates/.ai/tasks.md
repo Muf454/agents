@@ -11,6 +11,8 @@ IN_PROGRESS. DONE requires all dependencies DONE and verified acceptance criteri
 Do not reuse IDs or remove old task results; append review-fix tasks with new IDs.
 Every section heading below is required; `### Result / notes` starts empty and is filled as work proceeds.
 
+`Targeted:` lines are what an unattended session runs; the runner's full gate (`Gate:`) runs after the session.
+
 The following is a FORMAT EXAMPLE ONLY inside a code fence, ignored by tooling:
 
 ```markdown
@@ -31,7 +33,8 @@ Dependencies: none
 - <Observable, independently verifiable outcome.>
 
 ### Validation
-- <Exact deterministic commands and expected outcomes.>
+Targeted: <fast deterministic command for this task, with its expected result>
+Gate: .ai/bin/ai-check
 
 ### Result / notes
 <Evidence, deviations, failures, or blocker; populated as work proceeds.>

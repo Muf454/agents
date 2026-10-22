@@ -39,7 +39,8 @@ Record assumptions. Before significant implementation, create/update the spec,
 plan, and task queue. Planning alone does not authorize implementation.
 
 Tasks need a stable ID, title, status, dependencies, goal, implementation notes,
-likely affected modules, acceptance criteria, validation, and result. Order tasks
+likely affected modules, acceptance criteria, validation (`Targeted:` lines for the
+task's own checks plus a `Gate:` line), and result. Order tasks
 by dependencies. Make them independently understandable and verifiable where
 practical, small enough to checkpoint, and larger than pointless microtasks.
 Follow the exact task format in `.ai/tasks.md`. Never invent completed work.
