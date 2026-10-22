@@ -6862,3 +6862,47 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
   the edits). `bash -n` not needed (no shell script changed). Full gate left to the host gate (BATCH 10 GATE RULE).
 - Limitation: the vault's `agents.md` Log line was inserted just above the T201 line (not at the very end).
 - Handoff: Flow chart section, Covered-by-tests names (T202, T210, T218, T213), Validation run and Next action updated.
+
+## T223 — Recheck DONE-block preservation after the plan revision commit and in recovery (review M1)
+Status: TODO
+Dependencies: T214
+Model: opus
+
+### Goal
+A commit hook (or an interruption) can no longer slip a changed or removed earlier DONE task block
+into the counted plan revision commit: `ai-run --revise-plan` rechecks DONE preservation after its
+commit and before it records the revision, and `stage-verify` for an open `plan-revision` stage
+refuses to report `committed` when the counted commit changed a DONE block.
+
+### Implementation notes
+- `scripts/ai-run` (revise-plan block, ~line 629): `plan-keeps-done "$since"` runs only before
+  `git commit`; afterwards only `ai_guard_verify`, the clean-checkout check and `revision_scope` run,
+  and `plan-revisions record` is written BEFORE those post-commit checks. Reorder so that after the
+  commit the host runs `ai_guard_verify`, the clean-checkout check, `revision_scope` and
+  `plan-keeps-done "$since"` (stage prefix `Plan revision stage: ` so ai-recover escalates), and only
+  then `plan-revisions record`. A failure must leave no accepted revision record.
+- `scripts/lib/workflow.py` `plan_stage_verify(start, digest)`: before printing `committed`, apply the
+  `plan_keeps_done` comparison against START (the clean checkout equals HEAD at that point); a
+  changed or removed DONE block fails with `Plan revision stage: DONE task T… was changed or removed`.
+  Reuse `plan_keeps_done`'s logic (factor out a non-exiting helper if needed) instead of copying it.
+- Confirm the stage's `start_head` is the same `since` the revise-plan block passes to
+  `plan-keeps-done`; if not, record which base recovery uses and why.
+
+### Likely affected modules
+scripts/ai-run, scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- New regression: a follow-up `ai-run --revise-plan` whose pre-commit hook changes and stages an
+  earlier DONE task's Result text (statuses valid, paths allowed, gate files untouched, checkout clean)
+  stops with `Plan revision stage: … DONE task … was changed or removed` and writes no plan revision
+  record (`plan-revisions outcome` finds none for this review).
+- New regression: `stage-verify` on an open `plan-revision` stage whose counted commit (with a host
+  revision record) changed a DONE block fails instead of printing `committed`.
+- `test_plan_review_followup_revision_keeps_done_blocks` and the other plan revision tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k plan_review_followup -k plan_revision -k stage_verify` (must say `Ran N tests`, N ≥ 1).
+Targeted: `bash -n scripts/ai-run`.
+Gate: `.ai/bin/ai-check`.
+
+### Result / notes
