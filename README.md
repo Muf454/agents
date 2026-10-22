@@ -318,9 +318,12 @@ tmux new -s my-app-ai
 .ai/bin/ai-pipeline --approved --base main --model sonnet
 ```
 
-0. **Plan review**: until the first task is DONE, Codex reviews the spec, plan and tasks
+0. **Plan review**: while no task has become DONE since the run's base (`tasks newly-done
+   BASE` is empty; DONE tasks from earlier batches do not count), Codex reviews the spec, plan and tasks
    read-only (`ai-review --plan`, prompt `.ai/prompts/plan-review.md`) and the result
-   is committed as `.ai/reviews/plan.md`. On BLOCKER/MAJOR findings the supervisor
+   is committed as `.ai/reviews/plan.md`. Every skipped review prints one line
+   `Plan review skipped: <why>` (`--skip-plan-review`, a resumed run, tasks already done since the
+   base, or a reused current review). On BLOCKER/MAJOR findings the supervisor
    (`AI_SUPERVISE=1`, default) has Claude revise the plan (`ai-run --revise-plan`: one row
    per finding in `.ai/reviews/plan-dispositions.md`, accepted with new tasks, rejected
    with evidence, or a question for you), notifies `🔁 Plan revised (round n/N)` and has
@@ -607,6 +610,50 @@ Claude-only reviews awaiting the Codex catch-up. It orders a task's attempts by 
 attempt recorded late keeps its place (rows written before `seq` existed come first, in file
 order). Use it to see which categories could
 move to haiku and which keep failing on sonnet.
+
+### Session gate (`AI_SESSION_GATE`)
+
+`AI_SESSION_GATE` (environment or config; a run setting captured with the approved run) decides
+whether an implementation session runs the full gate itself: `auto` (default) runs it only when a
+passing gate is recorded and the largest of the last 3 passes took under 120 s, `full` always,
+`targeted` never. A session
+in `targeted` mode runs only its task's `Targeted:` lines (or, without them, its task-specific
+Validation commands, never `.ai/bin/ai-check`); the host gate after the session decides DONE.
+Triage sessions always get the TRIAGE CONTRACT, which runs no gate. `session-gate` prints the mode
+it would use. Details: docs/workflow.md (Outcome log, session gate paragraph).
+
+### Flow data (ME-01)
+
+Host scripts append flow events to `events.jsonl` in the state directory (`AI_STATE_DIR`, default
+`~/.local/state/ai-toolkit`), never in a checkout. Each line is schema `v: 1` with `id`, `time`,
+`kind`, `project`, `branch` and `run` (the run id from `AI_RUN_ID`, 16 hex, or null; outcome rows of
+an approved run carry it too; older rows show as `(no run record)`) plus the fields of one of seven
+kinds: `gate` (with a `gate_id` shared with its `outcome gate` row, so each gate counts once),
+`stop`, `recovery`, `ruling` (its category in `ruling_kind`), `review`, `pr` and `run` (one `start` or
+`resume`, and exactly one `end` per handled finish or terminal stop). Text fields are one line of at
+most 200 characters and secret-looking tokens are replaced with `[redacted]` (best effort, not a
+scanner). Events are not in `outcomes.jsonl` because that log must never rotate.
+
+- `events.lock` (beside the log, never deleted) serializes writers and readers. Every wait is bounded
+  by `AI_EVENTS_LOCK_SECONDS` (0.1–60, default 5); a busy log skips the event with one
+  `Note: could not record the … event (event log busy).` and nothing else changes.
+- Rotation: above `AI_EVENTS_MAX_BYTES` (integer ≥ 65536, default 8 MiB) the live file moves to
+  `events.1.jsonl`, keeping the lines of every active run (no `run end`, latest event within 7 days).
+  Readers read both files and count each event id once.
+- A stop's category (`stop-category`) is telemetry only; recovery does not read it.
+
+Reading the metrics:
+
+```
+ai-status --metrics                      # per project and per run, text tables
+ai-status --metrics --since 2026-10-21   # UTC dates on or after the day
+ai-status --metrics --project agents     # one project
+ai-status --metrics --json               # the same data as JSON (v 1)
+```
+
+A run whose events rotated away still appears from its outcome rows with `events 0` and result
+`unknown`; `open` means a start or resume with no end and a recent event. Treat `unknown` as "not
+recorded", not as a failure. Details: docs/workflow.md (Flow data, Metrics).
 
 ### Models
 

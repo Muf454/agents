@@ -1402,10 +1402,21 @@ once across both logs: a row and an event with one id are one gate (the row's se
 run; the event's tests, failures, workers, task, stage and start), a row without an id or an event
 without a row is a gate of its own (spec A12).
 
-Flow events (ME-01) go to a separate `<state root>/events.jsonl`, not to new kinds in
+### Flow data (ME-01)
+
+Where it lives: `events.jsonl` in the host state root (`AI_STATE_DIR`, else
+`$XDG_STATE_HOME/ai-toolkit`, else `~/.local/state/ai-toolkit`), beside `outcomes.jsonl`, with
+`events.1.jsonl` (the archive after a rotation) and the stable `events.lock`. Only host scripts
+write it; no agent session does, and nothing in a checkout is read. The sections below give the
+writers and rules; in short, every line has `v` (1), `id`, `time`, `kind`, `project`, `branch`,
+`run` and the fields of one of the seven kinds (`gate`, `stop`, `recovery`, `ruling`, `review`,
+`pr`, `run`). `run` is the run id from `AI_RUN_ID` (never inferred from the branch or time), so
+rows and events without one, such as older records and standalone commands, form the
+`(no run record)` group in the metrics. Text fields are redacted and folded to one line (see
+below). Flow events go to a separate `<state root>/events.jsonl`, not to new kinds in
 `outcomes.jsonl`. Decision (2026-10-22): `outcomes.jsonl` must never rotate (attempt numbering,
 `first_pass` and crash reconcile read all of it, and older installed copies read it with fixed
-kind filters), while events need rotation and a schema version. `workflow.py event KIND
+kind filters), while events need rotation and a schema version (spec A6). `workflow.py event KIND
 key=value…` appends one line: the envelope `v` (1), `id`, `time`, `kind`, `project`, `branch`,
 `run` (`AI_RUN_ID` when it is 16 hex, else null; never inferred) plus the kind's fields
 (`EVENT_KINDS`: `gate`, `stop`, `recovery`, `ruling` with its category in `ruling_kind`,
@@ -1421,7 +1432,8 @@ Shell callers use `ai_event` (`common.sh`), which skips once the gate is known b
 failure into one `Note:` and never changes the caller's status; any helper that prepares an
 event runs inside such a `common.sh` function after the same guard, never in its arguments.
 `read_events` reads `events.1.jsonl` then `events.jsonl`, keeping only `v == 1` events of known
-kinds, each id once. The writers (T207–T210, T218, T220) come later.
+kinds, each id once. The writers are described below; the event-kind table is `EVENT_KINDS` in
+`scripts/lib/workflow.py`.
 
 `workflow.py event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID` (T207) appends one `gate`
 event (`task` when the first argument is `T<digits>`, else `stage`; START and SECONDS decimal
@@ -1507,6 +1519,16 @@ the two renames leaves duplicates, never loss (`read_events` dedupes by id); a r
 removes its temp file and leaves the file it failed on as it was, and the append still happens
 (a `Note:` only when the append itself fails).
 
+### Reading the metrics
+
+`ai-status --metrics` (text tables, Projects and Runs) and `ai-status --metrics --json` (the same
+data, `{"v": 1, …}`) take `--since YYYY-MM-DD` (UTC, on or after that day), `--project NAME`
+(exact match). A run whose events rotated away is still listed from its outcome rows, with
+`events 0` and result `unknown`; `open` appears only for a retained start or resume with no end
+and a recent event. The two numbers that need the events (`stops`, lifecycle) are null or
+`unknown` rather than guessed. Check one run against its raw `outcomes.jsonl` and `events.jsonl`
+lines before trusting the totals.
+
 Metrics (T211, spec A13): `workflow.py metrics [--since YYYY-MM-DD] [--project NAME] [--json]
 [--outcomes FILE] [--events FILE…]` (the file options for tests) reads the outcome log and the
 retained events (read only) and prints `{"v": 1, "projects": […], "runs": […]}`; without
@@ -1532,6 +1554,8 @@ UTC date; `--project` matches exactly; a bad option exits 2. A busy event log ex
 `Error: the event log is busy (lock held for more than N s); try again.`, never numbers computed
 without the events.
 
+### Session gate (TS-01)
+
 `session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
 gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run
 setting `AI_SESSION_GATE` (kept with the approved run like the routing settings) decides: empty
@@ -1546,7 +1570,9 @@ checks, then `.ai/bin/ai-check` with `run_in_background`, waited for, and gets t
 lines runs its task-specific Validation commands, never a full-gate entry point such as
 `ai-check`, `.ai/validate` or the whole suite), gets no allowance (`Session:` line `gate rule
 targeted (host gate Ns after the session)`), and leaves the full gate to the host gate, which
-decides DONE.
+decides DONE. Triage sessions (`ai-run --triage`) are not affected by the setting: their TRIAGE
+CONTRACT says triage changes only workflow records and runs neither `.ai/bin/ai-check` nor
+`.ai/validate` nor the suite.
 
 `attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
 for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows

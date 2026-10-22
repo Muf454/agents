@@ -125,9 +125,10 @@ Measured worker default: not recorded yet (mission control: write the best of 8/
 approving; T202 uses `min(14, cpu - 2)` otherwise).
 
 ## Validation run
-None on this branch yet. Batch 9's last full gate: PASS, 1104 tests (T116 tree, `ai-check`,
-816.3 s). Each batch 10 task runs its `Targeted:` commands and `bash -n` in the session; the host
-gate after each session is the full gate (BATCH 10 GATE RULE in the queue header).
+No full gate was run in a session on this branch (the host gate after each session is the full
+gate, BATCH 10 GATE RULE in the queue header). The latest targeted checks: T213 `-k Docs` 3 OK,
+`-k flow_this_repo` 1 OK (after its README and docs edits, see the T213 result). Batch 9's last
+full gate: PASS, 1104 tests (T116 tree, `ai-check`, 816.3 s).
 
 ## Assumptions
 Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour most:
@@ -152,7 +153,8 @@ Recorded as A1–A20 in `.ai/project-spec.md`. The ones that shape behaviour mos
   header tells them not to run the full gate.
 
 ## Flow chart
-Flow chart updated (so far by T201; more to come).
+Flow chart updated (T213 audit, 2026-10-22: the T201, T204, T208 and T209 edits match the code; the
+"Flow data (ME-01)" Related line points to the docs; no other flow change in this batch).
 T201 updated the vault `agents-flow.md` plan review node ("no task DONE since the base?", skip
 line printed) and its skip edge (2026-10-22). T214: flow unchanged (checked the chart's plan
 revision nodes: the entry rule is T201's; an edited DONE block is a revision stop like the
@@ -160,8 +162,9 @@ others). T204 updated the "Inside one task" session node (targeted checks; full 
 session only under 120 s or `AI_SESSION_GATE=full`), the host gate node (decides DONE) and added
 the "Session gate rule" bullet. T208 added the "Stop and recovery events" bullet under "When
 something goes wrong" (2026-10-22). T209 added "run end recorded (ME-01)" to the big picture's
-🏁 FINISHED node (2026-10-22). Still to come: T213 audits them and adds the "Flow data (ME-01)"
-line.
+🏁 FINISHED node (2026-10-22). T213 audited them against the code (the chart's text matched, apart
+from the gate allowance wording, updated under "Session gate runs") and added the "Flow data
+(ME-01)" Related line.
 
 ## Manual testing for the human
 
@@ -215,7 +218,8 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_plan_review_followup_revision_keeps_done_blocks`); a task newly DONE since the base still
   stops the revision (`test_plan_review_followup_newly_done_still_stops`); the queue repair with
   `--base` reorders, without it does nothing (`test_plan_review_followup_queue_repair_with_base`).
-- `worker_count` (T202): default and override parsing, `Workers:` first line.
+- `worker_count` (T202, DONE): default `min(14, CPU - 2)`, override and invalid values, `Workers:`
+  first line (`test_worker_count_default_and_override`).
 - `session_gate_mode`, `session_gate_setting` (T203, DONE): mode from gate time and setting, errors
   → `targeted 0` (`test_session_gate_mode_from_gate_time_and_setting`); `AI_SESSION_GATE=x` stops
   `ai-run` and `ai-pipeline`, the value is kept in the run manifest
@@ -309,7 +313,13 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   `ai-recover` escalation keep exit 1, last-error and the one ⛔ notification
   (`test_events_lock_held_terminal_stop_is_bounded`); `run-totals` prints `gates=-
   gate_failures=-` within the bound, exit 0 (`test_events_lock_held_reader_reports_unavailable`).
-- Later parts: `events_ruling` and `events_review` (T210), `events_pr` (T218).
+- `events_ruling` and `events_review` (T210, DONE): every Ruling kind from its writer
+  (`test_events_ruling_all_writers_queue_order`, `_task_sections`, `_disposition_cell`, `_flow_line`),
+  a refused claim writes no event (`test_events_ruling_refused_claims_write_none`,
+  `_refused_flow_line_claim_writes_none`); `review` with its routing reason and a recorded limit as a
+  fallback (`test_events_review_routing_reason`, `test_events_review_recorded_limit_is_a_fallback`).
+- `events_pr` (T218, DONE): `pr` `opened` as draft or ready, `ready` state
+  (`test_events_pr_opened_draft_when_the_run_drafts`, `test_events_pr_opened_and_ready`).
 - `ai-status --metrics` text (T212, DONE): both tables print with no `|` and `-` for missing numbers
   (`test_metrics_text_tables`); a run with rotated events shows `unknown`, events `0`, stops `-`,
   and the footer explains it (`test_metrics_text_rotated_run`); `ai-status --metrics --json
@@ -325,7 +335,8 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_metrics_gates_counted_once`); `--since`, `--project`, empty logs, bad options exit 2, a
   held lock exits 1 with the busy error (`test_metrics_filters_and_empty_logs`).
 - `test_metrics` (T212, later): text tables, `ai-status --metrics`.
-- `Docs` and `flow_this_repo` (T213).
+- `Docs` and `flow_this_repo` (T213, DONE): `DocsConsistencyTest` (README and docs name the
+  batch's terms and phrases) and `test_pr_body_flow_this_repo_declares_the_flow_chart`.
 
 ## Human todos
 - Gate files: none need changing for this batch.
@@ -336,5 +347,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T211 (T212, then T213).
-Nothing is merged or deployed.
+T213 was the last task in the queue. After its host gate passes, the run is complete: the
+pipeline's all-DONE step runs the final validation and sets `ready_for_review`. Nothing is merged or deployed.

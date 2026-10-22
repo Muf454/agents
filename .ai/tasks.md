@@ -6798,7 +6798,7 @@ plain-output assertion now checks the text); `-k outcome_report -k runner_logs_t
 `bash -n scripts/ai-status` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T213 — Docs, flow chart and handoff audit (batch 10)
-Status: TODO
+Status: DONE
 Dependencies: T201, T214, T202, T203, T204, T205, T215, T206, T219, T216, T217, T207, T222, T220, T208, T209, T221, T210, T218, T211, T212
 Model: haiku
 
@@ -6844,4 +6844,21 @@ Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `R
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
-
+2026-10-22 (claude haiku): docs audit done; the code is the source of truth.
+- Added: README "Session gate (`AI_SESSION_GATE`)" and "Flow data (ME-01)" (events files, `events.lock`,
+  `AI_EVENTS_LOCK_SECONDS`, `AI_EVENTS_MAX_BYTES`, `AI_RUN_ID`, `gate_id`, redaction, rotation, metrics
+  commands and `unknown`/`open`/`events 0`, TRIAGE CONTRACT); README plan review line now says "no task
+  DONE since the base" and names `Plan review skipped:`.
+- docs/workflow.md: "### Flow data (ME-01)" (location via `state_root()`, the seven kinds, why not
+  `outcomes.jsonl`), "### Session gate (TS-01)" (triage not affected; TRIAGE CONTRACT runs no gate),
+  "### Reading the metrics"; stale "writers come later" sentence fixed.
+- Vault `agents-flow.md`: "Session gate runs" bullet now says it applies under the `full` rule only
+  (T204); "Flow data (ME-01)" Related line added; `updated:` already 2026-10-22. Vault `agents.md` Log line.
+- Checked, no mismatch: T201 plan review node and skip edge; T204 "Inside one task" gate node and
+  session gate rule bullet; T208 stop/recovery bullet; T209 "run end recorded (ME-01)" node.
+- Worker default (`min(14, CPU - 2)`, at least 1) matches `tests/run_parallel.py` `worker_count()` and
+  docs/workflow.md (already described in the test section).
+- Targeted: `python3 -m unittest discover -s tests -k Docs` 3 OK; `-k flow_this_repo` 1 OK (rerun after
+  the edits). `bash -n` not needed (no shell script changed). Full gate left to the host gate (BATCH 10 GATE RULE).
+- Limitation: the vault's `agents.md` Log line was inserted just above the T201 line (not at the very end).
+- Handoff: Flow chart section, Covered-by-tests names (T202, T210, T218, T213), Validation run and Next action updated.
