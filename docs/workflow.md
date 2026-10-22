@@ -575,7 +575,7 @@ earlier run's ended one) starts its record (`No run record to resume; recording 
 run.`). The end
 is recorded as `finished` (detail: the PR or `no PR`) or, through `ai_die`, `stopped` with the
 first 200 characters of the reason; `ai_die` writes it only when the approved gate still
-verifies, so no changed checkout helper runs. A stand-alone `ai-run` (no `AI_PIPELINE`, T316)
+verifies, so no changed checkout helper runs. A stand-alone `ai-run` (no `AI_PIPELINE`, T328)
 writes its own record (kind `ai-run`, branch `AI_START_BRANCH`, no base, its arguments with
 the resolved `--knowledge-dir`) right after its exit traps are installed, so every exit ends
 it: `finished` on exit 0, else `stopped` (detail: the last error), only while the approved

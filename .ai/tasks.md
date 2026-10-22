@@ -5509,7 +5509,7 @@ session `-k run_record` Ran 21 OK; the seven tests above OK (2+2+3, run separate
 `docs/workflow.md` "Pipeline contract" now describes the resume fallback. DONE.
 
 ## T316 — ai-recover owns the run early (RC-01 G3, plan review P4)
-Status: TODO
+Status: DONE
 Dependencies: T302
 Model: opus
 
@@ -5705,6 +5705,19 @@ is finished. Do NOT rerun them: check the diff against the notes and acceptance 
 few minutes, check `docs/workflow.md` "Recovery contract", record this result and checkpoint at
 once. The runner runs the full gate.
 
+Result 2026-10-22 (fourth session, wrap-up): the diff 8df58cb..a40f19e matches the notes.
+`scripts/ai-recover` sets `AI_RUN_ID` (or `run-record current`) and runs `run-record own --pid $$
+--launcher ai-recover` right after `state-root-check`, before `run-manifest gate` and
+`reserve-attempt`; no record → `there is no run record to resume.`, refusal → `the run was
+stopped by you or replaced; not resumed automatically.`. `escalate()` and `on_exit` end the
+record `stopped` (200 chars) only with `AI_RUN_ID` set and no `AI_GATE_BROKEN`; `relaunch_wait`
+pauses it; `resume()` passes `AI_RUN_ID`. Tests: `test_run_record_recovery_owns_before_its_session`
+and `test_run_record_recovery_refuses_a_stopped_run` exist as in the acceptance criteria; the
+shared fixture `crashed_run_record()` gives a direct `ai-recover` a crashed pipeline's record
+(no assertion weakened). Evidence: mission control's 30 targeted runs on 030fc61 (all OK, Ran 1
+each); not rerun in this session per the note above; the full gate is left to the runner.
+`docs/workflow.md` "Recovery contract" describes the early own; this session corrected the
+stand-alone `ai-run` record paragraph's task label to T328 (its code stays for T328 to check).
 
 ## T328 — Stand-alone ai-run publishes and ends its run record (RC-01 G3, plan review P7, P18)
 Status: TODO
