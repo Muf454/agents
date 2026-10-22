@@ -6256,7 +6256,7 @@ its run id, the later standalone ones none) and that the last event is the stop 
 `-k events_run_context` Ran 4 OK. Ran 1155 tests, nothing else failed.
 
 ## T208 — `stop` and `recovery` events with a fixed stop category (ME-01 part 1, stops)
-Status: TODO
+Status: DONE
 Dependencies: T206, T219, T216
 Model: opus
 
@@ -6337,6 +6337,23 @@ recovery_escalates` Ran 11 OK (39 s); `bash -n` OK. What is left: review the dif
 notes and acceptance criteria, finish docs (`docs/workflow.md`, the flow line in
 `.ai/handoff.md` if the flow changed), record the result and checkpoint. Do not run the full
 gate yourself (the runner runs it; it outlives the tool limit).
+2026-10-22 (resume): reviewed the WIP 7da9f68 against the notes and every acceptance criterion:
+`workflow.py stop-category` (ordered `STOP_CATEGORIES`, `read_record` on the pinned `.ai/local`
+at 4 KiB, never through a symlink, else `other`; telemetry-only comment); `common.sh`
+`ai_stop_event STAGE yes|no` and `ai_recovery_event DECISION ATTEMPT` with the `AI_GATE_BROKEN`
+guard first and the helper calls after it (the task is read inside, from `run-manifest task`, else
+`-`; attempt `-` unless 1–3 digits); `ai-pipeline` `stop()` writes `yes` right before `exec
+ai-recover`, else `no`; `ai-recover` writes `rerun` (open stage resume), `commit_and_rerun`
+(timeout rerun), `relaunch` (usage-limit schedule), the Claude decision before `resume`, and
+`escalate` + `stop recovery: no` in `escalate()` (skipped by the guard after a failed gate check).
+The five acceptance tests exist, including both gate-change paths (pipeline hook and `ai-recover`
+"gate files changed", logging helper shows no `stop-category`/`event` call). Re-run here:
+`-k events_stop` Ran 5 tests OK (68 s); `-k runs_no_helper -k observation_gate -k
+recovery_escalates` Ran 11 tests OK (23 s); `bash -n scripts/lib/common.sh scripts/ai-pipeline
+scripts/ai-recover` OK; extra neighbourhood `-k events_run -k events_gate -k recovery_` Ran 83
+tests OK (641 s). Docs: `docs/workflow.md` paragraph (in the WIP), vault `agents-flow.md`
+"Stop and recovery events" bullet under "When something goes wrong", hub Log line, handoff.
+Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T209 — `run` start, resume and exactly one end per handled finish or terminal stop (ME-01 part 1, review P7)
 Status: TODO

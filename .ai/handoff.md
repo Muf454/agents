@@ -55,6 +55,11 @@
   `outcome gate` row and an epoch start; `ai-pipeline` `ensure_validated` (`validation`) and
   `ai-recover` `commit_validated` (`recovery`), failed and timed-out gates included. Exit paths and
   messages unchanged; a changed gate records nothing.
+- T208 (ME-01 part 1, 2026-10-22): `stop` events with a fixed category (`workflow.py
+  stop-category STAGE` on the first 4 KiB of `.ai/local/last-error`, telemetry only) and
+  `recovery` events (decision, manifest task, reserved attempt) through `common.sh`
+  `ai_stop_event`/`ai_recovery_event`, guarded so nothing runs after a gate change; written by
+  `ai-pipeline` `stop()` and at each `ai-recover` decision and escalation. Stop behaviour unchanged.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -138,7 +143,8 @@ line printed) and its skip edge (2026-10-22). T214: flow unchanged (checked the 
 revision nodes: the entry rule is T201's; an edited DONE block is a revision stop like the
 others). T204 updated the "Inside one task" session node (targeted checks; full gate in the
 session only under 120 s or `AI_SESSION_GATE=full`), the host gate node (decides DONE) and added
-the "Session gate rule" bullet. Still to come: T208 (stop and recovery events bullet) and T209 (run end recorded) update vault
+the "Session gate rule" bullet. T208 added the "Stop and recovery events" bullet under "When
+something goes wrong" (2026-10-22). Still to come: T209 (run end recorded) updates vault
 `agents-flow.md` and add hub Log lines; T213 audits them and adds the "Flow data (ME-01)" line.
 
 ## Manual testing for the human
@@ -261,7 +267,15 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   recovery gate writes `recovery` `pass` with the checkpoint commit, `fail` and `timeout` with the
   same "fails validation" escalation, and nothing (helper never run) when the gate swapped a gate
   file (`test_events_gate_recovery_gate_outcomes_pass`, `_fail`, `_timeout`, `_changed_gate`).
-- Later parts: `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
+- `events_stop` (T208, DONE): one last-error text per category, reworded/missing/symlinked →
+  `other` (`test_events_stop_category_table`); a failing gate recovered by rerun writes `stop`
+  (`validation_failed`, `recovery: yes`) then `recovery` (`rerun`, attempt 1) with the run id
+  (`test_events_stop_and_recovery_written_on_a_recovered_stop`); an escalation writes `stop` with
+  `recovery: no` and a secret as `[redacted]` (`test_events_stop_on_escalation`); an unwritable
+  state dir keeps the notification, last-error and exit status
+  (`test_events_stop_unwritable_state_dir_keeps_the_stop`); a gate changed by a hook or during
+  recovery runs no event helper and writes no event (`test_events_stop_gate_change_runs_no_event_helper`).
+- Later parts: `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
   terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
   (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
@@ -278,5 +292,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T220 (the next unblocked task in `.ai/tasks.md`).
+The runner continues with the next task after T208 (the next unblocked task in `.ai/tasks.md`).
 Nothing is merged or deployed.
