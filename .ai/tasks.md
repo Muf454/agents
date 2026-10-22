@@ -5696,6 +5696,16 @@ here; the stand-alone ai-run record is T328. Budget the session: run the failing
 `-k` groups of at most ~10 tests each, never the whole file or the full gate (the runner runs
 the gate), and checkpoint as soon as the named tests pass.
 
+Mission control 2026-10-22 11:25: a third session hit the limit after changing only
+`.ai/handoff.md` (kept: its T316 entry and the next action). Mission control then ran the 30
+tests that matter on the committed source (030fc61), each alone, eight in parallel: the 28
+that failed at 10:05 plus `test_run_record_recovery_owns_before_its_session` and
+`test_run_record_recovery_refuses_a_stopped_run`. All 30 OK (Ran 1 each, 3–46 s). So the code
+is finished. Do NOT rerun them: check the diff against the notes and acceptance criteria in a
+few minutes, check `docs/workflow.md` "Recovery contract", record this result and checkpoint at
+once. The runner runs the full gate.
+
+
 ## T328 — Stand-alone ai-run publishes and ends its run record (RC-01 G3, plan review P7, P18)
 Status: TODO
 Dependencies: T316

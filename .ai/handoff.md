@@ -20,6 +20,15 @@
   the approved gate verifies. A resume without a named run whose approved run has no record of
   its own (approved before run records, or only an earlier run's ended record) starts one; a
   stop request still refuses. `docs/workflow.md` "Pipeline contract". Flow unchanged.
+- T316 (2026-10-22): `ai-recover` owns the run record (`run-record own --launcher ai-recover`,
+  `AI_RUN_ID` or `run-record current`) right after `state-root-check`, before an attempt is
+  reserved; no record or a refusal (stop request, ended or replaced run) escalates. Escalations
+  and an unexpected exit end it `stopped` (not after a gate change), a usage-limit wait pauses
+  it, the resume passes `AI_RUN_ID` (`resumes` + 1). Test fixture: a direct `ai-recover` in the
+  tests stands for the watchdog's recovery after a crash, so it gets a crashed pipeline record
+  when none is running. `docs/workflow.md` "Recovery contract". Flow unchanged. The stand-alone
+  `ai-run` record code from the first T316 session is in `scripts/ai-run`; T328 checks and
+  finishes it.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -207,7 +216,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_run_record_pipeline_start_and_finish`, `test_run_record_pipeline_stop_ends_stopped`,
   `test_run_record_pipeline_refuses_without_record`, `test_run_record_pipeline_resume_keeps_one_record`,
   `test_run_record_ai_die_after_gate_change`, `test_run_record_pipeline_resume_without_a_record_starts_one`,
-  `test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run`.
+  `test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run`; T316:
+  `test_run_record_recovery_owns_before_its_session`,
+  `test_run_record_recovery_refuses_a_stopped_run`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
@@ -254,6 +265,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303 and T302 are DONE (T302's gate PASSED on 086ff5f's source).
-Next: the rest of the queue by dependency (T316 follows T302).
+T301, T315, T305, T303, T302 and T316 are DONE (T302's gate PASSED on 086ff5f's source).
+Next: the rest of the queue by dependency (T328 follows T316).
 Nothing is merged or deployed.
