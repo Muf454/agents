@@ -1446,6 +1446,22 @@ clock) and `gate_id`, with the epoch start `date +%s - seconds`; `ai-pipeline`
 time the gate on the wall clock, record it after `ai_gate_check`, then take today's failure
 branch, so a failing or timed-out gate is recorded too. A gate that changed records nothing.
 
+Stops and recovery decisions (T208): `common.sh` `ai_stop_event STAGE yes|no` and
+`ai_recovery_event DECISION ATTEMPT` skip themselves once `AI_GATE_BROKEN` is set, and only then
+run their helpers. A `stop` event carries the stage, a category from `workflow.py stop-category
+STAGE` (spec A10: `timeout`, `validation_failed`, `record_format`, `queue_order`,
+`review_round_limit`, `usage_limit`, `needs_human`, `crash`, else `other`; the first match of the
+ordered `STOP_CATEGORIES` table on the first 4 KiB of `.ai/local/last-error`, a regular file read
+through the pinned `.ai/local`; stage `validation` is always `validation_failed`), the redacted
+last-error excerpt as `message`, and `recovery` (`yes` exactly when `ai-pipeline` `stop()` hands
+over to `ai-recover`). `ai-pipeline` `stop()` writes one after its gate check; `ai-recover`
+writes a `recovery` event (`rerun`, `commit_and_rerun`, `relaunch` when it schedules a usage-limit
+relaunch, `escalate`) at each decision with the manifest's task (else `-`) and the reserved attempt
+(`-` before it is reserved), and `escalate()` adds a `stop` with `recovery: no`. Escalations after a
+failed gate check record nothing. The category is telemetry only: recovery never reads it (its hard
+rules match the reason text). Recording never changes the stop's notification, last-error or exit
+status.
+
 Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
 exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
 least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`

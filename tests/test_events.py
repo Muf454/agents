@@ -441,6 +441,54 @@ class EventsGateTests(EventsFixture):
         self.assertEqual(len(self.lines()), len(cases))
 
 
+class EventsStopTests(EventsFixture):
+    def category(self, stage='implementation'):
+        result = subprocess.run([sys.executable, str(HELPER), 'stop-category', stage], cwd=self.repo,
+                                env=self.env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        return result.stdout.strip()
+
+    def test_events_stop_category_table(self):
+        local = self.repo / '.ai/local'
+        local.mkdir(parents=True)
+        error = local / 'last-error'
+        self.assertEqual(self.category(), 'other')  # no last-error
+        for text, category in (
+                ('Claude usage limit: the reset is beyond the 28800s wait budget. Rerun after it resets.', 'usage_limit'),
+                ('Claude exited 124 (timeout/interruption/error). Preserve partial work.', 'timeout'),
+                ('Run time limit reached before final validation.', 'timeout'),
+                ('Validation failed; T001 returned to IN_PROGRESS.', 'validation_failed'),
+                ('T002 fails validation after the session', 'validation_failed'),
+                ('Task queue is invalid: T003 dependencies must exist earlier', 'queue_order'),
+                ('T004 is missing ### Result / notes', 'record_format'),
+                ('review round 3 has no row in dispositions.md', 'record_format'),
+                ('Fix round limit reached (4).', 'review_round_limit'),
+                ('plan review needs your decision: keep A?', 'needs_human'),
+                ('Claude session was killed', 'crash'),
+                ('the pipeline ended without a checkpoint', 'crash'),
+                ('The reviewer said something nobody planned for', 'other')):
+            with self.subTest(category=category, text=text):
+                error.write_text(text + '\n')
+                self.assertEqual(self.category(), category)
+        error.write_text('stopped during validation (see terminal)\n')
+        self.assertEqual(self.category('validation'), 'validation_failed')
+        # A reworded message no pattern knows is `other`, never a guess.
+        error.write_text('Checks went red; the task is back in progress.\n')
+        self.assertEqual(self.category(), 'other')
+        # Only the first 4 KiB is read.
+        error.write_text('x' * 5000 + ' usage limit\n')
+        self.assertEqual(self.category(), 'other')
+        # A symlink is never followed, even to a file that names a category.
+        error.unlink()
+        target = self.base / 'outside-error'
+        target.write_text('Validation failed; T001 returned to IN_PROGRESS.\n')
+        error.symlink_to(target)
+        self.assertEqual(self.category(), 'other')
+        usage = subprocess.run([sys.executable, str(HELPER), 'stop-category'], cwd=self.repo, env=self.env,
+                               capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertNotEqual(usage.returncode, 0)
+
+
 class EventsGateIdTests(EventsFixture):
     def helper(self, *args, **env):
         return subprocess.run([sys.executable, str(HELPER), *args], cwd=self.repo, env={**self.env, **env},

@@ -4476,6 +4476,46 @@ def event_gate(arguments):
     record_event('gate', fields)
 
 
+# Stop categories (spec A10), first match wins: (stage or None, pattern or None) → category.
+# Telemetry only: recovery never reads a category (its hard rules match the reason itself, OR-04).
+STOP_CATEGORIES = (
+    (None, r'usage limit', 'usage_limit'),
+    (None, r'exit(?:ed)? 124\b|time limit|timed out', 'timeout'),
+    ('validation', None, 'validation_failed'),
+    (None, r'fails validation|validation failed', 'validation_failed'),
+    (None, r'Task queue is invalid|dependencies must exist earlier', 'queue_order'),
+    (None, r'missing ###|has no row|disposition|Flow chart', 'record_format'),
+    (None, r'fix round|review round|supervision limit', 'review_round_limit'),
+    (None, r'needs your decision|questions only you can answer', 'needs_human'),
+    (None, r'crash|killed|without a checkpoint', 'crash'),
+)
+
+
+def stop_category_of(stage, text):
+    """The STOP_CATEGORIES category of a stop during STAGE with last-error TEXT, else `other`."""
+    for wanted, pattern, category in STOP_CATEGORIES:
+        if (wanted is None or stage == wanted) and (pattern is None or re.search(pattern, text, re.IGNORECASE)):
+            return category
+    return 'other'
+
+
+def stop_category(arguments):
+    """stop-category STAGE: print the stop's category from the first 4 KiB of .ai/local/last-error
+    (a regular file in the pinned `.ai/local`; missing, a symlink or unreadable reads as empty)."""
+    if len(arguments) != 1:
+        fail('Usage: stop-category STAGE')
+    text = ''
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is not None:
+        try:
+            record = read_record(local_fd, 'last-error', SMALL_LIMIT)
+        finally:
+            os.close(local_fd)
+        if record is not None:
+            text = record[0]
+    print(stop_category_of(arguments[0], text))
+
+
 def attempt_seq_path():
     """The host-wide attempt counter, beside the log in the same state root."""
     return state_root() / 'attempt-seq'
@@ -6311,6 +6351,8 @@ def main():
         event_command(arguments)
     elif command == 'event-gate':
         event_gate(arguments)
+    elif command == 'stop-category':
+        stop_category(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
     elif command == 'session-gate':

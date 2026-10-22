@@ -6330,6 +6330,13 @@ Targeted: `bash -n scripts/lib/common.sh scripts/ai-pipeline scripts/ai-recover`
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Mission control 2026-10-22 11:00: the session hit its time limit (926 s, empty log) and left
+the implementation uncommitted; committed as WIP. Mission control then ran the targeted checks
+on that WIP: `-k events_stop` Ran 5 OK (91 s); `-k runs_no_helper -k observation_gate -k
+recovery_escalates` Ran 11 OK (39 s); `bash -n` OK. What is left: review the diff against the
+notes and acceptance criteria, finish docs (`docs/workflow.md`, the flow line in
+`.ai/handoff.md` if the flow changed), record the result and checkpoint. Do not run the full
+gate yourself (the runner runs it; it outlives the tool limit).
 
 ## T209 — `run` start, resume and exactly one end per handled finish or terminal stop (ME-01 part 1, review P7)
 Status: TODO

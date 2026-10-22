@@ -11368,6 +11368,108 @@ runpy.run_path(real, run_name='__main__')
                       result.stderr)
         self.assertEqual(self.recovery_checkpoints(), 0)
 
+    # ---------------------------------------------------------------- stop and recovery events (ME-01, T208)
+    def flow_events(self, *kinds):
+        path = self.base / 'host-state/events.jsonl'
+        records = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in records if r['kind'] in kinds]
+
+    def failing_validation_rerun(self, script, expected=1, **env):
+        (self.project / '.ai/validate').write_text(script)
+        self.commit('another gate')
+        (self.project / '.ai/local/validation.json').unlink(missing_ok=True)
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected, **env)
+
+    def test_events_stop_and_recovery_written_on_a_recovered_stop(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        flag = self.base / 'failed-once'
+        self.failing_validation_rerun(f'#!/usr/bin/env bash\n[[ -e {flag} ]] && exit 0\ntouch {flag}\nexit 1\n',
+                                      expected=0, AI_AUTO_RECOVER='1')
+        self.assertIn('🔧 Recovered (1/2)', self.notifications())
+        run_id = self.run_context_manifest()['run_id']
+        events = self.flow_events('stop', 'recovery')
+        self.assertEqual([(e['kind'], e['run']) for e in events], [('stop', run_id), ('recovery', run_id)])
+        stop, recovery = events
+        self.assertEqual((stop['stage'], stop['category'], stop['recovery']), ('validation', 'validation_failed', 'yes'))
+        self.assertEqual((recovery['decision'], recovery['attempt']), ('rerun', 1))
+        self.assertIsInstance(recovery['task'], str)
+
+    def test_events_stop_on_escalation(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        stops, recoveries = self.flow_events('stop'), self.flow_events('recovery')
+        self.assertEqual([(s['stage'], s['recovery']) for s in stops], [('implementation', 'yes'), ('implementation', 'no')])
+        self.assertEqual([(r['decision'], r['attempt']) for r in recoveries], [('escalate', 1)])
+        self.assertTrue(stops[1]['message'].startswith('Claude session failed'), stops[1])
+        secret = 'ghp_' + 'Z9' * 15
+        (self.project / '.ai/local/last-error').write_text(f'Claude exited 1: push with {secret} was refused\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        self.assertNotIn(secret, (self.base / 'host-state/events.jsonl').read_text())
+        last = self.flow_events('stop')[-1]
+        self.assertEqual((last['recovery'], last['message'].rstrip()),
+                         ('no', 'Claude exited 1: push with [redacted] was refused'))
+        self.assertEqual([(r['decision'], r['attempt']) for r in self.flow_events('recovery')],
+                         [('escalate', 1), ('escalate', 2)])
+
+    def test_events_stop_unwritable_state_dir_keeps_the_stop(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        failing = '#!/usr/bin/env bash\nexit 1\n'
+        result = self.failing_validation_rerun(failing)
+        [stop] = self.flow_events('stop')
+        self.assertEqual((stop['stage'], stop['category'], stop['recovery']), ('validation', 'validation_failed', 'no'))
+        error = (self.project / '.ai/local/last-error').read_text()
+        stopped = [line for line in self.notifications().splitlines() if '⛔' in line]
+        self.assertEqual(len(stopped), 1)
+        events = self.base / 'host-state/events.jsonl'
+        events.rename(self.base / 'host-state/events.saved')
+        events.mkdir()
+        blocked = self.failing_validation_rerun(failing + '# changed\n')
+        self.assertEqual(blocked.returncode, result.returncode)
+        self.assertIn('Note: could not record the stop event.\n', blocked.stderr)
+        errors = re.compile(r'^Error: .*$', re.M)
+        self.assertEqual(errors.findall(blocked.stderr), errors.findall(result.stderr))
+        self.assertEqual((self.project / '.ai/local/last-error').read_text(), error)
+        self.assertEqual([line for line in self.notifications().splitlines() if '⛔' in line], stopped * 2)
+
+    # Serves every command through the real helper and logs each command's name outside the checkout.
+    LOGGING_HELPER = """import pathlib, runpy, sys
+with open({log!r}, 'a') as calls:
+    calls.write((sys.argv[1] if len(sys.argv) > 1 else '') + '\\n')
+real = str(pathlib.Path(__file__).with_name('workflow_real.py'))
+sys.argv[0] = real
+runpy.run_path(real, run_name='__main__')
+"""
+
+    def test_events_stop_gate_change_runs_no_event_helper(self):
+        # A hook changes the gate during the pipeline: the tampered helper never runs.
+        self.ready()
+        self.hook('post-commit', 'if [[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]]; then\n'
+                                 '  printf "from pathlib import Path\\nPath(\'UNTRUSTED_HELPER_RAN\').touch()\\n" > .ai/bin/lib/workflow.py\n'
+                                 'fi\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertEqual(self.flow_events('stop', 'recovery'), [])
+        self.assertEqual(self.notifications().count('⛔'), 1)
+        # ai-recover (the approved run above) escalating "gate files changed since you approved the
+        # run": a helper that logs its commands shows no event helper ran.
+        self.run_cmd(['git', 'checkout', '--', '.ai/bin/lib/workflow.py'])
+        (self.project / '.ai/local/last-error').write_text('Validation failed; T001 returned to IN_PROGRESS.\n')
+        lib = self.project / '.ai/bin/lib'
+        calls = self.base / 'helper-calls'
+        shutil.copy(lib / 'workflow.py', lib / 'workflow_real.py')
+        (lib / 'workflow.py').write_text(self.LOGGING_HELPER.format(log=str(calls)))
+        notes = self.notifications()
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during implementation', self.notifications()[len(notes):])
+        self.assertIn('gate files changed since you approved the run', self.notifications()[len(notes):])
+        self.assertTrue(calls.exists())  # the logging helper served the calls before the gate check
+        self.assertFalse({'stop-category', 'event'} & set(calls.read_text().splitlines()))
+        self.assertEqual(self.flow_events('stop', 'recovery'), [])
+
     # ---------------------------------------------------------------- session gate rule (TS-01, T204)
     def session_gate_contracts(self):
         """The appended RUNNER CONTRACT part of each captured task prompt (not the template before it)."""

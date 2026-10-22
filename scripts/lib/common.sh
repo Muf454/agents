@@ -246,6 +246,27 @@ ai_gate_event() {
     printf '%s\n' 'Note: could not record the gate event.' >&2
   return 0
 }
+# One `stop` event (T208). Usage: ai_stop_event STAGE yes|no (yes: handed over to ai-recover).
+# The category helper and the last-error read run only after the guard. Returns 0 always.
+ai_stop_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local category message='' file=.ai/local/last-error
+  category=$(ai_helper stop-category "$1" 2>/dev/null) || category=other
+  # As stop() reads it, but never through a symlink and at most 4 KiB.
+  if [[ -f "$file" && ! -L "$file" ]]; then message=$(head -c 4096 -- "$file" 2>/dev/null) || message=''; fi
+  ai_event stop "stage=$1" "category=$category" "message=$message" "recovery=$2"
+  return 0
+}
+# One `recovery` event (T208). Usage: ai_recovery_event DECISION ATTEMPT (ATTEMPT `-` before
+# ai-recover reserved one); the task is the run manifest's, else `-`. Returns 0 always.
+ai_recovery_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local task attempt=$2
+  task=$(ai_helper run-manifest task 2>/dev/null) && [[ -n "$task" ]] || task=-
+  [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || attempt=-
+  ai_event recovery "decision=$1" "task=$task" "attempt=$attempt"
+  return 0
+}
 ai_notify_log() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true

@@ -46,6 +46,9 @@ escalate() {
   ai_observe stop '' "${reason% } (stopped during $stage)"
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}$([[ -f .ai/local/recovery-decision.txt ]] && printf ' Full text: .ai/local/recovery-decision.txt')"
   printf '%s\n' "$reason" > .ai/local/last-error
+  # Events (T208): none once the gate is known broken (ai_gate_check set AI_GATE_BROKEN).
+  ai_recovery_event escalate "${attempt:-}"
+  ai_stop_event "$stage" no
   touch .ai/local/last-error.notified 2>/dev/null || true
   # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.
   rm -f .ai/local/pipeline.active
@@ -214,6 +217,7 @@ resume_open_stage() {
     escalate "the interrupted $stage_label left changes outside its scope (${scope#Error: }); nothing was committed." \
       'inspect and discard them, then rerun ai-pipeline.'
   if [[ "${1:-}" == quiet ]]; then resume '' ''; fi
+  ai_recovery_event rerun "$attempt"
   ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage ($stage_label): $reason"
   resume "the resumed pipeline completes the interrupted $stage_label."
 }
@@ -273,6 +277,7 @@ if (( cap > 0 )) && limit=$(ai_helper limit-stop 2>/dev/null); then
   count=$(ai_helper run-manifest limit-schedule "$at" "$cap" "$stage" 2>/dev/null) || \
     escalate "usage limit again after $cap relaunch(es) in this run." 'rerun ai-pipeline after the reset.'
   relaunch_wait "$at" "$agent usage limit" "stopped at a $agent usage limit during $stage" "$count"
+  ai_recovery_event relaunch "$attempt"
   AI_STOP_NOTIFIED=1
   trap - EXIT
   printf 'Paused at a %s usage limit; the watchdog relaunches the run after %s.\n' "$agent" "$RELAUNCH_WHEN"
@@ -346,6 +351,7 @@ if [[ $stage == implementation ]] && \
   # WHY also prefixes commit_validated's escalations ("…; but the leftover work fails validation").
   commit_validated "the $task session timed out with uncommitted partial work" \
     'fix or discard the uncommitted work, then rerun ai-pipeline.'
+  ai_recovery_event commit_and_rerun "$attempt"
   resume "the $task session timed out; its validated partial work was committed."
 fi
 [[ -f .ai/prompts/recover.md ]] || escalate 'missing .ai/prompts/recover.md.' 'copy it from the toolkit templates.'
@@ -382,4 +388,5 @@ case "$action" in
       escalate "$why; but the checkout has uncommitted changes." 'inspect and commit or discard them, then rerun ai-pipeline.' ;;
   *) escalate "$why" "$human" ;;
 esac
+ai_recovery_event "$action" "$attempt"
 resume "$why"

@@ -189,8 +189,10 @@ stop() {
   if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && "$gate_ok" == yes ]]; then
     # Bounded auto-recovery takes over this process (same PID, lock and marker).
     [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
+    ai_stop_event "$stage" yes
     exec "$AI_BIN/ai-recover" --stage "$stage"
   fi
+  ai_stop_event "$stage" no
   AI_STOP_NOTIFIED=1
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
