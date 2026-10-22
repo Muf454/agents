@@ -19,6 +19,8 @@ ai_die() {
       ai_observe stop '' "$*" 2>/dev/null || true
     fi
     AI_STOP_NOTIFIED=1
+    # The run's one end event (nothing before the run has an id, or after a gate change).
+    ai_run_end stopped
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker
   fi
@@ -265,6 +267,22 @@ ai_recovery_event() {
   task=$(ai_helper run-manifest task 2>/dev/null) && [[ -n "$task" ]] || task=-
   [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || attempt=-
   ai_event recovery "decision=$1" "task=$task" "attempt=$attempt"
+  return 0
+}
+# The one `run` end event of a handled finish or terminal stop (T209). Usage: ai_run_end RESULT
+# (pr, no_pr, no_origin, no_gh or stopped). Only in the run's own shell (never a subshell), only
+# with a run id, and once: AI_RUN_ENDED is set before any helper runs. Returns 0 always.
+AI_RUN_ENDED=''
+ai_run_end() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  [[ -n "${AI_RUN_ID:-}" && -z "$AI_RUN_ENDED" && "$BASHPID" == "$$" ]] || return 0
+  AI_RUN_ENDED=1
+  local totals=() field
+  read -ra totals <<< "$(ai_helper run-totals 2>/dev/null)" || true
+  for field in "${totals[@]}"; do
+    [[ "$field" =~ ^(tasks|gates|gate_failures|seconds)=([0-9]{1,18}|-)$ ]] || { totals=(); break; }
+  done
+  ai_event run action=end "result=$1" "${totals[@]}"
   return 0
 }
 ai_notify_log() {

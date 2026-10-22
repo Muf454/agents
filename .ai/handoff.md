@@ -60,6 +60,16 @@
   `recovery` events (decision, manifest task, reserved attempt) through `common.sh`
   `ai_stop_event`/`ai_recovery_event`, guarded so nothing runs after a gate change; written by
   `ai-pipeline` `stop()` and at each `ai-recover` decision and escalation. Stop behaviour unchanged.
+- T209 (ME-01 part 1, review P7, 2026-10-22): `ai-pipeline` writes `run` `start` (human start) or
+  `resume` (recovery) with `base` (short sha) and `args` once it has the run id; `common.sh`
+  `ai_run_end RESULT` writes exactly one `run` `end` (gate-broken guard, run id required, never in
+  a subshell, `AI_RUN_ENDED` set before any helper) with totals from the new `workflow.py
+  run-totals` (`tasks=N gates=N gate_failures=N seconds=N`, `-` null: this run's done task ids,
+  gates through `merge_gates` each once and null on a busy lock, seconds since the manifest's
+  `started`). `finish RESULT [NOTE]` passes `no_pr`/`no_origin`/`no_gh`/`pr` (after the final
+  push); `ai_die`'s pipeline branch and `ai-recover` `escalate()`/`on_exit` pass `stopped`. No end
+  on a hand-over, resume, relaunch wait (exit 75) or after a gate change. Exit codes,
+  notifications and markers unchanged; a failed write adds `Note: could not record the run event.`
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -144,8 +154,9 @@ revision nodes: the entry rule is T201's; an edited DONE block is a revision sto
 others). T204 updated the "Inside one task" session node (targeted checks; full gate in the
 session only under 120 s or `AI_SESSION_GATE=full`), the host gate node (decides DONE) and added
 the "Session gate rule" bullet. T208 added the "Stop and recovery events" bullet under "When
-something goes wrong" (2026-10-22). Still to come: T209 (run end recorded) updates vault
-`agents-flow.md` and add hub Log lines; T213 audits them and adds the "Flow data (ME-01)" line.
+something goes wrong" (2026-10-22). T209 added "run end recorded (ME-01)" to the big picture's
+🏁 FINISHED node (2026-10-22). Still to come: T213 audits them and adds the "Flow data (ME-01)"
+line.
 
 ## Manual testing for the human
 
@@ -275,7 +286,17 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   state dir keeps the notification, last-error and exit status
   (`test_events_stop_unwritable_state_dir_keeps_the_stop`); a gate changed by a hook or during
   recovery runs no event helper and writes no event (`test_events_stop_gate_change_runs_no_event_helper`).
-- Later parts: `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
+- `events_run_end` (T209, DONE): `--no-pr`, no origin, no `gh` and a PR each write one `run start`
+  and one `run end` (`no_pr`, `no_origin`, `no_gh`, `pr`) with the run's id, `tasks` 1, `gates` =
+  the distinct gate ids of its rows and events, `seconds` ≥ 0
+  (`test_events_run_end_once_per_finish_path`); a failed final push ends `stopped`, never `pr`
+  (`test_events_run_end_failed_final_push_is_not_pr`); a recovered run writes `start`, `resume`,
+  one end, and an escalation one `stopped` (`test_events_run_end_resume_and_terminal_stops`); an
+  invalid queue stop after the start ends `stopped`
+  (`test_events_run_end_terminal_die_after_the_start`); a usage-limit relaunch wait writes no end
+  (`test_events_run_end_relaunch_wait_is_no_end`); a gate changed by a hook writes no end and runs
+  no helper (`test_events_run_end_gate_change_runs_no_helper`).
+- Later parts: `events_lock_held` (T221: pipeline completion,
   terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
   (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
@@ -292,5 +313,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T208 (the next unblocked task in `.ai/tasks.md`).
+The runner continues with the next task after T209 (the next unblocked task in `.ai/tasks.md`).
 Nothing is merged or deployed.

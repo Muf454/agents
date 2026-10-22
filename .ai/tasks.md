@@ -6356,7 +6356,7 @@ tests OK (641 s). Docs: `docs/workflow.md` paragraph (in the WIP), vault `agents
 Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T209 — `run` start, resume and exactly one end per handled finish or terminal stop (ME-01 part 1, review P7)
-Status: TODO
+Status: DONE
 Dependencies: T222, T220, T208, T216
 Model: opus
 
@@ -6425,6 +6425,36 @@ Targeted: `bash -n scripts/lib/common.sh scripts/ai-pipeline scripts/ai-recover`
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-22 (claude opus). `workflow.py run-totals` (`run_totals`): this run's records only (by
+`AI_RUN_ID`, usage error without it), prints `tasks=N gates=N gate_failures=N seconds=N` with `-`
+for null (the `event` CLI's null): distinct task ids of `outcome task` rows with result `done`;
+`merge_gates` over the run's `outcome gate` rows and `gate` events (failures = `fail`/`timeout`),
+both null on `EventsBusy`; seconds = now − manifest `started` when the manifest's `run_id` is this
+run's. `common.sh` `ai_run_end RESULT`: gate guard, then `AI_RUN_ID` set, `AI_RUN_ENDED` empty
+(reset to '' when common.sh is sourced) and `BASHPID == $$`; sets `AI_RUN_ENDED=1` before the
+helper; checks each total token, else writes the end without totals. `ai-pipeline`: `run` start or
+resume (`base` short sha, `args` = original arguments joined) right after the `AI_RUN_ID` export,
+only with a run id; `finish RESULT [NOTE]` (`no_pr`, `no_origin` 'no PR (local only)', `no_gh`
+'pushed, no PR (gh missing)', `pr` "$url"; dashboard text unchanged) calls `ai_run_end` after
+`ai_observe done`. `ai_die`'s pipeline branch calls `ai_run_end stopped`; `ai-recover` `escalate()`
+(after its stop event) and `on_exit` (non-zero, not notified) too. Nothing on `exec ai-recover`,
+`resume()` or exit 75. A resume dying before the pipeline re-reads the id uses the id ai-recover
+exported from the manifest (one end for a terminal stop of a started run).
+Tests: `test_events_run_end_once_per_finish_path` (subTests on one fixture, one new task per run:
+`--no-pr`, no origin, no `gh` via a PATH shadow without `gh`, PR; asserts the run's gate records
+outnumber its distinct ids, so each gate is counted once), `_failed_final_push_is_not_pr`,
+`_resume_and_terminal_stops` (recovered run: start, resume, end `no_pr`; escalation: one
+`stopped`), and, needing fixtures of their own, `_terminal_die_after_the_start` (unfixable queue,
+`AI_AUTO_RECOVER=0`), `_relaunch_wait_is_no_end` and `_gate_change_runs_no_helper`. Updated
+`test_events_gate_pipeline_validation`: with an unwritable event log the run start and end add
+their own Notes (2), so it strips every gate/run event Note before comparing stderr.
+Evidence: `-k events_run_end` Ran 6 tests OK (106 s); `-k observation_pipeline -k
+failed_final_push -k pipeline_without_remote -k runs_no_helper` Ran 21 tests OK (186 s); `bash -n
+scripts/lib/common.sh scripts/ai-pipeline scripts/ai-recover` OK; `-k events` Ran 41 tests, 1
+failure (the gate test above, fixed; rerun `-k events_gate_pipeline_validation` OK). Docs:
+`docs/workflow.md` "Run start, resume and end (T209)" paragraph; vault `agents-flow.md` 🏁 node
+"run end recorded (ME-01)", hub Log line; handoff. Full gate left to the host gate (BATCH 10 GATE
+RULE).
 
 ## T221 — A held event lock never stalls a run (ME-01 part 1, review round 2 P13)
 Status: TODO

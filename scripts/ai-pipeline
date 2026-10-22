@@ -90,8 +90,11 @@ rm -f .ai/local/last-error
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || ai_observe start
+# finish RESULT [NOTE]: RESULT is the `run` end result (pr, no_pr, no_origin, no_gh), NOTE the
+# dashboard's done text (default "no PR").
 finish() {
-  ai_observe done "${1:-no PR}"
+  ai_observe done "${2:-no PR}"
+  ai_run_end "$1"
   # Keeps the manifest's timeout reruns: a pipeline resumed under the same approval must not
   # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
@@ -171,6 +174,11 @@ fi
 # event and outcome row of this run, resumes included, carries it (spec A8). Not a run setting.
 AI_RUN_ID=$(ai_helper run-manifest run-id 2>/dev/null) || AI_RUN_ID=''
 if [[ "$AI_RUN_ID" =~ ^[0-9a-f]{16}$ ]]; then export AI_RUN_ID; else unset AI_RUN_ID; fi
+# The run's start (a human start) or resume (a recovery) event; its one end is ai_run_end's.
+if [[ -n "${AI_RUN_ID:-}" ]]; then
+  ai_event run "action=$([[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && printf resume || printf start)" \
+    "base=$(git rev-parse --short "$base_sha")" "args=${orig_args[*]}"
+fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
 ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \
@@ -684,7 +692,7 @@ if [[ "$open_pr" != yes ]]; then
   if (( disputes > 0 )); then disputed=" and resolve $disputes disputed finding(s) (.ai/reviews/disputes.md)"; fi
   ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally$disputed."
   printf '%s\n' 'Pipeline complete (no PR requested).'
-  finish
+  finish no_pr
 fi
 step pr 'Pull request'
 # Draft reasons: the human's --draft (never recorded) or the pipeline's policy (unresolved
@@ -704,12 +712,12 @@ fi
 if ! git remote get-url origin >/dev/null 2>&1; then
   ai_notify "🏁 FINISHED on $branch (local only): no 'origin' remote to open a PR on. Your todo: push and open a PR."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
-  finish 'no PR (local only)'
+  finish no_origin 'no PR (local only)'
 fi
 push push 'git push failed (3 tries)' -u origin "$branch"
 if ! command -v gh >/dev/null; then
   ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
-  finish 'pushed, no PR (gh missing)'
+  finish no_gh 'pushed, no PR (gh missing)'
 fi
 title=$(ai_helper pr-title)
 # The handoff's Flow chart line, once per run (key `final`, often already claimed by ai-run's
@@ -776,4 +784,4 @@ host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md .ai/han
 push 'final push' "PR is open at $url, but pushing the final handoff commit failed" origin "$branch"
 ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
-finish "$url"
+finish pr "$url"

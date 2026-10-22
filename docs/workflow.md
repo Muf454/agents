@@ -1462,6 +1462,23 @@ failed gate check record nothing. The category is telemetry only: recovery never
 rules match the reason text). Recording never changes the stop's notification, last-error or exit
 status.
 
+Run start, resume and end (T209): once `ai-pipeline` has the run id, it writes `run` with
+`action: start` (a human start) or `action: resume` (a recovery), the base's short sha as `base`
+and the original arguments joined as `args`. `common.sh` `ai_run_end RESULT` writes the run's one
+end: it skips itself once `AI_GATE_BROKEN` is set, without `AI_RUN_ID`, in a subshell
+(`BASHPID != $$`) and when `AI_RUN_ENDED` is already set (set before any helper runs), then asks
+`workflow.py run-totals` for the totals and writes `run` with `action: end`, `result` and them.
+`run-totals` prints `tasks=N gates=N gate_failures=N seconds=N` (`-` is null) from this run's
+records only: `tasks` the distinct task ids of its `outcome task` rows with result `done`; `gates`
+and `gate_failures` (`fail` or `timeout`) from `merge_gates` over its `outcome gate` rows and
+`gate` events, each gate once, null when `events.lock` stays held past the deadline; `seconds`
+from the manifest's `started` when the manifest is this run's. Callers: `finish RESULT [NOTE]`
+(`no_pr`, `no_origin`, `no_gh`, and `pr` only after the final push succeeded); `ai_die`'s pipeline
+branch (`stopped`: `stop()` without recovery and every terminal `ai_die` after the start; a failed
+final push stops there, never `pr`); `ai-recover` `escalate()` and `on_exit` (`stopped`). A hand-over
+to `ai-recover`, a resume and the usage-limit relaunch wait (exit 75) write no end. A failed write
+prints a Note and changes no exit status, notification or marker.
+
 Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
 exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
 least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`

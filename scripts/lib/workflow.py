@@ -4516,6 +4516,41 @@ def stop_category(arguments):
     print(stop_category_of(arguments[0], text))
 
 
+def run_totals(arguments):
+    """run-totals: the `run` end totals of the run AI_RUN_ID names, from that run's records only,
+    as one line `tasks=N gates=N gate_failures=N seconds=N` (`-` is null, as `event` reads it).
+    tasks: distinct task ids of its `outcome task` rows with result done. gates, gate_failures:
+    merge_gates over its `outcome gate` rows and `gate` events (each gate once, spec A12); null when
+    events.lock stays held past the deadline (EventsBusy), so the totals never wait longer.
+    seconds: now minus the manifest's `started` when the manifest is this run's, else null."""
+    if arguments:
+        fail('Usage: run-totals')
+    run = current_run_id()
+    if run is None:
+        fail('run-totals needs AI_RUN_ID (16 hex).')
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    rows = [r for r in read_outcomes([outcomes_path()]) if r.get('run') == run]
+    tasks = len({r['task'] for r in rows if r.get('kind') == 'task' and r.get('result') == 'done'
+                 and isinstance(r.get('task'), str)})
+    try:
+        events = [e for e in read_events() if e.get('kind') == 'gate' and e.get('run') == run]
+    except EventsBusy:
+        gates = failures = None
+    else:
+        merged = merge_gates([r for r in rows if r.get('kind') == 'gate'], events)
+        gates = len(merged)
+        failures = sum(1 for gate in merged if gate['result'] in ('fail', 'timeout'))
+    seconds = None
+    try:
+        data = json.loads((binding_dir() / 'run.json').read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get('run_id') == run and type(data.get('started')) is int:
+        seconds = max(int(time.time()) - data['started'], 0)
+    print(' '.join(f'{name}={"-" if value is None else value}' for name, value in
+                   (('tasks', tasks), ('gates', gates), ('gate_failures', failures), ('seconds', seconds))))
+
+
 def attempt_seq_path():
     """The host-wide attempt counter, beside the log in the same state root."""
     return state_root() / 'attempt-seq'
@@ -6353,6 +6388,8 @@ def main():
         event_gate(arguments)
     elif command == 'stop-category':
         stop_category(arguments)
+    elif command == 'run-totals':
+        run_totals(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
     elif command == 'session-gate':

@@ -11272,8 +11272,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         events.rename(self.base / 'host-state/events.saved')
         events.mkdir()
         blocked, _, _ = self.validation_rerun()
-        self.assertEqual(blocked.stderr.replace('Note: could not record the gate event.\n', ''), result.stderr)
+        # Every event of the run (gate, run start and end) adds its Note and nothing else.
+        notes = re.compile(r'^Note: could not record the (?:gate|run) event\.\n', re.M)
+        self.assertEqual(notes.sub('', blocked.stderr), result.stderr)
         self.assertIn('Note: could not record the gate event.\n', blocked.stderr)
+        self.assertEqual(blocked.stderr.count('Note: could not record the run event.\n'), 2)
         steps = re.compile(r'^== .* ==$', re.M)
         self.assertEqual(steps.findall(blocked.stdout), steps.findall(result.stdout))
         events.rmdir()
@@ -11469,6 +11472,111 @@ runpy.run_path(real, run_name='__main__')
         self.assertTrue(calls.exists())  # the logging helper served the calls before the gate check
         self.assertFalse({'stop-category', 'event'} & set(calls.read_text().splitlines()))
         self.assertEqual(self.flow_events('stop', 'recovery'), [])
+
+    # ---------------------------------------------------------------- run start, resume and end (ME-01, T209)
+    def run_events(self, run_id=None):
+        return [e for e in self.flow_events('run') if run_id is None or e['run'] == run_id]
+
+    def run_gate_ids(self, run_id):
+        """The distinct gate ids of RUN_ID's gate rows and gate events, and how many records carry one."""
+        rows = [r for r in self.gate_rows() if r.get('run') == run_id]
+        events = [e for e in self.gate_events() if e['run'] == run_id]
+        ids = [record.get('gate_id') for record in rows + events]
+        self.assertNotIn(None, ids)
+        return set(ids), len(ids)
+
+    def path_without_gh(self):
+        """PATH with the mock tools and the system's, but no `gh` anywhere on it."""
+        shadow = self.base / 'no-gh-bin'
+        shadow.mkdir(exist_ok=True)
+        kept = []
+        for entry in self.env['PATH'].split(os.pathsep):
+            directory = Path(entry)
+            if directory != self.mock_bin and not (directory / 'gh').exists():
+                kept.append(entry)
+                continue
+            for file in directory.iterdir() if directory.is_dir() else ():
+                if file.name != 'gh' and not (shadow / file.name).exists():
+                    (shadow / file.name).symlink_to(file)
+        return os.pathsep.join([str(shadow)] + kept)
+
+    def test_events_run_end_once_per_finish_path(self):
+        self.ready()
+        tasks = self.project / '.ai/tasks.md'
+        finishes = (('no_pr', ('--no-pr',), {}), ('no_origin', (), {}),
+                    ('no_gh', (), {'PATH': self.path_without_gh()}), ('pr', (), {}))
+        for number, (result, args, env) in enumerate(finishes, 1):
+            with self.subTest(result):
+                if number > 1:  # one more task for this run; every run implements exactly one
+                    tasks.write_text(tasks.read_text() + '\n' + task(f'T00{number}'))
+                    self.commit(f'task T00{number}')
+                if result == 'no_gh':
+                    self.add_origin()
+                self.tool('ai-pipeline', '--approved', '--base', 'main', *args, **env)
+                run_id = self.run_context_manifest()['run_id']
+                events = self.run_events(run_id)
+                self.assertEqual([e['action'] for e in events], ['start', 'end'])
+                start, end = events
+                self.assertEqual(start['args'], ' '.join(('--approved', '--base', 'main') + args))
+                self.assertEqual(start['base'], self.run_cmd(['git', 'rev-parse', '--short', 'main']).stdout.strip())
+                self.assertEqual((end['result'], end['tasks']), (result, 1))
+                ids, records = self.run_gate_ids(run_id)
+                self.assertGreater(records, len(ids))  # rows and events share ids: each gate once
+                self.assertEqual((end['gates'], end['gate_failures']), (len(ids), 0))
+                self.assertGreaterEqual(end['seconds'], 0)
+        self.assertEqual([e['result'] for e in self.run_events() if e['action'] == 'end'],
+                         ['no_pr', 'no_origin', 'no_gh', 'pr'])
+        self.assertEqual(len({e['run'] for e in self.run_events()}), 4)
+
+    def test_events_run_end_failed_final_push_is_not_pr(self):
+        self.ready()
+        self.add_origin()
+        self.hook('pre-push', '[[ "$(git log -1 --format=%s)" != "chore(ai): record pull request" ]]\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', expected=1, AI_AUTO_RECOVER='0')
+        self.assertIn('pushing the final handoff commit failed', result.stderr)
+        ends = [e for e in self.run_events() if e['action'] == 'end']
+        self.assertEqual([e['result'] for e in ends], ['stopped'])
+        self.assertEqual(ends[0]['run'], self.run_context_manifest()['run_id'])
+
+    def test_events_run_end_resume_and_terminal_stops(self):
+        with self.subTest('recovered run'):
+            self.ready()
+            self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+            flag = self.base / 'failed-once'
+            self.failing_validation_rerun(f'#!/usr/bin/env bash\n[[ -e {flag} ]] && exit 0\ntouch {flag}\nexit 1\n',
+                                          expected=0, AI_AUTO_RECOVER='1')
+            run_id = self.run_context_manifest()['run_id']
+            self.assertEqual([(e['action'], e['result']) for e in self.run_events(run_id)],
+                             [('start', None), ('resume', None), ('end', 'no_pr')])
+        with self.subTest('escalated stop'):
+            before = len(self.run_events())
+            self.failing_validation_rerun('#!/usr/bin/env bash\nexit 1\n', AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+            run_id = self.run_context_manifest()['run_id']
+            self.assertEqual([(e['action'], e['result']) for e in self.run_events()[before:]],
+                             [('start', None), ('end', 'stopped')])
+            self.assertEqual({e['run'] for e in self.run_events()[before:]}, {run_id})
+
+    # The rest of the resume and terminal-stop criterion: each needs a fixture of its own.
+    def test_events_run_end_terminal_die_after_the_start(self):
+        self.ready(self.unfixable_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        self.assertIn('Task queue is invalid', self.notifications())
+        self.assertEqual([(e['action'], e['result']) for e in self.run_events()], [('start', None), ('end', 'stopped')])
+
+    def test_events_run_end_relaunch_wait_is_no_end(self):
+        self.limit_relaunch_scheduled()
+        self.assertEqual([e['action'] for e in self.run_events()], ['start'])
+
+    def test_events_run_end_gate_change_runs_no_helper(self):
+        self.ready()
+        self.hook('post-commit', 'if [[ "$(git log -1 --format=%s)" == "chore(ai): record independent review" ]]; then\n'
+                                 '  printf "from pathlib import Path\\nPath(\'UNTRUSTED_HELPER_RAN\').touch()\\n" > .ai/bin/lib/workflow.py\n'
+                                 'fi\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        self.assertIn('Approved workflow gate changed', result.stderr)
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertEqual([e['action'] for e in self.run_events()], ['start'])
+        self.assertEqual(self.notifications().count('⛔'), 1)
 
     # ---------------------------------------------------------------- session gate rule (TS-01, T204)
     def session_gate_contracts(self):
