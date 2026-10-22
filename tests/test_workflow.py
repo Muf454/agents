@@ -2943,6 +2943,91 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('dependencies must exist earlier in the queue: T002', result.stderr)
         self.assertEqual(queue.read_text(), before)
 
+    def head(self):
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def porcelain(self):
+        return self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout
+
+    def test_ai_task_commit_sets_and_commits(self):
+        self.ready(task('T001', status='BLOCKED'))
+        before = self.head()
+        self.tool('ai-task', 'set', 'T001', 'TODO', '--commit')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        log = self.run_cmd(['git', 'log', '--format=%s', f'{before}..HEAD']).stdout.splitlines()
+        self.assertEqual(log, ['chore(ai): set T001 to TODO (ai-task)'])
+        files = self.run_cmd(['git', 'show', '--name-only', '--format=', 'HEAD']).stdout.split()
+        self.assertEqual(files, ['.ai/tasks.md'])
+        self.assertEqual(self.porcelain(), '')
+        # The same status again is not an error and makes no empty commit.
+        self.tool('ai-task', 'set', 'T001', 'TODO', '--commit')
+        self.assertEqual(self.run_cmd(['git', 'rev-list', '--count', f'{before}..HEAD']).stdout.strip(), '1')
+
+    def test_ai_task_commit_refuses_while_locked(self):
+        self.ready(task('T001', status='BLOCKED'))
+        queue = self.project / '.ai/tasks.md'
+        before, head = queue.read_bytes(), self.head()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with open(self.project / '.ai/local/workflow.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = self.tool('ai-task', 'set', 'T001', 'TODO', '--commit', expected=75)
+        self.assertIn('A run is active in this checkout; nothing changed.', result.stderr)
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(self.head(), head)
+
+    def test_ai_task_commit_refuses_dirty_or_protected(self):
+        self.ready(task('T001', status='BLOCKED'))
+        queue = self.project / '.ai/tasks.md'
+        before, head = queue.read_bytes(), self.head()
+
+        def refused(message):
+            result = self.tool('ai-task', 'set', 'T001', 'TODO', '--commit', expected=1)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(queue.read_bytes(), before)
+            self.assertEqual(self.head(), head)
+        (self.project / 'other.txt').write_text('human work\n')
+        refused('uncommitted changes')
+        (self.project / 'other.txt').unlink()
+        self.run_cmd(['git', 'branch', '-f', 'master', 'HEAD'])
+        self.run_cmd(['git', 'switch', '-q', 'master'])
+        refused('Branch master is protected')
+        self.run_cmd(['git', 'switch', '-q', '--detach', 'HEAD'])
+        refused('Detached HEAD')
+        # A change that breaks the queue is restored byte for byte.
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        queue.write_text(task('T001', status='BLOCKED') + task('T002', dependencies='T001'))
+        self.commit('two tasks')
+        before, head = queue.read_bytes(), self.head()
+        result = self.tool('ai-task', 'set', 'T002', 'DONE', '--commit', expected=1)
+        self.assertIn('Nothing changed.', result.stderr)
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual(self.head(), head)
+
+    def test_ai_task_commit_hook_failure(self):
+        self.ready(task('T001', status='BLOCKED'))
+        hooks = Path(self.run_cmd(['git', 'rev-parse', '--git-path', 'hooks']).stdout.strip())
+        hook = (hooks if hooks.is_absolute() else self.project / hooks) / 'pre-commit'
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text('#!/bin/sh\necho "hook says no" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        head = self.head()
+        result = self.tool('ai-task', 'set', 'T001', 'TODO', '--commit', expected=1)
+        self.assertIn('T001 is TODO but not committed; commit .ai/tasks.md yourself.', result.stderr)
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        self.assertEqual(self.head(), head)
+
+    def test_ai_task_plain_set_unchanged(self):
+        self.ready()
+        head = self.head()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with open(self.project / '.ai/local/workflow.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.tool('ai-task', 'set', 'T001', 'DONE')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'DONE')
+        self.assertEqual(self.head(), head)
+        usage = self.tool('ai-task', 'set', 'T001', 'DONE', '--now', expected=2)
+        self.assertIn('[--commit]', usage.stderr)
+
     def night_queue(self):
         fence = '```\n## T009 — not a heading\n```\n\n'
         return ('# Task queue\n\nPreamble text.\n\n' + task('T001', dependencies='T011') + task('T002')

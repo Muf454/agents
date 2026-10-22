@@ -191,6 +191,14 @@ Before leaving an implementation session unattended:
    prose in `Dependencies:`. `python3 scripts/lib/workflow.py tasks fill-sections` (host-only)
    adds a missing `### Likely affected modules` or `### Result / notes` heading to TODO tasks and
    changes nothing else.
+   To change a task by hand (or from an app) while no run is active, use
+   `.ai/bin/ai-task set T005 TODO --commit`: it refuses with exit 75 while a run holds the
+   checkout (`.ai/local/workflow.lock`), refuses a detached HEAD, a protected branch (`main`,
+   `master`, `develop`, `release/*`, ...) and an unclean checkout (exit 1, nothing changed),
+   restores the queue if the change makes it invalid, and commits only `.ai/tasks.md` as
+   `chore(ai): set T005 to TODO (ai-task)` (hooks run). If that commit fails, the status stays
+   changed and you commit `.ai/tasks.md` yourself. Plain `ai-task set` (no `--commit`) is what
+   sessions use inside a run: no lock, no commit.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write

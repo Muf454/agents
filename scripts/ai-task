@@ -1,9 +1,54 @@
 #!/usr/bin/env bash
-# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> | ai-task show <ID> | ai-task check | ai-task reorder
+# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit] | ai-task show <ID> | ai-task check | ai-task reorder
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 ai_root
+
+# A human's or an app's queue change: never while a run holds the checkout (exit 75), only on
+# a feature branch, checked by `tasks check` (restored on failure), and with COMMIT a clean
+# checkout before and a commit of only .ai/tasks.md after.
+# Usage: task_change COMMIT(0|1) SUBJECT NOT-COMMITTED-MESSAGE HELPER-ARGS...
+task_change() {
+  local commit=$1 subject=$2 not_committed=$3 branch original
+  shift 3
+  # Never waits and never ai_lock: its PPID shortcut and messages are for runners.
+  exec 9>.ai/local/workflow.lock
+  flock -n 9 || { echo 'A run is active in this checkout; nothing changed.' >&2; exit 75; }
+  branch=$(git symbolic-ref --quiet --short HEAD) || {
+    echo 'Detached HEAD; switch to a feature branch first. Nothing changed.' >&2; exit 1; }
+  case "$branch" in
+    main|master|develop|development|production|release|release/*)
+      echo "Branch $branch is protected; switch to a feature branch first. Nothing changed." >&2; exit 1 ;;
+  esac
+  if [[ "$commit" == 1 && -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    echo 'The checkout has uncommitted changes; commit or stash them first. Nothing changed.' >&2; exit 1
+  fi
+  original=$(mktemp .ai/local/tasks.md.XXXXXX)
+  cp -- .ai/tasks.md "$original"
+  if ! ai_helper "$@" || ! ai_helper tasks check; then
+    cat -- "$original" > .ai/tasks.md
+    rm -f -- "$original"
+    echo 'Nothing changed.' >&2
+    exit 1
+  fi
+  rm -f -- "$original"
+  [[ "$commit" == 1 ]] || return 0
+  git diff --quiet -- .ai/tasks.md && return 0  # already so: nothing to commit
+  # Hooks run (never --no-verify); a failed commit leaves the change in place for the human.
+  if ! git commit --quiet --only -m "$subject" -- .ai/tasks.md || \
+     [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    echo "$not_committed" >&2
+    exit 1
+  fi
+}
+
 case "${1:-}" in
-  set) [[ $# -eq 3 ]] || { echo 'Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>' >&2; exit 2; }
+  set) if [[ $# -eq 4 && "$4" == --commit ]]; then
+         task_change 1 "chore(ai): set $2 to $3 (ai-task)" \
+           "$2 is $3 but not committed; commit .ai/tasks.md yourself." tasks set "$2" "$3"
+         exit 0
+       fi
+       [[ $# -eq 3 ]] || { echo 'Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit]' >&2; exit 2; }
+       # Sessions inside a run use plain set: no lock, no commit.
        ai_helper tasks set "$2" "$3" ;;
   show) [[ $# -eq 2 ]] || { echo 'Usage: ai-task show <ID>' >&2; exit 2; }
         ai_helper tasks show "$2" ;;
@@ -15,5 +60,5 @@ case "${1:-}" in
   reorder) [[ $# -eq 1 ]] || { echo 'Usage: ai-task reorder' >&2; exit 2; }
            # Rewrites .ai/tasks.md so dependencies come first; a valid queue is left untouched.
            ai_helper tasks reorder ;;
-  *) echo 'Usage: ai-task set <ID> <STATUS> | ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
+  *) echo 'Usage: ai-task set <ID> <STATUS> [--commit] | ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
 esac

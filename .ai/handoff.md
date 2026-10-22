@@ -80,6 +80,14 @@
   possible escalation) and a stand-alone `ai-run`'s `on_exit` stop path (one line). The kind comes
   from the hint or the stage, never from `last-error`. `docs/workflow.md` "Writers (T320)", vault
   flow chart bullet "Escalation record (G9)" and hub Log.
+- T310 (2026-10-23): `ai-task set ID STATUS --commit` through `task_change` in `scripts/ai-task`:
+  `flock -n` on `.ai/local/workflow.lock` (held → exit 75 "A run is active in this checkout;
+  nothing changed."), refuses a detached HEAD, a protected branch and an unclean checkout (exit 1),
+  `tasks check` after the change (failure → original bytes restored), then `git commit --only` of
+  `.ai/tasks.md` as `chore(ai): set ID to STATUS (ai-task)` with hooks; a failed commit leaves the
+  change and says "ID is STATUS but not committed; commit .ai/tasks.md yourself." Setting the
+  current status again makes no commit. Plain `set` is unchanged (no lock). README task commands.
+  Flow unchanged. T312 and T322 reuse `task_change`.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -147,6 +155,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-23, T310: `-k ai_task` Ran 7 OK (3.2 s); full gate result in the T310 notes.
 2026-10-22, T325: `-k stop_command` Ran 12 OK (23.6 s), `-k standalone` Ran 10 OK (61.4 s); full gate in the T325 notes.
 2026-10-22, T319: `-k stop_command` Ran 11 OK (21.0 s); `.ai/bin/ai-check` PASS, Ran 1175 OK (943.6 s).
 2026-10-22, T308: `-k stop_command` Ran 7 OK (15.6 s); full gate result in the T308 notes.
@@ -366,6 +375,13 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_standalone_ai_run_interrupt_without_request` (plain SIGTERM: `stopped`, "needs you").
 - `ai_task` (T310, T312, T322): lock, `--commit`, dirty or protected refusal, hook failure, plain
   `set` unchanged; retry, model, skip; reauthorize and its refusals.
+  Done so far (T310): `test_ai_task_commit_sets_and_commits` (one commit, only `.ai/tasks.md`,
+  standard subject, clean checkout; the same status again makes no commit),
+  `test_ai_task_commit_refuses_while_locked` (exit 75, bytes and HEAD unchanged),
+  `test_ai_task_commit_refuses_dirty_or_protected` (dirty file, `master`, detached HEAD, a change
+  that breaks the queue → exit 1, bytes unchanged), `test_ai_task_commit_hook_failure` (failing
+  `pre-commit` → "not committed", status changed, no commit), `test_ai_task_plain_set_unchanged`
+  (works while the lock is held).
 - `skip` (T311): SKIPPED semantics, forged status refused, new branch, merge and second worktree,
   refusals, `tasks set`, planning guard.
 - `exec_logged` (T324): both log prefixes accepted, invalid names refused, existing protections.
@@ -384,6 +400,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
-T319, T309 and T320 are DONE as well.
+T319, T309 and T320 are DONE as well; T325 and T310 too.
 Next: the rest of the queue by dependency (T321 the fix-round limit record).
 Nothing is merged or deployed.

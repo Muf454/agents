@@ -6577,7 +6577,7 @@ Evidence: `-k stop_command` Ran 12 OK (23.6 s); `-k standalone` Ran 10 OK (61.4 
 gives the full result.
 
 ## T310 — ai-task takes the checkout lock and can commit `.ai/tasks.md` (RC-01 G7)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -6622,6 +6622,19 @@ Targeted: `python3 -m unittest discover -s tests -k ai_task` (must say `Ran N te
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-23: `scripts/ai-task` `task_change COMMIT SUBJECT NOT-COMMITTED-MESSAGE HELPER-ARGS…`
+(for T312/T322): `exec 9>.ai/local/workflow.lock; flock -n 9` (exit 75 "A run is active in this
+checkout; nothing changed."), branch via `git symbolic-ref` (detached and protected names → exit
+1), with COMMIT a clean `git status --porcelain --untracked-files=all` first; the original bytes
+are saved under `.ai/local/`, the helper and `tasks check` run, and on failure the bytes are
+restored ("Nothing changed.", exit 1). Then `git commit --quiet --only -m SUBJECT -- .ai/tasks.md`
+(hooks run) and a clean check; failure → "ID is STATUS but not committed; commit .ai/tasks.md
+yourself.", exit 1, nothing reverted. Setting the current status again makes no commit (no empty
+commit, exit 0). `set ID STATUS --commit` uses it; plain `set` is unchanged. Usage lines and
+README task-command paragraph updated; flow unchanged. Tests: the five named above (the refusal
+test also covers a change that breaks the queue). Evidence: `-k ai_task` Ran 7 OK (3.2 s). The
+full `.ai/bin/ai-check` (~900 s) exceeds the session's 600 s tool limit, so the runner's gate
+gives the full result.
 
 ## T311 — SKIPPED status with a host skip record (RC-01 G6, queue)
 Status: TODO
