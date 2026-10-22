@@ -628,13 +628,16 @@ if [[ "$revise_plan" == yes ]]; then
   # Always the host's own commit: an agent commit's subject never counts.
   git commit --allow-empty -m 'chore(ai): record plan revision' >/dev/null
   ai_guard_verify
-  printf '%s\n' "$questions" | ai_helper plan-revisions record "$plan_base" HEAD --accepted "$accepted" \
-    --rejected "$rejected" --needs-human "$needs_human" || \
-    ai_die 'Cannot record the plan revision in the host state directory.'
-  # A commit hook must not have slipped anything else into the counted commit.
+  # A commit hook must not have slipped anything else into the counted commit, nor rewritten a
+  # DONE block after the check above; all before the record, so a failure leaves none.
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     ai_die 'Plan revision stage: changes were left after the revision commit (commit hook?).'
   revision_scope 'Plan revision stage: the revision commit is out of scope (commit hook?): '
+  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: the revision commit is out of scope (commit hook?): ${keep_error#Error: }"
+  printf '%s\n' "$questions" | ai_helper plan-revisions record "$plan_base" HEAD --accepted "$accepted" \
+    --rejected "$rejected" --needs-human "$needs_human" || \
+    ai_die 'Cannot record the plan revision in the host state directory.'
   ai_helper outcome plan_revision "$revision_round" revised "$revision_model" "$(( SECONDS - revision_started ))" \
     2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
   finished=yes

@@ -5518,6 +5518,40 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.revision_commits(), 0)
         self.revisions('revised', expected=1)
 
+    def rewrite_done_result(self):
+        """T001 is the first block, so its Result is the first 'Pending.' line (statuses stay valid)."""
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(queue.read_text().replace('Pending.', 'Rewritten after the check.', 1))
+
+    def test_plan_review_followup_revision_rechecks_done_blocks_after_a_commit_hook(self):
+        start = self.followup_revise_ready(task('T001', 'DONE') + task('T002'))
+        # Only the counted revision commit stages the run log; the hook rewrites T001 and stages it.
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/usr/bin/env bash\n'
+                        'git diff --cached --name-only | grep -qx .ai/run-log.md || exit 0\n'
+                        'python3 - <<\'EOF\'\nimport pathlib\nqueue = pathlib.Path(".ai/tasks.md")\n'
+                        'queue.write_text(queue.read_text().replace("Pending.", "Rewritten by a hook.", 1))\nEOF\n'
+                        'git add -- .ai/tasks.md\n')
+        hook.chmod(0o755)
+        result = self.revise('--since', start, '--base', 'main', expected=1)
+        self.assertRegex(result.stderr, r'Plan revision stage: .*DONE task T001 was changed or removed')
+        self.assertIn('Rewritten by a hook.', self.run_cmd(['git', 'show', 'HEAD:.ai/tasks.md']).stdout)
+        self.revisions('outcome', expected=1)  # no accepted revision record
+
+    def test_plan_review_followup_stage_verify_rejects_a_changed_done_block(self):
+        start = self.followup_revise_ready(task('T001', 'DONE') + task('T002'))
+        self.start_supervised_run()
+        self.helper('run-manifest', 'stage-set', 'plan-revision', start)
+        self.rewrite_done_result()
+        self.commit('chore(ai): record plan revision')
+        plan_base = self.run_cmd(['git', 'merge-base', 'main', 'HEAD']).stdout.strip()
+        self.run_cmd(['bash', '-c', 'python3 "$0" plan-revisions record "$1" HEAD --accepted 1 --rejected 0 '
+                      '--needs-human 0 </dev/null', str(HELPER), plan_base])
+        self.revisions('outcome', expected=0)  # a recorded stage, as an interrupted older host left it
+        result = self.helper('stage-verify', expected=1)
+        self.assertIn('Plan revision stage: DONE task T001 was changed or removed', result.stderr)
+        self.assertNotIn('committed', result.stdout)
+
     def test_plan_review_followup_newly_done_still_stops(self):
         start = self.followup_revise_ready(task('T001', 'DONE') + task('T002', 'DONE') + task('T003'))
         result = self.revise('--since', start, '--base', 'main', expected=1)

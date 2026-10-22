@@ -625,3 +625,4 @@
 | 2026-10-22T13:38:35Z | runner | T213 | completed | PASS | f077140 | Claude checkpointed; continuing queue |
 | 2026-10-22T13:56:47Z | runner | none | queue complete; ready for independent review | PASS | 8908647 | Human acceptance remains |
 | 2026-10-22T14:02:49Z | runner | triage | review triaged into dispositions/tasks | n/a | 61f0ab6 | Fix tasks run next |
+| 2026-10-22T14:40:00Z | claude (opus) | T223 | DONE: revise-plan rechecks plan-keeps-done after its commit and before plan-revisions record; stage-verify (plan-revision) rejects a changed DONE block; 2 regressions; docs/workflow.md | targeted selector: 22 run, 1 failure in the new test's own assertion (fixed), then 2 OK; bash -n OK; full gate left to the host (BATCH 10 GATE RULE) | pending | review M1; flow unchanged |

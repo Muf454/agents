@@ -75,6 +75,12 @@
   goes through `lock_events`, so a held `events.lock` costs at most `AI_EVENTS_LOCK_SECONDS` per
   write; a pipeline finish, a terminal stop and an `ai-recover` escalation keep their output, exit
   status, last-error and notifications, and only the events are missing.
+- T223 (review M1, 2026-10-22): `ai-run --revise-plan` now runs the post-commit checks (clean
+  checkout, scope, `plan-keeps-done START` again) BEFORE `plan-revisions record`, so a pre-commit
+  hook that rewrites an earlier DONE block stops with `Plan revision stage: the revision commit is
+  out of scope (commit hook?): DONE task T… was changed or removed` and no record is written.
+  `stage-verify` for an open `plan-revision` stage runs `plan_keeps_done` against the stage's
+  `start_head` (the same START ai-pipeline passes as `--since`) before printing `committed`.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -218,6 +224,12 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_plan_review_followup_revision_keeps_done_blocks`); a task newly DONE since the base still
   stops the revision (`test_plan_review_followup_newly_done_still_stops`); the queue repair with
   `--base` reorders, without it does nothing (`test_plan_review_followup_queue_repair_with_base`).
+  T223 (DONE): a pre-commit hook that rewrites and stages T001's Result in the revision commit
+  stops the revision with `Plan revision stage: … DONE task T001 was changed or removed` and
+  leaves no revision record
+  (`test_plan_review_followup_revision_rechecks_done_blocks_after_a_commit_hook`); `stage-verify`
+  on an open plan-revision stage whose recorded commit changed a DONE block fails instead of
+  printing `committed` (`test_plan_review_followup_stage_verify_rejects_a_changed_done_block`).
 - `worker_count` (T202, DONE): default `min(14, CPU - 2)`, override and invalid values, `Workers:`
   first line (`test_worker_count_default_and_override`).
 - `session_gate_mode`, `session_gate_setting` (T203, DONE): mode from gate time and setting, errors
@@ -347,5 +359,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-T213 was the last task in the queue. After its host gate passes, the run is complete: the
-pipeline's all-DONE step runs the final validation and sets `ready_for_review`. Nothing is merged or deployed.
+T223 (review round 1 M1 fix) was the last task in the queue. After its host gate passes, the
+pipeline's all-DONE step runs the final validation and requests the next independent review. Nothing is merged or deployed.

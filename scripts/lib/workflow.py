@@ -3669,6 +3669,12 @@ def plan_stage_verify(start, digest):
         return
     if git('status', '--porcelain', '--untracked-files=all').strip():
         fail('Plan revision stage: uncommitted changes after the counted revision commit.')
+    # A commit hook can rewrite a DONE block after the host's pre-commit check; the clean
+    # checkout equals HEAD here, so this compares the counted commit with START.
+    try:
+        plan_keeps_done([start])
+    except ValueError as error:
+        fail(f'Plan revision stage: {error}')
     print('committed')
 
 

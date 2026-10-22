@@ -439,7 +439,10 @@ check` (either failure stops with `Plan revision stage: task queue is invalid: �
 DONE task T… was changed or removed`, escalated the same way) and
 `plan-dispositions-check --fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
 needs-human h`) and the state line, `git add` of the plan revision records, `git commit
---allow-empty -m 'chore(ai): record plan revision'`, the gate check, and ONE host record
+--allow-empty -m 'chore(ai): record plan revision'`, the gate check, the post-commit checks
+(clean checkout, scope, and `plan-keeps-done START` again, so a commit hook cannot rewrite a DONE
+block after the first check: `Plan revision stage: the revision commit is out of scope (commit
+hook?): DONE task T… was changed or removed`, with no record written), and ONE host record
 `plan-revisions record BASE HEAD --accepted a --rejected r --needs-human h` (bounded questions on
 stdin) in `plan-revisions-<branch hash>.json`: `{commit, report_digest, round, accepted,
 rejected, needs_human, questions}`. Nothing writes to the checkout after the commit, so a
@@ -472,7 +475,10 @@ this run)`. A human (re)start (`run-manifest start`) resets the list; a recovery
 digest and only plan revision records changed since START; a host `plan-revisions` record for
 the digest whose commit is in START..HEAD means `committed` (the record holds the outcome), a
 dirty tree after it fails `Plan revision stage: uncommitted changes after the counted revision
-commit.`, else `pending` (an agent commit with the revision subject never closes it).
+commit.`, and so does a DONE block that differs from START's (`plan_keeps_done` against
+`start_head`, the same base `ai-run --revise-plan --since START` checks: `Plan revision stage:
+DONE task T… was changed or removed`, so recovery cannot close a stage a commit hook rewrote),
+else `pending` (an agent commit with the revision subject never closes it).
 `complete_plan_stage` (every start and resume dispatches the open stage by name, before the
 clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-reserve` again
 (idempotent), `ai-run --revise-plan --since START --base <base sha> --model M` with the run's

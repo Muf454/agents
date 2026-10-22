@@ -6864,7 +6864,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 - Handoff: Flow chart section, Covered-by-tests names (T202, T210, T218, T213), Validation run and Next action updated.
 
 ## T223 — Recheck DONE-block preservation after the plan revision commit and in recovery (review M1)
-Status: TODO
+Status: DONE
 Dependencies: T214
 Model: opus
 
@@ -6906,3 +6906,17 @@ Targeted: `bash -n scripts/ai-run`.
 Gate: `.ai/bin/ai-check`.
 
 ### Result / notes
+2026-10-22: `scripts/ai-run` revise-plan block now runs, after `git commit` and `ai_guard_verify`,
+the clean-checkout check, `revision_scope` and `plan-keeps-done "$since"` (stop `Plan revision
+stage: the revision commit is out of scope (commit hook?): DONE task T… was changed or removed`),
+and only then `plan-revisions record`. `plan_stage_verify` calls `plan_keeps_done([start])` (reused,
+`fail` raises ValueError) after the clean-tree check and before `committed`. Base confirmed:
+`complete_plan_stage` passes the stage's `start_head` as `ai-run --since`, so recovery and the
+revision compare against the same START. New tests
+`test_plan_review_followup_revision_rechecks_done_blocks_after_a_commit_hook` and
+`test_plan_review_followup_stage_verify_rejects_a_changed_done_block`. docs/workflow.md updated (revision
+order, stage-verify). Targeted: the selector ran 22 tests, 1 failure in the new test's own
+over-strict clean-checkout assertion (`ai_die` appends to the run log on a stop); assertion removed,
+both new tests then OK (Ran 2 tests). `bash -n scripts/ai-run` OK. Full gate left to the host gate
+(BATCH 10 GATE RULE); a session `ai-check` started before reading that rule went past the 600 s tool
+limit and its result was not observed. Flow chart unchanged (the revision stop already exists).
