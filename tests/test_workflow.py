@@ -11578,6 +11578,125 @@ runpy.run_path(real, run_name='__main__')
         self.assertEqual([e['action'] for e in self.run_events()], ['start'])
         self.assertEqual(self.notifications().count('⛔'), 1)
 
+    # ---------------------------------------------------------------- a held event lock (ME-01, T221)
+    # Every event write waits at most AI_EVENTS_LOCK_SECONDS; a run writes a handful, so the held
+    # run may take that much longer than the free one, never more than this on top.
+    EVENTS_HELD_SLACK = 30 * TIMEOUT_SCALE
+    EVENTS_NOTE = re.compile(r'^Note: could not record the \w+ event[^\n]*\n', re.M)
+    # What differs between two identical runs anyway: times, hashes, temp log names, durations.
+    RUN_NOISE = ((re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'), 'TIME'), (re.compile(r'\b[0-9a-f]{7,64}\b'), 'HASH'),
+                 (re.compile(r'-[A-Za-z0-9]{8}\.(log|json)\b'), r'-X.\1'), (re.compile(r'\bin \d+s\b'), 'in Ns'))
+
+    def events_checkout(self, name):
+        """A fresh fixture checkout with its own host state dir: a run in it sees no other run's
+        gate history or recovery attempts."""
+        self.project = self.base / name / 'project with spaces'
+        self.project.mkdir(parents=True)
+        self.env['AI_STATE_DIR'] = str(self.base / name / 'host-state')
+        self.run_cmd(['git', 'init', '-b', 'main'])
+        self.ready()
+
+    @contextlib.contextmanager
+    def events_lock_held(self):
+        """A separate process holds the state dir's events.lock exclusively (it says `ready` on a
+        pipe) until the block ends; then its process group is killed. Asserts that events.jsonl
+        gained no line meanwhile."""
+        state = Path(self.env['AI_STATE_DIR'])
+        state.mkdir(exist_ok=True)
+        holder = subprocess.Popen(
+            [sys.executable, '-c', 'import fcntl, os, sys, time\n'
+             'fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)\n'
+             'print("ready", flush=True)\nwhile True: time.sleep(60)\n', str(state / 'events.lock')],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'ready')
+            events = state / 'events.jsonl'
+            lines = len(events.read_text().splitlines()) if events.exists() else 0
+            yield
+            self.assertEqual(len(events.read_text().splitlines()) if events.exists() else 0, lines)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(holder.pid, signal.SIGKILL)
+            holder.wait(timeout=COMMAND_TIMEOUT)
+            holder.stdout.close()
+
+    def held_tool(self, *args, **env):
+        """(result, seconds) of a tool run with a short event lock deadline."""
+        started = time.monotonic()
+        result = self.tool(*args, AI_EVENTS_LOCK_SECONDS='0.5', **env)
+        return result, time.monotonic() - started
+
+    def without_event_notes(self, text):
+        text = self.EVENTS_NOTE.sub('', text)
+        for pattern, replacement in self.RUN_NOISE:
+            text = pattern.sub(replacement, text)
+        return text
+
+    def stop_notes(self, notes):
+        return [line for line in notes.splitlines() if '⛔' in line]
+
+    def test_events_lock_held_pipeline_completion_is_bounded(self):
+        runs = {}
+        for held in (False, True):  # the same run in two fresh checkouts, without and with a holder
+            self.events_checkout('held' if held else 'free')
+            notes = len(self.notifications())
+            with self.events_lock_held() if held else contextlib.nullcontext():
+                result, seconds = self.held_tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+            runs[held] = (result, seconds, self.notifications()[notes:], self.observation())
+        (free, free_seconds, free_notes, free_done), (held, held_seconds, held_notes, done) = runs[False], runs[True]
+        free_events = self.base / 'free/host-state/events.jsonl'
+        self.assertIn('"kind": "run"', free_events.read_text())  # the free run records its events
+        self.assertLess(held_seconds, free_seconds + self.EVENTS_HELD_SLACK)
+        self.assertNotIn('Note: could not record', free.stderr)
+        for kind in ('gate', 'run'):  # gate events, the run start and the run end all gave up
+            self.assertIn(f'Note: could not record the {kind} event.', held.stderr)
+        self.assertEqual(self.without_event_notes(held.stdout), self.without_event_notes(free.stdout))
+        self.assertEqual(self.without_event_notes(held.stderr), self.without_event_notes(free.stderr))
+        self.assertEqual(self.without_event_notes(held_notes), self.without_event_notes(free_notes))
+        self.assertIn('🏁 FINISHED', held_notes)
+        self.assertEqual((done['stage'], done['state'], done['note']), ('pr', 'done', 'no PR'))
+        self.assertEqual((done['stage'], done['state'], done['note']),
+                         (free_done['stage'], free_done['state'], free_done['note']))
+
+    def test_events_lock_held_terminal_stop_is_bounded(self):
+        with self.subTest('terminal stop'):
+            self.events_checkout('stop')
+            (self.project / '.ai/tasks.md').write_text(self.unfixable_queue())
+            self.commit('an unfixable queue')
+            notes = len(self.notifications())
+            free, free_seconds = self.held_tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                                                expected=1, AI_AUTO_RECOVER='0')
+            free_error = (self.project / '.ai/local/last-error').read_text()
+            free_stops = self.stop_notes(self.notifications()[notes:])
+            self.assertEqual(len(free_stops), 1)
+            notes = len(self.notifications())
+            with self.events_lock_held():
+                held, held_seconds = self.held_tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                                                    expected=1, AI_AUTO_RECOVER='0')
+            self.assertLess(held_seconds, free_seconds + self.EVENTS_HELD_SLACK)
+            self.assertIn('Note: could not record the stop event.', held.stderr)
+            self.assertEqual(self.without_event_notes(held.stderr), self.without_event_notes(free.stderr))
+            self.assertEqual((self.project / '.ai/local/last-error').read_text(), free_error)
+            self.assertEqual(self.stop_notes(self.notifications()[notes:]), free_stops)
+        with self.subTest('ai-recover escalation'):
+            results = []
+            for held in (False, True):  # each in a fresh checkout: the same recovery attempt number
+                self.events_checkout('recover-held' if held else 'recover-free')
+                self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                          AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+                (self.project / '.ai/local/last-error').write_text('Claude exited 1: the session failed\n')
+                notes = len(self.notifications())
+                with self.events_lock_held() if held else contextlib.nullcontext():
+                    result, seconds = self.held_tool('ai-recover', '--stage', 'implementation', expected=1,
+                                                     AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+                results.append((result, seconds, (self.project / '.ai/local/last-error').read_text(),
+                                self.stop_notes(self.notifications()[notes:])))
+            (free, free_seconds, free_error, free_stops), (held, held_seconds, held_error, held_stops) = results
+            self.assertLess(held_seconds, free_seconds + self.EVENTS_HELD_SLACK)
+            self.assertIn('Note: could not record the stop event.', held.stderr)
+            self.assertEqual(len(free_stops), 1)
+            self.assertEqual((held_error, held_stops), (free_error, free_stops))
+
     # ---------------------------------------------------------------- session gate rule (TS-01, T204)
     def session_gate_contracts(self):
         """The appended RUNNER CONTRACT part of each captured task prompt (not the template before it)."""

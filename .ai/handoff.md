@@ -70,6 +70,11 @@
   push); `ai_die`'s pipeline branch and `ai-recover` `escalate()`/`on_exit` pass `stopped`. No end
   on a hand-over, resume, relaunch wait (exit 75) or after a gate change. Exit codes,
   notifications and markers unchanged; a failed write adds `Note: could not record the run event.`
+- T221 (ME-01 part 1, review round 2 P13, 2026-10-22): regressions only, no code change needed.
+  Every synchronous event call site (gate, stop, recovery, run start/resume/end and `run-totals`)
+  goes through `lock_events`, so a held `events.lock` costs at most `AI_EVENTS_LOCK_SECONDS` per
+  write; a pipeline finish, a terminal stop and an `ai-recover` escalation keep their output, exit
+  status, last-error and notifications, and only the events are missing.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -296,9 +301,15 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_events_run_end_terminal_die_after_the_start`); a usage-limit relaunch wait writes no end
   (`test_events_run_end_relaunch_wait_is_no_end`); a gate changed by a hook writes no end and runs
   no helper (`test_events_run_end_gate_change_runs_no_helper`).
-- Later parts: `events_lock_held` (T221: pipeline completion,
-  terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
-  (T210), `events_pr` (T218).
+- `events_lock_held` (T221, DONE): with another process holding `events.lock` and
+  `AI_EVENTS_LOCK_SECONDS=0.5`, a `--no-pr` pipeline finishes within a bound of the free run's time
+  with exit 0 and the same stdout, stderr (apart from `Note: could not record the … event.` lines),
+  notifications and observation `done`, and `events.jsonl` gains no line
+  (`test_events_lock_held_pipeline_completion_is_bounded`); an invalid-queue terminal stop and an
+  `ai-recover` escalation keep exit 1, last-error and the one ⛔ notification
+  (`test_events_lock_held_terminal_stop_is_bounded`); `run-totals` prints `gates=-
+  gate_failures=-` within the bound, exit 0 (`test_events_lock_held_reader_reports_unavailable`).
+- Later parts: `events_ruling` and `events_review` (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
   runs that survive three rotations (`unknown`, `events 0`, sums agree), gates counted once,
   filters, text tables, `ai-status --metrics`.
@@ -313,5 +324,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T209 (the next unblocked task in `.ai/tasks.md`).
+The runner continues with the next task after T221 (the next unblocked task in `.ai/tasks.md`).
 Nothing is merged or deployed.

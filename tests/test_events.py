@@ -249,6 +249,24 @@ class EventsCoreTests(EventsFixture):
         self.assertEqual(self.event('stop', 'stage=three', **fast).returncode, 0)
         self.assertEqual([r['stage'] for r in self.records()], ['one', 'three'])
 
+    def test_events_lock_held_reader_reports_unavailable(self):
+        run = {'AI_RUN_ID': 'fedcba9876543210'}
+        self.assertEqual(self.event('gate', f'gate_id={GATE_ID}', 'result=fail', **run).returncode, 0)
+
+        def totals(**env):
+            started = time.monotonic()
+            result = subprocess.run([sys.executable, str(HELPER), 'run-totals'], cwd=self.repo,
+                                    env={**self.env, **run, **env}, capture_output=True, text=True,
+                                    timeout=COMMAND_TIMEOUT)
+            self.assertLess(time.monotonic() - started, BOUND)
+            return result.returncode, result.stdout, result.stderr
+        free = totals()
+        self.assertEqual(free, (0, 'tasks=0 gates=1 gate_failures=1 seconds=-\n', ''))
+        holder = self.holder('exclusive')
+        self.assertEqual(totals(AI_EVENTS_LOCK_SECONDS='0.5'), (0, 'tasks=0 gates=- gate_failures=- seconds=-\n', ''))
+        self.release(holder)
+        self.assertEqual(totals(), free)
+
     def test_events_core_lock_seconds_setting(self):
         for value, expected in (('0.5', 0.5), ('60', 60.0), ('0.05', 5.0), ('61', 5.0), ('nan', 5.0),
                                 ('x', 5.0), ('', 5.0)):

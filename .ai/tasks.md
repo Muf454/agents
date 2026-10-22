@@ -6457,7 +6457,7 @@ failure (the gate test above, fixed; rerun `-k events_gate_pipeline_validation` 
 RULE).
 
 ## T221 — A held event lock never stalls a run (ME-01 part 1, review round 2 P13)
-Status: TODO
+Status: DONE
 Dependencies: T209
 Model: opus
 
@@ -6505,6 +6505,30 @@ Targeted: `python3 -m unittest discover -s tests -k events_run_end -k events_cor
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22, claude (opus). Regressions only; no script change needed: every synchronous event
+call site already goes through `lock_events` (bounded `flock_bounded`), and `read_events` (used
+only by `run_totals`) is the one reader. Exercised call sites: `ai_gate_event` (`event-gate`, task
+and validation gates), `ai_event run` start and end with `run-totals` (pipeline finish),
+`ai_stop_event` (`stop()` on an invalid queue, `ai-recover` `escalate()`), `ai_recovery_event`
+(escalation) and `run-totals` directly.
+- `tests/test_workflow.py`: `events_lock_held()` (a separate Python process takes `LOCK_EX` on the
+  state dir's `events.lock`, says `ready` on a pipe, its process group is killed in `finally`;
+  asserts `events.jsonl` gained no line), `events_checkout()` (fresh checkout with its own state
+  dir, so two runs see the same gate history and recovery attempt), noise normalization (times,
+  hashes, temp log names, `in Ns`). `test_events_lock_held_pipeline_completion_is_bounded`: the
+  held run (`AI_EVENTS_LOCK_SECONDS=0.5`) takes less than the free run + 30 s × scale, exit 0, same
+  stdout/stderr apart from the event Notes (gate and run Notes present), same notifications and
+  observation `pr`/`done`/`no PR`. `test_events_lock_held_terminal_stop_is_bounded`: invalid queue
+  with `AI_AUTO_RECOVER=0` and an `ai-recover` escalation, exit 1, last-error and the single ⛔ line
+  unchanged, stop Note present.
+- `tests/test_events.py` `test_events_lock_held_reader_reports_unavailable`: `run-totals` prints
+  `tasks=0 gates=1 gate_failures=1 seconds=-` free, `gates=- gate_failures=-` with the holder
+  (exit 0, within `BOUND`), the free output again after release.
+- Targeted: `-k events_lock_held` Ran 3 tests OK (55.9 s); `-k events_run_end -k events_core`
+  Ran 15 tests OK. No shell script changed (no `bash -n` needed). Full gate left to the host gate
+  (BATCH 10 GATE RULE); note: this session started `.ai/bin/ai-check` by mistake before re-reading
+  the rule; it moved to the background and its result was not seen here (the host gate waits for
+  its lock). Docs: handoff, vault hub Log line. Flow unchanged.
 
 ## T210 — `ruling` and `review` routing events (ME-01 part 1, BR-01 and BR-14 records, review P5 and P6)
 Status: TODO
