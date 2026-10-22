@@ -618,3 +618,4 @@
 | 2026-10-22T12:25:00Z | claude (opus) | T211 | note: the mistaken in-session ai-check finished: 1184 tests OK, then `Error: Validation modified project content` (this session edited and committed during its run) | not a clean gate; the host gate decides | e0247f0 | no code change |
 | 2026-10-22T12:21:11Z | runner | T211 | completed | PASS | e0247f0 | Claude checkpointed; continuing queue |
 | 2026-10-22T12:30:00Z | claude (sonnet) | T212 | DONE (ME-01 part 2 command): `metrics_text` tables and footers; `ai-status --metrics` passes through to `metrics`; without `--json` the output is text | -k test_metrics 8 OK; -k outcome_report -k runner_logs_task_outcomes 4 OK; bash -n scripts/ai-status OK; full gate left to the host (BATCH 10 GATE RULE) | this commit | flow unchanged; docs/workflow.md Metrics paragraph |
+| 2026-10-22T12:39:43Z | runner | T212 | completed | PASS | 6d0f1a4 | Claude checkpointed; continuing queue |
