@@ -111,6 +111,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T306: `-k human_stop` Ran 8 OK (57.8 s); full gate result in the T306 notes.
 2026-10-22, T302: `.ai/bin/ai-check` PASS, Ran 1138 tests OK (1482 s) on the recovery checkpoint
 086ff5f's source; in session `-k run_record` Ran 21 OK, the seven formerly failing resume tests OK,
 Docs OK.
@@ -156,7 +157,8 @@ Recorded as B1–B24 in `.ai/project-spec.md`. The ones that shape behaviour mos
   own run record.
 
 ## Flow chart
-Flow unchanged so far (planning only). T303, T306, T307, T308, T311, T313 and T320 change the
+Flow chart updated: T306 added the "Stopped by you" path (interrupt → child ended → inline gate
+check → record or nothing → ⛔ STOPPED by you, no recovery) and its notification row. T303, T306, T307, T308, T311, T313 and T320 change the
 flow and update the vault `agents-flow.md` and the hub Log in their own task; T314 audits them.
 
 ## For mission control (phase 2 switch; filled in by T314)
@@ -263,6 +265,10 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   implementation, review, validation, dependency setup, the retry wait, `git push`, `git
   ls-remote` and `gh`; recovery refuses, interrupt during
   recovery, watchdog does not recover.
+  Done so far (T306): `test_human_stop_during_session` (group SIGINT during a session: exit 130,
+  one ⛔ STOPPED by you, no recovery, run record and escalation `human_stop`, marker gone, partial
+  work kept), `test_human_stop_bookkeeping_commit`, `test_human_stop_request_wins_in_stop`,
+  `test_human_stop_gate_tamper_child_failure`, `test_human_stop_gate_tamper_interrupt`.
 - `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
   wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
   stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
@@ -285,6 +291,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316, T304 and T328 are DONE (T302's gate PASSED on 086ff5f's source).
+T301, T315, T305, T303, T302, T316, T304, T328, T317 and T306 are DONE (T302's gate PASSED on 086ff5f's source).
 Next: the rest of the queue by dependency.
 Nothing is merged or deployed.

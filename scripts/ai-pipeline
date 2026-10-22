@@ -81,6 +81,11 @@ state_error=$(ai_helper state-root-check ${knowledge_dir:+"$knowledge_dir"} 2>&1
 ai_lock
 export AI_LOCK_HELD=$$
 rm -f .ai/local/last-error
+# A human stop (Ctrl-C, kill -TERM, a service stop) is recorded as such, never auto-recovered;
+# trapped before the marker exists so no interrupt leaves it behind. AI_STAGE is the step key.
+AI_STAGE=start
+trap 'ai_human_stop INT' INT
+trap 'ai_human_stop TERM' TERM
 # Liveness marker for ai-watchdog: removed by ai_die and finish, so one left behind
 # with no runner alive means the pipeline was killed or the machine restarted.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
@@ -199,6 +204,10 @@ stop() {
   reason=${reason:-see terminal}
   # Sets AI_GATE_BROKEN on a changed gate, so no project helper records this stop.
   local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
+  # A run whose stop was requested (ai-pipeline --stop, a signal) is a human stop, never recovered.
+  if [[ "$gate_ok" == yes ]] && ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null; then
+    ai_human_stop TERM
+  fi
   ai_observe stop "$stage" "$reason"
   # Only hand over to checkout code that is still exactly the approved gate.
   if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && "$gate_ok" == yes ]]; then
@@ -211,7 +220,7 @@ stop() {
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
 }
 # step KEY TITLE [DETAIL]: KEY is the dashboard box recorded for the stage.
-step() { printf '\n== %s ==\n' "$2"; ai_observe step "$1" "${@:3}"; }
+step() { AI_STAGE=$1; printf '\n== %s ==\n' "$2"; ai_observe step "$1" "${@:3}"; }
 count_commits() { git log --oneline "$base_sha..HEAD" --grep="$1" | wc -l; }
 # Commit host records, then re-verify before any project-local helper runs again
 # (commit hooks could otherwise swap gate code in between).

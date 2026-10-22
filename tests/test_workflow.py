@@ -11136,6 +11136,103 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(code, 143, output)
         self.assertIn('usage limit reached; pausing', output)
 
+    # Human stop (RC-01 G1, T306): an interrupted pipeline is stopped by the human, never recovered.
+    def pipeline_command(self):
+        return [str(self.project / '.ai/bin/ai-pipeline'), '--approved', '--base', 'main', '--no-pr']
+
+    def human_stop_lines(self):
+        return [line for line in self.notifications().splitlines() if '⛔ STOPPED by you:' in line]
+
+    def assert_not_recovered(self):
+        self.assertNotIn('🔧', self.notifications())
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_human_stop_during_session(self):
+        self.ready()
+        code, output = self.interrupt_session(self.pipeline_command(), 'mock-session.pid',
+                                              lambda runner: os.killpg(runner.pid, signal.SIGINT),
+                                              AI_AUTO_RECOVER='1', MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 130, output)
+        self.assert_not_recovered()
+        [line] = self.human_stop_lines()
+        self.assertIn('during build. Partial work is kept uncommitted.', line)
+        self.assertNotIn('needs you', self.notifications())
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'signal'))
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']), ('human_stop', 'build'))
+        local = self.project / '.ai/local'
+        self.assertFalse((local / 'pipeline.active').exists())
+        self.assertGreater((local / 'last-error.notified').stat().st_mtime_ns, (local / 'last-error').stat().st_mtime_ns)
+        self.assertEqual((local / 'last-error').read_text(), 'stopped by the human during build\n')
+        self.assertIn('stopped by the human (signal)', (self.project / '.ai/run-log.md').read_text())
+        self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
+        self.assertIn('?? partial.txt', self.run_cmd(['git', 'status', '--porcelain']).stdout)
+
+    def test_human_stop_bookkeeping_commit(self):
+        self.ready()
+        code, output = self.interrupt_session(self.pipeline_command(), 'mock-session.pid',
+                                              lambda runner: os.killpg(runner.pid, signal.SIGINT),
+                                              AI_AUTO_RECOVER='1', MOCK_CLAUDE='hold')
+        self.assertEqual(code, 130, output)
+        self.assert_not_recovered()
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain', '--untracked-files=all']).stdout, '')
+        self.assertEqual(self.run_cmd(['git', 'log', '-1', '--format=%s']).stdout.strip(),
+                         'chore(ai): record stop by the human')
+        self.assertIn('.ai/run-log.md', self.run_cmd(['git', 'show', '--name-only', '--format=', 'HEAD']).stdout)
+        [line] = self.human_stop_lines()
+        self.assertNotIn('Partial work', line)
+
+    def test_human_stop_request_wins_in_stop(self):
+        self.ready()
+        # The session records a stop request for the running pipeline, then fails.
+        (self.mock_bin / 'claude').write_text(
+            '#!/usr/bin/env bash\nhelper=.ai/bin/lib/workflow.py\n'
+            'python3 "$helper" run-record request-stop --run "$(python3 "$helper" run-record current)" '
+            "--via 'ai-pipeline --stop'\nexit 1\n")
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=143, AI_AUTO_RECOVER='1')
+        self.assert_not_recovered()
+        self.assertEqual(len(self.human_stop_lines()), 1)
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'ai-pipeline --stop'))
+        self.assertIn('stopped by the human (ai-pipeline --stop)', (self.project / '.ai/run-log.md').read_text())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def tampering_session(self, then):
+        """A fake session that records HEAD in .ai/local/tamper-head, replaces the fixture's
+        workflow.py with code that only writes a sentinel, then runs THEN; returns the sentinel path."""
+        sentinel = self.base / 'tampered-helper-ran'
+        (self.mock_bin / 'claude').write_text(
+            '#!/usr/bin/env bash\ngit rev-parse HEAD > .ai/local/tamper-head\n'
+            f"printf 'import pathlib\\npathlib.Path({json.dumps(str(sentinel))}).touch()\\n' > .ai/bin/lib/workflow.py\n"
+            + then)
+        return sentinel
+
+    def assert_tampered_stop(self, sentinel):
+        self.assertFalse(sentinel.exists(), 'the tampered helper ran')
+        self.assert_not_recovered()
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout,
+                         (self.project / '.ai/local/tamper-head').read_text())
+        [line] = [line for line in self.notifications().splitlines() if '⛔' in line]
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        return line
+
+    def test_human_stop_gate_tamper_child_failure(self):
+        self.ready()
+        sentinel = self.tampering_session('exit 1\n')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
+        self.assert_tampered_stop(sentinel)
+
+    def test_human_stop_gate_tamper_interrupt(self):
+        self.ready()
+        sentinel = self.tampering_session('echo $$ > .ai/local/mock-session.pid\nexec sleep 300\n')
+        code, output = self.interrupt_session(self.pipeline_command(), 'mock-session.pid',
+                                              lambda runner: os.killpg(runner.pid, signal.SIGINT),
+                                              AI_AUTO_RECOVER='1')
+        self.assertEqual(code, 130, output)
+        line = self.assert_tampered_stop(sentinel)
+        self.assertIn('⛔ STOPPED by you:', line)
+        self.assertIn('Gate files changed or not yet approved', line)
+
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')

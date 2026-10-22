@@ -596,3 +596,4 @@
 | 2026-10-22T10:45:56Z | runner | T328 | completed | PASS | 53db858 | Claude checkpointed; continuing queue |
 | 2026-10-22T11:15:00Z | claude (opus) | T317 | DONE: ai-run host gate, ai-recover commit_validated gate and ai_limit_pause sleep run via ai_run_child; 3 pid-only TERM tests | -k interrupt 17 OK; full gate left to the runner (over the tool limit) | see next entry | vault not written in this session |
 | 2026-10-22T11:37:08Z | runner | T317 | completed | PASS | 3cecca6 | Claude checkpointed; continuing queue |
+| 2026-10-22T12:20:00Z | claude (opus) | T306 | DONE: ai-pipeline INT/TERM trap and stop() under a stop request → ai_human_stop (gate first; human_stop record, escalation, bookkeeping commit, one ⛔ STOPPED by you, no recovery); 5 test_human_stop_* tests | -k human_stop 8 OK; full gate left to the runner (over the tool limit) | see next entry | vault flow chart and hub Log updated |

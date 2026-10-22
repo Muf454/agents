@@ -306,6 +306,26 @@ The same holds for the Codex or Claude reviewer of `ai-review`, the validator of
 fails the gate), the `.ai/ci-setup` run of dependency setup, the host's full gate of `ai-run`
 and of `ai-recover`'s validated recovery commit (a TERM to the script's pid alone ends
 `ai-check`, which ends its validator; nothing is committed) and the usage-limit pause's sleep.
+
+An interrupt of `ai-pipeline` itself (Ctrl-C, `kill -TERM`, a service stop) is a human stop,
+recorded once and never handed to auto-recovery (`ai_human_stop` in `lib/common.sh`, trapped
+before the liveness marker exists). Gate first: it ignores further INT/TERM, ends its child, then
+checks the approved gate with the inline verifier. A signal before the gate baseline, or a gate
+that changed or cannot be read, runs no checkout helper and commits nothing: one `⛔ STOPPED by
+you: <branch> during <stage>. Gate files changed or not yet approved …` notification,
+`last-error` and `last-error.notified` written by the shell, the marker removed. With the gate
+unchanged it records a stop request (`via signal`, unless one is recorded), a run-log row
+`stopped by the human (<via>)`, the run record outcome `human_stop`, the escalation record
+`human_stop <stage>`, the observation; commits `chore(ai): record stop by the human` only when
+nothing but state, run log and handoff is dirty and the child ended (never on an armed tree);
+re-checks the gate; then `last-error`, one `⛔ STOPPED by you: <branch> during <stage>. [Partial
+work is kept uncommitted.] Rerun ai-pipeline … to continue.` notification,
+`last-error.notified`, the marker removed, exit 130 (INT) or 143 (TERM). `<stage>` is the
+dashboard step key (`start` before the first step). `stop()` does the same, after its own gate
+check, when the run record carries a stop request, so a stage that fails under a requested
+stop never reaches `ai-recover`. Until T318 the pipeline's own children run in the foreground,
+so a signal to the pipeline's pid alone waits for the running stage; a signal to the group
+(Ctrl-C) ends it at once.
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

@@ -5852,7 +5852,7 @@ in this session, so the runner's gate is the evidence for it. docs/workflow.md "
 limits, and recovery" names the host gates and the limit pause.
 
 ## T306 — ai-pipeline traps INT/TERM and records a human stop, gate first (RC-01 G1, pipeline)
-Status: TODO
+Status: DONE
 Dependencies: T302, T317
 Model: opus
 
@@ -5914,6 +5914,24 @@ Targeted: `python3 -m unittest discover -s tests -k human_stop` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `ai_human_stop SIGNAL` in `scripts/lib/common.sh` (idempotent via `AI_HUMAN_STOPPED`,
+`trap '' INT TERM` first, `ai_stop_child`, then the inline gate check: unset baseline or a changed
+gate → shell-only ⛔ STOPPED by you, `last-error`/`last-error.notified`, marker dropped, exit; else
+stop request `via signal` when none, run-log row `stopped by the human (<via>)` (not while armed),
+`run-record end … human_stop`, `escalation write human_stop <stage>` (sets
+`AI_ESCALATION_WRITTEN`), observation, bookkeeping commit only when the dirty paths are a subset
+of state/run log/handoff and the child ended, gate re-check, ⛔ STOPPED by you (with ` Partial work
+is kept uncommitted.` when dirty), exit 130/143). Deviation: `last-error` (`stopped by the human
+during <stage>`) is written before the escalation write, so the escalation's evidence is this
+stop rather than a stale reason. `scripts/ai-pipeline`: INT/TERM traps before the marker,
+`AI_STAGE` set by `step` (`start` before the first step), `stop()` calls `ai_human_stop TERM`
+after its gate check when `run-record stop-requested` succeeds. Docs: `docs/workflow.md`
+"Interruption, limits, and recovery"; vault `agents-flow.md` "Stopped by you" path, bullet and
+notification row, hub Log line.
+Evidence: `python3 -m unittest discover -s tests -k human_stop` → Ran 8 tests OK (57.8 s; the 5
+new `test_human_stop_*` plus 3 existing). Full `.ai/bin/ai-check` exceeded the 600 s tool limit in
+session (the suite takes ≈ 20 min), so the runner's host gate decides, as for T317.
+Limitation (by design, T318): a PID-only TERM waits for the pipeline's foreground stage.
 
 ## T318 — The pipeline forwards a stop to its children and sleeps; PID-only stop at every stage (RC-01 G2, G1, plan review P2)
 Status: TODO

@@ -154,6 +154,70 @@ ai_stop_child() {
   done
   AI_CHILD_PID=
 }
+# A human stop of ai-pipeline (Ctrl-C, kill -TERM, a service stop, or a failure of a run whose
+# stop was requested): recorded once as "stopped by the human" and never handed to auto-recovery.
+# Gate first: no checkout helper runs and nothing is committed unless the approved gate is
+# unchanged. Uses the pipeline's AI_STAGE (step key), branch and orig_args. Usage: ai_human_stop INT|TERM.
+AI_HUMAN_STOPPED=
+ai_human_stop() {
+  trap '' INT TERM
+  [[ -z "$AI_HUMAN_STOPPED" ]] || return 0
+  AI_HUMAN_STOPPED=1
+  local code=143 stage=${AI_STAGE:-start} who=${branch:-${AI_START_BRANCH:-this branch}} child=ended
+  local via=signal line path dirty='' clause='' rerun='ai-pipeline --approved' paths=() others=no
+  [[ "$1" != INT ]] || code=130
+  ai_stop_child || child=running
+  if [[ -z "${AI_APPROVED_GATE:-}" ]] || ! ai_gate_check "$AI_APPROVED_GATE"; then
+    # A signal before the baseline, or a changed gate: shell writes only (the notification's log
+    # helper skips itself once AI_GATE_BROKEN is set).
+    AI_GATE_BROKEN=1
+    AI_STOP_NOTIFIED=1
+    if [[ -d .ai/local ]]; then
+      printf 'stopped by the human during %s; gate files changed or not yet approved\n' "$stage" \
+        > .ai/local/last-error 2>/dev/null || true
+    fi
+    ai_notify "⛔ STOPPED by you: $who during $stage. Gate files changed or not yet approved: inspect them before rerunning."
+    touch .ai/local/last-error.notified 2>/dev/null || true
+    ai_drop_marker
+    exit "$code"
+  fi
+  printf '%s\n' "stopped by the human during $stage" > .ai/local/last-error 2>/dev/null || true
+  if [[ -n "${AI_RUN_ID:-}" ]]; then
+    ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null || \
+      ai_helper run-record request-stop --run "$AI_RUN_ID" --via signal 2>/dev/null || true
+    via=$(ai_helper run-record show "$AI_RUN_ID" 2>/dev/null | python3 -c \
+      'import json, sys; print((json.load(sys.stdin).get("stop_requested") or {}).get("via") or "signal")' \
+      2>/dev/null) || via=signal
+  fi
+  # No host write while armed: the preserved tree stays exactly the armed one.
+  [[ "$AI_ARMED" == yes ]] || ai_log "$stage" "stopped by the human ($via)" 'n/a' 'No merge or deployment performed' 2>/dev/null || true
+  if [[ -n "${AI_RUN_ID:-}" ]]; then
+    ai_helper run-record end --run "$AI_RUN_ID" --pid $$ human_stop 2>/dev/null || true
+    ai_helper escalation write human_stop "$stage" --run "$AI_RUN_ID" 2>/dev/null || true
+    AI_ESCALATION_WRITTEN=1
+  fi
+  ai_observe stop '' 'stopped by the human'
+  # Bookkeeping commit only when nothing but the runner records is dirty and the child ended.
+  dirty=$(git status --porcelain --untracked-files=all 2>/dev/null) || others=yes
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    path=${line:3}
+    case "$path" in .ai/state.md|.ai/run-log.md|.ai/handoff.md) paths+=("$path") ;; *) others=yes ;; esac
+  done <<< "$dirty"
+  if [[ "$others" == no && "$child" == ended && "$AI_ARMED" != yes ]] && (( ${#paths[@]} )); then
+    git add -- "${paths[@]}" 2>/dev/null && git commit -q -m 'chore(ai): record stop by the human' -- "${paths[@]}" \
+      >/dev/null 2>&1 || true
+    # Commit hooks run project code: from here on a changed gate runs no helper.
+    ai_gate_check "$AI_APPROVED_GATE" || true
+  fi
+  [[ -z "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]] || clause=' Partial work is kept uncommitted.'
+  [[ -z "${orig_args+x}" ]] || rerun="ai-pipeline ${orig_args[*]}"
+  AI_STOP_NOTIFIED=1
+  ai_notify "⛔ STOPPED by you: $who during $stage.$clause Rerun $rerun to continue."
+  touch .ai/local/last-error.notified 2>/dev/null || true
+  ai_drop_marker
+  exit "$code"
+}
 ai_root() {
   AI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ai_die 'Run inside a Git project.'
   cd -- "$AI_ROOT"
