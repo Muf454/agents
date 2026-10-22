@@ -613,3 +613,4 @@
 | 2026-10-22T10:45:13Z | runner | T221 | completed | PASS | 32cdd25 | Claude checkpointed; continuing queue |
 | 2026-10-22T11:30:00Z | claude (sonnet) | T210 | DONE (ME-01 ruling/review events): `ai_ruling_event` after each Ruling row in all three writers; `review` event in `ai-review` `review_records` | -k events_ruling -k events_review 8 OK; -k ruling 24 OK; -k review_routing 7 OK; bash -n OK; full gate left to the host (BATCH 10 GATE RULE) | this commit | flow unchanged; docs/workflow.md paragraph |
 | 2026-10-22T11:12:10Z | runner | T210 | completed | PASS | d131d39 | Claude checkpointed; continuing queue |
+| 2026-10-22T11:37:10Z | runner | T218 | completed | PASS | e5d2849 | Claude checkpointed; continuing queue |
