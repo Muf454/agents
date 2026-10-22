@@ -582,3 +582,4 @@
 | 2026-10-22T05:08:52Z | runner | T303 | stopped (exit 1); inspect state/diff before resuming | see local logs | b6a4386 | No merge or deployment performed |
 | 2026-10-22T05:17:03Z | claude (opus) | T303 | DONE: the 7 gate failures are T302's resume check (ai-pipeline ~166), not the interrupt forwarding; no source change | -k interrupt -k test_session_exit_codes_unchanged 13 OK; each of the 7 run alone fails at "run record refuses this resume" | (this commit) | diagnosis recorded under T302; gate stays red until T302 is fixed |
 | 2026-10-22T05:43:19Z | runner | T303 | stopped (exit 1); inspect state/diff before resuming | see local logs | ad420a2 | No merge or deployment performed |
+| 2026-10-22T06:14:12Z | runner | T302 | stopped (exit 1); inspect state/diff before resuming | see local logs | 5c7dcf3 | No merge or deployment performed |

@@ -161,9 +161,21 @@ if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
   [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
     ai_die 'Resumed on a different branch than the approved run.'
   # The resumed pipeline holds the checkout lock, so the current run record is this run's.
-  AI_RUN_ID=${AI_RUN_ID:-$(ai_helper run-record current 2>/dev/null || true)}
-  ai_helper run-record resume --run "$AI_RUN_ID" --pid $$ || \
-    ai_die 'The run record refuses this resume (stopped by you or replaced); rerun ai-pipeline --approved yourself.'
+  # A named run (AI_RUN_ID) must resume. Without one, a current record that refuses only
+  # stops the resume on a stop request; no record, or an ended one without a stop request,
+  # means the approved run has none yet (approved before run records): start its record.
+  refused='The run record refuses this resume (stopped by you or replaced); rerun ai-pipeline --approved yourself.'
+  if [[ -n "${AI_RUN_ID:-}" ]]; then
+    ai_helper run-record resume --run "$AI_RUN_ID" --pid $$ || ai_die "$refused"
+  elif AI_RUN_ID=$(ai_helper run-record current 2>/dev/null) && \
+       ai_helper run-record resume --run "$AI_RUN_ID" --pid $$ 2>/dev/null; then
+    :
+  else
+    [[ -z "$AI_RUN_ID" ]] || ! ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null || ai_die "$refused"
+    printf 'No run record to resume; recording this resumed run.\n'
+    AI_RUN_ID=$(ai_helper run-record start pipeline "$AI_START_BRANCH" "$base_ref" "$base_sha" \
+      --pid $$ -- "${orig_args[@]}") || ai_die 'Cannot record the run in the host state directory.'
+  fi
 else
   # A human (re)start: record the approved run and give it a fresh recovery budget.
   ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \

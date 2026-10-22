@@ -15685,6 +15685,42 @@ PY
         self.assertEqual((record['outcome'], record['resumes']), ('finished', 1))
         self.assertEqual(self.run_record('current').stdout.strip(), record['id'])
 
+    def manifest_resume(self, expected=0, **env):
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected,
+                         AI_RECOVERY_ATTEMPT='1', **env)
+
+    def test_run_record_pipeline_resume_without_a_record_starts_one(self):
+        # An approved run with no record of its own (none yet, or only an earlier run's ended one).
+        self.ready()
+        earlier = self.run_record_start(os.getpid())
+        self.run_record('end', '--run', earlier, '--pid', str(os.getpid()), 'finished')
+        result = self.manifest_resume()
+        self.assertIn('No run record to resume; recording this resumed run.', result.stdout)
+        records = self.pipeline_records()
+        self.assertEqual([r['id'] for r in records][0], earlier)
+        [record] = records[1:]
+        self.assertEqual((record['kind'], record['argv'], record['outcome'], record['resumes']),
+                         ('pipeline', ['--approved', '--base', 'main', '--no-pr'], 'finished', 0))
+        self.assertEqual(self.run_record('current').stdout.strip(), record['id'])
+
+    def test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run(self):
+        self.ready()
+        stopped = self.run_record_start(os.getpid())
+        self.run_record('request-stop', '--run', stopped, '--via', 'ai-pipeline --stop')
+        before = self.run_record_bytes(stopped)
+        result = self.manifest_resume(expected=1)
+        self.assertIn('The run record refuses this resume', result.stderr)
+        self.assertEqual(self.run_record_bytes(stopped), before)
+        self.assertEqual(len(self.pipeline_records()), 1)
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+        unknown = stopped.replace('-', '-9', 1)
+        result = self.manifest_resume(expected=1, AI_RUN_ID=unknown)
+        self.assertIn('The run record refuses this resume', result.stderr)
+        self.assertEqual(len(self.pipeline_records()), 1)
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+
     def test_run_record_ai_die_after_gate_change(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0',

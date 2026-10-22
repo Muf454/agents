@@ -5420,7 +5420,7 @@ source as b99ceac) PASSED at 2026-10-22T03:23:47Z. Re-checked: `-k escalation` R
 that gate-lock test plus `-k test_run_record` Ran 12 OK. DONE.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T305
 Model: opus
 
