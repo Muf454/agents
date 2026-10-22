@@ -63,7 +63,8 @@ When implementation is authorized, do not request approval between ordinary task
    interrupted IN_PROGRESS task against source, diffs, and tests first.
 3. Mark it IN_PROGRESS and record the current task before editing.
 4. Implement within scope, with appropriate tests. Run its deterministic checks
-   and `.ai/bin/ai-check`. Repair failures caused by your changes.
+   and `.ai/bin/ai-check` (an unattended runner session follows
+   the RUNNER CONTRACT's gate rule instead). Repair failures caused by your changes.
 5. Update relevant documentation and decisions. Mark DONE only after acceptance
    criteria and validation are satisfied; record concrete evidence and limitations.
 6. Update `.ai/state.md` and `.ai/handoff.md`, append a concise outcome to

@@ -327,8 +327,8 @@ if 'PLANNING CONTRACT' in prompt:
                           + helper.read_text())
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'permission_denials':[]}))
     sys.exit(0)
-assert 'RUNNER CONTRACT' in prompt or 'TRIAGE CONTRACT' in prompt
-assert 'TRIAGE CONTRACT' in prompt or 'never prefix commands with `cd`' in prompt
+assert 'RUNNER CONTRACT:' in prompt or 'TRIAGE CONTRACT:' in prompt
+assert 'TRIAGE CONTRACT:' in prompt or 'never prefix commands with `cd`' in prompt
 assert '.ai/local/scratch/' in prompt, 'the prompt does not name the scratch directory'
 assert '--strict-mcp-config' in args
 assert args[args.index('--setting-sources')+1] == 'project'
@@ -349,9 +349,9 @@ if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before ever
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
-if 'RUNNER CONTRACT' in prompt:  # each task session's prompt (BR-03 fresh retry)
+if 'RUNNER CONTRACT:' in prompt:  # each task session's prompt (BR-03 fresh retry)
     with open('.ai/local/mock-prompts', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
-if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT' in prompt:
+if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT:' in prompt:
     # The host run manifest as this session sees it (ai-run's task record).
     copy_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
     for manifest in pathlib.Path(os.environ['AI_STATE_DIR']).rglob('run.json'):
@@ -361,7 +361,7 @@ if mode == 'limit-once' and not pathlib.Path('.ai/local/mock-limit-hit').exists(
     print(json.dumps({'type':'result','subtype':'error','is_error':True,
                       'result':"You've hit your usage limit. Try again in 2 minutes."}))
     sys.exit(1)
-if mode.startswith('limit-far-') and 'RUNNER CONTRACT' in prompt:
+if mode.startswith('limit-far-') and 'RUNNER CONTRACT:' in prompt:
     # Preserved work of a session stopped at the far limit: its task IN_PROGRESS (-dirty), DONE
     # (-done, -done-committed: committed with preserved.txt, then preserved-after.txt edited) or
     # unchanged (-keep); MOCK_LIMIT_ALSO="T002:DONE ..." sets more statuses, MOCK_EXTRA_FILE is
@@ -405,7 +405,7 @@ if mode == 'limit-far':
     print(json.dumps({'type':'result','subtype':'error','is_error':True,
                       'result':'Claude AI usage limit reached|' + str(int(time.time()) + 7 * 86400)}))
     sys.exit(1)
-if 'TRIAGE CONTRACT' in prompt:
+if 'TRIAGE CONTRACT:' in prompt:
     with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-calls', 'a') as f: f.write('call\n')
     with open(pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'triage-prompts.log', 'a') as f:
         f.write('=== PROMPT ===\n' + prompt + '\n')
@@ -483,14 +483,14 @@ if mode in ('error-once', 'error-once-partial') and not pathlib.Path('.ai/local/
     sys.exit(0)
 if mode in ('error-once', 'error-once-partial'):
     mode = 'success'
-if mode == 'chmod-tracked' and 'RUNNER CONTRACT' in prompt:
+if mode == 'chmod-tracked' and 'RUNNER CONTRACT:' in prompt:
     # A session that loses the recorded executable bit of a tracked script, then completes normally.
     os.chmod(os.environ['MOCK_CHMOD_PATH'], 0o644)
     mode = 'success'
 if mode == 'timeout':
     pathlib.Path('partial.txt').write_text('interrupted work')
     time.sleep(30)
-if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT' in prompt:
+if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT:' in prompt:
     # A session that marks T001 IN_PROGRESS, leaves partial work and runs past --session-timeout:
     # -once only on its first call (then the normal mock completes T001), -always every time.
     calls = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'timeout-session-calls'
@@ -503,7 +503,7 @@ if mode in ('timeout-once', 'timeout-always') and 'RUNNER CONTRACT' in prompt:
             os.chmod(os.environ['MOCK_CHMOD_PATH'], 0o644)  # loses a tracked script's bit too
         time.sleep(30)
     mode = 'success'
-if mode in ('error-in-progress', 'timeout-committed') and 'RUNNER CONTRACT' in prompt:
+if mode in ('error-in-progress', 'timeout-committed') and 'RUNNER CONTRACT:' in prompt:
     # T001 marked IN_PROGRESS, then: -error-in-progress leaves partial work and exits 1 (not a
     # timeout); -timeout-committed commits the mark, leaves nothing else and runs past the timeout.
     subprocess.run(['.ai/bin/ai-task', 'set', 'T001', 'IN_PROGRESS'], check=True, stdout=subprocess.DEVNULL)
@@ -552,7 +552,7 @@ if denied_but_done:
 if mode == 'invalid':
     print('not JSON')
     sys.exit(0)
-if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER CONTRACT' in prompt:
+if mode in ('blocked-gate-unknown', 'blocked-gate-unknown-always') and 'RUNNER CONTRACT:' in prompt:
     # T001 marked BLOCKED although its own gate run showed no failing check: validation.json is
     # left as `stamp invalidate` writes it (RUNNING). Only the first T001 call (-always: every
     # one); later calls complete the task normally. Every prompt is recorded. MOCK_BLOCK_VARIANT
@@ -11265,6 +11265,35 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 rest = contract.replace(exclusion, '')
                 self.assertNotIn('.ai/bin/ai-check', rest)
                 self.assertNotIn('.ai/validate', rest)
+
+    def test_session_gate_templates_defer_to_the_contract(self):
+        templates = ROOT / 'templates'
+        for name in ('runner', 'fix-review'):
+            self.assertIn("RUNNER CONTRACT's gate rule", (templates / f'.ai/prompts/{name}.md').read_text())
+        bullets = {}
+        for name in ('runner', 'triage'):
+            section = self.prompt_section(name)
+            self.assertNotRegex(section, r'(?m)^- Run the full gate as')
+            bullet = section[section.index('- The gate rule of'):].split('\n- ', 2)[0]
+            self.assertIn("this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT)", ' '.join(bullet.split()))
+            self.assertIn('When the rule says to run it:', bullet)
+            self.assertLess(bullet.index('When the rule says to run it:'), bullet.index('run_in_background'))
+            self.assertEqual(bullet.count('run_in_background'), 1)
+            bullets[name] = bullet
+        self.assertEqual(bullets['runner'], bullets['triage'])
+        self.assertIn("RUNNER CONTRACT's gate rule", (templates / 'CLAUDE.md').read_text())
+        self.assertIn('.ai/bin/ai-check', (templates / '.ai/prompts/implement.md').read_text())
+
+    def test_session_gate_triage_contract_has_its_own_gate_rule(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', MOCK_CODEX='major-once')
+        prompt = self.triage_prompts()[0]
+        self.assertIn('TRIAGE CONTRACT:', prompt)
+        after = prompt[prompt.index('TRIAGE CONTRACT:'):]
+        self.assertIn('Gate rule: triage changes only workflow records', after)
+        self.assertIn('do not run .ai/bin/ai-check', after)
+        self.assertNotIn('RUNNER CONTRACT:', prompt)
+        self.assertIn('TRIAGE CONTRACT', self.prompt_section('triage'))
 
     # ---------------------------------------------------------------- gate lock wait (FL-32, T039)
     def gate_lock_holder(self, seconds):

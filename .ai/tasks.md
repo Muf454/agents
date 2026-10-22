@@ -5534,7 +5534,7 @@ tests, OK). docs/workflow.md (`session-gate`, watchdog note) and vault agents-fl
 updated.
 
 ## T205 — Prompt templates: the gate rule comes from the RUNNER CONTRACT (TS-01 (2), templates)
-Status: TODO
+Status: DONE
 Dependencies: T204
 Model: sonnet
 
@@ -5599,6 +5599,17 @@ Targeted: `bash -n scripts/ai-run`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: done. `runner.md` and `triage.md` share one "How to work here" gate bullet: the gate rule
+of this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT) decides, default targeted checks only,
+and the `run_in_background` instructions follow `When the rule says to run it:`. `runner.md` step text,
+`fix-review.md` and `templates/CLAUDE.md` step 4 defer to the RUNNER CONTRACT's gate rule. `scripts/ai-run`
+appends `Gate rule: triage changes only workflow records; do not run .ai/bin/ai-check, .ai/validate or
+the test suite in this session.` to the TRIAGE CONTRACT. Tests: `test_session_gate_templates_defer_to_the_contract`
+and `test_session_gate_triage_contract_has_its_own_gate_rule`. The mock `claude` now detects session kind by
+`RUNNER CONTRACT:` / `TRIAGE CONTRACT:` (with colon), because the shared bullet names both contracts.
+Evidence: new tests + `template_rules`, `review_prompt_template`, `Docs`, `gate_background_prompts`,
+`tool_contract_section`, `session_gate_contract` OK; `bash -n scripts/ai-run` OK; `.ai/bin/ai-check` PASS
+(Ran 1125 tests, OK, 1024 s; it outlived the 600 s tool call and was awaited as a background job).
 
 ## T215 — Task format and task-writing prompts name `Targeted:` checks (TS-01 (2), review P11)
 Status: TODO

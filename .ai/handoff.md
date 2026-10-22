@@ -152,6 +152,11 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   `--skip-plan-review` prints the line (`test_plan_review_base_skip_flag_prints_the_line`); a
   reused current plan review prints its line once and calls no reviewer
   (`test_plan_review_base_current_review_is_reused_with_a_line`).
+- `session_gate_templates` / `session_gate_triage` (T205, DONE): runner, triage, fix-review and
+  `templates/CLAUDE.md` defer to the session contract's gate rule
+  (`test_session_gate_templates_defer_to_the_contract`); a triage session's TRIAGE CONTRACT forbids
+  the full gate and carries no RUNNER CONTRACT
+  (`test_session_gate_triage_contract_has_its_own_gate_rule`).
 - `plan_review_followup` (T214, DONE): a MAJOR plan review on a follow-up batch is revised,
   re-reviewed and implemented with earlier DONE blocks unchanged
   (`test_plan_review_followup_major_revised_rereviewed_and_implemented`); a revision that edits a

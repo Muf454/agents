@@ -52,7 +52,10 @@ handoff/state with explicit paths, then return.
   redirect edits (`>`, `>>`, `tee`).
 - Run plain commands, and never prefix commands with `cd`: the shell already starts in the
   project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+- The gate rule of this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT) says whether to
+  run the full gate in this session. By default run only the targeted checks: the runner runs
+  the full gate after the session and it decides DONE. When the rule says to run it: run the
+  full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
   wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
   `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and
   after; a change fails it with `Validation modified project content`) and do not end the
