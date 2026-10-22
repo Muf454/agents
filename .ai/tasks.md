@@ -6637,7 +6637,7 @@ full `.ai/bin/ai-check` (~900 s) exceeds the session's 600 s tool limit, so the 
 gives the full result.
 
 ## T311 — SKIPPED status with a host skip record (RC-01 G6, queue)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -6699,6 +6699,16 @@ Targeted: `python3 -m unittest discover -s tests -k skip` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-23 (Claude): done. `workflow.py`: `STATUSES`/`FINISHED`, `skip_key`, `skips_dir`,
+`skip_authorized(task)`; `tasks(text, check_skips=True)`; `tasks skip ID REASON` (`tasks_skip`,
+authorization created exclusively before the queue write, queue mode kept); `tasks set` refuses
+SKIPPED ("use ai-task skip"); `next`/`complete`/dependency rule accept SKIPPED; `newly-done`'s
+earlier queue parsed with `check_skips=False`; `plan-keeps-done` protects SKIPPED blocks;
+`pr-body` "Skipped tasks:" line. `scripts/ai-run` planning prompt names SKIPPED; runner/triage
+templates say only the human skips. Tests: the six acceptance tests (names as in the criteria);
+`test_plan_session_revision_keeping_done_tasks_completes` follows the new prompt wording.
+Evidence: `-k skip` Ran 23 tests OK; plan_keeps_done/plan_session_revision/pr_body/Docs Ran 29 OK;
+`.ai/bin/ai-check` PASS, Ran 1206 tests OK (977.7 s). The `ai-task skip` wrapper is T312.
 
 ## T312 — `ai-task retry`, `model` and `skip` (RC-01 G4, G5, G6)
 Status: TODO

@@ -431,8 +431,9 @@ if [[ -n "$plan_file" ]]; then
   prompt+='it with the same rules as .ai/bin/ai-task check: exactly one Status: and one Dependencies: line '
   prompt+='per task, and the required sections (the host adds a missing Likely affected modules or '
   prompt+='Result / notes to TODO tasks; anything else missing stops the run).'
-  prompt+=' Keep every DONE task block exactly as it is (status, text and results); the host stops '
-  prompt+='the run when a DONE task was changed or removed.'
+  prompt+=' Keep every DONE and SKIPPED task block exactly as it is (status, text and results); the '
+  prompt+='host stops the run when a DONE or SKIPPED task was changed or removed. Never set SKIPPED; '
+  prompt+='only the human skips a task (ai-task skip).'
   if [[ "$plan_revision" == yes ]]; then
     prompt+=' An earlier plan exists: keep DONE tasks, their status and results unchanged.'
   fi

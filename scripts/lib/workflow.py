@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 
@@ -431,7 +432,44 @@ REQUIRED_SECTIONS = ('Goal', 'Implementation notes', 'Likely affected modules',
 FILLABLE_SECTIONS = {'Likely affected modules': ['(not listed)\n'], 'Result / notes': []}
 
 
-def tasks(text=None):
+STATUSES = ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'SKIPPED')
+# Finished for the queue: satisfies dependencies and counts toward `complete` (SKIPPED only with
+# its host authorization, which tasks() checks).
+FINISHED = ('DONE', 'SKIPPED')
+SKIPPED_LINE = re.compile(r'Skipped \(\d{4}-\d{2}-\d{2}, ai-task skip\): \S.*')
+
+
+def skipped_lines(task):
+    """The task's `Skipped (…)` lines (fenced lines don't count; task_blocks skips them)."""
+    return [line for line in task['lines'] if line.startswith('Skipped (')]
+
+
+def skip_key(task, line):
+    """sha256 of the repository's sorted root commits, the task's heading line and its Skipped line:
+    host-wide per repository (every checkout and branch), bound to the heading and exact reason."""
+    try:
+        roots = sorted(git('rev-list', '--max-parents=0', 'HEAD').decode().split())
+    except subprocess.CalledProcessError:
+        fail('Skip authorizations need a Git repository with a commit.')
+    return hashlib.sha256('\0'.join([' '.join(roots), task['heading'], line]).encode()).hexdigest()
+
+
+def skips_dir():
+    """Host-only store of skip authorizations (agent sessions get no write access there)."""
+    root = Path(git('rev-parse', '--show-toplevel').decode().strip())
+    return check_state_root(root) / 'skips'
+
+
+def skip_authorized(task):
+    """True when the SKIPPED task has exactly one valid Skipped line and the host authorized it."""
+    lines = skipped_lines(task)
+    if len(lines) != 1 or not SKIPPED_LINE.fullmatch(lines[0]):
+        return False
+    return (skips_dir() / skip_key(task, lines[0])).is_file()
+
+
+def tasks(text=None, check_skips=True):
+    """Parse and validate the queue; check_skips=False turns off only the SKIPPED authorization check."""
     blocks = task_blocks(Path('.ai/tasks.md').read_text() if text is None else text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
@@ -449,7 +487,7 @@ def tasks(text=None):
         task['model'] = models[0] if models else ''
         if task['model'] and not re.fullmatch(r'[A-Za-z0-9._:\[\]-]{1,64}', task['model']):
             fail(f"{task['id']}: invalid Model: value")
-        if task['status'] not in ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'):
+        if task['status'] not in STATUSES:
             fail(f"{task['id']}: invalid status")
         value = task['dependencies']
         task['deps'] = [] if value == 'none' else [x.strip() for x in value.split(',')]
@@ -463,10 +501,15 @@ def tasks(text=None):
                 fail(f"{task['id']}: missing ### {section}")
     by_id = {task['id']: task for task in blocks}
     for task in blocks:
-        if task['status'] in ('DONE', 'IN_PROGRESS') and any(by_id[d]['status'] != 'DONE' for d in task['deps']):
+        if task['status'] in ('DONE', 'IN_PROGRESS') and any(by_id[d]['status'] not in FINISHED for d in task['deps']):
             fail(f"{task['id']}: {task['status']} requires DONE dependencies")
     if sum(task['status'] == 'IN_PROGRESS' for task in blocks) > 1:
         fail('At most one task can be IN_PROGRESS.')
+    if check_skips:
+        for task in blocks:
+            if task['status'] == 'SKIPPED' and not skip_authorized(task):
+                fail(f"{task['id']}: SKIPPED without a host skip record (use ai-task skip, or "
+                     f"ai-task skip {task['id']} --reauthorize on another host)")
     return blocks
 
 
@@ -749,7 +792,7 @@ def task_command(arguments):
         if not blocks:
             fail('No real tasks. Plan before starting implementation.')
     elif action == 'complete':
-        if not blocks or any(task['status'] != 'DONE' for task in blocks):
+        if not blocks or any(task['status'] not in FINISHED for task in blocks):
             fail('Task queue is not complete.')
     elif action == 'untouched':
         # No task finished yet: the plan gate still applies (BLOCKED/IN_PROGRESS don't lift it).
@@ -768,7 +811,7 @@ def task_command(arguments):
             before = git('show', f'{commit}:.ai/tasks.md').decode()
         except subprocess.CalledProcessError:
             before = ''  # no queue at REV: every DONE task is new
-        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+        done = {task['id'] for task in tasks(before, check_skips=False) if task['status'] == 'DONE'}
         for task in blocks:
             if task['status'] == 'DONE' and task['id'] not in done:
                 print(task['id'])
@@ -779,7 +822,7 @@ def task_command(arguments):
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
-                    and all(by_id[d]['status'] == 'DONE' for d in task['deps'])]
+                    and all(by_id[d]['status'] in FINISHED for d in task['deps'])]
         active = next((task for task in eligible if task['status'] == 'IN_PROGRESS'), None)
         print((active or (eligible[0] if eligible else {'id': 'none'}))['id'])
     elif action == 'model':
@@ -799,7 +842,7 @@ def task_command(arguments):
             fail(f'Unknown task: {arguments[1]}')
         done = sum(t['status'] == 'DONE' for t in blocks)
         print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
-    elif action in ('status', 'show', 'set'):
+    elif action in ('status', 'show', 'set', 'skip'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
             fail(f'Unknown task: {arguments[1]}')
@@ -808,32 +851,109 @@ def task_command(arguments):
         elif action == 'show':
             print(f"{task['id']} {task['title']}\nStatus: {task['status']}\n"
                   f"Model: {task['model'] or 'default'}\nDependencies: {task['dependencies']}")
+        elif action == 'skip':
+            if len(arguments) != 3:
+                fail('Usage: tasks skip ID REASON')
+            tasks_skip(blocks, task, arguments[2])
         else:
-            if arguments[2] not in ('TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'):
+            if arguments[2] == 'SKIPPED':
+                fail('Invalid task status: use ai-task skip to skip a task.')
+            if arguments[2] not in STATUSES:
                 fail('Invalid task status.')
             path = Path('.ai/tasks.md')
-            text = path.read_text()
-            # Find real heading, not the code-fenced example, by exact task title.
-            lines = text.splitlines(keepends=True)
-            fence = None
-            active = False
-            for index, line in enumerate(lines):
-                marker = re.match(r'^\s*(`{3,}|~{3,})', line)
-                if marker:
-                    value = marker.group(1)
-                    if fence is None:
-                        fence = value
-                    elif value[0] == fence[0] and len(value) >= len(fence):
-                        fence = None
-                    continue
-                if fence:
-                    continue
-                if line.startswith('## '):
-                    active = bool(re.match(r'^##\s+' + re.escape(task['id']) + r'\s+[—-]\s+', line))
-                if active and line.startswith('Status:'):
-                    lines[index] = f'Status: {arguments[2]}\n'
-                    break
+            lines = path.read_text().splitlines(keepends=True)
+            index, _ = task_line_positions(lines, task['id'])
+            if index is not None:
+                lines[index] = f'Status: {arguments[2]}\n'
             atomic(path, ''.join(lines))
+
+
+def task_line_positions(lines, task_id):
+    """(index of the task's Status: line, index of its `### Result / notes` heading), each None
+    when absent; the real heading is found by exact ID outside code fences (not a fenced example)."""
+    fence = None
+    active = False
+    status = notes = None
+    for index, line in enumerate(lines):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+            continue
+        if fence:
+            continue
+        if line.startswith('## '):
+            if active:
+                break
+            active = bool(re.match(r'^##\s+' + re.escape(task_id) + r'\s+[—-]\s+', line))
+        elif active and line.startswith('Status:') and status is None:
+            status = index
+        elif active and line.rstrip('\r\n') == '### Result / notes' and notes is None:
+            notes = index
+    return status, notes
+
+
+def skip_reason_error(reason):
+    """Why REASON can't be a Skipped line's reason, or '' (one line, 1-500 characters, no control,
+    format or line separator characters, no backticks)."""
+    if not 1 <= len(reason) <= 500:
+        return 'the reason must be 1-500 characters'
+    if reason != reason.strip():
+        return 'the reason must not start or end with whitespace'
+    if '`' in reason or any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in reason):
+        return 'the reason must be one line without control characters or backticks'
+    return ''
+
+
+def tasks_skip(blocks, task, reason):
+    """tasks skip ID REASON: TODO/BLOCKED → SKIPPED with a `Skipped (DATE, ai-task skip): REASON`
+    line under `### Result / notes`. The host authorization is created first, so a failed write
+    leaves only an unused authorization, never an unauthorized SKIPPED."""
+    if task['status'] not in ('TODO', 'BLOCKED'):
+        fail(f"{task['id']} is {task['status']}; only a TODO or BLOCKED task can be skipped.")
+    dependents = [other['id'] for other in blocks
+                  if task['id'] in other['deps'] and other['status'] not in FINISHED]
+    if dependents:
+        fail(f"{task['id']} cannot be skipped: unfinished tasks depend on it: {', '.join(dependents)}")
+    error = skip_reason_error(reason)
+    if error:
+        fail(f'Cannot skip {task["id"]}: {error}.')
+    if skipped_lines(task):
+        fail(f"{task['id']} already has a Skipped line; remove it first.")
+    path = Path('.ai/tasks.md')
+    lines = path.read_text().splitlines(keepends=True)
+    status, notes = task_line_positions(lines, task['id'])
+    if status is None or notes is None:
+        fail(f"{task['id']}: Status: line or ### Result / notes not found.")
+    skipped = f"Skipped ({datetime.now(timezone.utc).strftime('%Y-%m-%d')}, ai-task skip): {reason}"
+    lines[status] = 'Status: SKIPPED\n'
+    # Append to the end of the Result / notes section: after its last non-blank line.
+    end = notes + 1
+    while end < len(lines) and not re.match(r'^#{2,3}\s', lines[end]):
+        end += 1
+    while end > notes + 1 and not lines[end - 1].strip():
+        end -= 1
+    if not lines[end - 1].endswith('\n'):
+        lines[end - 1] += '\n'
+    lines.insert(end, skipped + '\n')
+    new = ''.join(lines)
+    after = next(t for t in tasks(new, check_skips=False) if t['id'] == task['id'])
+    if skipped_lines(after) != [skipped]:
+        fail(f"{task['id']}: the Skipped line could not be placed in the task.")
+    directory = skips_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.close(os.open(directory / skip_key(after, skipped), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        pass
+    tasks(new)  # the whole queue, with the new authorization in place
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, new)
+    path.chmod(mode)
+    print(f"{task['id']} SKIPPED: {reason}")
 
 
 def fingerprint():
@@ -4295,9 +4415,11 @@ def plan_keeps_done(arguments):
     done = {}
     for before in [task_blocks(text) for text in queues]:
         for task in before:
-            if any(line.startswith('Status:') and line.split(':', 1)[1].strip() == 'DONE'
-                   for line in task['lines']):
-                done[task['id']] = task
+            # SKIPPED blocks are protected the same way (their Skipped line is authorized as is).
+            status = next((line.split(':', 1)[1].strip() for line in task['lines']
+                           if line.startswith('Status:') and line.split(':', 1)[1].strip() in FINISHED), None)
+            if status:
+                done[task['id']] = dict(task, finished=status)
     if not done:
         return
     path = Path('.ai/tasks.md')
@@ -4313,7 +4435,7 @@ def plan_keeps_done(arguments):
 
     for task in done.values():
         if task['id'] not in after or block(after[task['id']]) != block(task):
-            fail(f"DONE task {task['id']} was changed or removed")
+            fail(f"{task['finished']} task {task['id']} was changed or removed")
 
 
 def plan_revisions_store():
@@ -5739,10 +5861,15 @@ def pr_body(arguments):
     if flow:
         lines += [flow, '']
     lines += ['## Tasks', '']
-    for task in tasks():
+    queue = tasks()
+    for task in queue:
         mark = {'DONE': 'x'}.get(task['status'], ' ')
         suffix = '' if task['status'] == 'DONE' else f" ({task['status']})"
         lines.append(f"- [{mark}] {task['id']} {task['title']}{suffix}")
+    skipped = [f"{task['id']}: {skipped_lines(task)[0].split('): ', 1)[1]}"
+               for task in queue if task['status'] == 'SKIPPED']
+    if skipped:
+        lines += ['', 'Skipped tasks: ' + '; '.join(skipped)]
     lines.append('')
     evidence = Path('.ai/local/validation.json')
     lines += ['## Validation', '']

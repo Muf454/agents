@@ -66,6 +66,7 @@ your checkpoint and continues the queue.
   executable bit (`git diff` shows `old mode 100755` / `new mode 100644`); the runner restores
   such a bit after the session too.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
-  it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
+  it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line. Never set SKIPPED;
+  only the human skips a task (`ai-task skip`).
 - Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).
   Append dated progress lines to the project's log file instead (e.g., "2026-10-05 — T003 complete").

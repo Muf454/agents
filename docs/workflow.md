@@ -19,12 +19,25 @@ completion; local docs can link/summarize vault knowledge rather than duplicate 
 Task parser contract:
 
 - Headings `## T001 — Title` (or `## T001 - Title`), stable T + 3-or-more digit IDs.
-- Exactly one `Status: TODO|IN_PROGRESS|BLOCKED|DONE` line per task.
+- Exactly one `Status: TODO|IN_PROGRESS|BLOCKED|DONE|SKIPPED` line per task.
 - Exactly one `Dependencies: none` or comma-separated earlier IDs line.
 - Required `###` sections match the example in `.ai/tasks.md`.
 - IDs are unique; dependencies exist earlier, preventing cycles; at most one
-  IN_PROGRESS; DONE/IN_PROGRESS require DONE dependencies. Code-fenced examples
+  IN_PROGRESS; DONE/IN_PROGRESS require DONE or SKIPPED dependencies. Code-fenced examples
   are ignored. Invalid queues stop the runner rather than being guessed at.
+- SKIPPED (only the human skips a task: `workflow.py tasks skip ID REASON`, wrapped by
+  `ai-task skip`) needs exactly one `Skipped (YYYY-MM-DD, ai-task skip): REASON` line and a
+  host skip authorization: an empty file `<state root>/skips/<sha256 of the repository's sorted
+  root commits, the task's heading line and its Skipped line>`, created exclusively by the skip.
+  It is valid in every branch and worktree of the repository on this host and bound to the
+  heading and exact reason, so a hand-edited status, a forged line or a line moved to another
+  task makes the queue invalid (`T…: SKIPPED without a host skip record …`). `tasks skip` takes
+  only a TODO or BLOCKED task no unfinished task depends on, and a one-line reason (1-500
+  characters, no control characters or backticks); it writes the authorization before the
+  queue. `tasks set` refuses SKIPPED. A SKIPPED task is never selected, satisfies dependencies
+  and counts toward `tasks complete`; `counts`, `progress`, `untouched` and `newly-done` count
+  DONE only. The planning guard keeps SKIPPED blocks like DONE ones, and the PR body lists
+  `Skipped tasks: T…: reason`.
 
 The first eligible TODO is selected, with an eligible IN_PROGRESS taking priority
 for recovery. BLOCKED tasks do not count as complete (a block without a failing check whose

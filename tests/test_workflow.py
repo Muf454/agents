@@ -1931,6 +1931,111 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'set', 'T003', 'DONE')
         self.assertEqual(self.helper('tasks', 'next').stdout.strip(), 'none')
 
+    def queue_text(self):
+        return (self.project / '.ai/tasks.md').read_text()
+
+    def test_skipped_task_with_host_record(self):
+        self.ready(task('T001', 'DONE') + task('T002') + task('T003'))
+        result = self.helper('tasks', 'skip', 'T002', 'not needed')
+        self.assertIn('T002 SKIPPED: not needed', result.stdout)
+        block = self.queue_text().split('## T002')[1].split('## T003')[0]
+        self.assertIn('Status: SKIPPED\n', block)
+        self.assertRegex(block, r'### Result / notes\nPending\.\nSkipped \(\d{4}-\d{2}-\d{2}, ai-task skip\): not needed\n')
+        self.assertEqual(len(list((self.base / 'host-state/skips').iterdir())), 1)
+        self.helper('tasks', 'check')
+        self.assertEqual(self.helper('tasks', 'next').stdout.strip(), 'T003')
+        self.helper('tasks', 'complete', expected=1)
+        self.helper('tasks', 'set', 'T003', 'DONE')
+        self.assertEqual(self.helper('tasks', 'next').stdout.strip(), 'none')
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.helper('tasks', 'counts').stdout.split(), ['2', '3'])
+        self.assertIn('Skipped tasks: T002: not needed\n', self.helper('pr-body', '0', '0').stdout)
+        self.commit('skip T002')
+        # A dependent added after the skip is eligible: SKIPPED satisfies dependencies.
+        (self.project / '.ai/tasks.md').write_text(self.queue_text() + task('T004', dependencies='T002'))
+        self.commit('add T004')
+        self.assertEqual(self.helper('tasks', 'next').stdout.strip(), 'T004')
+        self.helper('tasks', 'set', 'T004', 'DONE')
+        self.helper('tasks', 'check')
+
+    def test_skipped_task_without_host_record_is_invalid(self):
+        self.ready(task('T001') + task('T002'))
+        queue = self.queue_text()
+        path = self.project / '.ai/tasks.md'
+        message = ('T002: SKIPPED without a host skip record (use ai-task skip, or ai-task skip T002 '
+                   '--reauthorize on another host)')
+        forged = 'Pending.\nSkipped (2026-10-23, ai-task skip): not needed\n'
+        hand = queue.replace('Status: TODO', 'Status: SKIPPED').replace(
+            'Status: SKIPPED', 'Status: TODO', 1)
+        cases = {'hand-edited status': hand,
+                 'forged line': hand[:hand.index('## T002')] + hand[hand.index('## T002'):].replace('Pending.\n', forged)}
+        for name, text in cases.items():
+            with self.subTest(name):
+                path.write_text(text)
+                self.assertIn(message, self.helper('tasks', 'check', expected=1).stderr)
+                self.helper('tasks', 'next', expected=1)
+        path.write_text(queue)
+        self.helper('tasks', 'skip', 'T002', 'not needed')
+        skipped = self.queue_text()
+        self.helper('tasks', 'check')
+        path.write_text(skipped.replace('## T002 — Verify T002', '## T002 — Another title'))
+        self.assertIn(message, self.helper('tasks', 'check', expected=1).stderr)
+        # The authorized line moved to another task (T001) does not authorize it there.
+        line = re.search(r'Skipped \(.*\n', skipped).group(0)
+        first, second = skipped.split('## T002')
+        moved = (first.replace('Status: TODO', 'Status: SKIPPED').replace('Pending.\n', 'Pending.\n' + line)
+                 + '## T002' + second.replace('Status: SKIPPED', 'Status: TODO').replace(line, ''))
+        path.write_text(moved)
+        self.assertIn('T001: SKIPPED without a host skip record', self.helper('tasks', 'check', expected=1).stderr)
+
+    def test_skipped_task_survives_new_branch_and_worktree(self):
+        self.ready(task('T001') + task('T002'))
+        self.helper('tasks', 'skip', 'T002', 'not needed')
+        self.commit('skip T002')
+        self.run_cmd(['git', 'switch', '-q', '-c', 'next-branch'])
+        self.helper('tasks', 'check')
+        self.run_cmd(['git', 'switch', '-q', '-c', 'side', 'HEAD~1'])
+        (self.project / 'side.txt').write_text('side\n')
+        self.commit('side work')
+        self.run_cmd(['git', 'merge', '-q', '--no-edit', 'next-branch'])
+        self.assertIn('Status: SKIPPED', self.queue_text())
+        self.helper('tasks', 'check')
+        worktree = self.base / 'second worktree'
+        self.run_cmd(['git', 'worktree', 'add', '-q', '-b', 'in-worktree', str(worktree), 'next-branch'])
+        check = ['python3', str(HELPER), 'tasks', 'check']
+        result = subprocess.run(check, cwd=worktree, env=self.env, capture_output=True, text=True,
+                                timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        empty = dict(self.env, AI_STATE_DIR=str(self.base / 'empty-state'))
+        result = subprocess.run(check, cwd=worktree, env=empty, capture_output=True, text=True,
+                                timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('T002: SKIPPED without a host skip record', result.stderr)
+
+    def test_skip_refuses(self):
+        self.ready(task('T001', 'DONE') + task('T002', 'IN_PROGRESS') + task('T003')
+                   + task('T004', dependencies='T003') + task('T005'))
+        self.helper('tasks', 'skip', 'T005', 'not needed')
+        before = (self.project / '.ai/tasks.md').read_bytes()
+        cases = [(('T001', 'reason'), 'T001 is DONE'), (('T002', 'reason'), 'T002 is IN_PROGRESS'),
+                 (('T005', 'again'), 'T005 is SKIPPED'),
+                 (('T003', 'reason'), 'unfinished tasks depend on it: T004'),
+                 (('T004', 'two\nlines'), 'one line'), (('T004', 'a `tick`'), 'backticks'),
+                 (('T004', ''), '1-500 characters'), (('T004', 'x' * 501), '1-500 characters'),
+                 (('T004', ' padded'), 'whitespace'), (('T009', 'reason'), 'Unknown task: T009')]
+        for args, message in cases:
+            with self.subTest(args=args[0], reason=args[1][:20]):
+                self.assertIn(message, self.helper('tasks', 'skip', *args, expected=1).stderr)
+                self.assertEqual((self.project / '.ai/tasks.md').read_bytes(), before)
+        self.helper('tasks', 'skip', 'T004', expected=1)
+        self.assertEqual((self.project / '.ai/tasks.md').read_bytes(), before)
+
+    def test_tasks_set_refuses_skipped(self):
+        self.ready(task('T001'))
+        before = self.queue_text()
+        self.assertIn('use ai-task skip', self.helper('tasks', 'set', 'T001', 'SKIPPED', expected=1).stderr)
+        self.assertEqual(self.queue_text(), before)
+
     def test_validation_placeholder_failure_and_stale_success(self):
         self.setup_project()
         self.commit()
@@ -4447,6 +4552,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.keeps_done(start, start)
         self.keeps_done(start, start.replace('## not a heading', '## changed'), expected=1)
 
+    def test_planning_keeps_skipped_blocks(self):
+        skipped = task('T001', 'SKIPPED').replace(
+            'Pending.\n', 'Pending.\nSkipped (2026-10-23, ai-task skip): not needed\n')
+        start = '# Task queue\n\n' + skipped + task('T002')
+        self.keeps_done(start, start + task('T003'))
+        for name, queue in {'reason changed': start.replace('not needed', 'obsolete'),
+                            'set to TODO': start.replace('Status: SKIPPED', 'Status: TODO'),
+                            'removed': '# Task queue\n\n' + task('T002')}.items():
+            with self.subTest(name):
+                result = self.keeps_done(start, queue, expected=1)
+                self.assertIn('SKIPPED task T001 was changed or removed', result.stderr)
+
     def test_plan_keeps_done_passes_without_done_tasks_at_start(self):
         self.keeps_done(None, '# Task queue\n\n' + task('T001'))
         self.keeps_done('# Task queue\n\n' + task('T001') + task('T002', 'IN_PROGRESS'), None)
@@ -4516,7 +4633,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.done_queue_ready()
         result = self.plan('--revision', MOCK_CLAUDE='plan-revision-ok')
         self.assertIn('Plan ready on feature/test: 3 tasks', result.stdout)
-        self.assertIn('the host stops the run when a DONE task was changed or removed', self.plan_prompt())
+        self.assertIn('host stops the run when a DONE or SKIPPED task was changed or removed', self.plan_prompt())
         after = self.observation()
         self.assertEqual((after['stage'], after['state'], after['note']), ('planning', 'done', '3 tasks'))
         self.assertNotIn('⛔', self.notifications())
