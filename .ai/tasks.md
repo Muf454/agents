@@ -5317,7 +5317,7 @@ Mission control 2026-10-22 01:35Z: returned to TODO (BLOCKED only on the gate ti
   the runner's checkpoint gate decides. DONE.
 
 ## T305 — Escalation record helper: schema 1, redaction, allowed answers (RC-01 G9, helper)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T315
 Model: opus
 
