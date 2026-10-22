@@ -5934,7 +5934,7 @@ session (the suite takes ≈ 20 min), so the runner's host gate decides, as for 
 Limitation (by design, T318): a PID-only TERM waits for the pipeline's foreground stage.
 
 ## T318 — The pipeline forwards a stop to its children and sleeps; PID-only stop at every stage (RC-01 G2, G1, plan review P2)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T306
 Model: opus
 
