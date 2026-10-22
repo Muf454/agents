@@ -11655,6 +11655,45 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
         self.assertEqual(self.escalation_data()['kind'], 'human_stop')
 
+    # T325: `--stop` of a stand-alone `ai-run` is a human stop too.
+    def test_stop_command_stops_a_standalone_ai_run(self):
+        self.ready()
+        stopped = {}
+
+        def send(runner):
+            started = time.monotonic()
+            stopped['result'] = self.stop_command()
+            stopped['seconds'] = time.monotonic() - started
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-session.pid',
+                                              send, MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 143, output)
+        self.assertLess(stopped['seconds'], 60 * TIMEOUT_SCALE)
+        record = self.pipeline_records()[-1]
+        self.assertIn(f'Run {record["id"]} stopped (stopped by you).', stopped['result'].stdout)
+        self.assertEqual((record['kind'], record['outcome'], record['stop_requested']['via']),
+                         ('ai-run', 'human_stop', 'ai-pipeline --stop'))
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['run']), ('human_stop', record['id']))
+        self.assertFalse([a for a in data['answers'] if a['argv'][:1] == ['.ai/bin/ai-pipeline']])
+        [line] = self.human_stop_lines()
+        self.assertIn('runner stopped at T001. Rerun ai-run --approved to continue.', line)
+        self.assertNotIn('needs you', self.notifications())
+        # A second stop changes nothing.
+        before = (self.run_record_bytes(record['id']), self.escalation_path().read_bytes())
+        result = self.stop_command(expected=3)
+        self.assertIn(f'Run {record["id"]} was already stopped by you.', result.stderr)
+        self.assertEqual((self.run_record_bytes(record['id']), self.escalation_path().read_bytes()), before)
+
+    def test_standalone_ai_run_interrupt_without_request(self):
+        self.ready()
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-session.pid',
+                                              lambda runner: runner.send_signal(signal.SIGTERM), MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 143, output)
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['kind'], record['outcome'], record['stop_requested']), ('ai-run', 'stopped', None))
+        self.assertIn('⛔ STOPPED, needs you: runner stopped at T001', self.notifications())
+        self.assertEqual(self.human_stop_lines(), [])
+
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')

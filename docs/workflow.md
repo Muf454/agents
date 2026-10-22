@@ -392,7 +392,10 @@ relaunch, its process gone) is handled the same way and prints `Cancelled the sc
 usage-limit relaunch of <id>.`; the due relaunch's `ai-recover` then refuses the human stop.
 A recovery (`ai-recover`, also one the watchdog started) owns the run record with its own
 process (T316), so `--stop` signals the recovery; its trap records the human stop and nothing
-resumes.
+resumes. `--stop` also stops a stand-alone `ai-run` (T325): its exit handler ends the record
+(`stopped` under a stop request is stored `human_stop`), writes the escalation (refined to
+`human_stop`) and notifies `⛔ STOPPED by you: runner stopped at <task>. Rerun ai-run … to
+continue.` instead of the "needs you" text; a signal without a request stays `stopped`.
 
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,

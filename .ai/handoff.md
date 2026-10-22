@@ -147,6 +147,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T325: `-k stop_command` Ran 12 OK (23.6 s), `-k standalone` Ran 10 OK (61.4 s); full gate in the T325 notes.
 2026-10-22, T319: `-k stop_command` Ran 11 OK (21.0 s); `.ai/bin/ai-check` PASS, Ran 1175 OK (943.6 s).
 2026-10-22, T308: `-k stop_command` Ran 7 OK (15.6 s); full gate result in the T308 notes.
 2026-10-22, T307: `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK; full gate PASS 16:08:15Z on
@@ -359,6 +360,10 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   (cancel message, `human_stop`, the due `ai-recover` refuses quietly, no session),
   `test_stop_command_stops_a_watchdog_recovery` (`ai-recover` with a sleeping decision session:
   exit 0, recovery 143, `human_stop`, no ▶ RESUMED, no implementation session).
+  T325: `test_stop_command_stops_a_standalone_ai_run` (ai-run 143, record kind `ai-run`
+  `human_stop` via `ai-pipeline --stop`, escalation `human_stop` without `ai-pipeline` answers,
+  one `⛔ STOPPED by you:` line and no "needs you"; a second stop exits 3, bytes unchanged),
+  `test_standalone_ai_run_interrupt_without_request` (plain SIGTERM: `stopped`, "needs you").
 - `ai_task` (T310, T312, T322): lock, `--commit`, dirty or protected refusal, hook failure, plain
   `set` unchanged; retry, model, skip; reauthorize and its refusals.
 - `skip` (T311): SKIPPED semantics, forged status refused, new branch, merge and second worktree,

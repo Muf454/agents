@@ -6519,7 +6519,7 @@ because `.ai/bin/ai-check` did not finish within the 600 s foreground limit (no 
 same load-induced timeout seen for T320). Rerun the gate; if green, set DONE.
 
 ## T325 — `--stop` of a stand-alone `ai-run` is a human stop (RC-01 G1, plan review round 3 P16)
-Status: TODO
+Status: DONE
 Dependencies: T319, T320
 Model: opus
 
@@ -6566,6 +6566,15 @@ Targeted: `python3 -m unittest discover -s tests -k stop_command` and `-k standa
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `scripts/ai-run` `on_exit`: one `if` — stand-alone, `AI_RUN_ID` set, gate ok and
+`run-record stop-requested` exits 0 → `⛔ STOPPED by you: runner stopped at $active_task. Rerun
+ai-run ${run_argv[*]} to continue.`; otherwise the "needs you" text as before. The record and
+escalation chain (T315 `end`, T305 refinement, T320 `on_exit` write) needed no change: the new
+test confirmed `human_stop` for both. Tests: `test_stop_command_stops_a_standalone_ai_run`,
+`test_standalone_ai_run_interrupt_without_request`. Docs: docs/workflow.md stop section, README.
+Evidence: `-k stop_command` Ran 12 OK (23.6 s); `-k standalone` Ran 10 OK (61.4 s). The full
+`.ai/bin/ai-check` (~900 s) is longer than the session's 600 s tool limit, so the runner's gate
+gives the full result.
 
 ## T310 — ai-task takes the checkout lock and can commit `.ai/tasks.md` (RC-01 G7)
 Status: TODO

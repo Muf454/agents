@@ -243,9 +243,13 @@ on_exit() {
     # No host write while armed: the preserved tree stays exactly the armed one.
     [[ "$AI_ARMED" == yes ]] || ai_log "$active_task" "stopped (exit $code)$stop_label; inspect state/diff before resuming" \
       'see local logs' 'No merge or deployment performed'
-    # Inside ai-pipeline the pipeline reports the stop itself.
-    [[ -n "${AI_PIPELINE:-}" ]] || \
+    # Inside ai-pipeline the pipeline reports the stop itself; `ai-pipeline --stop` is a human stop.
+    if [[ -n "${AI_PIPELINE:-}" ]]; then :
+    elif [[ -n "${AI_RUN_ID:-}" && "$gate_ok" == yes ]] && ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null; then
+      ai_notify "⛔ STOPPED by you: runner stopped at $active_task. Rerun ai-run ${run_argv[*]} to continue."
+    else
       ai_notify "⛔ STOPPED, needs you: runner stopped at $active_task: $(cat .ai/local/last-error 2>/dev/null || echo "exit $code")"
+    fi
     [[ -n "${AI_PIPELINE:-}" ]] || touch .ai/local/last-error.notified 2>/dev/null || true
     [[ -n "${AI_PIPELINE:-}" || "$gate_ok" != yes ]] || ai_escalation_write other "$active_task"
   fi
