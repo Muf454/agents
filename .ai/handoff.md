@@ -118,7 +118,8 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
-2026-10-22, T307: `-k human_stop` Ran 19 OK (144.9 s); full gate result in the T307 notes and run log.
+2026-10-22, T307: `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK; full gate PASS 16:08:15Z on
+recovery checkpoint 8d45821.
 2026-10-22, T323: `-k human_stop` Ran 16 OK, `-k pr_` Ran 33 OK, `-k push` Ran 13 OK; full gate
 result in the run log.
 2026-10-22, T318: `-k human_stop` Ran 13 OK (118.4 s); full gate result in the T318 notes.
@@ -316,5 +317,5 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323 and T307 are DONE (T302's gate PASSED on 086ff5f's source).
-Next: the rest of the queue by dependency.
+Next: T308 (`ai-pipeline --stop`), then the rest of the queue by dependency.
 Nothing is merged or deployed.

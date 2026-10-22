@@ -6069,7 +6069,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 - Mission control 2026-10-22 17:23: the session's own gate outlived its time limit (FL-38); mission control ran `.ai/bin/ai-check` on a648352 by hand: Ran 1162 tests, OK (942 s). DONE stands.
 
 ## T307 — ai-recover and the watchdog never resume a human stop (RC-01 G1, recovery)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T306, T316
 Model: opus
 
@@ -6152,6 +6152,10 @@ human stop): `test_interrupt_pid_only_recovery_gate`,
 Validation: `-k human_stop` Ran 19 OK (144.9 s); the eight targeted recovery/watchdog tests OK;
 first full gate: 1163/1164, the one failure was `test_recovery_signal_and_rejected_process_handling`
 (old contract), now updated and passing alone; final gate result below / in the run log.
+2026-10-22 (resume): the implementing session timed out in the full gate; the runner's recovery
+checkpoint 8d45821 holds the code above and its gate passed (PASS 16:08:15Z). Diff reviewed against
+the notes (`mark_crashed` relies on `run_change`'s still-current check). Rerun on 8d45821:
+`-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK. No source change in this session.
 
 ## T308 — `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]`: find, verify, signal, wait (RC-01 G1, command)
 Status: TODO
