@@ -606,3 +606,4 @@
 | 2026-10-22T15:06:14Z | runner | T323 | stopped (exit 1); inspect state/diff before resuming | see local logs | a648352 | No merge or deployment performed |
 | 2026-10-22T15:53:16Z | runner | T307 | stopped (exit 1); inspect state/diff before resuming | see local logs | 2f74653 | No merge or deployment performed |
 | 2026-10-22T16:30:00Z | claude (opus) | T307 | DONE (resume): code in recovery checkpoint 8d45821 reviewed against the notes; no source change | -k human_stop 19 OK, -k watchdog 62 OK; recovery gate PASS 16:08:15Z on 8d45821 | 8d45821 | vault flow chart and hub Log already updated |
+| 2026-10-22T17:05:20Z | runner | T307 | completed | PASS | 25f38dd | Claude checkpointed; continuing queue |
