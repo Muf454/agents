@@ -11938,8 +11938,11 @@ runpy.run_path(real, run_name='__main__')
         self.assertTrue({'task', 'gate'} <= {r['kind'] for r in later}, later)
         self.assertEqual([r for r in later if 'run' in r], [])
         self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_event stop stage=final'])
-        [event] = [json.loads(x) for x in (self.base / 'host-state/events.jsonl').read_text().splitlines()]
-        self.assertIsNone(event['run'])
+        events = [json.loads(x) for x in (self.base / 'host-state/events.jsonl').read_text().splitlines()]
+        # The host gates write gate events (T220): the pipeline's carry its run, the later ones none.
+        gates = [e for e in events if e['kind'] == 'gate']
+        self.assertEqual([e['run'] for e in gates], [run_id] * (len(gates) - 2) + [None, None])
+        self.assertEqual((events[-1]['kind'], events[-1]['run']), ('stop', None))
 
     def test_events_run_context_consecutive_runs_on_one_branch(self):
         self.ready()

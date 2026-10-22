@@ -6250,7 +6250,10 @@ Ran 7 OK; `-k gate_time -k session_gate_allowance_records -k runs_no_helper` Ran
 `-k recovery_commits_validated_leftovers -k timeout_rerun -k recovery_never_passes_a_changed_gate
 -k observation_recovery_validation` Ran 17 OK; `bash -n` on the four scripts OK. Full gate left to the
 host gate (BATCH 10 GATE RULE); an in-session `ai-check` started by mistake outlived the tool limit and
-is not evidence.
+is not evidence. It did report one failure this task caused: `test_events_run_context_rows_carry_the_run`
+expected the stop event to be the only event; it now also checks the gate events (the pipeline's carry
+its run id, the later standalone ones none) and that the last event is the stop with no run.
+`-k events_run_context` Ran 4 OK. Ran 1155 tests, nothing else failed.
 
 ## T208 — `stop` and `recovery` events with a fixed stop category (ME-01 part 1, stops)
 Status: TODO
