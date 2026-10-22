@@ -49,6 +49,11 @@ escalate() {
   touch .ai/local/last-error.notified 2>/dev/null || true
   # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.
   rm -f .ai/local/pipeline.active
+  # The watchdog and the pipeline verified the gate before this process started (spec B20).
+  if [[ -n "${AI_RUN_ID:-}" && -z "${AI_GATE_BROKEN:-}" ]]; then
+    local detail="${1:-$reason}"
+    ai_helper run-record end --run "$AI_RUN_ID" --pid $$ stopped "${detail:0:200}" 2>/dev/null || true
+  fi
   # Not ai_die: last-error keeps the original stop reason for the human and later runs.
   printf 'Error: escalated to the human: %s\n' "${1:-$reason}" >&2
   exit 1
@@ -60,7 +65,8 @@ resume() {
   [[ -z "$note" ]] || ai_notify "$note"
   rm -f .ai/local/last-error
   trap - EXIT
-  exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 "$AI_BIN/ai-pipeline" "${args[@]}"
+  exec env AI_RECOVERY_ATTEMPT="$attempt" AI_SETTINGS_FROM_MANIFEST=1 AI_RUN_ID="$AI_RUN_ID" \
+    "$AI_BIN/ai-pipeline" "${args[@]}"
 }
 
 # Authority must come from a host state directory agent sessions can't write: check it
@@ -70,6 +76,13 @@ if ! check=$(ai_helper state-root-check 2>&1); then
   escalate 'the host state directory is not safe for recovery.' \
     'set AI_STATE_DIR to an absolute directory outside the checkout, then rerun ai-pipeline.'
 fi
+# Own the run record before any long work, so it names this live process (also a watchdog-started
+# recovery with a new pid). We hold the checkout lock, so the current record is this run's.
+AI_RUN_ID=${AI_RUN_ID:-$(ai_helper run-record current 2>/dev/null || true)}
+[[ -n "$AI_RUN_ID" ]] || escalate 'there is no run record to resume.' 'rerun ai-pipeline --approved by hand.'
+ai_helper run-record own --run "$AI_RUN_ID" --pid $$ --launcher ai-recover 2>/dev/null || \
+  escalate 'the run was stopped by you or replaced; not resumed automatically.' \
+    'rerun ai-pipeline --approved yourself to continue.'
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
   escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
 # Reserve the attempt before anything that can be interrupted, then publish the marker:
@@ -102,6 +115,7 @@ relaunch_wait() {
   ai_notify "⏸ PAUSED: $branch $3; relaunches by itself after $when (relaunch $4/$cap)."
   # The stopped run's records: nothing is left for the watchdog to report as a stop or a crash.
   rm -f .ai/local/last-error .ai/local/limit-stop .ai/local/pipeline.active
+  ai_helper run-record pause --run "$AI_RUN_ID" --pid $$ 2>/dev/null || true
   RELAUNCH_WHEN=$when
 }
 # The relaunch schedule decides first, before any escalation (each one would be terminal):
@@ -127,6 +141,10 @@ on_exit() {
     ai_notify "⛔ STOPPED, needs you: auto-recovery failed unexpectedly (exit $code) during $stage. Inspect the checkout, then rerun ai-pipeline."
     touch .ai/local/last-error.notified 2>/dev/null || true
     ai_drop_marker
+    if [[ -n "${AI_RUN_ID:-}" && -z "${AI_GATE_BROKEN:-}" ]]; then
+      ai_helper run-record end --run "$AI_RUN_ID" --pid $$ stopped \
+        "auto-recovery failed unexpectedly (exit $code)" 2>/dev/null || true
+    fi
   fi
 }
 trap on_exit EXIT

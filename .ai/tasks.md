@@ -5572,6 +5572,18 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 
+Mission control 2026-10-22 10:10: the first opus session hit the 1800 s limit (empty session log)
+and left an unfinished diff, committed as WIP. The gate then failed 35 tests, nearly all
+recovery and watchdog tests (`observation_recovery_*`, `supervised_plan_resume_*_watchdog`,
+`limit_relaunch_*`, `recovery_*`, `plan_revision_stage_*`, `preflight_pipeline_*`,
+`interrupt_reaches_the_recovery_session`, `timeout_rerun_unchanged_auto_recovery_off`,
+`resume_ignores_user_config_*`, `supervise_settings_are_captured_*`), with
+"escalated to the human: the run was stopped by you or replaced; not resumed automatically"
+(1 != 128): the new `run-record own` refuses in fixtures where the existing flow must keep
+working (e.g. no record, or a record owned by the dead pipeline pid). Fix the semantics or the
+shared fixtures, never weaken an assertion. Check those tests with targeted `-k` runs (the
+names above), not the full gate: leave the full gate to the runner, it outlives the tool limit.
+
 ## T303 — Interrupts reach the agent session: ai-run and ai-recover (RC-01 G2)
 Status: DONE
 Dependencies: none

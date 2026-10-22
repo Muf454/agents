@@ -52,6 +52,9 @@ sessions=''; sessions_given=no; session_timeout=1800; run_timeout=14400; approve
 model=${AI_MODEL:-}; triage=no; since=''; revise_plan=no; base=''; explicit_model=''
 plan_file=''; plan_revision=no; session_timeout_given=no; run_timeout_given=no; read_dirs=()
 model_pattern='^[][A-Za-z0-9._:-]{1,64}$'
+# The stand-alone run record's argv (the resolved --knowledge-dir, as ai-pipeline records it).
+run_argv=("$@")
+[[ -n "${AI_PIPELINE:-}" ]] || AI_RUN_ID=''
 while (( $# )); do
   case "$1" in
     --approved) approved=yes; shift ;;
@@ -79,6 +82,7 @@ while (( $# )); do
       (( $# >= 2 )) || ai_die 'Missing knowledge directory'
       [[ -d "$2" ]] || ai_die 'Knowledge directory must already exist.'
       knowledge_dir=$(cd -- "$2" && pwd -P)
+      run_argv[${#run_argv[@]} - $# + 1]=$knowledge_dir
       shift 2 ;;
     --read-dir)
       (( $# >= 2 )) && [[ -n "$2" ]] || ai_die 'Missing --read-dir DIRECTORY'
@@ -207,6 +211,11 @@ on_exit() {
   # Never run a project helper after the approved gate changed: a stop for that reason logs
   # nothing (the check also sets AI_GATE_BROKEN, so the notification skips its log helper).
   local gate_ok=no; if ai_gate_check "$AI_APPROVED_GATE"; then gate_ok=yes; fi
+  # A stand-alone run ends its own record (a pipeline's runner has none).
+  if [[ -z "${AI_PIPELINE:-}" && -n "${AI_RUN_ID:-}" && "$gate_ok" == yes ]]; then
+    ai_helper run-record end --run "$AI_RUN_ID" --pid $$ "$( (( code == 0 )) && echo finished || echo stopped)" \
+      "$( (( code == 0 )) || head -c 200 .ai/local/last-error 2>/dev/null || true)" 2>/dev/null || true
+  fi
   if [[ "$attempt_open" == yes && "$gate_ok" == yes ]]; then
     if (( code == 130|| code == 143 )); then task_outcome interrupted
     elif [[ "$session_code" == 124 || "$session_code" == 137 ]]; then task_outcome timeout
@@ -243,6 +252,11 @@ on_exit() {
 trap on_exit EXIT
 trap 'ai_stop_child; exit 130' INT
 trap 'ai_stop_child; exit 143' TERM
+# A stand-alone run publishes its record after on_exit is installed, so every exit ends it.
+if [[ -z "${AI_PIPELINE:-}" ]]; then
+  AI_RUN_ID=$(ai_helper run-record start ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}") || \
+    ai_die 'Cannot record the run in the host state directory.'
+fi
 
 # The runner owns the bookkeeping records and commits leftovers in them; anything
 # else left uncommitted means the session didn't checkpoint its work.

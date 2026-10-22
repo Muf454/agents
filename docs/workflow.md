@@ -38,7 +38,7 @@ ready_for_acceptance. `blocked` describes a stop needing resolution. Review and
 acceptance phases are not inferred as passed simply because a CLI succeeded.
 The runner records ready_for_review, never claims that the human accepted the work.
 
-**Run records (RC-01 G3; helper only, no caller yet).** `workflow.py run-record` keeps one
+**Run records (RC-01 G3; written by `ai-pipeline`, `ai-recover` and a stand-alone `ai-run`).** `workflow.py run-record` keeps one
 host record per run beside `run.json`: `runs/<id>.json`, `runs/current` (the latest id, one line)
 and `runs/.lock`. `start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (KIND `pipeline` or
 `ai-run`; `-` `-` for no base) prints only the new id `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>` (`seq`
@@ -54,7 +54,7 @@ id, `show [ID]` the JSON, `alive [ID]` exits 0 when the recorded process exists,
 and has the recorded start ticks. A record that is not schema 1 with the right field types, a
 symlink, over 64 KB, or a `current` that is not an id is "no record" (exit 1); unknown extra
 fields are accepted.
-Lifecycle actions (T315, no caller yet) each name their run with `--run ID` and are checked under
+Lifecycle actions (T315; callers T302, T316) each name their run with `--run ID` and are checked under
 `runs/.lock`; an ID that is not `current`, an invalid record or a failed identity check exits 3
 with `not the owner of run ID` and changes nothing. "Ended" is any outcome but `running` and
 `paused`, and an ended record never changes again. `own --run ID --pid PID --launcher NAME`
@@ -575,7 +575,12 @@ earlier run's ended one) starts its record (`No run record to resume; recording 
 run.`). The end
 is recorded as `finished` (detail: the PR or `no PR`) or, through `ai_die`, `stopped` with the
 first 200 characters of the reason; `ai_die` writes it only when the approved gate still
-verifies, so no changed checkout helper runs.
+verifies, so no changed checkout helper runs. A stand-alone `ai-run` (no `AI_PIPELINE`, T316)
+writes its own record (kind `ai-run`, branch `AI_START_BRANCH`, no base, its arguments with
+the resolved `--knowledge-dir`) right after its exit traps are installed, so every exit ends
+it: `finished` on exit 0, else `stopped` (detail: the last error), only while the approved
+gate verifies. Inside a pipeline `ai-run` writes no record. Every new record removes the
+escalation record of an earlier run.
 
 Before the plan review (review on or off) the queue is validated like `ai-task check`; an
 invalid queue stops with `Task queue is invalid: …` and recovery always escalates it.
@@ -880,7 +885,15 @@ digest against the pipeline's in-memory approved digest and only then execs
 (fd 9 is handed over across exec) and the liveness marker. `ai-recover`: before reading
 the manifest, the host state directory must pass `state-root-check` for the checkout
 (absolute, no overlap); otherwise it escalates with the configuration error plus the
-original stop reason, without a Claude session, commit or attempt; current gate
+original stop reason, without a Claude session, commit or attempt; then, before anything long
+(T316), it owns the run record (`AI_RUN_ID`, or `run-record current` for a watchdog-started
+recovery with a new pid, under the checkout lock): `run-record own --launcher ai-recover`
+puts its process in the record, so the record always names the live process; no record
+escalates (`there is no run record to resume.`), and a refusal (a stop request, an ended or
+replaced run) escalates (`the run was stopped by you or replaced; not resumed
+automatically.`), both before an attempt is reserved. Every escalation and an unexpected exit
+end the record `stopped` (not when the gate is broken), a usage-limit relaunch wait pauses it,
+and the resume passes `AI_RUN_ID` to the resumed pipeline (`resumes` + 1); current gate
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
 reserved (validated integer; max `AI_RECOVER_MAX`, default 2; reset by a human start and
 on finish) before any fallible work; a recorded needs-human plan revision for the current

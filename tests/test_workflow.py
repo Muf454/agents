@@ -150,6 +150,11 @@ if 'RECOVERY CONTRACT' in prompt:
     with open(state / 'recover-calls', 'a') as f: f.write(prompt.split('RECOVERY CONTRACT')[1][:400].replace('\n', ' ') + '\n')
     if os.path.exists('.ai/local/observation.json'):
         with open(state / 'obs-recover', 'a') as f: f.write(open('.ai/local/observation.json').read())
+    if os.environ.get('MOCK_RECOVER_RECORD'):
+        # The run record as the decision session sees it (T316: the recovery owns it first).
+        shown = subprocess.run([sys.executable, '.ai/bin/lib/workflow.py', 'run-record', 'show'],
+                               capture_output=True, text=True)
+        (state / 'recover-record.json').write_text(shown.stdout)
     if os.environ.get('MOCK_RECOVER_KILL'):
         # ai-recover (claude <- timeout <- ai-recover) is terminated from outside once the session ends
         os.kill(int(pathlib.Path('.ai/local/pipeline.active').read_text()), 15)
@@ -15728,6 +15733,89 @@ PY
         self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
         [record] = self.pipeline_records()
         self.assertEqual((record['outcome'], record['ended']), ('running', None))
+
+    # Recovery and stand-alone wiring (T316): the recovery owns the record first; ai-run records itself.
+    def dead_run_record(self):
+        """A pipeline record whose process is gone (the pipeline was killed)."""
+        start = ('exec python3 "$0" run-record start pipeline feature/test - - --pid $$ -- '
+                 '--approved --base main --no-pr')
+        return self.run_cmd(['bash', '-c', start, str(HELPER)]).stdout.strip()
+
+    def test_run_record_recovery_owns_before_its_session(self):
+        self.ready()
+        self.start_recoverable_run()
+        run_id = self.dead_run_record()
+        dead = self.run_record_data(run_id)['process']['pid']
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', MOCK_RECOVER='rerun',
+                  MOCK_RECOVER_RECORD='1')
+        seen = json.loads((self.base / 'recover-record.json').read_text())
+        self.assertEqual((seen['id'], seen['launcher'], seen['resumes'], seen['outcome']),
+                         (run_id, 'ai-recover', 0, 'running'))
+        self.assertNotEqual(seen['process']['pid'], dead)
+        [record] = self.pipeline_records()
+        # The resumed pipeline is the recovery's process (exec), counted once.
+        self.assertEqual((record['id'], record['resumes'], record['outcome']), (run_id, 1, 'finished'))
+        self.assertEqual(record['process'], seen['process'])
+
+    def test_run_record_recovery_refuses_a_stopped_run(self):
+        self.ready()
+        self.start_recoverable_run()
+        run_id = self.dead_run_record()
+        self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop')
+        attempts = self.manifest()['attempts']
+        result = self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1)
+        self.assertIn('the run was stopped by you or replaced', result.stderr)
+        self.assertEqual(self.manifest()['attempts'], attempts)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+        # No record at all escalates the same way, before any attempt.
+        shutil.rmtree(self.run_records())
+        result = self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1)
+        self.assertIn('there is no run record to resume', result.stderr)
+        self.assertEqual(self.manifest()['attempts'], attempts)
+
+    def test_run_record_standalone_ai_run(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        [record] = self.pipeline_records()
+        self.assertEqual((record['kind'], record['branch'], record['base'], record['argv'], record['outcome']),
+                         ('ai-run', 'feature/test', None, ['--approved'], 'finished'))
+        self.assertIsNotNone(record['ended'])
+        # Inside a pipeline only the pipeline's record exists.
+        self.helper('tasks', 'set', 'T001', 'TODO')
+        self.commit('reopen T001')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='0')
+        records = self.pipeline_records()
+        self.assertEqual([r['kind'] for r in records], ['ai-run', 'pipeline'])
+        # A caller-relative --knowledge-dir is recorded resolved.
+        self.helper('tasks', 'set', 'T001', 'TODO')
+        self.commit('reopen T001 again')
+        sub = self.project / 'sub'
+        (sub / 'notes').mkdir(parents=True)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-run'), '--approved', '--knowledge-dir', './notes'],
+                                cwd=sub, env=dict(self.env, MOCK_KNOWLEDGE_DIR=str((sub / 'notes').resolve())),
+                                capture_output=True, text=True,
+                                timeout=command_timeout('ai-run'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['kind'], record['argv']),
+                         ('ai-run', ['--approved', '--knowledge-dir', str((sub / 'notes').resolve())]))
+
+    def test_run_record_standalone_refusal_after_publication(self):
+        self.ready(queue=task('T001', 'BLOCKED'))
+        result = self.tool('ai-run', '--approved', expected=1)
+        self.assertIn('Unfinished tasks exist but none can run.', result.stderr)
+        [record] = self.pipeline_records()
+        self.assertEqual((record['kind'], record['outcome']), ('ai-run', 'stopped'))
+        self.assertIn('none can run', record['detail'])
+
+    def test_run_record_standalone_start_clears_escalation(self):
+        self.ready()
+        earlier = self.run_record_start(os.getpid())
+        self.escalation('write', 'other', 'implementation', '--run', earlier)
+        self.assertTrue(self.escalation_path().exists())
+        self.tool('ai-run', '--approved')
+        self.assertFalse(self.escalation_path().exists())
 
     # Escalation record (RC-01 G9, T305): `escalation write|hint|show|clear` beside `runs/`.
     def escalation(self, *args, expected=0):
