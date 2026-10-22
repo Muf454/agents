@@ -621,3 +621,4 @@
 | 2026-10-22T21:21:14Z | runner | T321 | blocked; try next independent task | not complete | 60abab7 | See task result |
 | 2026-10-22T21:38:51Z | runner | T327 | blocked; try next independent task | not complete | 4096a47 | See task result |
 | 2026-10-22T21:52:33Z | claude (opus) | T325 | DONE: stand-alone ai-run on_exit notifies "⛔ STOPPED by you" when the run record has a stop request; record/escalation chain already gave human_stop; 2 tests | -k stop_command 12 OK, -k standalone 10 OK; full gate over the 600 s tool limit, left to the runner | see next entry | docs/workflow.md, README, vault hub Log updated; flow unchanged |
+| 2026-10-22T22:13:17Z | runner | T325 | completed | PASS | d23ce4e | Claude checkpointed; continuing queue |
