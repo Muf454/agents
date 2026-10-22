@@ -5485,6 +5485,18 @@ is `no PR`); `-k test_pipeline_` 14 OK; `-k test_recovery_` 23 OK.
 BLOCKED only on the gate: `.ai/bin/ai-check` ran past the session's 600 s foreground limit, and
 the background run was killed at its limit (no result). Needs: the host gate on this checkpoint;
 when it passes, set T302 DONE (no source change expected).
+2026-10-22 (T303 session): the host gate after b6a4386 fails 7 tests, and they are T302's, not
+T303's (T303's script change is 1e06212, before f77e511; no script changed after a428a3c, and
+a428a3c's gate never ran because T302 was gate-blocked). All 7 die in the T302 resume check
+(`scripts/ai-pipeline` ~166, "The run record refuses this resume"):
+`test_preflight_pipeline_same_ruling_twice_stops` and `_indirectly_moved_task_repeat_stops`
+create only `run-manifest start` and resume with `AI_RECOVERY_ATTEMPT=1` (no run record);
+the four `test_supervised_plan_resume_*_watchdog` resumes get an empty `AI_RUN_ID`
+("Usage: run-record resume --run ID --pid PID"); and
+`test_observation_pipeline_registers_the_checkout_on_start_and_resume` gets "not the owner".
+This fails the acceptance line "Existing pipeline and recovery tests pass". Needs: a T302 fix
+(test fixtures that resume must start a run record; check how the watchdog and observation resume
+paths obtain the id and owner), then the host gate.
 
 ## T316 — ai-recover owns the run early; stand-alone ai-run records (RC-01 G3, plan review P4, P7)
 Status: TODO
@@ -5551,7 +5563,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T303 — Interrupts reach the agent session: ai-run and ai-recover (RC-01 G2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5609,6 +5621,17 @@ test_session_exit_codes_unchanged` → Ran 13 tests OK (incl. `test_interrupt_re
 Full gate not run here per the mission-control note (gate exceeds the session limit); the runner
 validates the checkpoint.
 Mission control 2026-10-22 07:12Z: the host gate after b6a4386 failed 7 tests that passed after T302 (a428a3c), so T303's changes caused them: test_supervised_plan_resume_after_stage_clear_watchdog, test_supervised_plan_resume_after_the_record_watchdog, test_supervised_plan_resume_reserved_without_a_stage_watchdog, test_supervised_plan_resume_stage_without_a_reservation_watchdog, test_preflight_pipeline_same_ruling_twice_stops, test_preflight_pipeline_indirectly_moved_task_repeat_stops, test_observation_pipeline_registers_the_checkout_on_start_and_resume. Run exactly these (`python3 -m unittest tests.test_workflow.ToolkitTest.<name>`, one per call), find the regression in the interrupt forwarding, fix it without weakening the tests, then run the targeted checks and mark DONE. Do not run the full gate in the foreground.
+2026-10-22 05:2xZ (claude opus): no regression in the interrupt forwarding; the 7 failures are
+T302's. Evidence: T303's whole script change is WIP 1e06212, committed before T302's f77e511, and
+`git diff a428a3c b6a4386 --stat` touches only `.ai/` records and one test line, so "passed after
+a428a3c" was never measured (T302 was gate-blocked, so no gate ran there). Each of the 7 run alone
+fails in T302's resume check, `scripts/ai-pipeline` ~166 ("The run record refuses this resume"):
+the two preflight tests and the four watchdog tests resume without a run record or id
+("Usage: run-record resume"); the observation test gets "run-record resume: not the owner". None of
+them reaches `ai_run_child`/`ai_stop_child`. Diagnosis recorded under T302. T303 targeted:
+`python3 -m unittest discover -s tests -k interrupt -k test_session_exit_codes_unchanged` → Ran 13
+tests OK. No source change in this session. The full gate stays red until T302 is fixed; it is not
+claimed clean.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
 Status: TODO
