@@ -5739,7 +5739,7 @@ over the 600 s tool limit); the runner's gate decides. `docs/workflow.md` senten
 line added. T316's last three notes, appended here by mistake, were moved back to T316.
 
 ## T328 — Stand-alone ai-run publishes and ends its run record (RC-01 G3, plan review P7, P18)
-Status: TODO
+Status: DONE
 Dependencies: T316
 Model: opus
 
@@ -5784,6 +5784,15 @@ Targeted: `python3 -m unittest discover -s tests -k run_record_standalone` (must
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (opus): the WIP from 8df58cb in `scripts/ai-run` already matched every note:
+`run_argv=("$@")` at the top, the `--knowledge-dir` branch writes the resolved path into
+`run_argv`, `run-record start ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}"` only
+without `AI_PIPELINE` and right after the traps (refuses with `Cannot record the run in the host
+state directory.`), and `on_exit` ends it `finished`/`stopped` only when `gate_ok=yes`. No source
+change was needed. The three tests and the `docs/workflow.md` "Pipeline contract" paragraph were
+already in place. Evidence: `python3 -m unittest discover -s tests -k run_record_standalone` →
+`Ran 3 tests … OK`. Full gate result unknown in the session; left to the host gate (the notes
+say to run only the targeted tests).
 
 ## T317 — Interrupts reach the runner's and recovery's host gates and limit sleeps (RC-01 G2, plan review P2)
 Status: TODO

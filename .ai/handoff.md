@@ -35,6 +35,11 @@
   for T317/T318's background children). `ai-check`'s `tee` is a logger on fd 7 whose failure
   still fails the gate; an interrupted gate leaves the stamp invalidated. `docs/workflow.md`
   "Interruption, limits, and recovery". Flow unchanged beyond T303's note.
+- T328 (2026-10-22): a stand-alone `ai-run` (no `AI_PIPELINE`) publishes a kind `ai-run` record
+  (branch `AI_START_BRANCH`, argv with the resolved `--knowledge-dir`) right after its exit
+  traps, and `on_exit` ends it `finished` on exit 0, else `stopped` (only while the approved gate
+  verifies). Inside a pipeline it writes none. The code came from T316's WIP (8df58cb) and was
+  checked against the notes unchanged. `docs/workflow.md` "Pipeline contract". Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -224,7 +229,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_run_record_ai_die_after_gate_change`, `test_run_record_pipeline_resume_without_a_record_starts_one`,
   `test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run`; T316:
   `test_run_record_recovery_owns_before_its_session`,
-  `test_run_record_recovery_refuses_a_stopped_run`.
+  `test_run_record_recovery_refuses_a_stopped_run`; T328: `test_run_record_standalone_ai_run`,
+  `test_run_record_standalone_refusal_after_publication`,
+  `test_run_record_standalone_start_clears_escalation`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
@@ -273,6 +280,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316 and T304 are DONE (T302's gate PASSED on 086ff5f's source).
-Next: the rest of the queue by dependency (T328 follows T316).
+T301, T315, T305, T303, T302, T316, T304 and T328 are DONE (T302's gate PASSED on 086ff5f's source).
+Next: the rest of the queue by dependency.
 Nothing is merged or deployed.
