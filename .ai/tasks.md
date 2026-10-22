@@ -5843,6 +5843,9 @@ digest unchanged, a `ghp_` token across character 200 → `…[redacted]`, CLI `
 reads back redacted); `-k events_core` Ran 9 tests OK; `-k Docs` Ran 3 OK. The session's
 `.ai/bin/ai-check` ran past the 600 s tool limit (gate median about 13 min) and was not seen
 to finish: the full gate is left to the host gate. docs/workflow.md: one sentence; flow unchanged.
+It later finished: `Ran 1136 tests in 980.6s` OK, then `Error: Validation modified project
+content.`, because this session edited and committed the .ai records (7f9ae48) while it ran; not a
+clean gate, so the host gate decides.
 
 ## T216 — Run context: run id in the manifest, `AI_RUN_ID`, run on outcome rows and attempt markers (ME-01, review P8)
 Status: TODO
