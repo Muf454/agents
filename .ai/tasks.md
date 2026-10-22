@@ -6142,7 +6142,7 @@ exact numbers); `-k gate_time -k session_gate_mode -k events_gate_parses` Ran 6 
 in-session ai-check started by mistake is not evidence).
 
 ## T220 — `gate` events from every host gate, failed and timed-out recovery gates included (ME-01 part 1, gate wiring)
-Status: TODO
+Status: DONE
 Dependencies: T207, T222
 Model: opus
 
@@ -6229,6 +6229,28 @@ Targeted: `bash -n scripts/lib/common.sh scripts/ai-run scripts/ai-pipeline scri
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-22 (claude opus). `scripts/lib/common.sh` `ai_gate_event WHERE START_EPOCH SECONDS
+CODE [GATE_ID]` (gate-broken guard first; 0 pass, 124/137 timeout, else fail; `ai_new_id` without an
+id; `event-gate … 2>/dev/null || Note: could not record the gate event.`; returns 0). `scripts/ai-run`
+`record_gate CODE STARTED WHERE`: one `secs` and `id`, epoch start `date +%s - secs`, `outcome gate …
+--id`, then the event; callers pass `$task` (checkpoint, gate-only retry) and `final`.
+`ai-pipeline` `ensure_validated` / `ai-recover` `commit_validated`: wall-clock timing, `ai_gate_check`
+→ event (`validation` / `recovery`), then `(( gate_code == 0 )) || stop validation` / `|| escalate …`
+with the old text, then the old guard lines unchanged. docs/workflow.md paragraph; flow unchanged.
+Tests (tests/test_workflow.py): `test_events_gate_written_by_the_runner`,
+`test_events_gate_clock_is_epoch_and_matches_the_row` (subTests gate-only retry, checkpoint after
+DONE, final in one `blocked-gate-unknown` run), `test_events_gate_pipeline_validation` (pass, an
+events.jsonl directory → same stderr plus the Note and the same steps, fail → stop as before),
+`test_events_gate_recovery_gate_outcomes_{pass,fail,timeout,changed_gate}` (separate methods, not
+subTests, since each needs a fresh fixture). Finding: a recovery gate that changes a gate file always
+fails already (ai-check's stamp: `Validation modified project content.`), so that case escalates with
+today's "fails validation" text; no gate event and the swapped helper never ran (marker absent).
+Evidence: `-k events_gate_written -k events_gate_clock -k events_gate_pipeline -k events_gate_recovery`
+Ran 7 OK; `-k gate_time -k session_gate_allowance_records -k runs_no_helper` Ran 10 OK;
+`-k recovery_commits_validated_leftovers -k timeout_rerun -k recovery_never_passes_a_changed_gate
+-k observation_recovery_validation` Ran 17 OK; `bash -n` on the four scripts OK. Full gate left to the
+host gate (BATCH 10 GATE RULE); an in-session `ai-check` started by mistake outlived the tool limit and
+is not evidence.
 
 ## T208 — `stop` and `recovery` events with a fixed stop category (ME-01 part 1, stops)
 Status: TODO

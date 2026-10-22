@@ -49,6 +49,12 @@
   `workflow.py merge_gates(rows, events)` counts each gate once across outcome rows and gate
   events (id join, row's seconds/result/run win, event adds the counts; id-less rows and
   event-only gates count alone). No caller passes `--id` yet (T220); T209/T211 use the merge.
+- T220 (ME-01 part 1, review P14/P17, 2026-10-22): every host full gate on an unchanged gate writes
+  one `gate` event through `common.sh` `ai_gate_event`: `ai-run` `record_gate` (task id for the
+  checkpoint gate and the gate-only retry, `final`) with the same `seconds` and `gate_id` as its
+  `outcome gate` row and an epoch start; `ai-pipeline` `ensure_validated` (`validation`) and
+  `ai-recover` `commit_validated` (`recovery`), failed and timed-out gates included. Exit paths and
+  messages unchanged; a changed gate records nothing.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -244,10 +250,18 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   complete overlap, partial event loss, rotated-away events, legacy id-less rows, an event-only
   validation gate and a duplicate event once each, the row's seconds win
   (`test_events_gate_merge_counts_each_gate_once`).
-- `events_gate` (later part: T220: runner, pipeline
-  validation and recovery gates pass/fail/timeout, epoch starts and row-matching durations, none
-  after a gate change),
-  `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
+- `events_gate_written` / `events_gate_clock` / `events_gate_pipeline` / `events_gate_recovery`
+  (T220, DONE): an `ai-run` task gets a `task: T001`, `pass` event with `tests` ≥ 1 beside its
+  `outcome gate` row, a failing final gate gives `stage: final`, `fail`
+  (`test_events_gate_written_by_the_runner`); the gate-only retry, the checkpoint gate and the
+  final gate have epoch starts inside the run and the same `seconds`/`result` as the row with their
+  `gate_id`, one event per row (`test_events_gate_clock_is_epoch_and_matches_the_row`);
+  `ensure_validated` writes `validation` `pass`, an unwritable event log adds only the Note, a
+  failing gate writes `fail` and stops as before (`test_events_gate_pipeline_validation`); the
+  recovery gate writes `recovery` `pass` with the checkpoint commit, `fail` and `timeout` with the
+  same "fails validation" escalation, and nothing (helper never run) when the gate swapped a gate
+  file (`test_events_gate_recovery_gate_outcomes_pass`, `_fail`, `_timeout`, `_changed_gate`).
+- Later parts: `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
   terminal stop and escalation bounded with a held lock), `events_ruling` and `events_review`
   (T210), `events_pr` (T218).
 - `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
@@ -264,5 +278,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T222 (T220: `gate` events from every host gate).
+The runner continues with the next task after T220 (the next unblocked task in `.ai/tasks.md`).
 Nothing is merged or deployed.

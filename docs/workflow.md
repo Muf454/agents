@@ -1433,7 +1433,18 @@ Unknown values are null and the event is still written. The validation stamp and
 agent-writable, so they are read only through `gate_log_lines()` (pinned `.ai/local`,
 `O_NOFOLLOW|O_NONBLOCK` opens with a regular-file `fstat` check, stamp at most 64 KiB, log tail
 256 KiB, log only directly inside `.ai/local`): a FIFO, symlink, swapped directory or outside
-log gives null counts promptly and is never followed. The host callers come with T220.
+log gives null counts promptly and is never followed.
+
+Host callers (T220): `common.sh` `ai_gate_event WHERE START_EPOCH SECONDS CODE [GATE_ID]` skips
+itself once `AI_GATE_BROKEN` is set, maps the exit code (0 pass, 124/137 timeout, else fail),
+uses `ai_new_id` without GATE_ID, prints a Note on a write failure and always returns 0. Every
+host full gate on an unchanged gate writes one event: `ai-run` `record_gate CODE STARTED WHERE`
+(the checkpoint gate after a session and the gate-only retry with the task id, the final gate
+with `final`) gives the `outcome gate` row and the event the same `seconds` (its `$SECONDS`
+clock) and `gate_id`, with the epoch start `date +%s - seconds`; `ai-pipeline`
+`ensure_validated` (stage `validation`) and `ai-recover` `commit_validated` (stage `recovery`)
+time the gate on the wall clock, record it after `ai_gate_check`, then take today's failure
+branch, so a failing or timed-out gate is recorded too. A gate that changed records nothing.
 
 Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
 exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at

@@ -11199,6 +11199,175 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-run', '--approved', expected=1)
         self.assertEqual([r['result'] for r in self.gate_rows()], ['fail'])
 
+    # ---------------------------------------------------------------- gate events (ME-01, T220)
+    COUNTING_VALIDATE = '#!/usr/bin/env bash\nprintf "Ran 3 tests in 0.010s\\n\\nOK\\n"\n'
+
+    def gate_events(self):
+        path = self.base / 'host-state/events.jsonl'
+        records = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in records if r['kind'] == 'gate']
+
+    def where(self, event):
+        return event['task'] or event['stage']
+
+    def timed(self, *args, **kwargs):
+        t0 = int(time.time())
+        result = self.tool(*args, **kwargs)
+        return result, t0, int(time.time())
+
+    def assert_gate_window(self, event, t0, t1):
+        """An epoch start inside the run and a duration on the same clock (review round 3 P17)."""
+        self.assertTrue(t0 - 2 <= event['start'] <= t1 + 2, (event, t0, t1))
+        self.assertTrue(0 <= event['seconds'] <= t1 - t0 + 2, (event, t0, t1))
+        self.assertLessEqual(event['start'] + event['seconds'], t1 + 2)
+
+    def test_events_gate_written_by_the_runner(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text(self.COUNTING_VALIDATE)
+        self.commit('counting gate')
+        self.tool('ai-run', '--approved')
+        events = self.gate_events()
+        self.assertEqual([(self.where(e), e['result']) for e in events], [('T001', 'pass'), ('final', 'pass')])
+        self.assertEqual(events[0]['task'], 'T001')
+        self.assertGreaterEqual(events[0]['tests'], 1)
+        self.assertEqual([r['result'] for r in self.gate_rows()], ['pass', 'pass'])
+        # A failing final gate: stage final, result fail.
+        tasks = self.project / '.ai/tasks.md'
+        tasks.write_text(tasks.read_text() + task('T002'))
+        (self.project / '.ai/validate').write_text(self.RECORDING_VALIDATE)
+        self.commit('one more task and the recording fixture gate')
+        self.tool('ai-run', '--approved', expected=1, MOCK_VALIDATE_FAIL='final')
+        last = self.gate_events()[-1]
+        self.assertEqual((last['stage'], last['task'], last['result']), ('final', None, 'fail'))
+
+    def test_events_gate_clock_is_epoch_and_matches_the_row(self):
+        self.ready()
+        self.approve_run()
+        _, t0, t1 = self.timed('ai-run', '--approved', MOCK_CLAUDE='blocked-gate-unknown')
+        events, rows = self.gate_events(), self.gate_rows()
+        self.assertEqual(len(events), len(rows))
+        self.assertEqual([self.where(e) for e in events], ['T001', 'T001', 'final'])
+        by_id = {r['gate_id']: r for r in rows}
+        for label, event in zip(('gate-only retry', 'checkpoint after DONE', 'final'), events):
+            with self.subTest(label):
+                self.assert_gate_window(event, t0, t1)
+                row = by_id[event['gate_id']]
+                self.assertEqual((row['seconds'], row['result']), (event['seconds'], event['result']))
+
+    def validation_rerun(self, expected=0, **env):
+        (self.project / '.ai/local/validation.json').unlink()
+        return self.timed('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=expected, **env)
+
+    def test_events_gate_pipeline_validation(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        before = len(self.gate_events())
+        result, t0, t1 = self.validation_rerun()
+        self.assertIn('== Validation ==', result.stdout)
+        new = self.gate_events()[before:]
+        self.assertEqual([(e['stage'], e['result']) for e in new], [('validation', 'pass')])
+        self.assert_gate_window(new[0], t0, t1)
+        # An unwritable event log: the same exit status and output, plus the Note.
+        events = self.base / 'host-state/events.jsonl'
+        events.rename(self.base / 'host-state/events.saved')
+        events.mkdir()
+        blocked, _, _ = self.validation_rerun()
+        self.assertEqual(blocked.stderr.replace('Note: could not record the gate event.\n', ''), result.stderr)
+        self.assertIn('Note: could not record the gate event.\n', blocked.stderr)
+        steps = re.compile(r'^== .* ==$', re.M)
+        self.assertEqual(steps.findall(blocked.stdout), steps.findall(result.stdout))
+        events.rmdir()
+        (self.base / 'host-state/events.saved').rename(events)
+        # A failing validation gate is recorded, then stops as before.
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 1\n')
+        self.commit('failing gate')
+        failed, t0, t1 = self.validation_rerun(expected=1)
+        last = self.gate_events()[-1]
+        self.assertEqual((last['stage'], last['result']), ('validation', 'fail'))
+        self.assert_gate_window(last, t0, t1)
+        self.assertIn('Error: Pipeline stopped during validation', failed.stderr)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('⛔ STOPPED, needs you: feature/test stopped during validation', notes)
+
+    def recovery_gate_events(self):
+        return [e for e in self.gate_events() if e['stage'] == 'recovery']
+
+    def test_events_gate_recovery_gate_outcomes_pass(self):
+        self.ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n'))
+        _, t0, t1 = self.timed('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='1',
+                               MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun')
+        events = self.recovery_gate_events()
+        self.assertEqual([e['result'] for e in events], ['pass'])
+        self.assert_gate_window(events[0], t0, t1)
+        self.assertEqual(self.recovery_checkpoints(), 1)
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    def test_events_gate_recovery_gate_outcomes_fail(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntest ! -e partial.txt\n')
+        self.commit('a gate the partial work fails')
+        result, t0, t1 = self.timed('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--session-timeout', '1',
+                                    expected=1, AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-once')
+        events = self.recovery_gate_events()
+        self.assertEqual([e['result'] for e in events], ['fail'])
+        self.assert_gate_window(events[0], t0, t1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('but the leftover work fails validation. Next: fix or discard the uncommitted work', notes)
+        self.assertIn('Error: escalated to the human:', result.stderr)
+        self.assert_partial_uncommitted()
+
+    def test_events_gate_recovery_gate_outcomes_timeout(self):
+        self.ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n'))
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\ntest ! -e partial.txt || exec sleep 60\n')
+        self.commit('a gate that hangs on the partial work')
+        result, t0, t1 = self.timed('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                                    AI_AUTO_RECOVER='1', AI_CHECK_TIMEOUT='1', MOCK_CLAUDE='error-once-partial',
+                                    MOCK_RECOVER='commit_and_rerun')
+        events = self.recovery_gate_events()
+        self.assertEqual([e['result'] for e in events], ['timeout'])
+        self.assert_gate_window(events[0], t0, t1)
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        self.assertIn('but the leftover work fails validation. Next: fix or discard the uncommitted work', notes)
+        self.assertIn('Error: escalated to the human:', result.stderr)
+        self.assertEqual(self.recovery_checkpoints(), 0)
+
+    # Swaps in a helper that still serves ai-check's own stamp calls, but leaves a marker when any
+    # other command runs: after the gate changed, nothing may run it.
+    TAMPERED_HELPER = """import pathlib, runpy, sys
+if sys.argv[1:2] != ['stamp']:
+    pathlib.Path('UNTRUSTED_HELPER_RAN').touch()
+real = str(pathlib.Path(__file__).with_name('workflow_real.py'))
+sys.argv[0] = real
+runpy.run_path(real, run_name='__main__')
+"""
+
+    def test_events_gate_recovery_gate_outcomes_changed_gate(self):
+        self.ready(task('T001').replace('T001.txt\n', 'T001.txt, partial.txt\n'))
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\nset -e\nif [ -e partial.txt ] && [ ! -e .ai/bin/lib/workflow_real.py ]; then\n'
+            '  cp .ai/bin/lib/workflow.py .ai/bin/lib/workflow_real.py\n'
+            '  cp .ai/local/tampered-helper.py .ai/bin/lib/workflow.py\nfi\n')
+        self.commit('a gate that swaps the helper during recovery')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        (self.project / '.ai/local/tampered-helper.py').write_text(self.TAMPERED_HELPER)
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
+                           MOCK_CLAUDE='error-once-partial', MOCK_RECOVER='commit_and_rerun')
+        self.assertTrue((self.project / '.ai/bin/lib/workflow_real.py').exists())  # the swap happened
+        self.assertEqual(self.recovery_gate_events(), [])
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        notes = self.notifications()
+        self.assertEqual(notes.count('⛔'), 1)
+        # ai-check's stamp already fails a gate that rewrote tracked files, so the escalation is
+        # today's "fails validation" one (ai_gate_check only set AI_GATE_BROKEN).
+        self.assertIn('Error: Validation modified project content.', result.stderr)
+        self.assertIn('but the leftover work fails validation. Next: fix or discard the uncommitted work', notes)
+        self.assertIn('Error: escalated to the human: the session crashed once.; but the leftover work fails validation.',
+                      result.stderr)
+        self.assertEqual(self.recovery_checkpoints(), 0)
+
     # ---------------------------------------------------------------- session gate rule (TS-01, T204)
     def session_gate_contracts(self):
         """The appended RUNNER CONTRACT part of each captured task prompt (not the template before it)."""

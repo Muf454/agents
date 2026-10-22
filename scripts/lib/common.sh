@@ -234,6 +234,18 @@ ai_event() {
 # 16 lowercase hex for a gate id (spec A12): the same id goes on the `outcome gate` row and the
 # `gate` event of one gate. Plain od, no helper, so it runs even when the gate is known bad.
 ai_new_id() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
+# One `gate` event per host gate (spec A12). Usage: ai_gate_event WHERE START_EPOCH SECONDS CODE
+# [GATE_ID]: WHERE is the task id or a stage; the caller measures SECONDS on its own clock and
+# passes the epoch start separately. Exit 124/137 is a timeout, as record_gate. Returns 0 always.
+ai_gate_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local result=fail id=${5:-}
+  if (( $4 == 0 )); then result=pass; elif (( $4 == 124 || $4 == 137 )); then result=timeout; fi
+  [[ -n "$id" ]] || id=$(ai_new_id)
+  ai_helper event-gate "$1" "$2" "$3" "$result" "$id" 2>/dev/null || \
+    printf '%s\n' 'Note: could not record the gate event.' >&2
+  return 0
+}
 ai_notify_log() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true

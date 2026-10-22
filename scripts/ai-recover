@@ -303,7 +303,13 @@ commit_validated() {
     escalate "$1; but dependency setup failed: $AI_DEPS_ERROR." \
       'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
   ai_observe recovering "$AI_OBSERVE_RECOVERY" checks
-  "$AI_BIN/ai-check" || escalate "$1; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
+  # The gate event comes before today's decision, so a failing or timed-out gate is recorded too.
+  local gate_started gate_code=0 gate_secs
+  gate_started=$(date +%s)
+  "$AI_BIN/ai-check" || gate_code=$?
+  gate_secs=$(( $(date +%s) - gate_started ))
+  if ai_gate_check "$approved_gate"; then ai_gate_event recovery "$gate_started" "$gate_secs" "$gate_code"; fi
+  (( gate_code == 0 )) || escalate "$1; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
   ai_gate_check "$approved_gate" || escalate 'gate files changed during validation.' 'inspect the diff.'
   git add --all -- .
   if ! new_files=$(ai_helper checkpoint-guard); then

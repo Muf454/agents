@@ -271,12 +271,16 @@ task_outcome() {
 }
 
 # Host gate run timing for the implementation session allowance (gate-seconds); never fatal.
-# Call only after ai_guard_verify: the gate may have changed. Usage: record_gate CODE STARTED.
+# Call only after ai_guard_verify: the gate may have changed. Usage: record_gate CODE STARTED WHERE
+# (STARTED is a $SECONDS value). The outcome row and the `gate` event share one duration and id.
 record_gate() {
-  local result=fail
+  local result=fail secs=$(( SECONDS - $2 )) id start_epoch
   if (( $1 == 0 )); then result=pass; elif (( $1 == 124 || $1 == 137 )); then result=timeout; fi
-  ai_helper outcome gate "$result" "$(( SECONDS - $2 ))" 2>/dev/null || \
+  id=$(ai_new_id)
+  start_epoch=$(( $(date +%s) - secs ))
+  ai_helper outcome gate "$result" "$secs" --id "$id" 2>/dev/null || \
     printf '%s\n' 'Note: could not record the gate time.' >&2
+  ai_gate_event "$3" "$start_epoch" "$secs" "$1" "$id"
 }
 
 # Sessions keep throwaway files in .ai/local/scratch; emptied before and after each session
@@ -760,7 +764,7 @@ checkpoint_done() {
   gate_started=$SECONDS
   host_gate
   ai_guard_verify
-  record_gate "$gate_code" "$gate_started"
+  record_gate "$gate_code" "$gate_started" "$task"
   if (( gate_code != 0 )); then
     task_outcome validation_failed
     ai_helper tasks set "$task" IN_PROGRESS
@@ -815,7 +819,7 @@ gate_only_retry() {
   gate_started=$SECONDS
   host_gate
   ai_guard_verify
-  record_gate "$gate_code" "$gate_started"
+  record_gate "$gate_code" "$gate_started" "$task"
   if (( gate_code != 0 )); then
     printf '%s\n' "Gate-only block retry of $task: the full gate failed; it stays BLOCKED."
     return 0
@@ -907,7 +911,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     gate_started=$SECONDS
     host_gate
     ai_guard_verify
-    record_gate "$gate_code" "$gate_started"
+    record_gate "$gate_code" "$gate_started" final
     if (( gate_code != 0 )); then
       ai_helper state blocked 'Final validation failed; inspect validation log'
       ai_die 'Final validation failed; readiness is not established.'

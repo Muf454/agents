@@ -270,7 +270,13 @@ push() {
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
     step checks 'Validation'
-    "$AI_BIN/ai-check" || stop validation
+    # The gate event comes before today's decision, so a failing gate is recorded too.
+    local gate_started gate_code=0 gate_secs
+    gate_started=$(date +%s)
+    "$AI_BIN/ai-check" || gate_code=$?
+    gate_secs=$(( $(date +%s) - gate_started ))
+    if ai_gate_check "$AI_APPROVED_GATE"; then ai_gate_event validation "$gate_started" "$gate_secs" "$gate_code"; fi
+    (( gate_code == 0 )) || stop validation
     ai_guard_verify
   fi
 }
