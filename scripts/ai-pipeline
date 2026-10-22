@@ -347,7 +347,7 @@ push() {
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
     step checks 'Validation'
-    ai_run_child "$AI_BIN/ai-check" || stop validation
+    ai_run_child "$AI_BIN/ai-check" || { ai_escalation_hint validation; stop validation; }
     ai_guard_verify
   fi
 }
@@ -411,6 +411,7 @@ complete_plan_stage() {
     read -r _ start digest <<< "$info"
     if ! state=$(ai_helper run-manifest revision-reserve "$digest" "$AI_SUPERVISE_PLAN_ROUNDS" 2>&1); then
       printf '%s\n' "${state#Error: }" > .ai/local/last-error
+      ai_escalation_hint plan_review_limit
       stop 'plan revision'
     fi
     model=$(plan_revision_model 2>&1) || plan_stage_fail "$model"
@@ -524,6 +525,8 @@ plan_decision_check() {
        current=$(ai_helper plan-rounds current "$base_sha" 2>/dev/null) || current='?'
        printf 'plan review needs your decision (round %s): %s\n' "${current%% *}" "${questions//$'\n'/; }" \
          > .ai/local/last-error
+       # shellcheck disable=SC2046
+       ai_escalation_hint needs_human_question $(grep -oE '\b[A-Z]{1,3}[0-9]{1,4}\b' <<< "$questions" | sort -u | sed 's/^/--finding /')
        stop 'plan review' ;;
     1) ;;
     *) plan_stage_fail "the plan revision records are unreadable (${questions#Error: })." ;;
@@ -607,12 +610,14 @@ if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>
     (( plan_blockers + plan_majors > 0 )) || break
     if [[ "$AI_SUPERVISE" != 1 ]]; then
       printf '%s\n' "plan review found BLOCKER $plan_blockers, MAJOR $plan_majors; revise the plan (see .ai/reviews/plan.md) or rerun with --skip-plan-review" > .ai/local/last-error
+      ai_escalation_hint plan_review_limit
       stop 'plan review'
     fi
     current=$(ai_helper plan-rounds current "$base_sha") || stop 'plan review'
     # Reserved before the stage opens (a crash in between finds it reserved, never counted twice).
     if ! reserved=$(ai_helper run-manifest revision-reserve "${current#* }" "$AI_SUPERVISE_PLAN_ROUNDS" 2>&1); then
       printf '%s; BLOCKER %s, MAJOR %s remain\n' "${reserved#Error: }" "$plan_blockers" "$plan_majors" > .ai/local/last-error
+      ai_escalation_hint plan_review_limit
       stop 'plan review'
     fi
     step plan_revision "Plan revision $reserved/$AI_SUPERVISE_PLAN_ROUNDS, review round ${current%% *} (Claude)" \

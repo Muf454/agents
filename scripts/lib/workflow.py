@@ -772,6 +772,10 @@ def task_command(arguments):
         for task in blocks:
             if task['status'] == 'DONE' and task['id'] not in done:
                 print(task['id'])
+    elif action == 'blocked':
+        for task in blocks:
+            if task['status'] == 'BLOCKED':
+                print(task['id'])
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')

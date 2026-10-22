@@ -256,6 +256,8 @@ Planned commands (exact forms land with their tasks; T314 checks this list again
 
 ### Covered by automated tests
 Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
+- `escalation_hint` (T309): `test_escalation_hint_task_blocked`, `_plan_kinds`,
+  `_needs_human_question`, `_validation_and_limit`, `_usage_limit` (hint file kind per stop).
 - `run_record` (T301, T315, T302, T316): schema, current pointer, unique ids with a fixed clock
   and pid, retention, identity, bounded lock; lifecycle bound to the run id (interleaving of two runs); pipeline start required,
   resume, `ai_die` after a gate change; recovery owns the run before its session; stand-alone

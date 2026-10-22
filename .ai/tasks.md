@@ -6294,7 +6294,7 @@ ai-pipeline dispatch comment. Evidence: `-k stop_command` Ran 11 OK (21.0 s; 4 n
 `.ai/bin/ai-check` PASS, Ran 1175 OK (943.6 s). Implementation commit 01bd5ff.
 
 ## T309 — Escalation hints at the producers of stops for a human (RC-01 G9, hints)
-Status: TODO
+Status: DONE
 Dependencies: T316, T328
 Model: sonnet
 
@@ -6335,6 +6335,15 @@ Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude, sonnet): `common.sh` `ai_escalation_hint KIND [--task|--finding ID]…` (skips
+without `AI_RUN_ID`, best effort); called right before the stop in `ai-pipeline`
+(`plan_decision_check` → `needs_human_question` with finding ids grepped from the questions, the
+two `revision-reserve` refusals and the `AI_SUPERVISE != 1` stop → `plan_review_limit`,
+`ensure_validated` → `validation`), `ai-run` "none can run" (`task_blocked`, ids from the new
+`workflow.py tasks blocked`), `ai_limit_pause` beyond the budget (`usage_limit`). Stop messages
+unchanged. Tests: `test_escalation_hint_task_blocked`, `_plan_kinds`, `_needs_human_question`,
+`_validation_and_limit`, `_usage_limit`. Evidence: `-k escalation_hint` Ran 6 OK;
+`.ai/bin/ai-check` PASS, Ran 1180 OK (892.5 s).
 
 ## T320 — Escalation records written at every stop for a human, gate first (RC-01 G9, writes)
 Status: TODO

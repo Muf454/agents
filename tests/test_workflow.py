@@ -16640,6 +16640,39 @@ PY
         self.escalation('write', 'other', 'implementation', '--run', run_id)
         self.assertIsNone(self.escalation_data()['evidence']['last_error'])
 
+    # Hints at the producers of stops for a human (T309): written right before the stop.
+    def hint_data(self):
+        return json.loads(self.escalation_path('escalation-hint.json').read_text())
+
+    def test_escalation_hint_task_blocked(self):
+        self.ready(queue=task('T001', 'BLOCKED'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        hint = self.hint_data()
+        self.assertEqual((hint['kind'], hint['tasks']), ('task_blocked', ['T001']))
+        self.assertEqual(hint['run'], self.pipeline_records()[-1]['id'])
+
+    def test_escalation_hint_plan_kinds(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='0', AI_SUPERVISE='0', MOCK_CODEX_PLAN='major')
+        self.assertEqual(self.hint_data()['kind'], 'plan_review_limit')
+
+    def test_escalation_hint_needs_human_question(self):
+        self.decision_recorded()
+        self.assertEqual(self.hint_data()['kind'], 'needs_human_question')
+
+    def test_escalation_hint_validation_and_limit(self):
+        self.ready(queue=task('T001', 'DONE'))
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 1\n')
+        self.commit('a failing gate')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        self.assertEqual(self.hint_data()['kind'], 'validation')
+
+    def test_escalation_hint_usage_limit(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='limit-far', AI_LIMIT_MAX_WAIT='60')
+        self.assertEqual(self.hint_data()['kind'], 'usage_limit')
+
     def test_escalation_hint_is_consumed_once(self):
         run_a = self.run_record_start(os.getpid())
         self.escalation('hint', 'task_blocked', '--run', run_a, '--task', 'T005')

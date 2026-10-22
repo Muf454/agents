@@ -888,6 +888,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   if [[ "$active_task" == none ]]; then
     if ! ai_helper tasks complete; then
       ai_helper state blocked 'No runnable tasks; resolve blockers/dependencies'
+      ai_escalation_hint task_blocked $(ai_helper tasks blocked 2>/dev/null | sed 's/^/--task /')
       ai_die 'Unfinished tasks exist but none can run. See .ai/tasks.md.'
     fi
     remaining=$(remaining_time)

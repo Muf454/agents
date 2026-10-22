@@ -116,6 +116,7 @@ ai_limit_pause() {
     # pinned .ai/local, never a redirection: a planted symlink or FIFO there is not followed.
     (( reset > now )) || reset=0
     ai_helper limit-stop-write "$agent" "$reset" 2>/dev/null || true
+    ai_escalation_hint usage_limit
     ai_die "$agent usage limit: the reset is beyond the ${max}s wait budget. Rerun after it resets."
   fi
   until=$(date -d "@$(( now + wait ))" '+%a %H:%M')
@@ -234,6 +235,12 @@ ai_root() {
   mkdir -p .ai/local
 }
 ai_helper() { python3 "$AI_BIN/lib/workflow.py" "$@"; }
+# Host-side hint for the escalation record: KIND and optional --task/--finding ids, right
+# before a stop for a human. Best effort; skipped outside a run.
+ai_escalation_hint() {
+  [[ -n "${AI_RUN_ID:-}" ]] || return 0
+  ai_helper escalation hint "$@" --run "$AI_RUN_ID" 2>/dev/null || true
+}
 # The armed-tree acceptance contract (ai-pipeline, before its start check): one predicate for
 # ai-pipeline and ai-run. A resume (a human start drops the arm), the checkout exactly the armed
 # tree, no stage open.
