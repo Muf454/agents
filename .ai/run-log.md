@@ -600,3 +600,4 @@
 | 2026-10-22T12:30:13Z | runner | T306 | completed | PASS | 715eabc | Claude checkpointed; continuing queue |
 | 2026-10-22T13:10:00Z | claude (opus) | T318 | DONE: ai-pipeline's ai-run, ai-review, ai-check and push retry sleep run via ai_run_child; 5 test_human_stop_pid_only_* tests (signal to the pipeline pid only) | -k human_stop 13 OK; full gate left to the runner (over the tool limit) | see next entry | vault hub Log updated; flow unchanged |
 | 2026-10-22T13:12:56Z | runner | T318 | stopped (exit 1); inspect state/diff before resuming | see local logs | 824a021 | No merge or deployment performed |
+| 2026-10-22T14:05:00Z | claude (opus) | T318 | DONE (resume): code already in 824a021; the earlier gate failure was the runner's time budget (exit 124), the recovery gate passed on the same code | -k human_stop 13 OK; recovery gate PASS 13:42:50Z | 4591022 | no code change this session |

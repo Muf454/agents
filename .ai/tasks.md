@@ -5934,7 +5934,7 @@ session (the suite takes ≈ 20 min), so the runner's host gate decides, as for 
 Limitation (by design, T318): a PID-only TERM waits for the pipeline's foreground stage.
 
 ## T318 — The pipeline forwards a stop to its children and sleeps; PID-only stop at every stage (RC-01 G2, G1, plan review P2)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T306
 Model: opus
 
@@ -5995,6 +5995,9 @@ sleeping Codex), `_validation` (DONE queue, sleeping `.ai/validate`, stamp not P
 hook, sleeping `AI_SLEEP`, stage `pr`). `python3 -m unittest discover -s tests -k human_stop`:
 Ran 13 tests OK (118.4 s). Docs: `docs/workflow.md` (a stop reaches every stage). Flow unchanged.
 Full gate: started in session, exceeded the 600 s tool limit (≈1500 s); the runner's gate decides.
+2026-10-22 (claude opus, resume): the runner's post-task gate exited 124 (its time budget ran out
+mid-gate, not a test failure); the recovery gate on the same code passed (state: PASS at
+2026-10-22T13:42:50Z, checkpoint 4591022). Re-ran `-k human_stop`: Ran 13 tests OK (119.5 s).
 
 ## T323 — The pipeline forwards a stop to its publication commands: git push, ls-remote, gh (RC-01 G2, G1, plan review round 2 P2)
 Status: TODO
