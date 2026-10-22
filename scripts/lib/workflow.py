@@ -5495,19 +5495,60 @@ def metrics_data(rows, events, since=None, project=None, current=None):
     return {'v': METRICS_SCHEMA, 'projects': projects, 'runs': runs}
 
 
+METRICS_TAIL = ['tasks', 'first pass %', 'timeouts', 'median task min', 'gates', 'median gate min', 'stops',
+                'review rounds', 'findings']
+
+
+def metrics_cells(entry):
+    """The text cells of one projects/runs entry; `-` stands for a missing number."""
+    def minutes(seconds):
+        return '-' if seconds is None else f'{seconds / 60:.1f}'
+    rate = entry['first_pass_rate']
+    stops = entry['stops']
+    findings = ', '.join(f"{name} {c['blocker']}/{c['major']}/{c['minor']}"
+                         for name, c in sorted(entry['findings'].items()))
+    return [str(entry['tasks']), '-' if rate is None else f'{rate * 100:.0f}', str(entry['timeouts']),
+            minutes(entry['median_task_seconds']), str(entry['gates']), minutes(entry['median_gate_seconds']),
+            '-' if not stops else ', '.join(f'{k} {v}' for k, v in sorted(stops.items())),
+            str(entry['review_rounds']), findings or '-']
+
+
+def metrics_table(title, headers, rows):
+    """Column-aligned plain text (no `|`): TITLE, the header line, then ROWS."""
+    widths = [max(len(line[i]) for line in [headers, *rows]) for i in range(len(headers))]
+    lines = [title] + ['  '.join(c.ljust(w) for c, w in zip(line, widths)).rstrip() for line in [headers, *rows]]
+    return '\n'.join(lines)
+
+
+def metrics_text(data):
+    """The readable view of metrics_data: a Projects table, a Runs table and explanatory footers."""
+    projects = [[str(p['project']), str(p['runs']), *metrics_cells(p)] for p in data['projects']]
+    runs = [[str(r['project']), r['label'] if r['run'] is None else r['run'][:8], str(r['branch'] or '-'),
+             str(r['result'] or '-'), str(r['events']), *metrics_cells(r)] for r in data['runs']]
+    return '\n\n'.join([
+        metrics_table('Projects', ['project', 'runs', *METRICS_TAIL], projects),
+        metrics_table('Runs', ['project', 'run', 'branch', 'result', 'events', *METRICS_TAIL], runs),
+        '\n'.join(['Sources: the outcome log (outcomes.jsonl) and the event log (events.jsonl, events.1.jsonl).',
+                   'result unknown: the run\'s lifecycle events rotated away or were never written.',
+                   'events 0: event numbers unavailable; gates come from the outcome log only.',
+                   'findings are blocker/major/minor from code reviews; - means no data.'])])
+
+
 def metrics(arguments):
     """metrics [--since YYYY-MM-DD] [--project NAME] [--json] [--outcomes FILE] [--events FILE...]:
-    print metrics_data as JSON (T212 adds the text view). Read only. Usage errors exit 2; a busy
+    print metrics_data as JSON with --json, else as two plain-text tables. Read only. Usage errors exit 2; a busy
     event log exits 1 with an error instead of numbers computed without the events."""
     def usage(message):
         print(f'Error: {message}\nUsage: metrics [--since YYYY-MM-DD] [--project NAME] [--json] '
               '[--outcomes FILE] [--events FILE...]', file=sys.stderr)
         sys.exit(2)
     since = project = outcomes = event_paths = None
+    as_json = False
     rest = list(arguments)
     while rest:
         option = rest.pop(0)
         if option == '--json':
+            as_json = True
             continue
         if option == '--events':
             event_paths = []
@@ -5538,7 +5579,8 @@ def metrics(arguments):
         print(f'Error: the event log is busy (lock held for more than {events_lock_seconds():g} s); try again.',
               file=sys.stderr)
         sys.exit(1)
-    print(json.dumps(metrics_data(rows, events, since, project), indent=2))
+    data = metrics_data(rows, events, since, project)
+    print(json.dumps(data, indent=2) if as_json else metrics_text(data))
 
 
 LIMIT_TEXT = re.compile(

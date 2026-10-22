@@ -310,6 +310,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_events_lock_held_terminal_stop_is_bounded`); `run-totals` prints `gates=-
   gate_failures=-` within the bound, exit 0 (`test_events_lock_held_reader_reports_unavailable`).
 - Later parts: `events_ruling` and `events_review` (T210), `events_pr` (T218).
+- `ai-status --metrics` text (T212, DONE): both tables print with no `|` and `-` for missing numbers
+  (`test_metrics_text_tables`); a run with rotated events shows `unknown`, events `0`, stops `-`,
+  and the footer explains it (`test_metrics_text_rotated_run`); `ai-status --metrics --json
+  --project p`, the usage error and `--help` (`test_metrics_ai_status_flag`).
 - `metrics` JSON (T211, DONE): fixture logs of two projects give exact per-project and per-run
   numbers (first pass 0.5, timeouts 1, median gate 700, stops and findings by reviewer)
   (`test_metrics_json_on_fixture_logs`); rows and events go to the run in their own `run` field, a

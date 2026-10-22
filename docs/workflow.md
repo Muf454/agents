@@ -1510,7 +1510,10 @@ removes its temp file and leaves the file it failed on as it was, and the append
 Metrics (T211, spec A13): `workflow.py metrics [--since YYYY-MM-DD] [--project NAME] [--json]
 [--outcomes FILE] [--events FILE…]` (the file options for tests) reads the outcome log and the
 retained events (read only) and prints `{"v": 1, "projects": […], "runs": […]}`; without
-`--json` it prints the same JSON until T212 adds tables. A row or event belongs to the run in its
+`--json` (T212) it prints two column-aligned text tables, "Projects" and "Runs" (`-` for a missing
+number, stops as `timeout 1, queue_order 2`, findings as `codex 0/2/3` blocker/major/minor), and
+footer lines explaining `unknown` and `events 0`; `ai-status --metrics [--since DATE] [--project
+NAME] [--json]` passes its arguments through. A row or event belongs to the run in its
 own `run` field, never to one matched by branch or time; records without one form their
 project's `(no run record)` group (`run` null, `result` null). Runs are the union of run ids on
 outcome rows and retained events, keyed by project and run, so a run whose events rotated away is

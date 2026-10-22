@@ -6744,7 +6744,7 @@ against the BATCH 10 GATE RULE; it overran the Bash tool's 600 s and continued i
 (BATCH 10 GATE RULE).
 
 ## T212 — `ai-status --metrics`: plain text tables and JSON (ME-01 part 2, command)
-Status: TODO
+Status: DONE
 Dependencies: T211
 Model: sonnet
 
@@ -6791,6 +6791,11 @@ Targeted: `bash -n scripts/ai-status`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Done (2026-10-22). `metrics_text` (Projects and Runs tables, footers) in `workflow.py`; without `--json`
+`metrics` prints text; `ai-status --metrics` passes its arguments through. Tests: `-k test_metrics` 8 OK
+(new `test_metrics_text_tables`, `test_metrics_text_rotated_run`, `test_metrics_ai_status_flag`; the T211
+plain-output assertion now checks the text); `-k outcome_report -k runner_logs_task_outcomes` 4 OK;
+`bash -n scripts/ai-status` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T213 — Docs, flow chart and handoff audit (batch 10)
 Status: TODO

@@ -835,7 +835,72 @@ class MetricsTests(EventsFixture):
         self.assert_sums(data)
         plain = self.metrics('--outcomes', str(self.base / 'outcomes.jsonl'),
                              '--events', str(self.base / 'events.jsonl'))
-        self.assertEqual(json.loads(plain.stdout), data)  # without --json: the JSON too, for now
+        self.assertEqual(plain.stdout, workflow.metrics_text(data) + '\n')  # without --json: the text tables
+        text = plain.stdout
+        self.assertNotIn('|', text)
+        projects, runs, footer = text.rstrip('\n').split('\n\n')
+        lines = projects.splitlines()
+        self.assertEqual(lines[0], 'Projects')
+        self.assertEqual(' '.join(lines[2].split()), 'alpha 2 2 50 1 22.5 2 11.7 queue_order 1, timeout 1 2 '
+                                                     'claude-routed 0/0/1, codex 0/2/3')
+        self.assertEqual(lines[3].split(), ['beta', '0', '1', '100', '0', '1.7', '0', '-', '-', '0', '-'])
+        self.assertIn('(no run record)', runs)
+        self.assertIn('events 0: event numbers unavailable', footer)
+
+    def text(self, rows, events, *args):
+        result = self.metrics('--outcomes', str(self.write('outcomes.jsonl', rows)),
+                              '--events', str(self.write('events.jsonl', events)), *args)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertNotIn('|', result.stdout)
+        return result.stdout
+
+    def test_metrics_text_tables(self):
+        rows = [outcome_row('2026-01-05T10:05:00Z', 'task', RUN_A, task='T1', result='done', seconds=300, seq=1),
+                outcome_row('2026-01-05T10:20:00Z', 'task', RUN_A, task='T2', result='timeout', seconds=1800, seq=2)]
+        events = [metrics_event('2026-01-05T10:00:00Z', 'run', RUN_A, action='start'),
+                  metrics_event('2026-01-05T10:45:00Z', 'stop', RUN_A, category='timeout'),
+                  metrics_event('2026-01-05T10:46:00Z', 'run', RUN_A, action='end', result='stopped')]
+        text = self.text(rows, events)
+        projects, runs, footer = text.rstrip('\n').split('\n\n')
+        self.assertEqual(projects.splitlines()[0], 'Projects')
+        self.assertEqual(projects.splitlines()[2].split(),
+                         ['alpha', '1', '2', '50', '1', '17.5', '0', '-', 'timeout', '1', '0', '-'])
+        self.assertEqual(runs.splitlines()[0], 'Runs')
+        self.assertEqual(runs.splitlines()[2].split(),
+                         ['alpha', RUN_A[:8], 'feat', 'stopped', '3', '2', '50', '1', '17.5', '0', '-',
+                          'timeout', '1', '0', '-'])
+        self.assertIn('Sources:', footer)
+
+    def test_metrics_text_rotated_run(self):
+        rows = [outcome_row('2026-02-01T10:10:00Z', 'task', RUN_A, task='T1', result='done', seconds=60, seq=1),
+                outcome_row('2026-02-01T11:10:00Z', 'task', RUN_D, task='T2', result='done', seconds=60, seq=2)]
+        events = [metrics_event(stamp(minutes=5), 'run', RUN_D, action='start'),
+                  metrics_event(stamp(minutes=6), 'stop', RUN_D, category='other')]
+        text = self.text(rows, events)
+        runs = {line.split()[1]: line.split() for line in text.split('Runs\n')[1].split('\n\n')[0].splitlines()[1:]}
+        self.assertEqual(runs[RUN_A[:8]][3:5], ['unknown', '0'])
+        self.assertEqual(runs[RUN_A[:8]][11], '-')  # stops
+        self.assertEqual(runs[RUN_D[:8]][3], 'open')
+        self.assertIn('result unknown: the run\'s lifecycle events rotated away or were never written.', text)
+        self.assertIn('events 0: event numbers unavailable; gates come from the outcome log only.', text)
+
+    def test_metrics_ai_status_flag(self):
+        rows = [outcome_row('2026-01-05T10:05:00Z', 'task', RUN_A, task='T1', result='done', seconds=300, seq=1),
+                outcome_row('2026-01-05T10:06:00Z', 'task', RUN_B, project='beta', task='T1', result='done',
+                            seconds=300, seq=2)]
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'outcomes.jsonl').write_text(''.join(json.dumps(r, sort_keys=True) + '\n' for r in rows))
+
+        def status(*args):
+            return subprocess.run([str(ROOT / 'scripts/ai-status'), *args], cwd=self.repo, env=self.env,
+                                  capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        result = status('--metrics', '--json', '--project', 'alpha')
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertEqual([p['project'] for p in json.loads(result.stdout)['projects']], ['alpha'])
+        bad = status('--metrics', '--since', 'x')
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn('Usage: metrics', bad.stderr)
+        self.assertIn('--metrics', status('--help').stdout)
 
     def test_metrics_attribution_by_run_field(self):
         rows = [outcome_row('2026-02-01T10:10:00Z', 'task', RUN_A, task='T1', result='timeout', seconds=60, seq=1),
