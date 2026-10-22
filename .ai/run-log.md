@@ -628,3 +628,4 @@
 | 2026-10-22T14:40:00Z | claude (opus) | T223 | DONE: revise-plan rechecks plan-keeps-done after its commit and before plan-revisions record; stage-verify (plan-revision) rejects a changed DONE block; 2 regressions; docs/workflow.md | targeted selector: 22 run, 1 failure in the new test's own assertion (fixed), then 2 OK; bash -n OK; full gate left to the host (BATCH 10 GATE RULE) | pending | review M1; flow unchanged |
 | 2026-10-22T14:43:38Z | runner | T223 | completed | PASS | 842fbaa | Claude checkpointed; continuing queue |
 | 2026-10-22T15:01:18Z | runner | none | queue complete; ready for independent review | PASS | 4ee19d1 | Human acceptance remains |
+| 2026-10-22T15:05:59Z | runner | none | pull request ready: https://github.com/Muf454/agents/pull/37 | PASS | e2c9183 | Human acceptance and merge remain |
