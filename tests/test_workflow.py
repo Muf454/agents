@@ -11142,7 +11142,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_session_gate_allowance_limit_grows_with_the_measured_gate(self):
         self.ready()
-        plain = self.tool('ai-run', '--approved', '--session-timeout', '1000')
+        plain = self.tool('ai-run', '--approved', '--session-timeout', '1000', AI_SESSION_GATE='full')
         self.assertRegex(self.session_lines(plain)[0], r'^Session: T001 \(limit 1000s; log \.ai/local/claude-')
         for seeded, limit, breakdown in (('300', '1600', '1000s + 600s for two gate runs of 300s'),
                                          ('900', '2000', '1000s + 1000s for two gate runs of 900s')):
@@ -11151,13 +11151,20 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 self.commit('reopen T001')
                 for _ in range(3):  # the last 3 passes decide
                     self.helper('outcome', 'gate', 'pass', seeded)
-                line = self.session_lines(self.tool('ai-run', '--approved', '--session-timeout', '1000'))[0]
+                line = self.session_lines(self.tool('ai-run', '--approved', '--session-timeout', '1000',
+                                                    AI_SESSION_GATE='full'))[0]
                 self.assertIn(f'(limit {limit}s: {breakdown}; log .ai/local/claude-', line)
+                # The default (auto) leaves these slow gates to the host: no allowance (TS-01).
+                self.helper('tasks', 'set', 'T001', 'TODO')
+                self.commit('reopen T001 again')
+                line = self.session_lines(self.tool('ai-run', '--approved', '--session-timeout', '1000'))[0]
+                self.assertIn('(limit 1000s: gate rule targeted (host gate ', line)
 
     def test_session_gate_allowance_capped_by_the_remaining_run_time(self):
         self.ready()
         self.helper('outcome', 'gate', 'pass', '300')
-        result = self.tool('ai-run', '--approved', '--session-timeout', '1000', '--run-timeout', '1200')
+        result = self.tool('ai-run', '--approved', '--session-timeout', '1000', '--run-timeout', '1200',
+                           AI_SESSION_GATE='full')
         limit = int(re.search(r'\(limit (\d+)s', self.session_lines(result)[0]).group(1))
         self.assertLessEqual(limit, 1200)
         self.assertGreater(limit, 1000)
@@ -11191,6 +11198,73 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.commit('failing gate')
         self.tool('ai-run', '--approved', expected=1)
         self.assertEqual([r['result'] for r in self.gate_rows()], ['fail'])
+
+    # ---------------------------------------------------------------- session gate rule (TS-01, T204)
+    def session_gate_contracts(self):
+        """The appended RUNNER CONTRACT part of each captured task prompt (not the template before it)."""
+        path = self.project / '.ai/local/mock-prompts'
+        prompts = path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+        return [p[p.index('RUNNER CONTRACT:'):] for p in prompts]
+
+    def session_gate_run(self, seconds, *args, **env):
+        for _ in range(3):
+            self.helper('outcome', 'gate', 'pass', seconds)
+        result = self.tool('ai-run', '--approved', *args, **env)
+        return self.session_gate_contracts()[-1], self.session_lines(result)[0]
+
+    def assert_targeted_contract(self, contract):
+        self.assertIn('Do not run the full gate', contract)
+        self.assertIn('never a full-gate entry point', contract)
+        self.assertNotIn('run_in_background', contract)
+
+    def test_session_gate_contract_targeted_on_a_slow_gate(self):
+        self.ready()
+        contract, line = self.session_gate_run('800', '--session-timeout', '3600')
+        self.assert_targeted_contract(contract)
+        self.assertIn('(limit 3600s: gate rule targeted (host gate 800s after the session); log ', line)
+
+    def test_session_gate_contract_full_on_a_fast_gate(self):
+        self.ready()
+        contract, line = self.session_gate_run('60', '--session-timeout', '3600')
+        self.assertIn('.ai/bin/ai-check', contract)
+        self.assertIn('run_in_background', contract)
+        self.assertIn('is not a blocker', contract)
+        self.assertNotIn('Do not run the full gate', contract)
+        self.assertIn('(limit 3720s: 3600s + 120s for two gate runs of 60s; log ', line)
+
+    def test_session_gate_contract_setting_overrides(self):
+        self.ready()
+        contract, line = self.session_gate_run('800', '--session-timeout', '1000', AI_SESSION_GATE='full')
+        self.assertIn('run_in_background', contract)
+        self.assertIn('(limit 2000s: 1000s + 1000s for two gate runs of 800s; log ', line)  # capped
+        self.helper('tasks', 'set', 'T001', 'TODO')
+        self.commit('reopen T001')
+        contract, line = self.session_gate_run('60', '--session-timeout', '1000', AI_SESSION_GATE='targeted')
+        self.assert_targeted_contract(contract)
+        self.assertIn('(limit 1000s: gate rule targeted (host gate 60s after the session); log ', line)
+
+    def test_session_gate_contract_fallback_excludes_full_gate_entry_points(self):
+        specific = task('T002', dependencies='T001').replace(
+            '### Validation\nbash .ai/validate\n',
+            '### Validation\npython3 -m unittest discover -s tests -k artifact\nbash .ai/validate\n')
+        self.ready(task('T001') + specific)
+        for _ in range(3):
+            self.helper('outcome', 'gate', 'pass', '800')
+        self.tool('ai-run', '--approved', AI_SESSION_GATE='targeted')
+        contracts = self.session_gate_contracts()
+        self.assertEqual(len(contracts), 2)
+        for contract in contracts:
+            with self.subTest(task=contract[:80]):
+                self.assert_targeted_contract(contract)
+                exclusion = contract[contract.index('never a full-gate entry point'):]
+                exclusion = exclusion[:exclusion.index(')')]
+                self.assertIn('bash .ai/validate', exclusion)
+                self.assertIn('.ai/bin/ai-check', exclusion)
+                self.assertIn('names only such a command', contract)
+                # No instruction to run a full-gate entry point outside the exclusion.
+                rest = contract.replace(exclusion, '')
+                self.assertNotIn('.ai/bin/ai-check', rest)
+                self.assertNotIn('.ai/validate', rest)
 
     # ---------------------------------------------------------------- gate lock wait (FL-32, T039)
     def gate_lock_holder(self, seconds):

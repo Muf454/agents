@@ -19,6 +19,13 @@
   `full`/`targeted` force it; any error or invalid value → `targeted 0`, exit 0). `AI_SESSION_GATE`
   is a run setting (config, manifest, recovery restore) validated by `ai-run` and `ai-pipeline`.
   No caller yet (T204).
+- T204 (TS-01 (2), 2026-10-22): `ai-run` asks `session-gate` before each task session and appends
+  one gate rule to the RUNNER CONTRACT: `full` = Targeted: checks, then `.ai/bin/ai-check` with
+  `run_in_background`, waited for (keeps `is not a blocker`); `targeted` = Targeted: checks and
+  fast static checks only, without Targeted: lines the task-specific Validation commands but never
+  a full-gate entry point; the host gate decides DONE. The FL-28 allowance applies only under
+  `full`; a targeted session's `Session:` line reads `gate rule targeted (host gate Ns after the
+  session)`. docs/workflow.md updated.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -100,8 +107,9 @@ Flow chart updated (so far by T201; more to come).
 T201 updated the vault `agents-flow.md` plan review node ("no task DONE since the base?", skip
 line printed) and its skip edge (2026-10-22). T214: flow unchanged (checked the chart's plan
 revision nodes: the entry rule is T201's; an edited DONE block is a revision stop like the
-others). Still to come: T204 (session gate
-rule), T208 (stop and recovery events bullet) and T209 (run end recorded) update vault
+others). T204 updated the "Inside one task" session node (targeted checks; full gate in the
+session only under 120 s or `AI_SESSION_GATE=full`), the host gate node (decides DONE) and added
+the "Session gate rule" bullet. Still to come: T208 (stop and recovery events bullet) and T209 (run end recorded) update vault
 `agents-flow.md` and add hub Log lines; T213 audits them and adds the "Flow data (ME-01)" line.
 
 ## Manual testing for the human
@@ -156,9 +164,14 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   → `targeted 0` (`test_session_gate_mode_from_gate_time_and_setting`); `AI_SESSION_GATE=x` stops
   `ai-run` and `ai-pipeline`, the value is kept in the run manifest
   (`test_session_gate_setting_is_validated_and_kept`).
-- `session_gate_contract` and the migrated `session_gate_allowance` (T204): contract text and
-  allowance per mode, fallback without `Targeted:` lines that excludes every full-gate entry
-  point (`bash .ai/validate` fixture).
+- `session_gate_contract` and the migrated `session_gate_allowance` (T204, DONE): a slow gate gets
+  the targeted rule and no allowance (`test_session_gate_contract_targeted_on_a_slow_gate`); a
+  fast gate gets the full rule and the allowance (`test_session_gate_contract_full_on_a_fast_gate`);
+  `AI_SESSION_GATE` overrides both ways (`test_session_gate_contract_setting_overrides`); the
+  fallback without `Targeted:` lines excludes every full-gate entry point
+  (`test_session_gate_contract_fallback_excludes_full_gate_entry_points`); the allowance tests run
+  with `AI_SESSION_GATE=full` and the default gives `gate rule targeted`
+  (`test_session_gate_allowance_limit_grows_with_the_measured_gate`).
 - `session_gate_templates` and `session_gate_triage` (T205) and `session_gate_targeted_lines`
   (T215): templates defer to the contract, the triage prompt carries its own TRIAGE CONTRACT gate
   rule; task format and prompts name `Targeted:`.
@@ -189,5 +202,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T203 (T204 wires `session-gate` into the runner).
+The runner continues with the next task after T204 (T205: prompt templates defer to the contract).
 Nothing is merged or deployed.

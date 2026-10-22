@@ -1146,7 +1146,8 @@ Incidents:
   start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
   its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
   `--session-timeout` (default 30 minutes), which stays below the default; an implementation
-  session's gate allowance can lengthen it up to double (see `gate-seconds`).
+  session's gate allowance (only under the `full` gate rule, see `session-gate`) can lengthen it
+  up to double (see `gate-seconds`).
 - **stop**: a `last-error` newer than the watchdog's last notification. The
   acknowledged stop remains an incident until removed or replaced.
 
@@ -1398,7 +1399,14 @@ or `auto` → `full` when at least one pass is recorded and the gate time is und
 (`FAST_GATE_SECONDS`; a sub-second `0` counts), else `targeted`; `full` or `targeted` forces that
 mode. Any error (a refused state root, a git error) or an invalid value prints `targeted 0` with
 exit 0; `ai-run` and `ai-pipeline` reject an invalid value before any agent runs
-(`Invalid AI_SESSION_GATE`). No caller uses it yet (T204 wires it into the runner contract).
+(`Invalid AI_SESSION_GATE`). `ai-run` asks it before each task session (anything but `full` is
+`targeted`) and puts one gate rule into the RUNNER CONTRACT: `full` runs the task's `Targeted:`
+checks, then `.ai/bin/ai-check` with `run_in_background`, waited for, and gets the gate allowance;
+`targeted` runs the `Targeted:` checks and fast static checks only (a task without `Targeted:`
+lines runs its task-specific Validation commands, never a full-gate entry point such as
+`ai-check`, `.ai/validate` or the whole suite), gets no allowance (`Session:` line `gate rule
+targeted (host gate Ns after the session)`), and leaves the full gate to the host gate, which
+decides DONE.
 
 `attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
 for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows

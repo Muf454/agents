@@ -5434,7 +5434,7 @@ OK; bash -n OK. Full gate left to the host gate (BATCH 10 GATE RULE); an in-sess
 started by mistake before reading that rule and passed the 600 s tool limit (not authoritative).
 
 ## T204 — Runner contract and session allowance follow the gate mode (TS-01 (2), FL-28, runner)
-Status: TODO
+Status: DONE
 Dependencies: T203
 Model: opus
 
@@ -5520,6 +5520,18 @@ Targeted: `bash -n scripts/ai-run`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: done. `scripts/ai-run` reads `session-gate` before each task session (globals
+`gate_mode`/`gate_secs`; anything but `full` → `targeted`, a bad number → 0) and appends one gate
+rule sentence to the RUNNER CONTRACT (`full` keeps `is not a blocker`); `claude_session` gives the
+FL-28 allowance only for `track_attempt == yes` and `full`, else breakdown `: gate rule targeted
+(host gate Ns after the session)`; it uses `gate_secs` instead of a second `gate-seconds` call.
+Tests: 4 new `test_session_gate_contract_*` (contract part = `RUNNER CONTRACT:` to the end; the
+slow/fast tests pass `--session-timeout 3600` explicitly because ai-run's own task default is
+1800 s), allowance tests migrated to `AI_SESSION_GATE=full` plus the auto subTest. Evidence:
+`-k session_gate_contract -k session_gate_allowance` Ran 9 OK; `-k fresh_retry -k gate_only -k
+gate_background_prompts` Ran 15 OK; `bash -n scripts/ai-run` OK; `.ai/bin/ai-check` PASS (Ran 1123
+tests, OK). docs/workflow.md (`session-gate`, watchdog note) and vault agents-flow.md/agents.md
+updated.
 
 ## T205 — Prompt templates: the gate rule comes from the RUNNER CONTRACT (TS-01 (2), templates)
 Status: TODO

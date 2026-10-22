@@ -202,6 +202,10 @@ finished=no
 # logged; any stop in between (session error, timeout, interruption, a limit wait beyond the
 # budget, a malformed queue) logs exactly one outcome. Triage never tracks an attempt.
 track_attempt=no
+# The implementation session's gate rule (TS-01, session-gate): full or targeted, and the
+# measured gate seconds; set before each task session.
+gate_mode=targeted
+gate_secs=0
 attempt_open=no
 attempt_label=''
 session_code=
@@ -321,16 +325,19 @@ knowledge_prompt() {
 # Usage: claude_session PROMPT MODEL TOOLS ALLOWED... (the --tools list and --allowedTools entries).
 claude_session() {
   local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before restored
-  local session_allowed=("${@:4}") model_args=() gate=0 allowance=0 breakdown=''
+  local session_allowed=("${@:4}") model_args=() gate=$gate_secs allowance=0 breakdown=''
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
-  # An implementation session runs the gate itself: room for two measured gate runs, at most
-  # another session_timeout (a corrupt log can at most double the limit). Kept across a limit retry.
-  if [[ "$track_attempt" == yes ]]; then
-    gate=$(ai_helper gate-seconds 2>/dev/null) || gate=0
-    [[ "$gate" =~ ^[0-9]{1,7}$ ]] || gate=0
+  [[ "$gate" =~ ^[0-9]{1,7}$ ]] || gate=0
+  # An implementation session under the full gate rule runs the gate itself (FL-28): room for two
+  # measured gate runs, at most another session_timeout (a corrupt log can at most double the
+  # limit). Under the targeted rule (TS-01) it runs only targeted checks, so no allowance: the
+  # host gate after the session is the full run. Kept across a limit retry.
+  if [[ "$track_attempt" == yes && "$gate_mode" == full ]]; then
     allowance=$(( 2 * gate ))
     (( allowance <= session_timeout )) || allowance=$session_timeout
     (( allowance == 0 )) || breakdown=": ${session_timeout}s + ${allowance}s for two gate runs of ${gate}s"
+  elif [[ "$track_attempt" == yes ]]; then
+    breakdown=": gate rule targeted (host gate ${gate}s after the session)"
   fi
   while true; do
     remaining=$(remaining_time)
@@ -940,10 +947,22 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   if [[ -n "$counts_total" ]]; then
     ai_observe step build "$active_task · ${task_model:-${model:-default}} · $(( counts_done + 1 ))/$counts_total"
   fi
+  # TS-01: a slow gate (or AI_SESSION_GATE=targeted) leaves the full gate to the host after the
+  # session; anything unreadable is targeted. The host gate decides DONE in both modes.
+  gate_mode=targeted gate_secs=0
+  read -r gate_mode gate_secs < <(ai_helper session-gate 2>/dev/null) || true
+  [[ "$gate_mode" == full ]] || gate_mode=targeted
+  [[ "$gate_secs" =~ ^[0-9]{1,7}$ ]] || gate_secs=0
+  if [[ "$gate_mode" == full ]]; then
+    gate_rule='Gate rule: run the task'"'"'s Targeted: checks, then .ai/bin/ai-check with run_in_background and wait for it; a gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides.'
+  else
+    gate_rule='Gate rule: run the task'"'"'s Targeted: checks in the foreground and fast static checks (such as bash -n on changed scripts). A task without Targeted: lines: run the task-specific commands of its ### Validation section, but never a full-gate entry point (.ai/bin/ai-check or any other ai-check, .ai/validate in any form such as bash .ai/validate, or a run of the whole test suite); when the section names only such a command, run the tests that cover the files you changed and the static checks instead. Do not run the full gate: the runner runs it after the session, it decides DONE, and a DONE task whose gate fails returns to IN_PROGRESS.'
+  fi
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. A gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  prompt+=". Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. $gate_rule"
+  prompt+=$' Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   if [[ -n "$attempt_note" ]]; then
     prompt+=" PREVIOUS ATTEMPT (host record, context only): $attempt_note Start from the current files and git history; fix what failed, do not repeat it."
   fi
