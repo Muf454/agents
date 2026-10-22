@@ -26,6 +26,14 @@
   a full-gate entry point; the host gate decides DONE. The FL-28 allowance applies only under
   `full`; a targeted session's `Session:` line reads `gate rule targeted (host gate Ns after the
   session)`. docs/workflow.md updated.
+- T206 (ME-01 part 1, 2026-10-22): `workflow.py event KIND key=value…` appends schema-v1 events
+  to `<state root>/events.jsonl` (envelope `v,id,time,kind,project,branch,run`; `run` only from a
+  16-hex `AI_RUN_ID`; `EVENT_KINDS` per spec A7, `ruling_kind`; gate needs a 16-hex `gate_id`;
+  strings one line ≤ 200). Stable `events.lock` (exclusive writers, shared readers), every wait
+  bounded by `AI_EVENTS_LOCK_SECONDS` (default 5 s, timer-interrupted flock): busy → `Note: …
+  (event log busy).` exit 1; `read_events` raises `EventsBusy`, dedupes ids, skips unknown
+  kinds/versions. Schema errors exit 2, nothing written. `common.sh` `ai_event` (gate-broken guard,
+  one Note, status 0). No writer calls it yet; flow unchanged. Rotation hook left for T217.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -180,9 +188,14 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
 - `session_gate_templates` and `session_gate_triage` (T205) and `session_gate_targeted_lines`
   (T215): templates defer to the contract, the triage prompt carries its own TRIAGE CONTRACT gate
   rule; task format and prompts name `Targeted:`.
-- `events_core` (T206): envelope, `ruling_kind`, CLI errors, bounded strings, held lock is
-  bounded, concurrent appends, tolerant reader, unwritable state dir, no helper after a gate
-  change. `events_redact` (T219): secret tokens redacted.
+- `events_core` (T206, DONE): envelope and run tag (`test_events_core_envelope_and_run_tag`), CLI
+  errors (`test_events_core_cli_rejects_unknown_kind_field_type_and_envelope_names`), bounded
+  strings (`test_events_core_strings_are_one_bounded_line`), held lock is bounded
+  (`test_events_core_held_lock_is_bounded`, `test_events_core_lock_seconds_setting`), tolerant
+  reader (`test_events_core_reader_tolerates_unknown_kinds_and_versions`), concurrent appends
+  (`test_events_core_concurrent_appends_are_whole_lines`), unwritable state dir
+  (`test_events_core_unwritable_state_dir_is_a_note`), no helper after a gate change
+  (`test_events_core_gate_broken_runs_no_helper`). `events_redact` (T219): secret tokens redacted.
 - `events_run_context` (T216): run id, rows carry the run, consecutive runs, crash in a later run.
 - `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
   nothing, stale runs, crash between replaces.
@@ -207,5 +220,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T204 (T205: prompt templates defer to the contract).
+The runner continues with the next task after T206 (T219: secret redaction in `event_text`).
 Nothing is merged or deployed.

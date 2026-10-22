@@ -5665,7 +5665,7 @@ template_rules -k queue_check_empty_template` 6 OK; `-k Docs -k session_gate -k 
 host (session gate rule: targeted).
 
 ## T206 — Event log core: envelope, schema v1, bounded stable lock, guarded writer, tolerant reader (ME-01 part 1)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5771,6 +5771,23 @@ Targeted: `bash -n scripts/lib/common.sh`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-22 (claude opus). `scripts/lib/workflow.py` (after `append_outcome`): `EVENT_SCHEMA`,
+`EVENT_ENVELOPE`, `EVENT_KINDS` (spec A7, `ruling_kind`), an import-time check that no kind field
+is an envelope name, `EVENT_REQUIRED` (gate `gate_id`, 16 hex), `events_path`,
+`events_archive_path`, `events_lock_path`, `events_lock_seconds` (0.1–60, else 5 s; NaN → 5),
+`event_text` (control characters incl. CR/LF/tab/U+2028 → spaces, ≤ 200), `event_record`
+(EventUsage; fields not given are null), `flock_bounded` (blocking flock + `setitimer`, previous
+handler and timer restored), `lock_events(shared, optional)` (`O_RDWR|O_CREAT|O_NOFOLLOW|O_NONBLOCK|
+O_CLOEXEC`, regular-file check, never renamed), `event_run_id`, `append_event` (newline guard, one
+write, fsync, log closed before the lock; marked T217 rotation hook), `read_events` (shared,
+unlocked when the lock cannot be opened; archive then live; v == 1 int, known kind, string id, each
+once), CLI `event` (usage exit 2; busy/OSError/git error → `Note: could not record the KIND event
+(…)`, exit 1). `common.sh`: `ai_event` next to `ai_observe`, with the guard rule comment. Decision
+note in docs/workflow.md (docs/decisions.md only points at the vault). Flow unchanged.
+Evidence: `-k events_core` Ran 9 tests OK (8 required + `test_events_core_lock_seconds_setting`);
+`-k runs_no_helper -k gate_time` Ran 9 tests OK; `bash -n scripts/lib/common.sh` OK; `-k Docs`
+Ran 3 OK. Full gate left to the host gate (BATCH 10 GATE RULE). Limitation: `flock_bounded` uses
+SIGALRM, so `append_event`/`read_events` must be called from the main thread (documented).
 
 ## T219 — Secret redaction of event text fields (ME-01 part 1, split from T206 in plan review round 2)
 Status: TODO

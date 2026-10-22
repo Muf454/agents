@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -4002,6 +4004,255 @@ def append_outcome(path, record):
     return True
 
 
+# Flow events (ME-01): a separate, rotated log beside outcomes.jsonl, which must never rotate.
+EVENT_SCHEMA = 1
+# Reserved: no kind may define a field with one of these names (review P5).
+EVENT_ENVELOPE = ('v', 'id', 'time', 'kind', 'project', 'branch', 'run')
+EVENT_KINDS = {
+    'gate': {'gate_id': 'str', 'task': 'str', 'stage': 'str', 'start': 'int', 'seconds': 'int',
+             'tests': 'int|None', 'failures': 'int|None', 'workers': 'int|None', 'result': 'str'},
+    'stop': {'stage': 'str', 'category': 'str', 'message': 'str', 'recovery': 'str'},
+    'recovery': {'decision': 'str', 'task': 'str', 'attempt': 'int|None'},
+    'ruling': {'ruling_kind': 'str', 'key': 'str', 'task': 'str'},
+    'review': {'mode': 'str', 'reviewer': 'str', 'model': 'str', 'reason': 'str'},
+    'pr': {'action': 'str', 'state': 'str', 'url': 'str'},
+    'run': {'action': 'str', 'result': 'str', 'base': 'str', 'args': 'str', 'tasks': 'int|None',
+            'gates': 'int|None', 'gate_failures': 'int|None', 'seconds': 'int|None'},
+}
+if any(set(fields) & set(EVENT_ENVELOPE) for fields in EVENT_KINDS.values()):
+    raise AssertionError('An event kind defines a reserved envelope field.')
+# Required fields per kind (spec A12: the gate id joins the event to its `outcome gate` row).
+EVENT_REQUIRED = {'gate': ('gate_id',)}
+EVENT_ID = re.compile(r'[0-9a-f]{16}')
+EVENT_INT = re.compile(r'[0-9]{1,18}')
+EVENT_TEXT_LIMIT = 200
+EVENT_LOCK_SECONDS = 5.0  # long enough for a rotation (T217) of a full 8 MiB file
+
+
+class EventUsage(ValueError):
+    """An event the schema does not allow; nothing is written."""
+
+
+class EventsBusy(Exception):
+    """events.lock stayed held past the deadline (events_lock_seconds)."""
+
+
+def events_path():
+    return state_root() / 'events.jsonl'
+
+
+def events_archive_path():
+    """The previous generation; written only by rotation (T217)."""
+    return state_root() / 'events.1.jsonl'
+
+
+def events_lock_path():
+    return state_root() / 'events.lock'
+
+
+def events_lock_seconds():
+    """AI_EVENTS_LOCK_SECONDS (float 0.1-60); unset or invalid: EVENT_LOCK_SECONDS."""
+    try:
+        value = float(os.environ.get('AI_EVENTS_LOCK_SECONDS', ''))
+    except ValueError:
+        return EVENT_LOCK_SECONDS
+    return value if 0.1 <= value <= 60 else EVENT_LOCK_SECONDS  # NaN fails both comparisons
+
+
+def event_text(text, limit=EVENT_TEXT_LIMIT):
+    """One line of at most LIMIT characters: line breaks and control characters become spaces.
+    T219 adds secret redaction here, before the cut."""
+    text = ''.join(' ' if ord(c) < 32 or 127 <= ord(c) < 160 or c in '  ' else c
+                   for c in str(text))
+    return text[:limit]
+
+
+def event_record(kind, fields):
+    """The kind's fields checked against EVENT_KINDS (EventUsage otherwise), strings made one
+    bounded line; fields not given are null so every event of a kind has the same keys."""
+    schema = EVENT_KINDS.get(kind)
+    if schema is None:
+        raise EventUsage(f'unknown event kind: {kind}')
+    record = dict.fromkeys(schema)
+    for name, value in fields.items():
+        if name in EVENT_ENVELOPE:
+            raise EventUsage(f'{name} is an envelope field, not a {kind} field')
+        if name not in schema:
+            raise EventUsage(f'unknown {kind} field: {name}')
+        kind_type = schema[name]
+        if kind_type == 'str':
+            if not isinstance(value, str):
+                raise EventUsage(f'{kind} field {name} must be a string')
+            value = event_text(value)
+        elif value is None and kind_type == 'int|None':
+            pass
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise EventUsage(f'{kind} field {name} must be a non-negative integer')
+        record[name] = value
+    for name in EVENT_REQUIRED.get(kind, ()):
+        if record[name] is None:
+            raise EventUsage(f'{kind} event needs {name}')
+    if kind == 'gate' and not EVENT_ID.fullmatch(record['gate_id']):
+        raise EventUsage(f'gate_id must be 16 hex characters: {record["gate_id"]}')
+    return record
+
+
+def flock_bounded(fd, operation, seconds):
+    """A blocking flock interrupted by a real-time timer after SECONDS (EventsBusy). Not a
+    LOCK_NB polling loop like lock_record: polling can starve a waiter behind steady writers,
+    while a blocked flock is queued by the kernel. Main thread only (signal handlers)."""
+    def expired(signum, frame):
+        raise EventsBusy(f'{events_lock_path()} is held by another process')
+    started = time.monotonic()
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    previous_delay, previous_interval = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        fcntl.flock(fd, operation)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_delay:
+            left = max(previous_delay - (time.monotonic() - started), 0.001)
+            signal.setitimer(signal.ITIMER_REAL, left, previous_interval)
+
+
+@contextlib.contextmanager
+def lock_events(shared=False, optional=False):
+    """Hold events.lock: exclusive for writers, shared for readers, bounded by
+    events_lock_seconds (EventsBusy). The lock is a separate file, not the log's descriptor
+    (as append_outcome does): rotation (T217) replaces events.jsonl, and a lock on a replaced
+    inode no longer excludes later lockers (see next_attempt_seq). It is created once and never
+    renamed or deleted. With OPTIONAL, a lock file that cannot be opened (read-only state dir)
+    means no lock; EventsBusy still propagates."""
+    path = events_lock_path()
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f'Not a regular file: {path}')
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+            fd = None
+        if not optional:
+            raise
+    try:
+        if fd is not None:
+            flock_bounded(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX, events_lock_seconds())
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)  # releases the lock
+
+
+def event_run_id():
+    """The approved run from explicit context only (spec A8): AI_RUN_ID when it is 16 hex,
+    else None; never looked up from the manifest or the branch."""
+    value = os.environ.get('AI_RUN_ID', '')
+    return value if EVENT_ID.fullmatch(value) else None
+
+
+def append_event(kind, fields, project, branch):
+    """Append one event line under the exclusive events.lock; False when the write was short.
+    EventUsage before anything is opened; OSError and EventsBusy propagate (nothing written)."""
+    record = {'v': EVENT_SCHEMA, 'id': secrets.token_hex(8), 'time': now(), 'kind': kind,
+              'project': project, 'branch': branch, 'run': event_run_id(), **event_record(kind, fields)}
+    path = events_path()
+    created = make_dirs(path.parent)
+    with lock_events():
+        # T217 rotation hook: rotation runs here, inside the exclusive lock, before the append.
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        try:
+            size = os.fstat(fd).st_size
+            # A torn earlier line (no final newline) must not swallow this record.
+            prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
+            data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+            if os.write(fd, data) != len(data):  # one write; no retry (see append_outcome)
+                return False
+            os.fsync(fd)
+        finally:
+            os.close(fd)  # the log first, then the lock (leaving the with block)
+    fsync_dir(path.parent)
+    sync_created(created)
+    return True
+
+
+def read_events(paths=None):
+    """Known events (v == 1, known kind) of events.1.jsonl then events.jsonl, each id once, read
+    under the shared events.lock (unlocked when it cannot be opened). EventsBusy when a writer
+    holds it past the deadline: callers report the event data as unavailable, never wait."""
+    paths = [events_archive_path(), events_path()] if paths is None else paths
+    with lock_events(shared=True, optional=True):
+        data = []
+        for path in paths:
+            try:
+                data.append(Path(path).read_bytes())
+            except OSError:  # missing or unreadable: no events from it
+                continue
+    events, seen = [], set()
+    for chunk in data:
+        for _, record in decode_outcome_lines(chunk):
+            version, event_id = record.get('v'), record.get('id')
+            if (type(version) is not int or version != EVENT_SCHEMA or record.get('kind') not in EVENT_KINDS
+                    or not isinstance(event_id, str) or event_id in seen):
+                continue
+            seen.add(event_id)
+            events.append(record)
+    return events
+
+
+def event_command(arguments):
+    """event KIND key=value...: append one flow event. Values are typed per EVENT_KINDS (int
+    fields decimal; `-` is null for int|None fields). Schema errors exit 2 with nothing written;
+    a busy lock or a write failure prints one Note and exits 1 (ai_event keeps status 0)."""
+    def usage(message):
+        print(f'Error: {message}', file=sys.stderr)
+        sys.exit(2)
+    if not arguments:
+        usage('Usage: event KIND key=value...')
+    kind, *pairs = arguments
+    schema = EVENT_KINDS.get(kind)
+    if schema is None:
+        usage(f'unknown event kind: {kind}')
+    fields = {}
+    for pair in pairs:
+        name, equals, value = pair.partition('=')
+        if not equals:
+            usage(f'expected key=value: {pair}')
+        if name in fields:
+            usage(f'{name} given twice')
+        kind_type = schema.get(name)
+        if kind_type in ('int', 'int|None'):
+            if value == '-' and kind_type == 'int|None':
+                value = None
+            elif EVENT_INT.fullmatch(value):
+                value = int(value)
+            else:
+                usage(f'{kind} field {name} must be a decimal integer: {value}')
+        fields[name] = value
+    try:
+        event_record(kind, fields)
+    except EventUsage as error:
+        usage(str(error))
+    note = f'Note: could not record the {kind} event'
+    try:
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        try:
+            branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+        except subprocess.CalledProcessError:
+            branch = 'detached'
+        written = append_event(kind, fields, project_name(), branch)
+    except EventsBusy:
+        print(f'{note} (event log busy).', file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'{note} ({error}).', file=sys.stderr)
+        sys.exit(1)
+    if not written:
+        print(f'{note} (short write).', file=sys.stderr)
+        sys.exit(1)
+
+
 def attempt_seq_path():
     """The host-wide attempt counter, beside the log in the same state root."""
     return state_root() / 'attempt-seq'
@@ -5775,6 +6026,8 @@ def main():
         fallback_record(arguments)
     elif command == 'outcome':
         outcome(arguments)
+    elif command == 'event':
+        event_command(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
     elif command == 'session-gate':

@@ -1392,6 +1392,25 @@ project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0`
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
 
+Flow events (ME-01) go to a separate `<state root>/events.jsonl`, not to new kinds in
+`outcomes.jsonl`. Decision (2026-10-22): `outcomes.jsonl` must never rotate (attempt numbering,
+`first_pass` and crash reconcile read all of it, and older installed copies read it with fixed
+kind filters), while events need rotation and a schema version. `workflow.py event KIND
+key=value…` appends one line: the envelope `v` (1), `id`, `time`, `kind`, `project`, `branch`,
+`run` (`AI_RUN_ID` when it is 16 hex, else null; never inferred) plus the kind's fields
+(`EVENT_KINDS`: `gate`, `stop`, `recovery`, `ruling` with its category in `ruling_kind`,
+`review`, `pr`, `run`; a `gate` needs a 16-hex `gate_id`). Strings become one line of at most
+200 characters. Unknown kinds or fields, envelope names and bad integers exit 2 with nothing
+written. Writers (exclusive) and readers (shared) serialize on a stable `events.lock` beside
+the log, never renamed or deleted, and every wait is bounded by `AI_EVENTS_LOCK_SECONDS`
+(0.1–60, default 5 s; a blocking `flock` interrupted by a timer): a busy lock or a write error
+prints `Note: could not record the KIND event (…)` and exits 1, and a reader raises `EventsBusy`.
+Shell callers use `ai_event` (`common.sh`), which skips once the gate is known broken, turns any
+failure into one `Note:` and never changes the caller's status; any helper that prepares an
+event runs inside such a `common.sh` function after the same guard, never in its arguments.
+`read_events` reads `events.1.jsonl` then `events.jsonl`, keeping only `v == 1` events of known
+kinds, each id once. Rotation (T217) and the writers (T207–T210, T218, T220) come later.
+
 `session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
 gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run
 setting `AI_SESSION_GATE` (kept with the approved run like the routing settings) decides: empty

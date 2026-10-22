@@ -222,6 +222,15 @@ ai_observe() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   ai_helper observe "$@" || true
 }
+# Flow event (events.jsonl; best effort, never fails the caller): skipped once the gate is
+# known bad, so no helper runs after a detected gate change (spec A17). Rule for every event
+# writer (T208-T210, T218, T220): any helper call that prepares an event (stop category, run
+# totals, excerpts) lives inside a common.sh function after this same guard, never in the
+# caller's arguments to ai_event.
+ai_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  ai_helper event "$@" 2>/dev/null || printf 'Note: could not record the %s event.\n' "$1" >&2
+}
 ai_notify_log() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true
