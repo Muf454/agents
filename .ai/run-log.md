@@ -586,3 +586,4 @@
 | 2026-10-22T04:37:31Z | runner | T206 | stopped (exit 1); inspect state/diff before resuming | see local logs | 68ad8ea | No merge or deployment performed |
 | 2026-10-22T05:10:00Z | claude (opus) | T206 | reconciled and DONE: the stop was the host gate's time limit, not a failure; code unchanged since 68ad8ea | -k events_core 9 OK; -k runs_no_helper -k gate_time 9 OK; bash -n common.sh OK; full gate left to the host | 8e9916f | no code change this session |
 | 2026-10-22T05:21:52Z | runner | T206 | completed | PASS | 5e6f143 | Claude checkpointed; continuing queue |
+| 2026-10-22T05:33:26Z | claude (opus) | T219 | DONE: `redact` + `EVENT_SECRET_PATTERNS` in workflow.py, called by `event_text` before folding/cut; `test_events_redact_tokens`; docs/workflow.md sentence | -k events_redact 1 OK; -k events_core 9 OK; -k Docs 3 OK; session ai-check exceeded 600 s tool limit, full gate left to the host | pending | flow unchanged |

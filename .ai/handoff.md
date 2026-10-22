@@ -34,6 +34,10 @@
   (event log busy).` exit 1; `read_events` raises `EventsBusy`, dedupes ids, skips unknown
   kinds/versions. Schema errors exit 2, nothing written. `common.sh` `ai_event` (gate-broken guard,
   one Note, status 0). No writer calls it yet; flow unchanged. Rotation hook left for T217.
+- T219 (ME-01 part 1, 2026-10-22): `redact(text)` in workflow.py replaces secret-looking tokens
+  (`EVENT_SECRET_PATTERNS`: `sk-`, `ghp_`, `github_pat_`, `xox[abp]-`, `AKIA`, `Bearer`, values of
+  `key=`/`token=`/`secret=`/`password=`) with `[redacted]`; `event_text` calls it before folding
+  and the 200-character cut. Best effort, not a secret scanner. docs/workflow.md one sentence.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -195,7 +199,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   reader (`test_events_core_reader_tolerates_unknown_kinds_and_versions`), concurrent appends
   (`test_events_core_concurrent_appends_are_whole_lines`), unwritable state dir
   (`test_events_core_unwritable_state_dir_is_a_note`), no helper after a gate change
-  (`test_events_core_gate_broken_runs_no_helper`). `events_redact` (T219): secret tokens redacted.
+  (`test_events_core_gate_broken_runs_no_helper`). `events_redact` (T219, DONE): each secret
+  pattern → `[redacted]`, `password=hunter2` → `password=[redacted]`, ordinary text and short ids
+  unchanged, a token across the 200th character redacted whole, a CLI `stop message=…` reads back
+  redacted (`test_events_redact_tokens`).
 - `events_run_context` (T216): run id, rows carry the run, consecutive runs, crash in a later run.
 - `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
   nothing, stale runs, crash between replaces.

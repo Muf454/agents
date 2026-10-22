@@ -5794,7 +5794,7 @@ Re-ran: `-k events_core` Ran 9 OK; `-k runs_no_helper -k gate_time` Ran 9 OK; `b
 scripts/lib/common.sh` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T219 — Secret redaction of event text fields (ME-01 part 1, split from T206 in plan review round 2)
-Status: TODO
+Status: DONE
 Dependencies: T206
 Model: opus
 
@@ -5834,6 +5834,15 @@ Targeted: `python3 -m unittest discover -s tests -k events_core` (must say `Ran 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `redact(text)` and `EVENT_SECRET_PATTERNS`/`REDACTED` in scripts/lib/workflow.py;
+`event_text` redacts before folding and the cut (so it covers every `str` event field). `Bearer`
+and `key|token|secret|password=` are case-insensitive, the vendor prefixes are not; `api_key=x`
+also matches (best effort). Evidence: `-k events_redact` Ran 1 test OK
+(`test_events_redact_tokens`: every pattern, `password=hunter2`, ordinary text and a 12-hex
+digest unchanged, a `ghp_` token across character 200 → `…[redacted]`, CLI `stop message=…`
+reads back redacted); `-k events_core` Ran 9 tests OK; `-k Docs` Ran 3 OK. The session's
+`.ai/bin/ai-check` ran past the 600 s tool limit (gate median about 13 min) and was not seen
+to finish: the full gate is left to the host gate. docs/workflow.md: one sentence; flow unchanged.
 
 ## T216 — Run context: run id in the manifest, `AI_RUN_ID`, run on outcome rows and attempt markers (ME-01, review P8)
 Status: TODO

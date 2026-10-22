@@ -154,6 +154,31 @@ class EventsCoreTests(unittest.TestCase):
         self.assertEqual(workflow.event_text('a\nb', limit=2), 'a ')
         self.assertEqual(workflow.event_text('short'), 'short')
 
+    def test_events_redact_tokens(self):
+        redacted = workflow.REDACTED
+        for token in ('sk-' + 'aB3_-' * 4, 'ghp_' + 'Ab1' * 7, 'github_pat_' + 'A_b1' * 6,
+                      'xoxb-' + '12ab-' * 3, 'xoxp-1234567890', 'AKIA' + 'ABCD2345' * 2,
+                      'Bearer abc.def-ghi', 'bearer xyz'):
+            with self.subTest(token=token):
+                self.assertEqual(workflow.event_text(f'got {token} here'), f'got {redacted} here')
+        for text, expected in (('password=hunter2', 'password=[redacted]'),
+                               ('retry with API_KEY=abc123 now', 'retry with API_KEY=[redacted] now'),
+                               ('Token=t0k secret=s3 x', 'Token=[redacted] secret=[redacted] x')):
+            self.assertEqual(workflow.event_text(text), expected)
+        for text in ('T201 failed at stage final', 'gate 3f9a0c12b4de passed', 'sk-short',
+                     'see https://github.com/o/r/pull/12', 'AKIA lowercase akiaabcdefghijklmnop'):
+            self.assertEqual(workflow.event_text(text), text)
+        # A token across the 200th character is redacted whole, never cut to a leaked prefix.
+        straddle = 'x' * 190 + 'ghp_' + 'Q' * 36
+        self.assertEqual(workflow.event_text(straddle), 'x' * 190 + redacted)
+        self.assertNotIn('ghp_', workflow.event_text(straddle))
+        secret = 'ghp_' + 'Z9' * 15
+        result = self.event('stop', 'stage=final', f'message=push failed: {secret} password=hunter2')
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertNotIn(secret, '\n'.join(self.lines()))
+        self.assertEqual([e['message'] for e in workflow.read_events()],
+                         [f'push failed: {redacted} password={redacted}'])
+
     def test_events_core_held_lock_is_bounded(self):
         holder = self.holder('exclusive')
         fast = {'AI_EVENTS_LOCK_SECONDS': '0.5'}

@@ -4027,6 +4027,17 @@ EVENT_ID = re.compile(r'[0-9a-f]{16}')
 EVENT_INT = re.compile(r'[0-9]{1,18}')
 EVENT_TEXT_LIMIT = 200
 EVENT_LOCK_SECONDS = 5.0  # long enough for a rotation (T217) of a full 8 MiB file
+REDACTED = '[redacted]'
+# Text redaction for event strings (redact); SECRET_PATTERNS above is about file names.
+EVENT_SECRET_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
+    (r'sk-[A-Za-z0-9_-]{16,}', 0),
+    (r'ghp_[A-Za-z0-9]{20,}', 0),
+    (r'github_pat_[A-Za-z0-9_]{20,}', 0),
+    (r'xox[abp]-[A-Za-z0-9-]{10,}', 0),
+    (r'AKIA[0-9A-Z]{16}', 0),
+    (r'Bearer\s+\S+', re.IGNORECASE),
+    (r'(?P<name>(?:key|token|secret|password)=)\S+', re.IGNORECASE),
+))
 
 
 class EventUsage(ValueError):
@@ -4059,11 +4070,20 @@ def events_lock_seconds():
     return value if 0.1 <= value <= 60 else EVENT_LOCK_SECONDS  # NaN fails both comparisons
 
 
+def redact(text):
+    """Secret-looking tokens become [redacted]; a key=value keeps its name. Best effort for
+    telemetry, not a secret scanner: the event log stays in the host's private state dir."""
+    for pattern in EVENT_SECRET_PATTERNS:
+        text = pattern.sub(lambda m: (m.group('name') if 'name' in pattern.groupindex else '')
+                           + REDACTED, text)
+    return text
+
+
 def event_text(text, limit=EVENT_TEXT_LIMIT):
     """One line of at most LIMIT characters: line breaks and control characters become spaces.
-    T219 adds secret redaction here, before the cut."""
+    Redaction runs first, so a token the cut would split cannot leak its first half."""
     text = ''.join(' ' if ord(c) < 32 or 127 <= ord(c) < 160 or c in '  ' else c
-                   for c in str(text))
+                   for c in redact(str(text)))
     return text[:limit]
 
 

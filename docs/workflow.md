@@ -1400,7 +1400,9 @@ key=value…` appends one line: the envelope `v` (1), `id`, `time`, `kind`, `pro
 `run` (`AI_RUN_ID` when it is 16 hex, else null; never inferred) plus the kind's fields
 (`EVENT_KINDS`: `gate`, `stop`, `recovery`, `ruling` with its category in `ruling_kind`,
 `review`, `pr`, `run`; a `gate` needs a 16-hex `gate_id`). Strings become one line of at most
-200 characters. Unknown kinds or fields, envelope names and bad integers exit 2 with nothing
+200 characters, after `redact` replaces secret-looking tokens (`sk-…`, `ghp_…`, `github_pat_…`,
+`xox?-…`, `AKIA…`, `Bearer …`, the value of `key=`/`token=`/`secret=`/`password=`) with
+`[redacted]`: best effort for telemetry, not a secret scanner. Unknown kinds or fields, envelope names and bad integers exit 2 with nothing
 written. Writers (exclusive) and readers (shared) serialize on a stable `events.lock` beside
 the log, never renamed or deleted, and every wait is bounded by `AI_EVENTS_LOCK_SECONDS`
 (0.1–60, default 5 s; a blocking `flock` interrupted by a timer): a busy lock or a write error
