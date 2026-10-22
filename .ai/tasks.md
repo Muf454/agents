@@ -6645,7 +6645,7 @@ DONE. `ai-pipeline` writes `pr` events: `opened` (state draft/ready from `make_d
 full gate left to the host gate (BATCH 10 GATE RULE). Flow unchanged; docs/workflow.md paragraph.
 
 ## T211 — Metrics data and JSON from outcomes and events (ME-01 part 2, helper)
-Status: TODO
+Status: DONE
 Dependencies: T222, T220, T208, T209, T221, T210, T216, T217, T218
 Model: opus
 
@@ -6728,6 +6728,20 @@ Targeted: `python3 -m unittest discover -s tests -k outcome_report -k events_gat
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (opus): `workflow.py metrics` (`metrics_data`, `metrics_numbers`, `stop_counts`,
+`record_run`) builds `{"v": 1, "projects", "runs"}` per spec A13. Runs are keyed by (project, run),
+so the per-project sums hold by construction; the `(no run record)` group has `run: null`,
+`label: "(no run record)"`, `result: null`. First pass uses `ordered_attempts` over the whole
+(unfiltered) log, so a task retried in a later run is not a first pass there. `findings` and
+`review_rounds` count `mode == code` rows only (not re-checks, not plan reviews). `--since`
+compares `time[:10]`; `--project` exact; bad options exit 2; `EventsBusy` exits 1 with the busy
+error. Tests in `tests/test_events.py` `MetricsTests`: `-k test_metrics` Ran 5 OK; `-k
+outcome_report -k events_gate_merge -k events_rotation` Ran 8 OK. In the rotation test run C's
+events also rotate away (D's filler rotates twice), so C is asserted listed, not `pass`. docs/workflow.md
+gained a Metrics paragraph. Flow unchanged. Deviation: this session started `.ai/bin/ai-check`
+against the BATCH 10 GATE RULE; it overran the Bash tool's 600 s and continued in the background
+(`kill` is not allowlisted); its result is not evidence here. Full gate left to the host gate
+(BATCH 10 GATE RULE).
 
 ## T212 — `ai-status --metrics`: plain text tables and JSON (ME-01 part 2, command)
 Status: TODO

@@ -15,6 +15,7 @@ import re
 import secrets
 import signal
 import stat
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -5376,6 +5377,170 @@ def outcomes_report(arguments):
     print('\n'.join(lines).rstrip('\n'))
 
 
+METRICS_SCHEMA = 1
+NO_RUN_LABEL = '(no run record)'
+METRICS_DATE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
+
+
+def record_run(record):
+    """The 16-hex `run` of an outcome row or event, else None (the `(no run record)` group)."""
+    run = record.get('run')
+    return run if isinstance(run, str) and EVENT_ID.fullmatch(run) else None
+
+
+def metrics_numbers(rows, events, first_rows):
+    """The flow numbers of one group (spec A13): its outcome ROWS and EVENTS, already attributed.
+    FIRST_ROWS maps each task key to its first attempt over the whole log, so a task first tried in
+    an earlier run is not a first pass in a later one. `stops` is left to the caller."""
+    task_rows = [r for r in rows if r.get('kind') == 'task']
+    spent = {}
+    for r in task_rows:
+        key = (r.get('project'), r.get('branch'), r.get('task'))
+        seconds = r.get('seconds')
+        spent[key] = spent.get(key, 0) + (seconds if type(seconds) is int else 0)
+    first = sum(1 for key in spent if first_rows[key].get('result') == 'done')
+    gates = merge_gates([r for r in rows if r.get('kind') == 'gate'], [e for e in events if e['kind'] == 'gate'])
+    gate_seconds = [g['seconds'] for g in gates if type(g['seconds']) is int]
+    reviews = [r for r in rows if r.get('kind') == 'review' and r.get('mode') == 'code']
+    findings = {}
+    for r in reviews:
+        counts = findings.setdefault(str(r.get('reviewer')), dict.fromkeys(('blocker', 'major', 'minor'), 0))
+        for level in counts:
+            value = r.get(level)
+            counts[level] += value if type(value) is int else 0
+    return {'attempts': len(task_rows), 'tasks': len(spent), 'first_pass': first,
+            'first_pass_rate': first / len(spent) if spent else None,
+            'timeouts': sum(1 for r in task_rows if r.get('result') == 'timeout'),
+            'median_task_seconds': statistics.median(spent.values()) if spent else None,
+            'gates': len(gates), 'median_gate_seconds': statistics.median(gate_seconds) if gate_seconds else None,
+            'review_rounds': len(reviews), 'findings': findings}
+
+
+def stop_counts(events):
+    counts = {}
+    for e in events:
+        if e['kind'] == 'stop':
+            category = str(e.get('category') or 'other')
+            counts[category] = counts.get(category, 0) + 1
+    return counts
+
+
+def metrics_data(rows, events, since=None, project=None, current=None):
+    """{"v": 1, "projects": [...], "runs": [...]} from outcome ROWS (read_outcomes) and known
+    EVENTS (read_events), spec A13. A record belongs to the run in its own `run` field, never to
+    one matched by branch or time; records without one form their project's `(no run record)`
+    group (`run` null). Runs are the union of run ids on rows and retained events, so a run whose
+    events rotated away (T217) is still listed from its rows, with `events: 0`, `stops: null` and
+    `result: "unknown"`. Lifecycle comes only from retained `run` events: `result` is the end's;
+    `open` needs a retained start or resume, no end, and activity within EVENT_RUN_STALE_DAYS of
+    CURRENT. Runs are keyed by (project, run), so a project's attempts, timeouts and review rounds
+    are exactly the sums over its runs and its no-run group. SINCE (YYYY-MM-DD, inclusive) and
+    PROJECT filter records before grouping; first pass is judged over the whole log."""
+    rows = [r for r in rows if r.get('kind') in ('task', 'review', 'gate')]
+    first_rows = {key: attempts[0] for key, attempts in
+                  ordered_attempts([r for r in rows if r.get('kind') == 'task']).items()}
+
+    def kept(record):
+        when = record.get('time')
+        if since is not None and not (isinstance(when, str) and when[:10] >= since):
+            return False
+        return project is None or record.get('project') == project
+
+    rows = [r for r in rows if kept(r)]
+    events = [e for e in events if kept(e)]
+    groups = {}
+
+    def group(record):
+        key = (record.get('project'), record_run(record))
+        return groups.setdefault(key, {'rows': [], 'events': [], 'first': None})
+
+    for source, records in (('rows', rows), ('events', events)):
+        for record in records:
+            entry = group(record)
+            entry[source].append(record)
+            when = str(record.get('time') or '')
+            if entry['first'] is None or when < str(entry['first'].get('time') or ''):
+                entry['first'] = record
+    active = active_event_runs(events, current)
+    runs = []
+    for (name, run), entry in groups.items():
+        run_events = entry['events']
+        numbers = metrics_numbers(entry['rows'], run_events, first_rows)
+        lifecycle = [e for e in run_events if e['kind'] == 'run']
+        starts = sorted(str(e.get('time')) for e in lifecycle if e.get('action') in ('start', 'resume'))
+        ends = sorted((str(e.get('time')), e.get('result')) for e in lifecycle if e.get('action') == 'end')
+        if run is None:
+            result = None
+        elif ends:
+            result = ends[-1][1]
+        elif starts and run in active:
+            result = 'open'
+        else:
+            result = 'unknown'
+        runs.append({'run': run, 'label': NO_RUN_LABEL if run is None else run, 'project': name,
+                     'branch': entry['first'].get('branch'), 'events': len(run_events),
+                     'start': starts[0] if starts else None, 'end': ends[-1][0] if ends else None,
+                     'result': result, **numbers,
+                     'stops': stop_counts(run_events) if run_events else None})
+    runs.sort(key=lambda r: (str(r['project']), r['run'] is None, str(r['start'] or ''), str(r['run'])))
+    projects = []
+    for name in sorted({key[0] for key in groups}, key=str):
+        project_rows = [r for r in rows if r.get('project') == name]
+        project_events = [e for e in events if e.get('project') == name]
+        named = [r for r in runs if r['project'] == name and r['run'] is not None]
+        projects.append({'project': name, 'runs': len(named),
+                         'runs_without_events': sum(1 for r in named if r['events'] == 0),
+                         **metrics_numbers(project_rows, project_events, first_rows),
+                         'stops': stop_counts(project_events)})
+    return {'v': METRICS_SCHEMA, 'projects': projects, 'runs': runs}
+
+
+def metrics(arguments):
+    """metrics [--since YYYY-MM-DD] [--project NAME] [--json] [--outcomes FILE] [--events FILE...]:
+    print metrics_data as JSON (T212 adds the text view). Read only. Usage errors exit 2; a busy
+    event log exits 1 with an error instead of numbers computed without the events."""
+    def usage(message):
+        print(f'Error: {message}\nUsage: metrics [--since YYYY-MM-DD] [--project NAME] [--json] '
+              '[--outcomes FILE] [--events FILE...]', file=sys.stderr)
+        sys.exit(2)
+    since = project = outcomes = event_paths = None
+    rest = list(arguments)
+    while rest:
+        option = rest.pop(0)
+        if option == '--json':
+            continue
+        if option == '--events':
+            event_paths = []
+            while rest and not rest[0].startswith('--'):
+                event_paths.append(rest.pop(0))
+            if not event_paths:
+                usage('--events needs at least one file')
+            continue
+        if option not in ('--since', '--project', '--outcomes') or not rest:
+            usage(f'unexpected argument: {option}')
+        value = rest.pop(0)
+        if option == '--since':
+            try:
+                if not METRICS_DATE.fullmatch(value):
+                    raise ValueError(value)
+                datetime.strptime(value, '%Y-%m-%d')
+            except ValueError:
+                usage(f'--since needs a date YYYY-MM-DD: {value}')
+            since = value
+        elif option == '--project':
+            project = value
+        else:
+            outcomes = value
+    rows = read_outcomes([outcomes or outcomes_path()])
+    try:
+        events = read_events(event_paths)
+    except EventsBusy:
+        print(f'Error: the event log is busy (lock held for more than {events_lock_seconds():g} s); try again.',
+              file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(metrics_data(rows, events, since, project), indent=2))
+
+
 LIMIT_TEXT = re.compile(
     r"usage limit|rate[ _-]?limit|limit reached|hit your (?:usage )?limit|out of (?:usage|credits)|"
     r"too many requests|quota exceeded|\b429\b|resets? at|try again (?:in|at|later)", re.I)
@@ -6398,6 +6563,8 @@ def main():
         attempt_info(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
+    elif command == 'metrics':
+        metrics(arguments)
     elif command == 'pr-draft':
         pr_draft(arguments)
     elif command == 'pr-title':

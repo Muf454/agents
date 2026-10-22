@@ -1507,6 +1507,28 @@ the two renames leaves duplicates, never loss (`read_events` dedupes by id); a r
 removes its temp file and leaves the file it failed on as it was, and the append still happens
 (a `Note:` only when the append itself fails).
 
+Metrics (T211, spec A13): `workflow.py metrics [--since YYYY-MM-DD] [--project NAME] [--json]
+[--outcomes FILE] [--events FILE…]` (the file options for tests) reads the outcome log and the
+retained events (read only) and prints `{"v": 1, "projects": […], "runs": […]}`; without
+`--json` it prints the same JSON until T212 adds tables. A row or event belongs to the run in its
+own `run` field, never to one matched by branch or time; records without one form their
+project's `(no run record)` group (`run` null, `result` null). Runs are the union of run ids on
+outcome rows and retained events, keyed by project and run, so a run whose events rotated away is
+still listed from its rows with `events: 0`, `stops: null`, `start`/`end` null and `result:
+"unknown"`; otherwise `result` is the retained `run` end's result, `open` with a retained start
+or resume, no end and an event within `EVENT_RUN_STALE_DAYS`, else `unknown`. Each group has
+`attempts`, `tasks`, `first_pass` (tasks whose first attempt over the whole log, in
+`ordered_attempts` order, was `done`; so a retry in a later run is no first pass there),
+`first_pass_rate` (null without tasks), `timeouts`, `median_task_seconds` (per task, the sum of
+its attempts), `gates` and `median_gate_seconds` (`merge_gates`: each gate once),
+`review_rounds` and `findings` (code reviews only, not re-checks or plan reviews; reviewer →
+`blocker`/`major`/`minor`) and `stops` (category → count of retained `stop` events). Projects add
+`runs` and `runs_without_events`; their `attempts`, `timeouts` and `review_rounds` equal the sums
+over their runs and their no-run group. `--since` keeps records whose `time` is on or after that
+UTC date; `--project` matches exactly; a bad option exits 2. A busy event log exits 1 with
+`Error: the event log is busy (lock held for more than N s); try again.`, never numbers computed
+without the events.
+
 `session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
 gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run
 setting `AI_SESSION_GATE` (kept with the approved run like the routing settings) decides: empty

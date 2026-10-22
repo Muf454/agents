@@ -310,9 +310,17 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_events_lock_held_terminal_stop_is_bounded`); `run-totals` prints `gates=-
   gate_failures=-` within the bound, exit 0 (`test_events_lock_held_reader_reports_unavailable`).
 - Later parts: `events_ruling` and `events_review` (T210), `events_pr` (T218).
-- `test_metrics` (T211, T212): fixture logs to exact JSON numbers, attribution by run field,
-  runs that survive three rotations (`unknown`, `events 0`, sums agree), gates counted once,
-  filters, text tables, `ai-status --metrics`.
+- `metrics` JSON (T211, DONE): fixture logs of two projects give exact per-project and per-run
+  numbers (first pass 0.5, timeouts 1, median gate 700, stops and findings by reviewer)
+  (`test_metrics_json_on_fixture_logs`); rows and events go to the run in their own `run` field, a
+  late `crashed` row to its attempt's run, run-less rows to `(no run record)`, fresh start `open`,
+  8-day-old start `unknown`, outcome-only run `unknown` with `events: 0` and `stops: null`
+  (`test_metrics_attribution_by_run_field`); after three rotations run A is still listed from its
+  rows (`unknown`, `events 0`, attempts 2, timeouts 1, gates 1), D is `open`, project sums equal the
+  run sums (`test_metrics_runs_survive_event_rotation`); a gate with a lost event counts once
+  (`test_metrics_gates_counted_once`); `--since`, `--project`, empty logs, bad options exit 2, a
+  held lock exits 1 with the busy error (`test_metrics_filters_and_empty_logs`).
+- `test_metrics` (T212, later): text tables, `ai-status --metrics`.
 - `Docs` and `flow_this_repo` (T213).
 
 ## Human todos
@@ -324,5 +332,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T221 (the next unblocked task in `.ai/tasks.md`).
+The runner continues with the next task after T211 (T212, then T213).
 Nothing is merged or deployed.

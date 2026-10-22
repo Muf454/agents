@@ -729,5 +729,237 @@ class EventsRotationTests(EventsFixture):
         self.assertEqual(len(events), 301 + 1)
 
 
+RUN_A, RUN_B, RUN_C, RUN_D, RUN_E = (str(n) * 16 for n in range(1, 6))
+NUMBERS = ('attempts', 'tasks', 'first_pass', 'first_pass_rate', 'timeouts', 'median_task_seconds', 'gates',
+           'median_gate_seconds', 'stops', 'review_rounds', 'findings')
+
+
+def outcome_row(when, kind, run=None, project='alpha', branch='feat', **fields):
+    return {'time': when, 'kind': kind, 'project': project, 'branch': branch,
+            **({'run': run} if run else {}), **fields}
+
+
+def metrics_event(when, kind, run=None, project='alpha', branch='feat', **fields):
+    return {**json.loads(event_line(run, when, kind=kind, **fields)), 'project': project, 'branch': branch}
+
+
+class MetricsTests(EventsFixture):
+    def write(self, name, records):
+        path = self.base / name
+        path.write_text(''.join(json.dumps(r, sort_keys=True) + '\n' for r in records))
+        return path
+
+    def metrics(self, *args, **env):
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, str(HELPER), 'metrics', *args], cwd=self.repo,
+                                env={**self.env, **env}, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertLess(time.monotonic() - started, BOUND)
+        return result
+
+    def data(self, rows, events, *args):
+        result = self.metrics('--json', '--outcomes', str(self.write('outcomes.jsonl', rows)),
+                              '--events', str(self.write('events.jsonl', events)), *args)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        return json.loads(result.stdout)
+
+    def by_run(self, data):
+        return {(r['project'], r['run']): r for r in data['runs']}
+
+    def numbers(self, entry):
+        return {name: entry[name] for name in NUMBERS}
+
+    def assert_sums(self, data):
+        for project in data['projects']:
+            runs = [r for r in data['runs'] if r['project'] == project['project']]
+            for name in ('attempts', 'timeouts', 'review_rounds'):
+                self.assertEqual(project[name], sum(r[name] for r in runs), name)
+
+    def test_metrics_json_on_fixture_logs(self):
+        day = '2026-01-05T'
+        rows = [outcome_row(day + '10:05:00Z', 'task', RUN_A, task='T1', result='done', seconds=300, seq=1),
+                outcome_row(day + '10:20:00Z', 'task', RUN_A, task='T2', result='timeout', seconds=1800, seq=2),
+                outcome_row(day + '10:30:00Z', 'gate', RUN_A, result='pass', seconds=600, gate_id='a' * 16),
+                outcome_row(day + '10:40:00Z', 'review', RUN_A, mode='code', reviewer='codex', blocker=0,
+                            major=2, minor=3),
+                outcome_row(day + '12:10:00Z', 'task', RUN_B, task='T2', result='done', seconds=600, seq=3),
+                outcome_row(day + '12:20:00Z', 'gate', RUN_B, result='pass', seconds=800, gate_id='b' * 16),
+                outcome_row(day + '12:30:00Z', 'review', RUN_B, mode='code', reviewer='claude-routed', blocker=0,
+                            major=0, minor=1),
+                outcome_row(day + '12:35:00Z', 'review', RUN_B, mode='recheck', reviewer='codex'),
+                outcome_row(day + '12:36:00Z', 'plan', RUN_B, result='done'),
+                outcome_row(day + '13:00:00Z', 'future', RUN_B),
+                outcome_row(day + '14:00:00Z', 'task', project='beta', branch='main', task='T9', result='done',
+                            seconds=100, seq=4)]
+        events = [metrics_event(day + '10:00:00Z', 'run', RUN_A, action='start'),
+                  metrics_event(day + '10:30:00Z', 'gate', RUN_A, gate_id='a' * 16, seconds=600, result='pass'),
+                  metrics_event(day + '10:45:00Z', 'stop', RUN_A, category='timeout'),
+                  metrics_event(day + '10:46:00Z', 'run', RUN_A, action='end', result='stopped'),
+                  metrics_event(day + '12:00:00Z', 'run', RUN_B, action='start'),
+                  metrics_event(day + '12:20:00Z', 'gate', RUN_B, gate_id='b' * 16, seconds=800, result='pass'),
+                  metrics_event(day + '12:40:00Z', 'stop', RUN_B, category='queue_order'),
+                  metrics_event(day + '12:50:00Z', 'run', RUN_B, action='end', result='pass')]
+        data = self.data(rows, events)
+        self.assertEqual(data['v'], 1)
+        alpha, beta = data['projects']
+        self.assertEqual({k: alpha[k] for k in ('project', 'runs', 'runs_without_events')}, {
+            'project': 'alpha', 'runs': 2, 'runs_without_events': 0})
+        self.assertEqual(self.numbers(alpha), {
+            'attempts': 3, 'tasks': 2, 'first_pass': 1, 'first_pass_rate': 0.5, 'timeouts': 1,
+            'median_task_seconds': 1350, 'gates': 2, 'median_gate_seconds': 700,
+            'stops': {'timeout': 1, 'queue_order': 1}, 'review_rounds': 2,
+            'findings': {'codex': {'blocker': 0, 'major': 2, 'minor': 3},
+                         'claude-routed': {'blocker': 0, 'major': 0, 'minor': 1}}})
+        self.assertEqual(self.numbers(beta), {
+            'attempts': 1, 'tasks': 1, 'first_pass': 1, 'first_pass_rate': 1.0, 'timeouts': 0,
+            'median_task_seconds': 100, 'gates': 0, 'median_gate_seconds': None, 'stops': {},
+            'review_rounds': 0, 'findings': {}})
+        runs = self.by_run(data)
+        self.assertEqual(list(runs), [('alpha', RUN_A), ('alpha', RUN_B), ('beta', None)])
+        run_a, run_b, no_run = runs.values()
+        self.assertEqual({k: run_a[k] for k in ('branch', 'events', 'start', 'end', 'result')},
+                         {'branch': 'feat', 'events': 4, 'start': day + '10:00:00Z', 'end': day + '10:46:00Z',
+                          'result': 'stopped'})
+        self.assertEqual(self.numbers(run_a), {
+            'attempts': 2, 'tasks': 2, 'first_pass': 1, 'first_pass_rate': 0.5, 'timeouts': 1,
+            'median_task_seconds': 1050, 'gates': 1, 'median_gate_seconds': 600, 'stops': {'timeout': 1},
+            'review_rounds': 1, 'findings': {'codex': {'blocker': 0, 'major': 2, 'minor': 3}}})
+        # T2 was first tried in run A: its pass in run B is not a first pass.
+        self.assertEqual(self.numbers(run_b), {
+            'attempts': 1, 'tasks': 1, 'first_pass': 0, 'first_pass_rate': 0.0, 'timeouts': 0,
+            'median_task_seconds': 600, 'gates': 1, 'median_gate_seconds': 800, 'stops': {'queue_order': 1},
+            'review_rounds': 1, 'findings': {'claude-routed': {'blocker': 0, 'major': 0, 'minor': 1}}})
+        self.assertEqual(run_b['result'], 'pass')
+        self.assertEqual({k: no_run[k] for k in ('label', 'branch', 'events', 'result', 'stops', 'attempts')},
+                         {'label': '(no run record)', 'branch': 'main', 'events': 0, 'result': None,
+                          'stops': None, 'attempts': 1})
+        self.assert_sums(data)
+        plain = self.metrics('--outcomes', str(self.base / 'outcomes.jsonl'),
+                             '--events', str(self.base / 'events.jsonl'))
+        self.assertEqual(json.loads(plain.stdout), data)  # without --json: the JSON too, for now
+
+    def test_metrics_attribution_by_run_field(self):
+        rows = [outcome_row('2026-02-01T10:10:00Z', 'task', RUN_A, task='T1', result='timeout', seconds=60, seq=1),
+                outcome_row('2026-02-01T11:10:00Z', 'task', RUN_B, task='T3', result='done', seconds=60, seq=3),
+                outcome_row('2026-02-01T11:15:00Z', 'task', task='T4', result='done', seconds=60, seq=4),
+                # Reconciled during run B, for an attempt of run A: it counts for A.
+                outcome_row('2026-02-01T11:30:00Z', 'task', RUN_A, task='T2', result='crashed', seconds=0, seq=2),
+                outcome_row('2026-02-01T09:00:00Z', 'gate', RUN_E, result='pass', seconds=40)]
+        events = [metrics_event('2026-02-01T10:00:00Z', 'run', RUN_A, action='start'),
+                  metrics_event('2026-02-01T10:50:00Z', 'run', RUN_A, action='end', result='stopped'),
+                  metrics_event('2026-02-01T11:00:00Z', 'run', RUN_B, action='start'),
+                  metrics_event('2026-02-01T11:20:00Z', 'stop', None, category='other'),
+                  metrics_event('2026-02-01T11:40:00Z', 'run', RUN_B, action='end', result='pass'),
+                  metrics_event(stamp(minutes=5), 'run', RUN_C, action='start'),
+                  metrics_event(stamp(days=8), 'run', RUN_D, action='resume')]
+        runs = self.by_run(self.data(rows, events))
+        self.assertEqual([runs[('alpha', run)]['attempts'] for run in (RUN_A, RUN_B, None)], [2, 1, 1])
+        self.assertEqual(runs[('alpha', RUN_A)]['timeouts'], 1)
+        no_run = runs[('alpha', None)]
+        self.assertEqual((no_run['label'], no_run['events'], no_run['stops']), ('(no run record)', 1, {'other': 1}))
+        self.assertEqual([runs[('alpha', run)]['result'] for run in (RUN_A, RUN_B, RUN_C, RUN_D)],
+                         ['stopped', 'pass', 'open', 'unknown'])
+        self.assertIsNone(runs[('alpha', RUN_C)]['end'])
+        self.assertEqual({k: runs[('alpha', RUN_E)][k] for k in ('result', 'events', 'start', 'end', 'stops', 'gates')},
+                         {'result': 'unknown', 'events': 0, 'start': None, 'end': None, 'stops': None, 'gates': 1})
+        project = self.data(rows, events)['projects'][0]
+        self.assertEqual((project['runs'], project['runs_without_events'], project['attempts']), (5, 1, 4))
+
+    def test_metrics_gates_counted_once(self):
+        rows = [outcome_row('2026-03-01T10:00:00Z', 'gate', RUN_A, result='pass', seconds=10, gate_id='a' * 16),
+                outcome_row('2026-03-01T10:10:00Z', 'gate', RUN_A, result='pass', seconds=100, gate_id='b' * 16)]
+        events = [metrics_event('2026-03-01T10:10:00Z', 'gate', RUN_A, gate_id='b' * 16, seconds=100, result='pass')]
+        data = self.data(rows, events)
+        for entry in (data['projects'][0], self.by_run(data)[('alpha', RUN_A)]):
+            self.assertEqual((entry['gates'], entry['median_gate_seconds']), (2, 55))
+
+    def test_metrics_filters_and_empty_logs(self):
+        rows = [outcome_row('2026-01-01T23:59:59Z', 'task', RUN_A, task='T1', result='done', seconds=5, seq=1),
+                outcome_row('2026-01-02T00:00:00Z', 'task', RUN_B, task='T2', result='done', seconds=7, seq=2),
+                outcome_row('2026-01-03T00:00:00Z', 'task', RUN_B, project='beta', task='T3', result='done',
+                            seconds=9, seq=3)]
+        events = [metrics_event('2026-01-01T10:00:00Z', 'run', RUN_A, action='start')]
+        data = self.data(rows, events, '--since', '2026-01-02')
+        self.assertEqual(sorted(self.by_run(data)), [('alpha', RUN_B), ('beta', RUN_B)])
+        self.assertEqual([p['attempts'] for p in data['projects']], [1, 1])
+        data = self.data(rows, events, '--project', 'beta')
+        self.assertEqual(([p['project'] for p in data['projects']], list(self.by_run(data))),
+                         (['beta'], [('beta', RUN_B)]))
+        self.assertEqual(self.data(rows, events, '--project', 'alph')['projects'], [])
+        self.assertEqual(self.data([], []), {'v': 1, 'projects': [], 'runs': []})
+        empty = workflow.metrics_numbers([], [], {})
+        self.assertEqual({k: v for k, v in empty.items() if k != 'findings'}, {
+            'attempts': 0, 'tasks': 0, 'first_pass': 0, 'first_pass_rate': None, 'timeouts': 0,
+            'median_task_seconds': None, 'gates': 0, 'median_gate_seconds': None, 'review_rounds': 0})
+        default = self.metrics('--json')  # the state root's logs, none written yet
+        self.assertEqual((default.returncode, json.loads(default.stdout)), (0, {'v': 1, 'projects': [], 'runs': []}))
+        for args in (['--since', '2026-13-01'], ['--since', '2026-1-1'], ['--since', 'yesterday'], ['--since'],
+                     ['--bogus'], ['--events'], ['--project']):
+            with self.subTest(args=args):
+                result = self.metrics(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('Usage: metrics', result.stderr)
+        self.holder('exclusive')
+        result = self.metrics('--json', AI_EVENTS_LOCK_SECONDS='0.5')
+        self.assertEqual((result.returncode, result.stdout), (1, ''))
+        self.assertEqual(result.stderr, 'Error: the event log is busy (lock held for more than 0.5 s); try again.\n')
+
+    def test_metrics_runs_survive_event_rotation(self):
+        git = ['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+        subprocess.run([*git, 'commit', '-q', '--allow-empty', '-m', 'base'], cwd=self.repo, env=self.env, check=True)
+        cap = {'AI_EVENTS_MAX_BYTES': MIN_CAP}
+
+        def helper(run, *args):
+            result = subprocess.run([sys.executable, str(HELPER), *args], cwd=self.repo,
+                                    env={**self.env, **cap, **({'AI_RUN_ID': run} if run else {})},
+                                    capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+            self.assertEqual((result.returncode, result.stderr), (0, ''), args)
+
+        helper(RUN_A, 'event', 'run', 'action=start')
+        helper(RUN_A, 'outcome', 'task', 'T1', 'timeout', 'sonnet', '1800')
+        helper(RUN_A, 'outcome', 'task', 'T1', 'done', 'sonnet', '600')
+        helper(RUN_A, 'outcome', 'gate', 'pass', '700', '--id', GATE_ID)
+        helper(RUN_A, 'event', 'gate', f'gate_id={GATE_ID}', 'seconds=700', 'result=pass')
+        helper(RUN_A, 'outcome', 'review', 'code', 'codex', 'gpt', 'high', '90')
+        helper(RUN_A, 'event', 'stop', 'stage=implementation', 'category=timeout')
+        helper(RUN_A, 'event', 'run', 'action=end', 'result=stopped')
+        archive = self.state / 'events.1.jsonl'
+        rotations, last = 0, None
+        for run in (RUN_B, RUN_C, RUN_D):
+            helper(run, 'event', 'run', 'action=start')
+            helper(run, 'outcome', 'task', 'T2', 'done', 'sonnet', '30')
+            for n in range(250):  # null-run filler: always dropped by a rotation
+                with mock.patch.dict(os.environ, cap):
+                    self.assertTrue(workflow.append_event('stop', {'stage': f'filler-{n}', 'message': 'f' * 150},
+                                                          'events-project', 'main'))
+                inode = archive.stat().st_ino if archive.exists() else None
+                if inode != last:
+                    rotations, last = rotations + 1, inode
+            helper(run, 'event', 'stop', 'stage=final', 'category=other')
+            if run != RUN_D:
+                helper(run, 'event', 'run', 'action=end', 'result=pass')
+        self.assertGreaterEqual(rotations, 3)
+        self.assertNotIn(RUN_A, archive.read_text())
+        self.assertNotIn(RUN_A, (self.state / 'events.jsonl').read_text())
+        result = self.metrics('--json', **cap)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        data = json.loads(result.stdout)
+        runs = self.by_run(data)
+        run_a = runs[('events-project', RUN_A)]
+        self.assertEqual({k: run_a[k] for k in ('result', 'events', 'stops', 'attempts', 'timeouts', 'gates',
+                                                'review_rounds', 'start', 'branch')},
+                         {'result': 'unknown', 'events': 0, 'stops': None, 'attempts': 2, 'timeouts': 1,
+                          'gates': 1, 'review_rounds': 1, 'start': None, 'branch': 'main'})
+        self.assertEqual(runs[('events-project', RUN_D)]['result'], 'open')
+        self.assertEqual([runs[('events-project', run)]['attempts'] for run in (RUN_B, RUN_C, RUN_D)], [1, 1, 1])
+        project, = data['projects']
+        self.assert_sums(data)
+        self.assertGreaterEqual(project['runs_without_events'], 1)
+        rows = [json.loads(line) for line in (self.state / 'outcomes.jsonl').read_text().splitlines()]
+        gate_ids = {r['gate_id'] for r in rows if r['kind'] == 'gate' and 'gate_id' in r}
+        gate_ids |= {e['gate_id'] for e in workflow.read_events() if e['kind'] == 'gate'}
+        idless = sum(1 for r in rows if r['kind'] == 'gate' and 'gate_id' not in r)
+        self.assertEqual(project['gates'], len(gate_ids) + idless)
+
+
 if __name__ == '__main__':
     unittest.main()
