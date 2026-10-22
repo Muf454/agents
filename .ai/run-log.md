@@ -623,3 +623,4 @@
 | 2026-10-22T12:56:33Z | runner | T213 | stopped (exit 1); inspect state/diff before resuming | see local logs | a56ae0a | No merge or deployment performed |
 | 2026-10-22T13:18:05Z | claude (haiku) | T213 | DONE (recovery reconcile): docs work at a56ae0a verified against the acceptance criteria (README and docs/workflow.md name every required term; handoff "Flow chart updated" first line; vault agents-flow Related line and agents.md Log line present); no content change this session | -k Docs 3 OK; -k flow_this_repo 1 OK; full gate left to the host (BATCH 10 GATE RULE); the host's post-task gate on a56ae0a was cut off by SIGTERM at 814 s (gate timeout = remaining run time) | pending | flow unchanged; docs-only |
 | 2026-10-22T13:38:35Z | runner | T213 | completed | PASS | f077140 | Claude checkpointed; continuing queue |
+| 2026-10-22T13:56:47Z | runner | none | queue complete; ready for independent review | PASS | 8908647 | Human acceptance remains |
