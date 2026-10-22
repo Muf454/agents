@@ -5508,16 +5508,14 @@ gate PASS 2026-10-22T06:39:33Z, Ran 1138 OK (fingerprint of the tree committed a
 session `-k run_record` Ran 21 OK; the seven tests above OK (2+2+3, run separately); Docs OK.
 `docs/workflow.md` "Pipeline contract" now describes the resume fallback. DONE.
 
-## T316 — ai-recover owns the run early; stand-alone ai-run records (RC-01 G3, plan review P4, P7)
+## T316 — ai-recover owns the run early (RC-01 G3, plan review P4)
 Status: TODO
 Dependencies: T302
 Model: opus
 
 ### Goal
 A recovery, also one the watchdog started with a new pid, owns the run record before any long
-recovery work, so the record always names the live process; a stand-alone `ai-run` publishes its
-record after its exit handler is installed, using the real branch variable, and ends it on every
-exit.
+recovery work, so the record always names the live process.
 
 ### Implementation notes
 - Design: spec FR-1, B7, B17, B18; plan "Run record" (`own`, `pause`).
@@ -5533,21 +5531,13 @@ exit.
   and the pipeline verified the gate before this process started). `relaunch_wait` (~94–106):
   `run-record pause`. `on_exit` (unexpected exit): `end stopped`, same conditions. `resume()`
   (~58–64): pass `AI_RUN_ID="$AI_RUN_ID"` in the `exec env`.
-- `scripts/ai-run`: save the original arguments at the top (`run_argv=("$@")`); the
-  `--knowledge-dir` branch (~78–82) replaces its value in `run_argv` with the resolved
-  `knowledge_dir`, as `ai-pipeline` does (~57), so the recorded argv (and T305's `resume`
-  answer, run from the checkout root) never holds a caller-relative path (plan review round 3,
-  P18). Only when `AI_PIPELINE` is unset: right after the traps (~243–245) `AI_RUN_ID=$(ai_helper
-  run-record start ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}") || ai_die 'Cannot
-  record the run in the host state directory.'` (plan review P7: `AI_START_BRANCH`, not
-  `branch`; after `on_exit` is installed). `on_exit`: when `AI_RUN_ID` is set and `gate_ok=yes`,
-  `end finished` on code 0 else `end stopped` (T315 stores `human_stop` when a stop was
-  requested; P16). Keep both additions small (batch 10 edits the session code).
-- Docs: `docs/workflow.md` "Recovery contract" (the recovery owns the run record first) and the
-  T302 "Run record" paragraph (stand-alone `ai-run`). Flow unchanged (records only).
+- Docs: `docs/workflow.md` "Recovery contract" (the recovery owns the run record first). Flow
+  unchanged (records only).
+- The stand-alone `ai-run` record moved to T328 (mission control split this task after two
+  sessions hit the time limit).
 
 ### Likely affected modules
-scripts/ai-recover, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+scripts/ai-recover, tests/test_workflow.py, docs/workflow.md
 
 ### Acceptance criteria
 - `test_run_record_recovery_owns_before_its_session`: a record whose pipeline pid is dead and an
@@ -5556,18 +5546,10 @@ scripts/ai-recover, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
   launcher `ai-recover`, `resumes` 0; after the resume, `resumes` 1 and one record.
 - `test_run_record_recovery_refuses_a_stopped_run`: a record with a stop request → `ai-recover`
   exits 1, manifest `attempts` unchanged, no session started.
-- `test_run_record_standalone_ai_run`: `ai-run --approved` alone writes a kind `ai-run` record
-  with `AI_START_BRANCH` as branch, ended `finished`; inside a pipeline no second record appears;
-  started from a subdirectory with `--knowledge-dir ./notes`, the recorded argv holds the
-  absolute path of `<subdir>/notes`.
-- `test_run_record_standalone_refusal_after_publication`: a stand-alone run whose only task is
-  BLOCKED ("none can run") → its record ended `stopped`, not `running`.
-- `test_run_record_standalone_start_clears_escalation`: an `escalation.json` of an earlier run is
-  gone once a fresh stand-alone `ai-run` has started.
 - Existing recovery, watchdog and runner tests pass.
 
 ### Validation
-Targeted: `python3 -m unittest discover -s tests -k run_record` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k run_record_recovery` plus the recovery tests named in the notes below (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -5702,6 +5684,61 @@ scripts/ai-review, scripts/ai-check, scripts/lib/common.sh, tests/test_workflow.
 ### Validation
 Targeted: `python3 -m unittest discover -s tests -k interrupt` and `-k check` (must say `Ran N
 tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+Mission control 2026-10-22 10:40: a second opus session also hit the 1800 s limit (empty log).
+Its uncommitted test changes (a `crashed_run_record()` helper that `tool('ai-recover', ...)` and
+the direct `ai-recover` Popen fixtures call, so they start from a crashed pipeline's running
+record) are committed as WIP: continue from them. Task split: only the ai-recover part stays
+here; the stand-alone ai-run record is T328. Budget the session: run the failing tests in a few
+`-k` groups of at most ~10 tests each, never the whole file or the full gate (the runner runs
+the gate), and checkpoint as soon as the named tests pass.
+
+## T328 — Stand-alone ai-run publishes and ends its run record (RC-01 G3, plan review P7, P18)
+Status: TODO
+Dependencies: T316
+Model: opus
+
+### Goal
+A stand-alone `ai-run` publishes its record after its exit handler is installed, using the real
+branch variable and an argv with absolute paths, and ends it on every exit.
+
+### Implementation notes
+- Design: spec FR-1, B7; plan "Run record". Split from T316 by mission control (2026-10-22).
+  The first T316 session already added part of this to `scripts/ai-run` (WIP commit 8df58cb):
+  check it against these notes and finish it.
+- `scripts/ai-run`: save the original arguments at the top (`run_argv=("$@")`); the
+  `--knowledge-dir` branch (~78–82) replaces its value in `run_argv` with the resolved
+  `knowledge_dir`, as `ai-pipeline` does (~57), so the recorded argv (and T305's `resume`
+  answer, run from the checkout root) never holds a caller-relative path (plan review round 3,
+  P18). Only when `AI_PIPELINE` is unset: right after the traps (~243–245) `AI_RUN_ID=$(ai_helper
+  run-record start ai-run "$AI_START_BRANCH" - - --pid $$ -- "${run_argv[@]}") || ai_die 'Cannot
+  record the run in the host state directory.'` (plan review P7: `AI_START_BRANCH`, not
+  `branch`; after `on_exit` is installed). `on_exit`: when `AI_RUN_ID` is set and `gate_ok=yes`,
+  `end finished` on code 0 else `end stopped` (T315 stores `human_stop` when a stop was
+  requested; P16). Keep both additions small (batch 10 edits the session code).
+- Docs: the T302 "Run record" paragraph in `docs/workflow.md` (stand-alone `ai-run`). Flow
+  unchanged (records only).
+- Run only the targeted tests below (`-k run_record_standalone`), never the full gate.
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_run_record_standalone_ai_run`: `ai-run --approved` alone writes a kind `ai-run` record
+  with `AI_START_BRANCH` as branch, ended `finished`; inside a pipeline no second record appears;
+  started from a subdirectory with `--knowledge-dir ./notes`, the recorded argv holds the
+  absolute path of `<subdir>/notes`.
+- `test_run_record_standalone_refusal_after_publication`: a stand-alone run whose only task is
+  BLOCKED ("none can run") → its record ended `stopped`, not `running`.
+- `test_run_record_standalone_start_clears_escalation`: an `escalation.json` of an earlier run is
+  gone once a fresh stand-alone `ai-run` has started.
+- Existing runner tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k run_record_standalone` (must say `Ran N tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
@@ -6093,7 +6130,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ## T309 — Escalation hints at the producers of stops for a human (RC-01 G9, hints)
 Status: TODO
-Dependencies: T316
+Dependencies: T316, T328
 Model: sonnet
 
 ### Goal

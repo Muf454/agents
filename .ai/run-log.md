@@ -586,3 +586,4 @@
 | 2026-10-22T06:44:49Z | claude (opus) | T302 | DONE after reconciling recovery checkpoint 086ff5f (resume without a named run starts a record unless a stop request refuses; two new tests) | host gate PASS 06:39:33Z Ran 1138 OK; -k run_record 21 OK; the 7 formerly failing tests OK; Docs OK | 086ff5f (fix) | docs/workflow.md resume fallback; flow unchanged; vault not written from this session |
 | 2026-10-22T07:11:50Z | runner | T302 | completed | PASS | e886dff | Claude checkpointed; continuing queue |
 | 2026-10-22T07:41:53Z | runner | T316 | stopped (exit 1); inspect state/diff before resuming | see local logs | f5a2bf7 | No merge or deployment performed |
+| 2026-10-22T08:36:21Z | runner | T316 | stopped (exit 1); inspect state/diff before resuming | see local logs | 8df58cb | No merge or deployment performed |

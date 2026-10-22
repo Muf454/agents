@@ -1824,9 +1824,11 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for root in (ready_template(), self.project):
             self.assertEqual(list((root / '.ai/bin').rglob('__pycache__')), [], root)
 
-    def tool(self, name, *args, expected=0, timeout=None, **env):
+    def tool(self, name, *args, expected=0, timeout=None, crashed_run=True, **env):
         if timeout is None:
             timeout = command_timeout(name)
+        if name == 'ai-recover' and crashed_run:
+            self.crashed_run_record()
         return self.run_cmd([str(self.project / '.ai/bin' / name), *args], expected=expected,
                             env=dict(self.env, **env), timeout=timeout)
 
@@ -6235,6 +6237,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nsleep 3\n')
         (self.mock_bin / 'claude').chmod(0o755)
         before = self.notifications().count('⛔')
+        self.crashed_run_record()
         recover = subprocess.Popen([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
                                    cwd=self.project, env=dict(self.env, AI_AUTO_RECOVER='1'),
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -6310,6 +6313,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         output = runner.communicate(timeout=PIPELINE_TIMEOUT)[0].decode(errors='replace')
         self.assertEqual(runner.returncode, 1, output)
         # The same for the pipeline ai-recover resumes in its own process (what the watchdog starts).
+        self.crashed_run_record()
         runner, session = self.held_and_hidden([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
                                                MOCK_RECOVER='rerun')
         os.killpg(runner.pid, signal.SIGKILL)
@@ -10990,6 +10994,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
                   AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        self.crashed_run_record()
         code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
                                               'mock-recover.pid', lambda runner: os.killpg(runner.pid, signal.SIGINT),
                                               AI_AUTO_RECOVER='1', MOCK_RECOVER='sleep')
@@ -15741,6 +15746,15 @@ PY
                  '--approved --base main --no-pr')
         return self.run_cmd(['bash', '-c', start, str(HELPER)]).stdout.strip()
 
+    def crashed_run_record(self):
+        """A direct ai-recover stands for the watchdog's recovery after the pipeline died, which
+        finds the run's record still running; a fixture without one (or whose pipeline already
+        stopped and ended it) gets a crashed pipeline's record first."""
+        shown = subprocess.run(['python3', str(HELPER), 'run-record', 'show'], cwd=self.project,
+                               env=self.env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        if shown.returncode != 0 or json.loads(shown.stdout)['outcome'] not in ('running', 'paused'):
+            self.dead_run_record()
+
     def test_run_record_recovery_owns_before_its_session(self):
         self.ready()
         self.start_recoverable_run()
@@ -15770,7 +15784,8 @@ PY
         self.assertFalse((self.project / '.ai/local/mock-args').exists())
         # No record at all escalates the same way, before any attempt.
         shutil.rmtree(self.run_records())
-        result = self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1)
+        result = self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1,
+                           crashed_run=False)
         self.assertIn('there is no run record to resume', result.stderr)
         self.assertEqual(self.manifest()['attempts'], attempts)
 
