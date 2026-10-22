@@ -329,8 +329,11 @@ and the push retry sleep through `ai_run_child`, so a signal to the pipeline's p
 only Ctrl-C to the group) ends the running session, reviewer, validator, dependency setup or
 sleep within seconds with the same records. A child that exits 130 or 143 under a stop goes to
 the trap, never to `stop()`; a child still alive 30 s after the TERM skips the bookkeeping
-commit. The publication commands (`git push`, `git ls-remote`, `gh`) still run in the
-foreground (T323).
+commit. The publication stage is reached too: `git push` runs through `ai_run_child`, and
+`git ls-remote` and every `gh` call through `ai_run_capture`, which writes the child's output
+to one ignored `.ai/local/publish-*.out` file (a trap does not run while the shell waits on a
+command substitution) that `finish` and the stop remove. The TERM reaches the `git` or `gh`
+process only: a push hook that git started may outlive it (known limitation).
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

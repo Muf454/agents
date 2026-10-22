@@ -821,6 +821,9 @@ log = pathlib.Path(os.environ['MOCK_GH_LOG'])
 with log.open('a') as f: f.write(json.dumps(args) + '\n')
 draft = pathlib.Path(os.environ['MOCK_STATE_DIR']) / 'gh-draft'
 if args[:2] == ['pr', 'view']:
+    if os.environ.get('MOCK_GH_HOLD'):
+        pathlib.Path('.ai/local/mock-gh.pid').write_text(str(os.getpid()))
+        os.execvp('sleep', ['sleep', '300'])
     if not os.environ.get('MOCK_GH_EXISTING'):
         sys.exit(1)
     if 'isDraft' in args:
@@ -11292,6 +11295,35 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         nap.chmod(0o755)
         output = self.pid_only_stop('mock-sleep.pid', 'pr', command=self.pipeline_command()[:-1], AI_SLEEP=str(nap))
         self.assertIn('== Pull request ==', output)
+
+    # T323: the publication commands (git push, git ls-remote, gh) are reached as well.
+    def pid_only_publication_stop(self, pid_file, **env):
+        self.ready()
+        self.add_origin()
+        self.pid_only_stop(pid_file, 'pr', command=self.pipeline_command()[:-1], **env)
+        self.assertEqual(list((self.project / '.ai/local').glob('publish-*.out')), [])
+
+    def held_git(self, subcommand):
+        """A fake git first on PATH: SUBCOMMAND writes its pid and sleeps, the rest is the real git."""
+        real = shutil.which('git', path=self.env['PATH'])
+        held = self.base / 'held-git-bin'
+        held.mkdir()
+        (held / 'git').write_text(
+            f'#!/usr/bin/env bash\nif [[ "$1" == {subcommand} ]]; then\n'
+            '  echo $$ > .ai/local/mock-git.pid\n  exec sleep 300\nfi\n'
+            f'exec {shlex.quote(real)} "$@"\n')
+        (held / 'git').chmod(0o755)
+        return str(held) + os.pathsep + self.env['PATH']
+
+    def test_human_stop_pid_only_push(self):
+        self.pid_only_publication_stop('mock-git.pid', PATH=self.held_git('push'))
+
+    def test_human_stop_pid_only_ls_remote(self):
+        self.pid_only_publication_stop('mock-git.pid', PATH=self.held_git('ls-remote'))
+
+    def test_human_stop_pid_only_gh(self):
+        self.pid_only_publication_stop('mock-gh.pid', MOCK_GH_HOLD='1')
+        self.assertEqual([call[:2] for call in self.gh_calls()], [['pr', 'view']])
 
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()

@@ -111,6 +111,8 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T323: `-k human_stop` Ran 16 OK, `-k pr_` Ran 33 OK, `-k push` Ran 13 OK; full gate
+result in the run log.
 2026-10-22, T318: `-k human_stop` Ran 13 OK (118.4 s); full gate result in the T318 notes.
 2026-10-22, T306: `-k human_stop` Ran 8 OK (57.8 s); full gate result in the T306 notes.
 2026-10-22, T302: `.ai/bin/ai-check` PASS, Ran 1138 tests OK (1482 s) on the recovery checkpoint
@@ -273,7 +275,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   (signal to the pipeline's pid only, leaf process gone within a scaled 40 s, same records):
   `test_human_stop_pid_only_implementation` (TERM → 143, INT → 130),
   `test_human_stop_pid_only_review`, `test_human_stop_pid_only_validation` (no PASS stamp),
-  `test_human_stop_pid_only_dependency_setup`, `test_human_stop_pid_only_retry_wait`.
+  `test_human_stop_pid_only_dependency_setup`, `test_human_stop_pid_only_retry_wait`; T323
+  (publication stage, no `publish-*.out` left): `test_human_stop_pid_only_push`,
+  `test_human_stop_pid_only_ls_remote`, `test_human_stop_pid_only_gh` (no `gh pr create`).
 - `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
   wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
   stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
@@ -296,6 +300,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316, T304, T328, T317, T306 and T318 are DONE (T302's gate PASSED on 086ff5f's source).
+T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318 and T323 are DONE (T302's gate PASSED on 086ff5f's source).
 Next: the rest of the queue by dependency.
 Nothing is merged or deployed.

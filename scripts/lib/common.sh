@@ -141,6 +141,12 @@ ai_run_child() {
   AI_CHILD_PID=
   return "$code"
 }
+# ai_run_child with the child's stdout in FILE: a trap does not run while the shell waits on a
+# command substitution, so output a stop must not block on lands in a file. Usage: ai_run_capture FILE CMD...
+ai_run_capture() {
+  local file=$1; shift
+  ai_run_child "$@" > "$file"
+}
 # From a trap: TERM the recorded child (timeout forwards it and kills after 10 s), wait for it up
 # to 30 s, return 1 if it is still alive. Idempotent (a second signal in the trap is harmless);
 # a no-op without a child. The foreground sleep lets bash reap the exited child.
@@ -167,6 +173,8 @@ ai_human_stop() {
   local via=signal line path dirty='' clause='' rerun='ai-pipeline --approved' paths=() others=no
   [[ "$1" != INT ]] || code=130
   ai_stop_child || child=running
+  # The pipeline's publication capture file (ai-pipeline pub_capture), best effort.
+  [[ -z "${pub_out:-}" ]] || rm -f -- "$pub_out" 2>/dev/null || true
   if [[ -z "${AI_APPROVED_GATE:-}" ]] || ! ai_gate_check "$AI_APPROVED_GATE"; then
     # A signal before the baseline, or a changed gate: shell writes only (the notification's log
     # helper skips itself once AI_GATE_BROKEN is set).

@@ -6000,7 +6000,7 @@ mid-gate, not a test failure); the recovery gate on the same code passed (state:
 2026-10-22T13:42:50Z, checkpoint 4591022). Re-ran `-k human_stop`: Ran 13 tests OK (119.5 s).
 
 ## T323 — The pipeline forwards a stop to its publication commands: git push, ls-remote, gh (RC-01 G2, G1, plan review round 2 P2)
-Status: TODO
+Status: DONE
 Dependencies: T318
 Model: opus
 
@@ -6051,6 +6051,20 @@ tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+- `scripts/lib/common.sh`: `ai_run_capture FILE CMD…` (`ai_run_child CMD… > FILE`); `ai_human_stop`
+  removes the pipeline's `pub_out` after `ai_stop_child` (best effort).
+- `scripts/ai-pipeline`: `pub_capture` (one `mktemp .ai/local/publish-XXXXXXXX.out` at first use,
+  removed by `finish`) and `pub_read` (output into `pub_text`); `push()` runs `git push` via
+  `ai_run_child` and `git ls-remote` via `pub_capture` + `awk` on the file (`remote=''` fallback
+  kept); every `gh pr view/edit/ready/create` via `ai_run_child` or `pub_read`/`pub_capture`
+  (`gh pr create` → `tail -n 1` of the file); each `||`/`&&` branch and message unchanged.
+- Tests: `test_human_stop_pid_only_push`, `test_human_stop_pid_only_ls_remote` (fake `git` first
+  on `PATH`, delegating to the real git except the held subcommand), `test_human_stop_pid_only_gh`
+  (`MOCK_GH_HOLD`: `pr view` sleeps; only `pr view` was called, so no PR created); each also
+  checks no `publish-*.out` is left. Docs: `docs/workflow.md` stop paragraph names the
+  publication stage and the push-hook limitation. Flow unchanged.
+- Evidence: `-k human_stop` Ran 16 OK (171 s); `-k pr_` Ran 33 OK (436 s); `-k push` Ran 13 OK
+  (264 s). Full gate: see the run-log entry.
 
 ## T307 — ai-recover and the watchdog never resume a human stop (RC-01 G1, recovery)
 Status: TODO

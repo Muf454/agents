@@ -83,8 +83,8 @@ export AI_LOCK_HELD=$$
 rm -f .ai/local/last-error
 # A human stop (Ctrl-C, kill -TERM, a service stop) is recorded as such, never auto-recovered;
 # trapped before the marker exists so no interrupt leaves it behind. AI_STAGE is the step key.
-# Long children (ai-run, ai-review, ai-check, retry sleeps) run through ai_run_child, so a signal
-# to this pid alone ends them too.
+# Long children (ai-run, ai-review, ai-check, retry sleeps, git push, git ls-remote, gh) run
+# through ai_run_child or ai_run_capture, so a signal to this pid alone ends them too.
 AI_STAGE=start
 trap 'ai_human_stop INT' INT
 trap 'ai_human_stop TERM' TERM
@@ -98,6 +98,7 @@ finish() {
   # Keeps the manifest's timeout reruns: a pipeline resumed under the same approval must not
   # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
+  [[ -z "${pub_out:-}" ]] || rm -f -- "$pub_out" 2>/dev/null || true
   ai_helper run-record end --run "$AI_RUN_ID" --pid $$ finished "${1:-no PR}" 2>/dev/null || \
     printf 'Warning: could not record the end of run %s.\n' "$AI_RUN_ID" >&2
   ai_drop_marker
@@ -271,6 +272,23 @@ publish_ready() {
   printf 'Publish check failed at %s: %s\n' "$1" "${why%.}" > .ai/local/last-error
   stop "$1"
 }
+# Publication commands whose output is read (git ls-remote, gh) run through ai_run_capture into
+# one ignored file, made at first use and removed by finish and ai_human_stop. Usage: pub_capture CMD...
+pub_out=''
+pub_capture() {
+  [[ -n "$pub_out" ]] || pub_out=$(mktemp .ai/local/publish-XXXXXXXX.out) || { pub_out=''; return 1; }
+  ai_run_capture "$pub_out" "$@"
+}
+# pub_capture, then the output (trailing newlines stripped, empty without a file) in pub_text;
+# returns the command's status. Usage: pub_read CMD...
+pub_text=''
+pub_read() {
+  local code=0
+  pub_text=''
+  pub_capture "$@" || code=$?
+  [[ -z "$pub_out" ]] || pub_text=$(< "$pub_out")
+  return "$code"
+}
 # Pushes hit transient network/auth hiccups; retry before treating it as a stop.
 # Usage: push STAGE FAILURE-MESSAGE git-push-args...; afterwards origin's branch is HEAD.
 # Push hooks run project code, so the publish checks run after EVERY attempt, failed or
@@ -280,13 +298,16 @@ push() {
   for try in 1 2 3; do
     publish_ready "$stage"
     ok=0
-    if git push "$@"; then ok=1; fi
+    if ai_run_child git push "$@"; then ok=1; fi
     publish_ready "$stage"
     (( ok )) && break
     if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
     ai_run_child ${AI_SLEEP:-sleep} $(( try * 20 ))
   done
-  remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
+  remote=''
+  if pub_capture git ls-remote origin "refs/heads/$branch"; then
+    remote=$(awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }' "$pub_out") || remote=''
+  fi
   [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
     printf 'Publish check failed after %s: origin %s is %s, not HEAD %s (push hook?)\n' \
       "$stage" "$branch" "${remote:-missing}" "$(git rev-parse --short HEAD)" > .ai/local/last-error
@@ -710,13 +731,15 @@ make_draft=no
 if [[ "$human_draft" == yes || "$policy_draft" == yes ]]; then make_draft=yes; fi
 pipeline_drafted=no
 if [[ "$policy_draft" == yes && "$human_draft" == no ]]; then pipeline_drafted=yes; fi
-if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" ]]; then
-  gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
-  is_draft=$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null || true)
+# Every gh call runs through ai_run_child or pub_read: a stop to this pid alone ends it.
+if pub_read gh pr view "$branch" --json url --jq .url 2>/dev/null && url=$pub_text && [[ -n "$url" ]]; then
+  ai_run_child gh pr edit "$branch" --body-file "$body" >/dev/null || { printf '%s\n' 'gh pr edit failed' > .ai/local/last-error; stop 'pull request'; }
+  pub_read gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null || true
+  is_draft=$pub_text
   if [[ "$make_draft" == yes && "$is_draft" != true ]]; then
     # Never leave an existing ready PR "ready" when the policy says draft.
-    gh pr ready --undo "$branch" >/dev/null 2>&1 && \
-      [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
+    ai_run_child gh pr ready --undo "$branch" >/dev/null 2>&1 && \
+      { pub_read gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null || true; [[ "$pub_text" == true ]]; } || \
       { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
     # Ownership only from a confirmed ready PR: an unknown prior state (failed lookup) may have
     # been a human draft, so it never counts as a pipeline draft.
@@ -729,8 +752,8 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
     # Ready again only when the pipeline drafted it itself: the record is consumed first, so
     # a record that cannot be removed never un-drafts (a human re-draft between runs is not seen).
     if how=$(ai_helper pr-draft take "$url" 2>/dev/null); then
-      if gh pr ready "$branch" >/dev/null 2>&1 && \
-         [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
+      if ai_run_child gh pr ready "$branch" >/dev/null 2>&1 && \
+         { pub_read gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null || true; [[ "$pub_text" == false ]]; }; then
         printf '%s\n' 'Marked the PR ready (the pipeline had made it a draft).'
         ai_log none "pull request marked ready: $url" PASS 'drafted by the pipeline earlier'
       else
@@ -750,7 +773,7 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
 else
   pr_args=(--title "$title" --body-file "$body" --base "$pr_base")
   if [[ "$make_draft" == yes ]]; then pr_args+=(--draft); fi
-  url=$(gh pr create --head "$branch" "${pr_args[@]}" | tail -n 1) || { printf '%s\n' 'gh pr create failed' > .ai/local/last-error; stop 'pull request'; }
+  pub_capture gh pr create --head "$branch" "${pr_args[@]}" && url=$(tail -n 1 -- "$pub_out") || { printf '%s\n' 'gh pr create failed' > .ai/local/last-error; stop 'pull request'; }
   if [[ "$pipeline_drafted" == yes ]]; then
     ai_helper pr-draft record "$url" created || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
   fi
