@@ -618,3 +618,4 @@
 | 2026-10-22T20:17:56Z | runner | T320 | stopped (exit 1); inspect state/diff before resuming | see local logs | c666859 | No merge or deployment performed |
 | 2026-10-22T21:05:00Z | claude (opus) | T320 | DONE (second resume): the post-c666859 gate failure was one load-induced timeout in an unrelated test; recovery gate PASS 20:38:14Z on the same code; no source change | -k escalation 26 OK (134 s); full gate left to the runner | 87b0099 | handoff and docs unchanged |
 | 2026-10-22T20:56:38Z | runner | T320 | completed | PASS | be4f977 | Claude checkpointed; continuing queue |
+| 2026-10-22T21:21:14Z | runner | T321 | blocked; try next independent task | not complete | 60abab7 | See task result |
