@@ -6230,7 +6230,7 @@ Exit 0 / 3 / 4 / 1 with the planned messages; an ended record is never rewritten
 table), vault flow chart and hub Log. T319 adds the local completion and relaunch message.
 
 ## T319 — `--stop` completion bound to its run; relaunch cancel; stopping a recovery (RC-01 G1, plan review P4, P5, P9)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T308
 Model: opus
 
@@ -6281,6 +6281,17 @@ Targeted: `python3 -m unittest discover -s tests -k stop_command` (must say `Ran
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude, opus): `workflow.py` `stop_gone` → `stop_complete` (settle for the kept id;
+refused → its own ended message or "another run replaced it", nothing more; then
+`.ai/local/workflow.lock` LOCK_EX|LOCK_NB through the pinned `.ai/local`, held → "another runner
+owns <checkout> now; nothing else recorded."; with the id still current: escalation `human_stop`
+at the observation stage or `unknown`, marker unlinked only when it holds the recorded pid,
+`last-error` `stopped by the human during <stage>`, `last-error.notified` set 1 µs newer) and
+`stop_relaunch_scheduled` (paused + manifest `limit_relaunch_at` → cancel message). `.ai/local`
+is created on the pinned `.ai` when missing (as `ai_root`). Recovery: no code change needed
+(T316 ownership + T307 trap), covered by the new test. docs/workflow.md "Completion (T319)";
+ai-pipeline dispatch comment. Evidence: `-k stop_command` Ran 11 OK (21.0 s; 4 new tests);
+`.ai/bin/ai-check` PASS, Ran 1175 OK (943.6 s). Implementation commit 01bd5ff.
 
 ## T309 — Escalation hints at the producers of stops for a human (RC-01 G9, hints)
 Status: TODO

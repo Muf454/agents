@@ -137,7 +137,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
-2026-10-22, T319: `-k stop_command` Ran 11 OK (21.0 s); full gate result in the T319 notes.
+2026-10-22, T319: `-k stop_command` Ran 11 OK (21.0 s); `.ai/bin/ai-check` PASS, Ran 1175 OK (943.6 s).
 2026-10-22, T308: `-k stop_command` Ran 7 OK (15.6 s); full gate result in the T308 notes.
 2026-10-22, T307: `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK; full gate PASS 16:08:15Z on
 recovery checkpoint 8d45821.
