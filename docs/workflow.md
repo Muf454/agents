@@ -1416,7 +1416,21 @@ Shell callers use `ai_event` (`common.sh`), which skips once the gate is known b
 failure into one `Note:` and never changes the caller's status; any helper that prepares an
 event runs inside such a `common.sh` function after the same guard, never in its arguments.
 `read_events` reads `events.1.jsonl` then `events.jsonl`, keeping only `v == 1` events of known
-kinds, each id once. Rotation (T217) and the writers (T207–T210, T218, T220) come later.
+kinds, each id once. The writers (T207–T210, T218, T220) come later.
+
+Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
+exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
+least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`
+event `action=end` in the file whose latest event is at most 7 days old (`EVENT_RUN_STALE_DAYS`;
+any project's, paused recoveries included), and only their lines stay live, in file order. Lines
+with a null `run`, unknown kinds and torn lines go only to the archive. When that would drop less
+than a quarter of the cap, nothing rotates and the append goes on: the live file may exceed the
+cap while that many runs are active. Order: the whole live content is written to a temp file in
+the state root, synced and renamed over `events.1.jsonl` (the previous archive is dropped), then
+the kept lines replace `events.jsonl` the same way and the directory is synced. A crash between
+the two renames leaves duplicates, never loss (`read_events` dedupes by id); a rotation failure
+removes its temp file and leaves the file it failed on as it was, and the append still happens
+(a `Note:` only when the append itself fails).
 
 `session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
 gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run

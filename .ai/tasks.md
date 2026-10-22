@@ -5926,7 +5926,7 @@ limit in the background, no edits during it). Limit: no event writer exists yet 
 pipeline (T208+), so event `run` tagging inside a run is covered by T206's envelope test.
 
 ## T217 — Event log rotation that keeps every active run (ME-01 part 1, review P3 and P4)
-Status: TODO
+Status: DONE
 Dependencies: T206
 Model: opus
 
@@ -5989,6 +5989,18 @@ Targeted: `python3 -m unittest discover -s tests -k events_core` (must say `Ran 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): `events_max_bytes`, `event_run`, `active_event_runs`, `write_replace`
+and `rotate_events` in scripts/lib/workflow.py; `append_event` calls `rotate_events` at T206's
+hook point (inside the exclusive lock, before the append; an OSError from rotation is swallowed,
+the append proceeds). Active = run ids with no `run action=end` whose latest valid `time` is
+within `EVENT_RUN_STALE_DAYS = 7`; times compared as fixed-width text, only each run's latest
+parsed (keeps a non-rotating append over the cap cheap). Rotation rewrites only when the dropped
+bytes are ≥ cap // 4. Archive temp (mode 0644) + fsync + replace, then live, then directory fsync.
+Tests: new `EventsRotationTests` (4 tests, names as in the criteria) on a shared `EventsFixture`
+split out of `EventsCoreTests`. `-k events_rotation`: Ran 4 tests, OK (10 s); `-k events_core`:
+Ran 9 tests, OK. docs/workflow.md rotation paragraph. Flow unchanged. Full gate left to the host
+gate (BATCH 10 GATE RULE); an in-session `.ai/bin/ai-check` started before reading the rule passed
+the 600 s tool limit and is not used as evidence.
 
 ## T207 — `event-gate` helper: safe, bounded reads of the gate stamp and log (ME-01 part 1, gate)
 Status: TODO

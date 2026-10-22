@@ -1,4 +1,5 @@
 """Flow event log (ME-01): envelope, schema, bounded lock, guarded writer, tolerant reader."""
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
@@ -50,8 +51,41 @@ for n in range(50):
         print('Note: busy', file=sys.stderr)
 '''
 
+# One active run per process: 200 events of its run, each followed by a droppable filler event.
+ROTATOR = r'''
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location('workflow', sys.argv[1])
+workflow = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(workflow)
+run = sys.argv[3]
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.005)
+for n in range(200):
+    for run_id, stage in ((run, f'{run}-{n}'), (None, 'filler')):
+        if run_id:
+            os.environ['AI_RUN_ID'] = run_id
+        else:
+            os.environ.pop('AI_RUN_ID', None)
+        try:
+            if not workflow.append_event('stop', {'stage': stage, 'message': 'm' * 100}, 'p', 'b'):
+                print('short write', file=sys.stderr)
+        except workflow.EventsBusy:
+            print('Note: busy', file=sys.stderr)
+'''
+MIN_CAP = '65536'
 
-class EventsCoreTests(unittest.TestCase):
+
+def event_line(run, when, kind='stop', **fields):
+    record = {'v': 1, 'id': os.urandom(8).hex(), 'time': when, 'kind': kind, 'project': 'p',
+              'branch': 'b', 'run': run, **dict.fromkeys(workflow.EVENT_KINDS.get(kind, {})), **fields}
+    return json.dumps(record, sort_keys=True) + '\n'
+
+
+def stamp(**ago):
+    return (datetime.now(timezone.utc) - timedelta(**ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+class EventsFixture(unittest.TestCase):
     def setUp(self):
         self.base = Path(tempfile.mkdtemp(prefix='ai-events-'))
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
@@ -59,18 +93,18 @@ class EventsCoreTests(unittest.TestCase):
         self.repo = self.base / 'events-project'
         self.repo.mkdir()
         self.env = {k: v for k, v in os.environ.items()
-                    if k not in ('AI_RUN_ID', 'AI_EVENTS_LOCK_SECONDS', 'AI_GATE_BROKEN')}
+                    if k not in ('AI_RUN_ID', 'AI_EVENTS_LOCK_SECONDS', 'AI_EVENTS_MAX_BYTES', 'AI_GATE_BROKEN')}
         self.env.update(AI_STATE_DIR=str(self.state), XDG_CONFIG_HOME=str(self.base / 'config'),
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
         subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=self.repo, env=self.env, check=True)
         patch = mock.patch.dict(os.environ, {'AI_STATE_DIR': str(self.state)})
         patch.start()
         self.addCleanup(patch.stop)
-        os.environ.pop('AI_EVENTS_LOCK_SECONDS', None)
-        os.environ.pop('AI_RUN_ID', None)
+        for name in ('AI_EVENTS_LOCK_SECONDS', 'AI_EVENTS_MAX_BYTES', 'AI_RUN_ID'):
+            os.environ.pop(name, None)
 
-    def event(self, *args, **env):
-        return subprocess.run([sys.executable, str(HELPER), 'event', *args], cwd=self.repo,
+    def event(self, *args, cwd=None, **env):
+        return subprocess.run([sys.executable, str(HELPER), 'event', *args], cwd=cwd or self.repo,
                               env={**self.env, **env}, capture_output=True, text=True,
                               timeout=COMMAND_TIMEOUT)
 
@@ -100,6 +134,8 @@ class EventsCoreTests(unittest.TestCase):
         process.stdin.close()
         process.stdout.close()
 
+
+class EventsCoreTests(EventsFixture):
     def test_events_core_envelope_and_run_tag(self):
         self.assertFalse(set(workflow.EVENT_ENVELOPE) & {f for fields in workflow.EVENT_KINDS.values() for f in fields})
         result = self.event('gate', f'gate_id={GATE_ID}', 'task=T201', 'start=1700000000', 'seconds=12',
@@ -276,6 +312,141 @@ class EventsCoreTests(unittest.TestCase):
         result = self.shell(script, GATE_ID, common=lib / 'common.sh')
         self.assertEqual((result.returncode, result.stdout), (0, 'status 0\n'))
         self.assertTrue(marker.exists())
+
+
+class EventsRotationTests(EventsFixture):
+    def setUp(self):
+        super().setUp()
+        self.live = self.state / 'events.jsonl'
+        self.archive = self.state / 'events.1.jsonl'
+        self.cap = {'AI_EVENTS_MAX_BYTES': MIN_CAP}
+
+    def append(self, stage, run=None):
+        env = {**self.cap, **({'AI_RUN_ID': run} if run else {})}
+        with mock.patch.dict(os.environ, env):
+            if not run:
+                os.environ.pop('AI_RUN_ID', None)
+            self.assertTrue(workflow.append_event('stop', {'stage': stage}, 'p', 'b'))
+
+    def runs(self, path):
+        return [json.loads(line)['run'] for line in path.read_text().splitlines()]
+
+    def test_events_rotation_keeps_every_active_run(self):
+        repo_b = self.base / 'project-b'
+        repo_b.mkdir()
+        subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=repo_b, env=self.env, check=True)
+        run_a = 'a' * 16
+        for args in (['run', 'action=start'], ['stop', 'stage=a0'], ['stop', 'stage=a1'], ['recovery', 'decision=pause']):
+            result = self.event(*args, AI_RUN_ID=run_a, **self.cap)
+            self.assertEqual((result.returncode, result.stderr), (0, ''))
+        b_runs = ['b1' * 8, 'b2' * 8, 'b3' * 8]
+        for index, run in enumerate(b_runs):
+            result = self.event('run', 'action=start', cwd=repo_b, AI_RUN_ID=run, **self.cap)
+            self.assertEqual((result.returncode, result.stderr), (0, ''))
+            with mock.patch.dict(os.environ, {'AI_RUN_ID': run, **self.cap}):
+                for n in range(250 if index < 2 else 3):  # an ended run is about 80 KB, over the cap
+                    self.assertTrue(workflow.append_event('stop', {'stage': f'{run}-{n}', 'message': 'b' * 150},
+                                                          'project-b', 'main'))
+            if index < 2:
+                result = self.event('run', 'action=end', 'result=pass', cwd=repo_b, AI_RUN_ID=run, **self.cap)
+                self.assertEqual((result.returncode, result.stderr), (0, ''))
+        # Rotation 1 at b2's start dropped b1; rotation 2 at b3's start archived b2 and dropped b1 for good.
+        events = workflow.read_events()
+        by_run = {}
+        for event in events:
+            by_run.setdefault(event['run'], []).append(event)
+        self.assertEqual(sorted(by_run), sorted([run_a, b_runs[1], b_runs[2]]))
+        self.assertEqual([e['kind'] for e in by_run[run_a]], ['run', 'stop', 'stop', 'recovery'])
+        self.assertEqual({e['project'] for e in by_run[run_a]}, {'events-project'})
+        self.assertEqual(len(by_run[b_runs[2]]), 4)
+        self.assertEqual(len(by_run[b_runs[1]]), 252)
+        self.assertNotIn(b_runs[0], self.archive.read_text())
+        live_runs = self.runs(self.live)
+        self.assertEqual(live_runs.count(run_a), 4)
+        self.assertEqual(set(live_runs), {run_a, b_runs[2]})
+        self.assertEqual(len(events), len({e['id'] for e in events}))
+
+    def test_events_rotation_waiting_writers_lose_nothing(self):
+        go = self.base / 'go'
+        runs = [f'{n:016x}' for n in range(1, 7)]
+        workers = [subprocess.Popen([sys.executable, '-c', ROTATOR, str(HELPER), str(go), run],
+                                    env={**self.env, **self.cap}, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+                   for run in runs]
+        for worker in workers:
+            self.addCleanup(worker.kill)
+        go.touch()
+        for worker in workers:
+            out, err = worker.communicate(timeout=COMMAND_TIMEOUT * 4)
+            self.assertEqual((worker.returncode, err), (0, ''))  # no busy Note, no short write
+        self.assertTrue(self.archive.exists())
+        for path in (self.archive, self.live):
+            for line in path.read_text().splitlines():
+                json.loads(line)
+        live_runs = self.runs(self.live)
+        self.assertLess(len(live_runs), 2400)  # without rotation it would hold every line
+        self.assertLess(live_runs.count(None), 1200)
+        run_events = [e for e in workflow.read_events() if e['run']]
+        self.assertEqual(len(run_events), 1200)
+        self.assertEqual(sorted(e['stage'] for e in run_events),
+                         sorted(f'{run}-{n}' for run in runs for n in range(200)))
+
+    def test_events_rotation_small_gain_and_stale_runs(self):
+        for value, expected in (('65536', 65536), ('1000000', 1000000), ('65535', 8 * 1024 * 1024),
+                                ('-1', 8 * 1024 * 1024), ('x', 8 * 1024 * 1024), ('', 8 * 1024 * 1024)):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {'AI_EVENTS_MAX_BYTES': value}):
+                self.assertEqual(workflow.events_max_bytes(), expected)
+        self.state.mkdir(parents=True)
+        active = ['1' * 16, '2' * 16]
+        self.live.write_text(''.join(event_line(active[n % 2], stamp(minutes=5), message='x' * 150)
+                                     for n in range(260)))
+        self.assertGreater(self.live.stat().st_size, 65536)
+        self.append('one', run=active[0])
+        self.assertFalse(self.archive.exists())  # only active runs: nothing to gain, no rotation
+        self.assertEqual(len(self.runs(self.live)), 261)
+        stale = '3' * 16
+        with self.live.open('a') as handle:
+            for _ in range(40):
+                handle.write(event_line(stale, stamp(days=8), message='s' * 150))
+                handle.write(event_line(None, stamp(minutes=1), message='n' * 150))
+            handle.write(event_line(active[0], stamp(minutes=1), kind='future'))
+            handle.write('{"v": 1, "torn')
+        before = self.live.read_bytes()
+        self.append('two', run=active[1])
+        self.assertEqual(self.archive.read_bytes(), before)
+        records = [json.loads(line) for line in self.live.read_text().splitlines()]
+        self.assertEqual(len(records), 262)
+        self.assertEqual({r['run'] for r in records}, set(active))
+        self.assertNotIn('future', {r['kind'] for r in records})
+        self.assertEqual([r['stage'] for r in records[-2:]], ['one', 'two'])
+        self.assertEqual(oct(self.live.stat().st_mode & 0o777), '0o644')
+
+    def test_events_rotation_crash_between_replaces_duplicates_only(self):
+        self.state.mkdir(parents=True)
+        run = '4' * 16
+        self.live.write_text(''.join(event_line(run if n % 3 else None, stamp(minutes=2), message='y' * 150)
+                                     for n in range(300)))
+        self.archive.write_bytes(self.live.read_bytes())  # the first replace done, the second not
+        events = workflow.read_events()
+        self.assertEqual(len(events), 300)
+        self.assertEqual(len({e['id'] for e in events}), 300)
+        # A failing rotation leaves both files as they were, removes its temp, and the append happens.
+        before = self.live.read_bytes()
+        with mock.patch.object(workflow.os, 'replace', side_effect=OSError('disk full')):
+            self.append('during-failure', run=run)
+        self.assertEqual(self.archive.read_bytes(), before)
+        self.assertEqual(self.live.read_bytes()[:len(before)], before)
+        self.assertEqual(len(self.runs(self.live)), 301)
+        self.assertEqual(list(self.state.glob('.events-*')), [])
+        before = self.live.read_bytes()
+        self.append('after', run=run)
+        self.assertEqual(self.archive.read_bytes(), before)
+        live = [json.loads(line) for line in self.live.read_text().splitlines()]
+        self.assertEqual({r['run'] for r in live}, {run})
+        self.assertEqual(len(live), 202)
+        events = workflow.read_events()
+        self.assertEqual(len(events), len({e['id'] for e in events}))
+        self.assertEqual(len(events), 301 + 1)
 
 
 if __name__ == '__main__':

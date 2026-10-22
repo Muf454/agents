@@ -38,6 +38,12 @@
   (`EVENT_SECRET_PATTERNS`: `sk-`, `ghp_`, `github_pat_`, `xox[abp]-`, `AKIA`, `Bearer`, values of
   `key=`/`token=`/`secret=`/`password=`) with `[redacted]`; `event_text` calls it before folding
   and the 200-character cut. Best effort, not a secret scanner. docs/workflow.md one sentence.
+- T217 (ME-01 part 1, 2026-10-22): `append_event` calls `rotate_events` inside the exclusive lock
+  before the append. Over `AI_EVENTS_MAX_BYTES` (int ≥ 65536, default 8 MiB) the whole live file
+  goes to `events.1.jsonl` and only lines of active runs (no `run action=end`, latest event ≤ 7
+  days old; any project) stay live; no rotation when less than a quarter of the cap would be
+  dropped. Temp file + fsync + `os.replace` for the archive, then the live file, then a directory
+  sync; a rotation failure is silent and the append still happens. docs/workflow.md paragraph.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -211,8 +217,15 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_events_run_context_consecutive_runs_on_one_branch`); a crashed marker of run A
   reconciled under run B logs `run: A`, a marker without `run` a row without it
   (`test_events_run_context_crash_reconciled_in_a_later_run`).
-- `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
-  nothing, stale runs, crash between replaces.
+- `events_rotation` (T217, DONE): project A's open run keeps all its lines live while project B's
+  ended runs rotate out twice, the first gone for good
+  (`test_events_rotation_keeps_every_active_run`); 6 writers with active runs plus filler rotate
+  under contention with all 1200 run events kept once, valid JSON lines and no busy Note
+  (`test_events_rotation_waiting_writers_lose_nothing`); `AI_EVENTS_MAX_BYTES` parsing, no
+  rotation when only active runs fill the file, 8-day-old open run, null-run, unknown-kind and
+  torn lines dropped (`test_events_rotation_small_gain_and_stale_runs`); archive already a full
+  copy reads each id once, a failing rename leaves both files and no temp while the append
+  happens, the next rotation succeeds (`test_events_rotation_crash_between_replaces_duplicates_only`).
 - `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T222:
   `gate_id` on rows, each gate counted once across rows and events; T220: runner, pipeline
   validation and recovery gates pass/fail/timeout, epoch starts and row-matching durations, none

@@ -4040,8 +4040,12 @@ if any(set(fields) & set(EVENT_ENVELOPE) for fields in EVENT_KINDS.values()):
 EVENT_REQUIRED = {'gate': ('gate_id',)}
 EVENT_ID = re.compile(r'[0-9a-f]{16}')
 EVENT_INT = re.compile(r'[0-9]{1,18}')
+EVENT_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 EVENT_TEXT_LIMIT = 200
 EVENT_LOCK_SECONDS = 5.0  # long enough for a rotation (T217) of a full 8 MiB file
+EVENT_MAX_BYTES = 8 * 1024 * 1024
+EVENT_MIN_MAX_BYTES = 65536
+EVENT_RUN_STALE_DAYS = 7  # an open run silent this long is abandoned, no longer active
 REDACTED = '[redacted]'
 # Text redaction for event strings (redact); SECRET_PATTERNS above is about file names.
 EVENT_SECRET_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
@@ -4083,6 +4087,103 @@ def events_lock_seconds():
     except ValueError:
         return EVENT_LOCK_SECONDS
     return value if 0.1 <= value <= 60 else EVENT_LOCK_SECONDS  # NaN fails both comparisons
+
+
+def events_max_bytes():
+    """AI_EVENTS_MAX_BYTES (int >= EVENT_MIN_MAX_BYTES); unset or invalid: EVENT_MAX_BYTES."""
+    try:
+        value = int(os.environ.get('AI_EVENTS_MAX_BYTES', ''))
+    except ValueError:
+        return EVENT_MAX_BYTES
+    return value if value >= EVENT_MIN_MAX_BYTES else EVENT_MAX_BYTES
+
+
+def event_run(record):
+    """The run id of a known event (v == 1, known kind) tagged with one, else None."""
+    version, run = record.get('v'), record.get('run')
+    if (type(version) is not int or version != EVENT_SCHEMA or record.get('kind') not in EVENT_KINDS
+            or not isinstance(run, str) or not EVENT_ID.fullmatch(run)):
+        return None
+    return run
+
+
+def active_event_runs(records, current=None):
+    """Run ids with no `run` end event among RECORDS whose latest event time is within
+    EVENT_RUN_STALE_DAYS of CURRENT (a datetime, default now): any project's, paused recoveries
+    included. Only known kinds of this schema count; a run without a valid time is not active."""
+    current = current or datetime.now(timezone.utc)
+    ended, latest = set(), {}
+    for record in records:
+        run = event_run(record)
+        if run is None:
+            continue
+        if record['kind'] == 'run' and record.get('action') == 'end':
+            ended.add(run)
+        when = record.get('time')
+        # now()'s fixed-width UTC form sorts as text: only each run's latest time is parsed.
+        if isinstance(when, str) and EVENT_TIME.fullmatch(when) and when > latest.get(run, ''):
+            latest[run] = when
+    stale = timedelta(days=EVENT_RUN_STALE_DAYS)
+    active = set()
+    for run, when in latest.items():
+        try:
+            moment = datetime.strptime(when, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        except ValueError:  # matches the pattern but is no date (month 13)
+            continue
+        if run not in ended and current - moment <= stale:
+            active.add(run)
+    return active
+
+
+def write_replace(directory, data, target):
+    """DATA into a fresh temp file in DIRECTORY, synced, then renamed over TARGET. On failure the
+    temp is removed, TARGET is untouched and the OSError propagates."""
+    fd, temp = tempfile.mkstemp(dir=directory, prefix='.events-', suffix='.tmp')
+    try:
+        try:
+            os.fchmod(fd, 0o644)  # the mode append_event creates the log with
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
+def rotate_events(path):
+    """Archive PATH (the live log) to events.1.jsonl when it is over events_max_bytes, keeping
+    every line of every active run (active_event_runs) live. Caller holds the exclusive
+    events.lock. Order makes a crash leave duplicates, never loss: the archive gets the whole live
+    content first, then the live file is replaced by the kept lines; read_events dedupes by id.
+    True when rotated; OSError propagates (the file it failed on is left as it was)."""
+    cap = events_max_bytes()
+    try:
+        if os.stat(path).st_size <= cap:
+            return False
+    except FileNotFoundError:
+        return False
+    data = Path(path).read_bytes()
+    if len(data) <= cap:
+        return False
+    records = decode_outcome_lines(data)
+    active = active_event_runs(record for _, record in records)
+    lines = data.split(b'\n')
+    # Null-run lines, unknown kinds, other schemas and torn lines are not kept.
+    kept = b''.join(lines[index] + b'\n' for index, record in records if event_run(record) in active)
+    # Rotating for a small gain would rewrite the file on every append: the live file may stay
+    # over the cap while that many runs are active.
+    if len(data) - len(kept) < cap // 4:
+        return False
+    directory = Path(path).parent
+    write_replace(directory, data, events_archive_path())
+    write_replace(directory, kept, path)
+    fsync_dir(directory)
+    return True
 
 
 def redact(text):
@@ -4196,7 +4297,10 @@ def append_event(kind, fields, project, branch):
     path = events_path()
     created = make_dirs(path.parent)
     with lock_events():
-        # T217 rotation hook: rotation runs here, inside the exclusive lock, before the append.
+        try:
+            rotate_events(path)
+        except OSError:  # rotation is best effort: the log stays as it was and this append proceeds
+            pass
         fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o644)
         try:
             size = os.fstat(fd).st_size
