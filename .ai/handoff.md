@@ -203,7 +203,14 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   pattern → `[redacted]`, `password=hunter2` → `password=[redacted]`, ordinary text and short ids
   unchanged, a token across the 200th character redacted whole, a CLI `stop message=…` reads back
   redacted (`test_events_redact_tokens`).
-- `events_run_context` (T216): run id, rows carry the run, consecutive runs, crash in a later run.
+- `events_run_context` (T216, DONE): the manifest's 16-hex `run_id`/`started`, new per start, kept
+  by `clear-attempts`, wrong types invalid (`test_events_run_context_manifest_id_and_resume`); a
+  fixture pipeline's task, review and gate rows carry its id, an inherited `AI_RUN_ID` is ignored,
+  a later standalone `ai-run` writes rows without `run` and an event with `run: null`
+  (`test_events_run_context_rows_carry_the_run`); two starts on one branch, two ids
+  (`test_events_run_context_consecutive_runs_on_one_branch`); a crashed marker of run A
+  reconciled under run B logs `run: A`, a marker without `run` a row without it
+  (`test_events_run_context_crash_reconciled_in_a_later_run`).
 - `events_rotation` (T217): every active run kept across two rotations, waiting writers lose
   nothing, stale runs, crash between replaces.
 - `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T222:

@@ -72,6 +72,9 @@ if ! check=$(ai_helper state-root-check 2>&1); then
 fi
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
   escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
+# This recovery's events and the resumed pipeline belong to the approved run (as ai-pipeline).
+AI_RUN_ID=$(ai_helper run-manifest run-id 2>/dev/null) || AI_RUN_ID=''
+if [[ "$AI_RUN_ID" =~ ^[0-9a-f]{16}$ ]]; then export AI_RUN_ID; else unset AI_RUN_ID; fi
 # Reserve the attempt before anything that can be interrupted, then publish the marker:
 # a kill in between can never produce an uncounted retry.
 attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || \

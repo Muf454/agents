@@ -884,7 +884,7 @@ class ToolkitTest(unittest.TestCase):
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
                      'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                      'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
-                     'AI_REVIEW_RISK_WORDS'):
+                     'AI_REVIEW_RISK_WORDS', 'AI_RUN_ID'):
             # set when the gate runs inside a pipeline (or one resumed by ai-recover); the
             # supervision settings would override the fixture's config file
             self.env.pop(name, None)
@@ -11721,6 +11721,91 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                         Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
                     break
                 time.sleep(0.05)
+
+    # ---------------------------------------------------------------- run context (T216, spec A8)
+    def run_context_manifest(self):
+        return json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+
+    def test_events_run_context_manifest_id_and_resume(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        first = self.run_context_manifest()
+        self.assertRegex(first['run_id'], r'^[0-9a-f]{16}$')
+        self.assertIs(type(first['started']), int)
+        self.assertEqual(self.helper('run-manifest', 'run-id').stdout, first['run_id'] + '\n')
+        self.helper('run-manifest', 'clear-attempts')  # a resume keeps the run
+        kept = self.run_context_manifest()
+        self.assertEqual((kept['run_id'], kept['started']), (first['run_id'], first['started']))
+        self.approve_run()  # every human start is a new run
+        self.assertNotEqual(self.run_context_manifest()['run_id'], first['run_id'])
+        path = next((self.base / 'host-state').rglob('run.json'))
+        valid = self.run_context_manifest()
+        for key, value in (('run_id', 7), ('run_id', 'A1' * 8), ('run_id', 'abc'), ('run_id', None),
+                           ('started', '1700000000'), ('started', 1.5), ('started', True), ('started', -1)):
+            with self.subTest(key=key, value=value):
+                path.write_text(json.dumps(dict(valid, **{key: value})) + '\n')
+                self.assertIn('No valid run manifest', self.helper('run-manifest', 'run-id', expected=1).stderr)
+        # A manifest from before run ids stays valid; it just has no id.
+        path.write_text(json.dumps({k: v for k, v in valid.items() if k not in ('run_id', 'started')}) + '\n')
+        self.assertEqual(self.helper('run-manifest', 'gate').stdout.strip(), valid['gate'])
+        self.assertEqual(self.helper('run-manifest', 'run-id', expected=1).stdout, '')
+
+    def test_events_run_context_rows_carry_the_run(self):
+        self.ready()
+        # An inherited id is never trusted: the pipeline takes its own from the manifest.
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_RUN_ID='f' * 16)
+        run_id = self.run_context_manifest()['run_id']
+        self.assertNotEqual(run_id, 'f' * 16)
+        rows = self.outcome_rows()
+        self.assertTrue({'task', 'review', 'gate'} <= {r['kind'] for r in rows}, rows)
+        self.assertEqual({r['run'] for r in rows}, {run_id})
+        # After the run finished, standalone commands belong to no run (the manifest stays).
+        with (self.project / '.ai/tasks.md').open('a') as queue:
+            queue.write('\n' + task('T002'))
+        self.commit('one more task')
+        self.tool('ai-run', '--approved')
+        later = self.outcome_rows()[len(rows):]
+        self.assertTrue({'task', 'gate'} <= {r['kind'] for r in later}, later)
+        self.assertEqual([r for r in later if 'run' in r], [])
+        self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_event stop stage=final'])
+        [event] = [json.loads(x) for x in (self.base / 'host-state/events.jsonl').read_text().splitlines()]
+        self.assertIsNone(event['run'])
+
+    def test_events_run_context_consecutive_runs_on_one_branch(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        first_id, first = self.run_context_manifest()['run_id'], len(self.outcome_rows())
+        with (self.project / '.ai/tasks.md').open('a') as queue:
+            queue.write('\n' + task('T002'))
+        self.commit('one more task')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        second_id = self.run_context_manifest()['run_id']
+        self.assertNotEqual(first_id, second_id)
+        rows = self.outcome_rows()
+        self.assertGreater(len(rows), first)
+        self.assertEqual({r['run'] for r in rows[:first]}, {first_id})
+        self.assertEqual({r['run'] for r in rows[first:]}, {second_id})
+        self.assertIn('T002', {r.get('task') for r in rows[first:]})
+
+    def test_events_run_context_crash_reconciled_in_a_later_run(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        run_a, run_b = 'a' * 16, 'b' * 16
+        # attempt-open reconciles leftovers itself, so each marker is reconciled before the next.
+        for run in (run_a, None):
+            env = dict(self.env, AI_RUN_ID=run) if run else self.env
+            self.run_cmd(['python3', str(HELPER), 'outcome', 'attempt-open', 'T001', 'opus', str(dead.pid)], env=env)
+            [marker] = self.crash_markers()
+            self.assertEqual(json.loads(marker.read_text()).get('run'), run)
+            self.run_cmd(['python3', str(HELPER), 'outcome', 'attempt-reconcile'],
+                         env=dict(self.env, AI_RUN_ID=run_b))
+        crashed = [r for r in self.outcome_rows() if r['kind'] == 'task']
+        self.assertEqual([r['result'] for r in crashed], ['crashed', 'crashed'])
+        self.assertEqual([r.get('run', 'absent') for r in crashed], [run_a, 'absent'])
+        self.assertEqual(self.crash_markers(), [])
 
     def test_outcome_crash_killed_runner_logged_once_at_next_start(self):
         self.ready()

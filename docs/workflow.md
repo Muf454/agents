@@ -812,7 +812,10 @@ are described in the README; they never write tracked files.
 
 On a human start `ai-pipeline` writes a **run manifest** to the host state directory
 (`run.json` beside the review bindings, outside the checkout, where agent sessions can't
-write): approved gate digest, branch, arguments and the attempt counter. Recovery takes
+write): approved gate digest, branch, arguments and the attempt counter, plus a fresh `run_id`
+(16 hex) and `started` (epoch) on every human start, kept by resumes; `ai-pipeline` and
+`ai-recover` export it as `AI_RUN_ID` (read from the manifest only, an inherited value is
+dropped), so a run finished earlier never tags later standalone commands. Recovery takes
 its authority only from there, never from checkout files. `stop()` re-verifies the gate
 digest against the pipeline's in-memory approved digest and only then execs
 `ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
@@ -1293,7 +1296,9 @@ worktrees), branch and task (kept for readers of the log; the report derives its
 `seq`). `seq` orders the attempt among all attempts the host recorded (allocated at the
 attempt open, or at the append for an attempt without one, from `attempt-seq` beside the log;
 gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
-order key). Failures to write are reported and never stop the run.
+order key). Failures to write are reported and never stop the run. A row written inside an
+approved run carries `run` (`AI_RUN_ID`; absent otherwise); a `crashed` row takes it from its
+attempt marker, never from the run that reconciles it.
 
 A planning session (`ai-run --plan`, so `ai-plan` too) writes one `plan` line: `outcome plan
 RESULT MODEL SECONDS [TASKS] [--revision]`, RESULT `done`, `stopped`, `interrupted` or `timeout`

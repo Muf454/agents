@@ -5848,7 +5848,7 @@ content.`, because this session edited and committed the .ai records (7f9ae48) w
 clean gate, so the host gate decides.
 
 ## T216 — Run context: run id in the manifest, `AI_RUN_ID`, run on outcome rows and attempt markers (ME-01, review P8)
-Status: TODO
+Status: DONE
 Dependencies: T206
 Model: opus
 
@@ -5911,6 +5911,19 @@ Targeted: `bash -n scripts/ai-pipeline scripts/ai-recover`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-22. `run-manifest start` writes `run_id` (token_hex(8)) and `started`;
+`run_identity_valid` makes wrong types invalid; `run-manifest run-id` (exit 1 when absent).
+`current_run_id()` (renamed from T206's `event_run_id`) feeds `append_event`, every `outcome`
+row (key only when set), and `open_attempt`'s marker `run`; `reconcile_marker` copies the
+marker's 16-hex `run` to the crashed row. `ai-pipeline` unsets an inherited `AI_RUN_ID` on a
+human start and exports the manifest's id after the manifest step; `ai-recover` does the same
+after reading the approved gate. Fixture `ToolkitTest` env drops `AI_RUN_ID`. Docs: two
+sentences in docs/workflow.md (recovery contract, outcome log). Flow unchanged.
+Evidence: `-k events_run_context` Ran 4 OK; `-k outcome_attempt -k outcome_crash` Ran 41 OK;
+`-k ruling_manifest -k timeout_rerun_manifest -k recovery_restores_the_approved_runs_settings`
+Ran 9 OK; `bash -n` OK; `.ai/bin/ai-check` Ran 1140 tests OK (exit 0, ran past the 600 s tool
+limit in the background, no edits during it). Limit: no event writer exists yet in the
+pipeline (T208+), so event `run` tagging inside a run is covered by T206's envelope test.
 
 ## T217 — Event log rotation that keeps every active run (ME-01 part 1, review P3 and P4)
 Status: TODO

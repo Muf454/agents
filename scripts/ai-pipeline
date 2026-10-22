@@ -64,6 +64,9 @@ while (( $# )); do
   esac
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
+# A human start belongs to no run until its manifest is written (below); only a resume carries
+# the id ai-recover read from the manifest.
+[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || unset AI_RUN_ID
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 case "${AI_REVIEWER:-auto}" in
   claude) ;;
@@ -164,6 +167,10 @@ else
   ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \
     ai_die 'Cannot record the run manifest in the host state directory.'
 fi
+# The approved run's id, from the manifest only (an inherited value is never trusted): every
+# event and outcome row of this run, resumes included, carries it (spec A8). Not a run setting.
+AI_RUN_ID=$(ai_helper run-manifest run-id 2>/dev/null) || AI_RUN_ID=''
+if [[ "$AI_RUN_ID" =~ ^[0-9a-f]{16}$ ]]; then export AI_RUN_ID; else unset AI_RUN_ID; fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
 ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \

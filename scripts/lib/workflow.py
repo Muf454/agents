@@ -1533,6 +1533,13 @@ def timeout_reruns_valid(data):
             and all(ruling_valid(item) for item in rulings) and len(set(rulings)) == len(rulings))
 
 
+def run_identity_valid(data):
+    """The optional `run_id` (16 hex) and `started` (int epoch) of the approved run (T216)."""
+    return (('run_id' not in data or (isinstance(data['run_id'], str)
+                                      and re.fullmatch(r'[0-9a-f]{16}', data['run_id']) is not None))
+            and ('started' not in data or (type(data['started']) is int and data['started'] >= 0)))
+
+
 def ruling_row(arguments):
     """`ruling-row KIND WHAT WHY COST`: the run-log action cell of one host ruling, on one line
     that cannot break the run-log table (no `|`, backslash or line break; at most 400 chars)."""
@@ -1694,7 +1701,9 @@ def run_manifest(arguments):
             fail('Invalid gate digest.')
         path.parent.mkdir(parents=True, exist_ok=True)
         settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
-        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings}
+        # Every human start is a new run (spec A8): a resume never calls start, so it keeps both.
+        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings,
+                'run_id': secrets.token_hex(8), 'started': int(time.time())}
         # Stages live per branch (stage_path), so a run on another branch neither drops nor
         # inherits them, and one on the same branch completes it first. A legacy stage
         # inside run.json moves to its branch's file.
@@ -1721,7 +1730,8 @@ def run_manifest(arguments):
                  and all(isinstance(a, str) for a in data['args'])
                  and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
                  and ('task' not in data or task_id_valid(data['task']))
-                 and limit_fields_valid(data) and timeout_reruns_valid(data))
+                 and limit_fields_valid(data) and timeout_reruns_valid(data)
+                 and run_identity_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
@@ -1732,6 +1742,11 @@ def run_manifest(arguments):
         print(data['gate'])
     elif action == 'branch':
         print(data['branch'])
+    elif action == 'run-id':
+        # The approved run's id; exit 1 for a manifest from before run ids.
+        if 'run_id' not in data:
+            sys.exit(1)
+        print(data['run_id'])
     elif action == 'args':
         sys.stdout.write(''.join(arg + '\0' for arg in data['args']))
     elif action == 'env':
@@ -4165,9 +4180,10 @@ def lock_events(shared=False, optional=False):
             os.close(fd)  # releases the lock
 
 
-def event_run_id():
+def current_run_id():
     """The approved run from explicit context only (spec A8): AI_RUN_ID when it is 16 hex,
-    else None; never looked up from the manifest or the branch."""
+    else None; never looked up from the manifest or the branch. Events, outcome rows and
+    attempt markers all take it from here."""
     value = os.environ.get('AI_RUN_ID', '')
     return value if EVENT_ID.fullmatch(value) else None
 
@@ -4176,7 +4192,7 @@ def append_event(kind, fields, project, branch):
     """Append one event line under the exclusive events.lock; False when the write was short.
     EventUsage before anything is opened; OSError and EventsBusy propagate (nothing written)."""
     record = {'v': EVENT_SCHEMA, 'id': secrets.token_hex(8), 'time': now(), 'kind': kind,
-              'project': project, 'branch': branch, 'run': event_run_id(), **event_record(kind, fields)}
+              'project': project, 'branch': branch, 'run': current_run_id(), **event_record(kind, fields)}
     path = events_path()
     created = make_dirs(path.parent)
     with lock_events():
@@ -4492,6 +4508,10 @@ def open_attempt(task, model, pid, out=None):
     record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
               'branch': branch, 'started': int(time.time()), 'pid': int(pid),
               'pid_start': process_start(pid)}
+    # The run this attempt belongs to, so a later run reconciling it as crashed keeps it there.
+    run = current_run_id()
+    if run is not None:
+        record['run'] = run
     try:
         record['seq'] = next_attempt_seq()
     except OSError as error:
@@ -4546,6 +4566,9 @@ def reconcile_marker(log, marker, record, own_pid):
            'model': record['model'] or 'default', 'result': 'crashed', 'attempt': len(earlier) + 1,
            'first_pass': False, 'seconds': None, 'started': record['started'], 'seq': record['seq'],
            'attempt_id': record['id']}
+    # The marker's run, never the reconciling process's (that may be a later run or none).
+    if isinstance(record.get('run'), str) and EVENT_ID.fullmatch(record['run']):
+        row['run'] = record['run']
     if not append_outcome(log, row):
         note('could not log the crashed attempt completely; will retry at the next start.')
         return
@@ -4653,6 +4676,9 @@ def outcome(arguments):
     path = outcomes_path()
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    run = current_run_id()
+    if run is not None:  # absent outside an approved run, so standalone rows look as before
+        record['run'] = run
     marker = None
     if kind == 'task':
         if len(rest) not in (4, 6) or (len(rest) == 6 and rest[4] != '--attempt'):
