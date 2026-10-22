@@ -5420,7 +5420,7 @@ source as b99ceac) PASSED at 2026-10-22T03:23:47Z. Re-checked: `-k escalation` R
 that gate-lock test plus `-k test_run_record` Ran 12 OK. DONE.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T305
 Model: opus
 
@@ -5498,6 +5498,15 @@ This fails the acceptance line "Existing pipeline and recovery tests pass". Need
 (test fixtures that resume must start a run record; check how the watchdog and observation resume
 paths obtain the id and owner), then the host gate.
 Mission control 2026-10-22 07:45Z: returned to TODO. The host gate now shows that this task's resume check breaks 7 tests: test_supervised_plan_resume_after_stage_clear_watchdog, test_supervised_plan_resume_after_the_record_watchdog, test_supervised_plan_resume_reserved_without_a_stage_watchdog, test_supervised_plan_resume_stage_without_a_reservation_watchdog, test_preflight_pipeline_same_ruling_twice_stops, test_preflight_pipeline_indirectly_moved_task_repeat_stops, test_observation_pipeline_registers_the_checkout_on_start_and_resume. Diagnosis from T303's session (ad420a2): `run-record resume` gets a usage error, then 'The run record refuses this resume'. Run exactly these tests one per call, fix the resume path (a resume without a matching record, e.g. from a watchdog or an older run, must behave as these tests expect), keep the new run-record tests green, and mark DONE. Do not run the full gate in the foreground.
+2026-10-22 (claude opus, reconcile): the fix is in recovery checkpoint 086ff5f (written by a
+timed-out session). `scripts/ai-pipeline` resume: a named run (`AI_RUN_ID`) must resume; without
+one, the current record is resumed if it accepts; otherwise a stop request on it refuses, and no
+record or an ended one without a stop request starts this run's record ("No run record to resume;
+recording this resumed run."). New tests `test_run_record_pipeline_resume_without_a_record_starts_one`,
+`test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run`. Evidence: host
+gate PASS 2026-10-22T06:39:33Z, Ran 1138 OK (fingerprint of the tree committed as 086ff5f); in
+session `-k run_record` Ran 21 OK; the seven tests above OK (2+2+3, run separately); Docs OK.
+`docs/workflow.md` "Pipeline contract" now describes the resume fallback. DONE.
 
 ## T316 — ai-recover owns the run early; stand-alone ai-run records (RC-01 G3, plan review P4, P7)
 Status: TODO

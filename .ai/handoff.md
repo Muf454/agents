@@ -17,7 +17,9 @@
 - T302 (2026-10-22): `ai-pipeline` writes the run record at every human start (required: no
   record, no run) and exports `AI_RUN_ID`; a recovery resume takes over the current record
   (`resumes` + 1) or stops; `finish` ends it `finished`; `ai_die` ends it `stopped` only after
-  the approved gate verifies. `docs/workflow.md` "Pipeline contract". Flow unchanged.
+  the approved gate verifies. A resume without a named run whose approved run has no record of
+  its own (approved before run records, or only an earlier run's ended record) starts one; a
+  stop request still refuses. `docs/workflow.md` "Pipeline contract". Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -85,6 +87,9 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T302: `.ai/bin/ai-check` PASS, Ran 1138 tests OK (1482 s) on the recovery checkpoint
+086ff5f's source; in session `-k run_record` Ran 21 OK, the seven formerly failing resume tests OK,
+Docs OK.
 2026-10-22, T305: `-k escalation` Ran 11 OK, `-k test_run_record` Ran 11 OK, Docs 3 OK; the full
 gate ran in the background and was stopped at the 20-minute limit, so the runner's gate decides.
 The host gate then failed 1 of 1131 (`test_gate_lock_wait_runner_waits_for_the_session_gate`,
@@ -201,7 +206,8 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_run_record_interleaving_never_touches_another_run`; T302:
   `test_run_record_pipeline_start_and_finish`, `test_run_record_pipeline_stop_ends_stopped`,
   `test_run_record_pipeline_refuses_without_record`, `test_run_record_pipeline_resume_keeps_one_record`,
-  `test_run_record_ai_die_after_gate_change`.
+  `test_run_record_ai_die_after_gate_change`, `test_run_record_pipeline_resume_without_a_record_starts_one`,
+  `test_run_record_pipeline_resume_refuses_a_stop_request_or_a_named_unknown_run`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
@@ -248,7 +254,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315 and T305 are DONE (T305's gate PASSED on the recovery checkpoint b13bd5e).
-T303 has partial WIP from a timed-out session (1e06212) to reconcile; then the rest of the queue
-(T302 next by dependency).
+T301, T315, T305, T303 and T302 are DONE (T302's gate PASSED on 086ff5f's source).
+Next: the rest of the queue by dependency (T316 follows T302).
 Nothing is merged or deployed.

@@ -568,7 +568,11 @@ branch, review base ref and sha, the exact arguments, launcher, log, process ide
 agent or review runs, and exports its id `AI_RUN_ID` (`<UTC stamp>-<pid>-<seq>`). It is
 required: when the record cannot be written the pipeline stops (`Cannot record the run in the
 host state directory.`). A resume after recovery takes over the current record (`run-record
-resume`, `resumes` + 1) and stops when the record refuses (stopped by you or replaced). The end
+resume`, `resumes` + 1) and stops when the record refuses (stopped by you or replaced). A
+named run (`AI_RUN_ID`) must resume; without one, a refusing current record stops the resume
+only on a stop request, and an approved run with no record of its own (none yet, or only an
+earlier run's ended one) starts its record (`No run record to resume; recording this resumed
+run.`). The end
 is recorded as `finished` (detail: the PR or `no PR`) or, through `ai_die`, `stopped` with the
 first 200 characters of the reason; `ai_die` writes it only when the approved gate still
 verifies, so no changed checkout helper runs.
