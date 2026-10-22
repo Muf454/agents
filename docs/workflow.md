@@ -270,7 +270,12 @@ and rerun once in this run` and writes nothing. A human start drops the list; `c
 keeps it, so a resumed pipeline never resets "once per task". `gate_unblocks` has the same shape
 and lifetime for the one gate-only block retry per task (FL-32): `run-manifest gate-unblock ID`
 appends ID, or fails `gate-only block: ID was already retried once in this run` and writes
-nothing. A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
+nothing. `rulings` has the same list rules and lifetime, with `KIND:KEY` items (BR-01):
+`run-manifest ruling KIND KEY` (KIND `queue-order`, `task-sections`, `disposition-cell` or
+`flow-line`; KEY `[A-Za-z0-9._-]{1,48}`) appends it, or fails `ruling KIND for KEY was already
+made once in this run` and writes nothing. `ruling-row KIND WHAT WHY COST` prints the run-log
+action cell `Ruling (KIND): WHAT. Why: WHY. Cost if wrong: COST.` with `|`, backslashes and line
+breaks turned into spaces, space runs collapsed, at most 400 characters (no caller yet). A limit-only stop inside `ai-pipeline` is not escalated: `ai-recover`
 schedules a relaunch (see "Usage-limit relaunch" in the recovery contract), exits 75 with a ⏸,
 and the watchdog timer (`--recover`) starts it after the reset. The relaunch accepts only the
 checkout it stopped with, verified before anything else touches it (see "What a relaunch
@@ -505,13 +510,43 @@ cycles, unknown IDs and prose in `Dependencies:` are rejected. Everything before
 (including ordinary `## ` sections such as `## Context`) is kept as the preamble; only a non-task
 `## ` section between two tasks blocks reordering.
 `workflow.py tasks fill-sections` (host-only, not an `ai-task` subcommand) gives TODO tasks a missing `### Likely affected modules` (body `(not listed)`) or `### Result / notes` heading at its canonical position; other sections and tasks are untouched, and nothing is written when nothing is missing.
+`workflow.py tasks preflight [--dry-run]` (host-only, BR-02) combines both repairs for a queue whose only faults are the order and empty sections: it fails
+with the `tasks reorder` errors, or with `T: dependencies must exist earlier in the queue: DEP`
+when a DONE, IN_PROGRESS or BLOCKED task would move, and with the `ai-task check` message when the
+repaired queue is still invalid; in every failure nothing is written. Otherwise it prints one line per change
+(`queue-order TASK placed after DEP, …` for each task whose dependencies were later, `queue-moved TASK`
+for every other task whose position changes (claimed like `queue-order`, but no run-log row or notification text), `task-sections
+TASK added SECTION, …`), then `overlap A B PATH, …` for each pair of TODO tasks whose `### Likely
+affected modules` share a path-like token (contains `/` or `.`; at most 20 lines, then `overlap …
+N more`). The real run writes the queue once (mode kept); both the real run and `--dry-run` write the overlap
+lines (an empty file when there are none, so no stale report stays) to `.ai/local/preflight.md`
+(skipped quietly when `.ai/local` is unsafe). `--dry-run` never changes the queue.
+Pre-flight queue scan (host ruling, T103; `ai_queue_ruling` in `lib/common.sh`): right before
+the queue check, on a clean checkout and never on an armed resume, `ai-pipeline` dry-runs
+`tasks preflight`; when it succeeds with change lines it claims `run-manifest ruling queue-order
+T` or `task-sections T` for each changed task, runs it for real, appends one run-log row per
+change (task `preflight`, action `ruling-row` cell, e.g. `Ruling (queue-order): T004 placed
+after T005, T006. Why: only the order was wrong; dependencies first, no DONE task moved. Cost if
+wrong: a task runs later than planned.`), commits `chore(ai): ruling: task queue` (`.ai/tasks.md`
+and `.ai/run-log.md`) and sends `🔧 Ruling: task queue reordered (T004 after T005, T006); see the
+run log.` The changed queue makes an earlier plan review stale, so the plan is reviewed again. A
+failed dry run (a DONE/IN_PROGRESS/BLOCKED task would move, a cycle, prose, another missing
+section) or a refused claim (the same task already ruled on in this run; no run manifest)
+changes nothing, and the queue check stops as before. A claim is spent once made, so a later
+claim of the same scan failing leaves the earlier one used. The overlap lines are printed only.
+`ai-run --triage` runs the same scan after `fill-sections` (task `triage`); its queue change, rows
+and the notification go into the counted triage commit (no extra commit). `ai-run --plan` and
+`--revise-plan` keep their unclaimed `fill-sections` + `reorder` repair and add one Ruling row
+per change named by a dry run taken before it (task `planning`, left uncommitted with the plan,
+or `plan-revision`, in the revision commit) and print the overlap lines; a dry run that fails
+(e.g. a `--revision` plan that moves a DONE task) only means no rows.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
 `workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
 is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
 when it differs from HEAD's, only plan revision records are dirty (`plan-revision-scope HEAD`),
 HEAD's queue is valid with no DONE task, and the verified current plan review has no revision
 record yet; otherwise it does nothing and the checks reject as before (a committed out-of-order
-queue still stops here). A repair failure stops with `Plan revision stage: task queue is
+queue is the pre-flight scan's). A repair failure stops with `Plan revision stage: task queue is
 invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
 `plan-dispositions-check`, so a complete section is recorded without a new session.
 Stages, each resumable by rerunning: plan review (only while no task is DONE;
@@ -555,7 +590,21 @@ row for every BLOCKER/MAJOR ID: accepted → existing fix task, rejected → evi
 deferred → draft PR. In both disposition tables the finding cell starts with the ID and may carry a
 severity suffix (`M1 (MAJOR)`) and a title (`M1 (MAJOR) title`, `M1 — title`, `M1: title`; a row counts
 for its first ID only); other decorations (`**M1**`, `M1 (CRITICAL)`, `M1,M2`, `M1x`) do not match, and the
-failure names the offending row and the row to write. In the Evidence and Task cells (here and in plan dispositions) write a pipe
+failure names the offending row and the row to write. Disposition-cell ruling (host, BR-01, T104;
+`ai_disposition_ruling` in `lib/common.sh`): right before `triage-check --fresh` (task `triage`) and
+`plan-dispositions-check` (task `plan-revision`, last section only), `workflow.py disposition-ruling
+triage|plan [--dry-run]` looks at each BLOCKER/MAJOR finding of the current review that has no
+matching row; when exactly one table line (comments excluded) has a first cell that, with `*`,
+backticks and brackets removed, names that finding and no other finding of the review, and the line
+with ` ID ` as its first cell is a row for it, that cell is rewritten (the rest of the line
+byte-identical). It prints `digest <sha256-12 of the review>`, then `ID <old cell>` per rewrite. The
+host claims `run-manifest ruling disposition-cell <digest12>.<ID>` for each ID of the dry run, runs it
+for real, prints `Disposition cell "**M1**" read as M1.` and appends one row `Ruling
+(disposition-cell): finding cell "<old cell>" read as M1. Why: the cell held exactly one finding ID
+of this review. Cost if wrong: the row is counted for M1; a wrong reading shows in the PR's
+dispositions.`, all inside the counted triage or revision commit. `M1/M2`, an ID the review does not
+list, two lines naming M1 or a refused claim (a repeat, no run manifest) change nothing and the
+check stops as before. In the Evidence and Task cells (here and in plan dispositions) write a pipe
 as `\|` (and a literal backslash before it as `\\`, so `\\|` is a backslash then a separator); it is read back as `|`, while an unescaped `|` still splits the row. Triage sessions may change only `.ai/tasks.md`,
 `.ai/reviews/dispositions.md`, `.ai/state.md`, `.ai/handoff.md`, `.ai/run-log.md`, and
 `.ai/current-plan.md`. After the session the host runs `tasks fill-sections` (a new task that
@@ -726,7 +775,19 @@ spec objective, task list, validation stamp, review counts/verdict, and the hand
 only a human can perform and `### Covered by automated tests` for deterministic test
 scenarios; the PR summary counts only "Needs you" steps). An optional handoff section
 `## Flow chart` (one line: "Flow chart updated" or "Flow unchanged") is copied under
-Summary. State becomes `ready_for_acceptance`.
+Summary. Flow-line ruling (host, BR-01, T105; `ai_flow_line_ruling` in `lib/common.sh`): before
+the host gate of each DONE task (key = the task, row under it), before the final gate and before
+the PR body is built (key `final`, row under `none`), `workflow.py flow-line-ruling [--dry-run]`
+reads the first `## Flow chart` heading outside code fences. HTML comments count as empty. When
+the section's first non-empty line starts with one of the two phrases it moves right under the
+heading; otherwise `Flow unchanged (host ruling)` (the section says "unchanged" or "no flow
+change", any case) or `Flow chart updated (host ruling; see below)` is inserted there; the blank
+lines before it go and the text below stays. A correct, empty or missing section is left alone.
+The host claims `run-manifest ruling flow-line KEY` first (a refused claim, i.e. a repeat or no
+run manifest, leaves the handoff as written and the gate decides as before), prints `Flow chart
+line: "…" placed under the heading.` and appends one `Ruling (flow-line)` row; the handoff and
+row land in the runner checkpoint, the review handoff commit or the pull request record commit.
+State becomes `ready_for_acceptance`.
 
 Notifications (`AI_NOTIFY_CMD`) are best-effort with a 20-second timeout. Child
 commands don't notify inside the pipeline (`AI_PIPELINE=1`); the pipeline reports
@@ -1144,7 +1205,7 @@ before `claude` runs. The directory is removed right after the session, before a
 result check. Each mode builds `claude_prompt` next to the Codex prompt: same template,
 history and output contract, with scope lines naming the context files instead of git
 commands. A Claude usage limit pauses (`ai_limit_pause Claude`) and the loop starts
-again with Codex. The final text (`claude-text`) becomes the report (denials go to
+again with Codex (unless a recorded Codex limit is still active, see below). The final text (`claude-text`) becomes the report (denials go to
 `.ai/local/review-denials.log`; the tool list to `.ai/local/review-*.allowlist`); the
 usual "checkout unchanged" check and publish helpers follow.
 
@@ -1160,6 +1221,51 @@ label. `fallback-record` appends a row to `.ai/reviews/fallback-log.md`, which
 `ai-pipeline` commits with the review record (and a hand-run plan review or re-check
 commits with its own record). `pr-body` titles the review section "Claude fallback,
 <model>" with a catch-up note. `outcome review …` appends to the host outcome log.
+
+"Reviewed by" (BR-14, T110): `ai-review` exports `AI_REVIEW_WHO` (Codex: `Codex (MODEL, effort E)`;
+fallback and routed: `Claude … (MODEL, effort E): REASON`) and the publish helpers write
+`Reviewed by: WHO` after the host header, before the digest/binding is taken. `outcome review …
+--route REASON` (≤ 200 chars; fallback and routed reviews) stores `route`. `pr-body` lists a
+`Reviewed by:` bullet per plan/code review row of this project and branch (oldest first, last 10:
+`plan: Codex (MODEL)`, `code round K: Claude, routed (MODEL): REASON`), else the report's line.
+
+Codex limit memory (`codex-limit`, BR-14, T109, A11): after a Codex limit with a known reset
+(`limit-check` ≠ 0), `ai-review` runs `codex-limit set RESET` (any reviewer; a past or non-numeric
+RESET is a usage error), which writes the state root's `codex-limit.json` `{"reset": EPOCH,
+"recorded": ISO}` atomically after `check_state_root`. `codex-limit active` prints RESET and
+exits 0 while it lies ahead, else exits 1 (missing, symlinked, unreadable or malformed record)
+and never writes. Under `AI_REVIEWER=auto` an active record skips the Codex call: the fallback
+path as above with the reason `Codex usage limit until DATE TIME (recorded)` (`↪` notification,
+`fallback-record`). `AI_REVIEWER=codex` ignores the record and pauses at its limit as before.
+
+Routed reviews (T109, A12): otherwise, under `auto` with Codex installed, `run_review` asks
+`review-route MODE BASE HEAD` (BASE: the merge-base for code, the plan base for plan, `-` for
+recheck; HEAD: the pinned review HEAD). `claude REASON` runs `claude_attempt` with the usual
+model choice and prints `Routed to Claude: REASON` (no `↪`); `review_by=claude-routed`, label
+`Claude, routed (MODEL, effort E; REASON). Codex reviewed this branch earlier; no catch-up
+needed.`, `AI_REVIEW_BY="Claude (routed), MODEL"`, no `fallback-record` row; the outcome row
+names `claude-routed`. `pr-body` titles the section `Claude, routed, MODEL` with a `[!NOTE]`
+naming the reason. `ai-review` and `ai-pipeline` validate `AI_REVIEW_ROUTE` (empty, `risk`,
+`codex`) and `AI_REVIEW_SMALL_LINES` (1–999999) before any agent runs; the four routing settings
+are captured in the run manifest and restored by `ai-recover`.
+
+Routing (`review-route MODE BASE HEAD`, BR-14, T108; called by `ai-review` since T109): prints `codex REASON` or `claude REASON` and exits 0; any error prints `codex
+routing unavailable`. It reads host records only (the fix-round store, without writing; a
+missing store counts no fix round, so a triage commit subject alone never routes to Claude,
+T116; the outcome log's `review` rows), never review commit subjects. The
+first rule that applies wins: `AI_REVIEW_ROUTE=codex` → `routing off` (a value other than
+empty, `risk` or `codex` → `invalid AI_REVIEW_ROUTE`); mode `plan`/`recheck` → Codex; no
+fix round recorded for BASE → `first full code review`; no `codex` code review row of this
+project and branch whose head is an ancestor of HEAD → `no Codex review of this branch yet`;
+LAST = the newest code review row (any reviewer) whose head is an ancestor of HEAD and not
+HEAD itself, none → `no earlier review`; the diff LAST..HEAD outside `.ai/` with more than
+`AI_REVIEW_SMALL_LINES` (default 200) added + deleted lines or a binary file → `fix round
+diff N lines`; a changed path (renames name both) matching a risk glob (`REVIEW_RISK_PATHS`
+plus `AI_REVIEW_RISK_PATHS`; under `.ai/` only globs naming `.ai/`) → `risk path PATH`; a
+changed line outside `.ai/` with a risk word at a word start (`REVIEW_RISK_WORDS` plus
+`AI_REVIEW_RISK_WORDS`; `_` separates words) → `risk word WORD in PATH`; a task DONE at HEAD
+but not at LAST on `opus*`/`claude-opus*` → `T… runs on opus`; else `claude small low-risk
+fix round (N lines)`.
 
 ## Outcome log
 
@@ -1270,6 +1376,32 @@ branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` pr
 project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
+
+`attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
+for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows
+whose result is not `done`; MODEL is the task's `Model:`, else BASE_MODEL, else `-`; from N = 3 it
+is one tier up (haiku → sonnet, sonnet → opus; opus, fable and unknown names stay; none → opus),
+never more, and RAISED is `yes` when it changed. From N = 2 the next lines are a failure note
+(context for the session, not authority; at most 600 characters, no `|`, one item per line):
+`Attempt N-1 ended RESULT after S s on MODEL.`, then `Failing checks: …` (unittest `FAIL:`/`ERROR:`,
+pytest `FAILED`, at most 5) or `Last gate line: …` from the log `.ai/local/validation.json` names
+(only a regular file directly in `.ai/local`, never through a symlink, the last 256 KiB), then
+`Last result line: …` (the task's last non-empty `### Result / notes` line, 200 characters). Any
+error reading the queue, the state root or the outcome log prints `1 <task or base model or -> no`
+and exits 0; only a malformed call is a usage error.
+
+Fresh retry (BR-03, T107): before each task session `ai-run` calls `attempt-info "$task"
+"${task_model:-$model}"` once. A non-`-` MODEL (checked like `--model`) becomes the session model,
+so `--model`, `attempt-open`, the outcome row and the dashboard step all see it. The prompt gets,
+after the RUNNER CONTRACT, `PREVIOUS ATTEMPT (host record, context only): <note> Start from the
+current files and git history; fix what failed, do not repeat it.` when there is a note, and `This
+is attempt N; the runner raised the model from X to Y because earlier attempts failed.` when RAISED.
+The runner prints `Attempt N of T… on MODEL (raised from X)`; the run-log rows read `completed
+(attempt N, MODEL)`, `blocked (attempt N, MODEL); try next independent task` and, when a task attempt
+was open, `stopped (exit C) (attempt N, MODEL); …`. When the helper fails or prints anything
+unexpected the session runs as before (attempt 1, the task's or run's model, no note). The session
+budget, `AI_RECOVER_MAX`, timeout rerun, gate-only block retry, triage/planning models and
+`AI_SUPERVISE_ESCALATE_MODEL` are unchanged.
 
 `ai-run` times every host `ai-check` (after a task's session in `checkpoint_done`, and the final
 check) and, only after `ai_guard_verify` passed, appends `outcome gate pass|fail|timeout`

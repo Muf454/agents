@@ -6,6 +6,7 @@ The shell scripts own the workflow. This module never invokes an AI agent.
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -490,9 +491,9 @@ def queue_segments(text):
     return segments
 
 
-def tasks_reorder():
-    path = Path('.ai/tasks.md')
-    text = path.read_text()
+def queue_order(text):
+    """(blocks, ids, order, deps) of TEXT: the stable dependency-first order `tasks reorder` writes,
+    deps per ID in file order. Fails on duplicates, prose or unknown IDs and cycles."""
     blocks = task_blocks(text)
     ids = [task['id'] for task in blocks]
     if len(ids) != len(set(ids)):
@@ -530,8 +531,11 @@ def tasks_reorder():
 
     for task_id in ids:
         visit(task_id)
-    if order == ids:
-        return
+    return blocks, ids, order, deps
+
+
+def reordered_text(text, order):
+    """TEXT with its task blocks in ORDER; the preamble and the trailer are kept as they are."""
     segments = queue_segments(text)
     positions = [index for index, segment in enumerate(segments) if segment[0] == 'task']
     first, last = positions[0], positions[-1]
@@ -551,8 +555,18 @@ def tasks_reorder():
         out.extend(lines)
     for segment in segments[last + 1:]:
         out.extend(segment[2])
+    return ''.join(out)
+
+
+def tasks_reorder():
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    _, ids, order, _ = queue_order(text)
+    if order == ids:
+        return
+    new = reordered_text(text, order)
     mode = stat.S_IMODE(path.stat().st_mode)
-    atomic(path, ''.join(out))
+    atomic(path, new)
     path.chmod(mode)
     print('Task queue reordered (dependencies first): ' + ' '.join(order))
 
@@ -598,26 +612,124 @@ def fill_task_sections(lines):
     return lines, added
 
 
-def tasks_fill_sections():
-    path = Path('.ai/tasks.md')
-    text = path.read_text()
+def task_status(block):
+    """The block's only `Status:` value, or None (fenced lines don't count; task_blocks skips them)."""
+    statuses = [line for line in block['lines'] if line.startswith('Status:')]
+    return statuses[0].split(':', 1)[1].strip() if len(statuses) == 1 else None
+
+
+def filled_text(text):
+    """(TEXT with the missing fillable sections of TODO tasks added, [(ID, names added)])."""
     out, report = [], []
     for kind, key, lines in queue_segments(text):
         if kind == 'task':
-            # Fenced Status: lines don't count; task_blocks ignores them too.
             block = next((b for b in task_blocks(''.join(lines)) if b['id'] == key), None)
-            statuses = [line for line in block['lines'] if line.startswith('Status:')] if block else []
-            if len(statuses) == 1 and statuses[0].split(':', 1)[1].strip() == 'TODO':
+            if block and task_status(block) == 'TODO':
                 lines, added = fill_task_sections(lines)
                 if added:
-                    report.append(f"{key} ({', '.join(added)})")
+                    report.append((key, added))
         out.extend(lines)
+    return ''.join(out), report
+
+
+def tasks_fill_sections():
+    path = Path('.ai/tasks.md')
+    new, report = filled_text(path.read_text())
     if not report:
         return
     mode = stat.S_IMODE(path.stat().st_mode)
-    atomic(path, ''.join(out))
+    atomic(path, new)
     path.chmod(mode)
-    print('Task queue: added missing sections: ' + ', '.join(report))
+    print('Task queue: added missing sections: '
+          + ', '.join(f"{key} ({', '.join(added)})" for key, added in report))
+
+
+PREFLIGHT_OVERLAP_LINES = 20
+
+
+def likely_paths(block):
+    """Path-like tokens of `### Likely affected modules` (outside fences), in first-seen order."""
+    lines, inside, fence = [], False, None
+    for line in block['raw']:
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = None
+            continue
+        if fence:
+            continue
+        if line.startswith('### '):
+            inside = line.rstrip() == '### Likely affected modules'
+        elif inside:
+            lines.append(line)
+    paths = []
+    for token in re.split(r'[\s,]+', ' '.join(lines)):
+        token = token.replace('`', '').rstrip(',.;:')
+        if ('/' in token or '.' in token) and token not in paths:
+            paths.append(token)
+    return paths
+
+
+def tasks_preflight(arguments):
+    """tasks preflight [--dry-run]: repair a queue whose only faults are the order (only TODO
+    tasks move) and empty fillable sections of TODO tasks, print one line per change and the
+    TODO task pairs sharing a likely-affected path. A queue the repair can't make valid fails with
+    the `tasks reorder`/`tasks()` message and nothing is written."""
+    if arguments not in ([], ['--dry-run']):
+        fail('Usage: tasks preflight [--dry-run]')
+    dry_run = bool(arguments)
+    path = Path('.ai/tasks.md')
+    text = path.read_text()
+    blocks, ids, order, deps = queue_order(text)
+    late = {task_id: [dep for dep in deps[task_id] if ids.index(dep) >= ids.index(task_id)]
+            for task_id in ids}
+    changes, new = [], text
+    if order != ids:
+        status = {block['id']: task_status(block) for block in blocks}
+        moved = [task_id for index, task_id in enumerate(ids) if order[index] != task_id]
+        stuck = [task_id for task_id in moved if status[task_id] != 'TODO']
+        if stuck:
+            # The tasks() wording: a stuck task's own late dependency, else the queue's first one.
+            first = next((t for t in stuck if late[t]), None) or next(t for t in ids if late[t])
+            fail(f'{first}: dependencies must exist earlier in the queue: {late[first][0]}')
+        new = reordered_text(text, order)
+        changes += [f"queue-order {task_id} placed after {', '.join(late[task_id])}"
+                    for task_id in order if late[task_id]]
+        # Prerequisites and intervening tasks move too; the host claims them like the rest.
+        changes += [f'queue-moved {task_id}' for task_id in order
+                    if task_id in moved and not late[task_id]]
+    new, filled = filled_text(new)
+    changes += [f"task-sections {key} added {', '.join(added)}" for key, added in filled]
+    final = tasks(new)
+    todo = [block for block in final if block['status'] == 'TODO']
+    overlaps = []
+    for index, first in enumerate(todo):
+        first_paths = likely_paths(first)
+        for second in todo[index + 1:]:
+            shared = [p for p in first_paths if p in likely_paths(second)]
+            if shared:
+                overlaps.append(f"overlap {first['id']} {second['id']} {', '.join(shared)}")
+    if len(overlaps) > PREFLIGHT_OVERLAP_LINES:
+        overlaps = (overlaps[:PREFLIGHT_OVERLAP_LINES]
+                    + [f'overlap … {len(overlaps) - PREFLIGHT_OVERLAP_LINES} more'])
+    if not dry_run and new != text:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        atomic(path, new)
+        path.chmod(mode)
+    # The overlap report is advisory and not a queue change, so a dry run refreshes it too.
+    local_fd = local_dir_fd(os.getcwd())
+    if local_fd is not None:
+        try:
+            write_record(local_fd, 'preflight.md', ''.join(line + '\n' for line in overlaps))
+        except (RecordError, OSError):
+            pass  # An unsafe .ai/local skips the report quietly.
+        finally:
+            close_fds(local_fd)
+    for line in changes + overlaps:
+        print(line)
 
 
 def task_command(arguments):
@@ -626,6 +738,9 @@ def task_command(arguments):
         return
     if arguments[0] == 'fill-sections':
         tasks_fill_sections()
+        return
+    if arguments[0] == 'preflight':
+        tasks_preflight(arguments[1:])
         return
     blocks = tasks()
     action = arguments[0]
@@ -946,7 +1061,8 @@ def publish_review(arguments):
     error = review_format_error('code', content)
     if error:
         fail(f'{error.rstrip(".")}; prior review preserved. Inspect local report.')
-    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + reviewer_label()
+    header = f'<!-- Host evidence: HEAD {head}; merge-base {base}; saved {now()}. -->\n\n' + \
+        reviewed_by_line() + reviewer_label()
     atomic('.ai/reviews/current.md', header + content)
     bind_review(head, header + content)
 
@@ -963,6 +1079,13 @@ def reviewer_label():
     and AI_REVIEW_LABEL); empty for Codex reviews, so their files are unchanged."""
     label = ' '.join(os.environ.get('AI_REVIEW_LABEL', '').split())
     return f'> **Reviewer: {label}**\n\n' if label else ''
+
+
+def reviewed_by_line():
+    """`Reviewed by: WHO` line for every published review (ai-review sets AI_REVIEW_WHO:
+    family, model and, for Claude, the reason); empty when unset."""
+    who = ' '.join(os.environ.get('AI_REVIEW_WHO', '').split())
+    return f'Reviewed by: {who}\n\n' if who else ''
 
 
 VERDICT_LINE = re.compile(r'^(?:\*\*)?Overall verdict:(?:\*\*)?[ \t]*(.*)$', re.M)
@@ -1340,7 +1463,8 @@ def binding_dir():
 # Usage-limit relaunch schedule of the run (optional, so older manifests stay valid): relaunches
 # used, the pending relaunch time, the HEAD, tree digest, task and pipeline stage it was
 # scheduled at and the armed resume binding ({"head", "tree", "task"}). The other optional
-# fields, `timeout_reruns` and `gate_unblocks`, are checked beside them (timeout_reruns_valid).
+# fields, `timeout_reruns`, `gate_unblocks` and `rulings`, are checked beside them
+# (timeout_reruns_valid).
 LIMIT_FIELDS = ('limit_relaunches', 'limit_relaunch_at', 'limit_head', 'limit_tree', 'limit_task',
                 'limit_stage', 'limit_resume')
 
@@ -1378,10 +1502,42 @@ def task_list_valid(data, field):
             and all(task_id_valid(task) for task in tasks) and len(set(tasks)) == len(tasks))
 
 
+RULING_KINDS = ('queue-order', 'task-sections', 'disposition-cell', 'flow-line')
+
+
+def ruling_valid(value):
+    if not isinstance(value, str) or ':' not in value:
+        return False
+    kind, key = value.split(':', 1)
+    return kind in RULING_KINDS and re.fullmatch(r'[A-Za-z0-9._-]{1,48}', key) is not None
+
+
 def timeout_reruns_valid(data):
     """The optional `timeout_reruns` field: the tasks whose timed-out session was committed and
-    rerun in this run. `gate_unblocks`: the tasks set back from a gate-only block in this run."""
-    return task_list_valid(data, 'timeout_reruns') and task_list_valid(data, 'gate_unblocks')
+    rerun in this run. `gate_unblocks`: the tasks set back from a gate-only block in this run.
+    `rulings`: the `KIND:KEY` host rulings made in this run (same list rules, other items)."""
+    rulings = data.get('rulings', [])
+    return (task_list_valid(data, 'timeout_reruns') and task_list_valid(data, 'gate_unblocks')
+            and isinstance(rulings, list) and len(rulings) <= 200
+            and all(ruling_valid(item) for item in rulings) and len(set(rulings)) == len(rulings))
+
+
+def ruling_row(arguments):
+    """`ruling-row KIND WHAT WHY COST`: the run-log action cell of one host ruling, on one line
+    that cannot break the run-log table (no `|`, backslash or line break; at most 400 chars)."""
+    if len(arguments) != 4 or arguments[0] not in RULING_KINDS:
+        fail('Usage: ruling-row KIND WHAT WHY COST')
+
+    def clean(text):
+        return re.sub(r' {2,}', ' ', re.sub(r'[|\\\r\n]', ' ', text)).strip()
+
+    kind, what, why, cost = (clean(part) for part in arguments)
+    row = f'Ruling ({kind}): {what}. Why: {why}. Cost if wrong: {cost}.'
+    if len(row) > 400:
+        # At the last word boundary, unless one huge word would leave little more than the prefix.
+        cut = row[:401].rsplit(' ', 1)[0]
+        row = cut if 300 <= len(cut) <= 400 else row[:400]
+    print(row)
 
 
 def limit_binding():
@@ -1578,8 +1734,8 @@ def run_manifest(arguments):
         atomic(path, json.dumps(data) + '\n')
         print(data['attempts'])
     elif action == 'clear-attempts':
-        # Keeps `timeout_reruns` and `gate_unblocks`: a resumed pipeline must not reset "once
-        # per task" (only `start`, a human-approved run, does).
+        # Keeps `timeout_reruns`, `gate_unblocks` and `rulings`: a resumed pipeline must not
+        # reset "once per task" (only `start`, a human-approved run, does).
         data['attempts'] = 0
         for key in ('task',) + LIMIT_FIELDS:
             data.pop(key, None)
@@ -1629,6 +1785,20 @@ def run_manifest(arguments):
         if len(unblocks) >= 200:
             fail('gate-only block: too many gate-only block retries in this run')
         data['gate_unblocks'] = unblocks + [task]
+        atomic(path, json.dumps(data) + '\n')
+    elif action == 'ruling':
+        # Claims the one host ruling of KIND allowed per KEY in this run (BR-01): a record-format
+        # repair the host makes instead of stopping, never twice for the same thing.
+        if (len(arguments) != 3 or arguments[1] not in RULING_KINDS
+                or not re.fullmatch(r'[A-Za-z0-9._-]{1,48}', arguments[2])):
+            fail(f'Usage: run-manifest ruling KIND KEY (KIND: {", ".join(RULING_KINDS)})')
+        kind, key = arguments[1], arguments[2]
+        rulings = data.get('rulings', [])
+        if f'{kind}:{key}' in rulings:
+            fail(f'ruling {kind} for {key} was already made once in this run')
+        if len(rulings) >= 200:
+            fail('ruling: too many rulings in this run')
+        data['rulings'] = rulings + [f'{kind}:{key}']
         atomic(path, json.dumps(data) + '\n')
     elif action == 'stage-set':
         # Recorded before the stage starts, bound to the verified review it works on: the
@@ -2371,7 +2541,8 @@ RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFOR
                 'AI_AUTO_RECOVER', 'AI_RECOVER_MAX', 'AI_LIMIT_RELAUNCH_MAX', 'AI_LIMIT_RETRY', 'AI_LIMIT_MAX_WAIT',
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
-                'AI_SUPERVISE_ESCALATE_MODEL')
+                'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                'AI_REVIEW_RISK_WORDS')
 
 
 def _no_duplicate_keys(pairs):
@@ -2742,7 +2913,7 @@ def publish_plan_review(arguments):
     # even when the plan digest and the reviewer's text repeat within the same second.
     head = git('rev-parse', 'HEAD').decode().strip()
     content = f'<!-- Plan review of plan digest {arguments[1]}; HEAD {head}; saved {now()}. -->\n\n' + \
-        reviewer_label() + content
+        reviewed_by_line() + reviewer_label() + content
     atomic(PLAN_REVIEW, content)
     # Host-side binding, like implementation reviews: an edited report is not a review.
     directory = binding_dir()
@@ -3127,6 +3298,113 @@ def plan_dispositions_check(arguments):
     print(f"accepted={counts['accepted']} rejected={counts['rejected']} needs_human={counts['needs-human']}")
 
 
+def disposition_ruling(arguments):
+    """`disposition-ruling triage|plan [--dry-run]` (BR-01): for each BLOCKER/MAJOR finding of the
+    current review without a row (the check's own pattern), the one table line whose first cell,
+    with `*`, backticks and brackets removed, names that finding and no other finding of the review
+    gets the bare ID as its first cell, the rest of the line byte-identical (and only when the line
+    then is a row for it). Triage: all of dispositions.md; plan: the last plan-dispositions section.
+    Comments, the header and other lines are never touched. Prints `digest <sha256-12 of the
+    review>`, then `ID <old cell>` per rewrite; --dry-run writes nothing."""
+    dry = arguments[1:] == ['--dry-run']
+    mode = arguments[0] if arguments else None
+    if mode not in ('triage', 'plan') or len(arguments) != (2 if dry else 1):
+        fail('Usage: disposition-ruling triage|plan [--dry-run]')
+    review_path, path, row = ((Path('.ai/reviews/current.md'), Path('.ai/reviews/dispositions.md'), DISPOSITION_ROW)
+                              if mode == 'triage' else (PLAN_REVIEW, Path(PLAN_DISPOSITIONS), PLAN_DISPOSITION_ROW))
+    data = review_path.read_bytes()
+    print('digest ' + hashlib.sha256(data).hexdigest()[:12])
+    if not path.is_file():
+        return
+    review, text, start = data.decode(errors='replace'), path.read_text(), 0
+    if mode == 'plan':
+        marks = list(PLAN_SECTION.finditer(text))
+        if not marks:
+            return
+        start = marks[-1].end()
+    region = text[start:]
+    # The rows each check already counts: triage reads the whole file, plan its uncommented section.
+    counted = region if mode == 'triage' else re.sub(r'<!--.*?-->', '', region, flags=re.S)
+    matched = {m.group(1) for m in row.finditer(counted)}
+    required = finding_ids(review, 'BLOCKER') + finding_ids(review, 'MAJOR')
+    known = set(required + finding_ids(review, 'MINOR'))
+    mentions = {f: re.compile(r'(?<![A-Za-z0-9-])' + re.escape(f) + r'(?![A-Za-z0-9])') for f in known}
+    comments = [m.span() for m in re.finditer(r'<!--.*?-->', region, re.S)]
+    lines, offset, cells = region.splitlines(keepends=True), 0, []
+    for index, line in enumerate(lines):
+        cell = re.match(r'\|((?:\\.|[^\\|\n])*)\|', line)
+        if cell and not any(begin <= offset < end for begin, end in comments):
+            plain = re.sub(r'[*`\[\]]', '', cell.group(1))
+            cells.append((index, cell, {f for f, mention in mentions.items() if mention.search(plain)}))
+        offset += len(line)
+    changes = []
+    for finding in required:
+        found = [(index, cell) for index, cell, named in cells if named == {finding}]
+        if finding in matched or len(found) != 1:
+            continue
+        index, cell = found[0]
+        new = f'| {finding} ' + lines[index][cell.end(1):]
+        result = row.match(new)
+        if result and result.group(1) == finding:
+            lines[index] = new
+            changes.append(f'{finding} {shorten(cell.group(1), 60)}')
+    for change in changes:
+        print(change)
+    if changes and not dry:
+        atomic(path, text[:start] + ''.join(lines))
+
+
+FLOW_LINE_PHRASES = ('Flow chart updated', 'Flow unchanged')
+
+
+def flow_line_ruling(arguments):
+    """`flow-line-ruling [--dry-run]` (BR-01, A6): the handoff's `## Flow chart` section (the first
+    such heading outside code fences) must start with `Flow chart updated` or `Flow unchanged` on the
+    line right after the heading. HTML comments count as empty, as in the PR body. When its first
+    non-empty line starts with one of them, it moves right under the heading; otherwise `Flow
+    unchanged (host ruling)` (the section says "unchanged" or "no flow change") or `Flow chart
+    updated (host ruling; see below)` is inserted there. Either way the blank lines before that
+    line go (comment lines stay, below it). Prints the moved or inserted line; nothing (and no
+    change) for a correct, empty or missing section. --dry-run writes nothing."""
+    dry = arguments == ['--dry-run']
+    if arguments and not dry:
+        fail('Usage: flow-line-ruling [--dry-run]')
+    path = Path('.ai/handoff.md')
+    if not path.is_file():
+        return
+    lines, fence, heading = path.read_text().splitlines(keepends=True), False, None
+    for index, line in enumerate(lines):
+        if re.match(r'\s*(```|~~~)', line):
+            fence = not fence
+        elif not fence and re.match(r'##\s+Flow chart\s*$', line):
+            heading = index
+            break
+    if heading is None:
+        return
+    end = next((i for i in range(heading + 1, len(lines)) if re.match(r'##\s', lines[i])), len(lines))
+    # The section with each comment blanked character for character, so its lines align.
+    body = re.sub(r'<!--.*?-->', lambda m: re.sub(r'[^\n]', ' ', m.group()),
+                  ''.join(lines[heading + 1:end]), flags=re.S)
+    visible = body.splitlines(keepends=True)
+    first = next((i for i, line in enumerate(visible) if line.strip()), None)
+    if first is None:
+        return
+    first += heading + 1
+    kept = [line for line in lines[heading + 1:first] if line.strip()]  # comment lines
+    if lines[first].startswith(FLOW_LINE_PHRASES):
+        if first == heading + 1:
+            return
+        new, rest = lines[first].rstrip('\n'), lines[first + 1:]
+    else:
+        new = ('Flow unchanged (host ruling)' if re.search(r'\bunchanged\b|no flow change', body, re.I)
+               else 'Flow chart updated (host ruling; see below)')
+        rest = lines[first:]
+    print(new)
+    if not dry:
+        head = lines[heading] if lines[heading].endswith('\n') else lines[heading] + '\n'
+        atomic(path, ''.join(lines[:heading] + [head, new + '\n'] + kept + rest))
+
+
 def plan_revision_scope(arguments):
     """Since START, only plan revision records changed (committed or not)."""
     if len(arguments) != 1:
@@ -3239,8 +3517,8 @@ def plan_revision_records():
     return records
 
 
-def is_ancestor(commit):
-    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'],
+def is_ancestor(commit, head='HEAD'):
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', commit, head],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
@@ -3385,6 +3663,184 @@ def review_risk(arguments):
             print(f"high {task['id']} title names {match.group(0).lower()}")
             return
     print('normal')
+
+
+REVIEW_SMALL_LINES = 200
+REVIEW_RISK_PATHS = ('*migration*', '*.sql', 'supabase/*', '*auth*', '*polic*', '*rls*', '*security*',
+                     '*payment*', '*billing*', '.github/*', '.claude/*', '.ai/permissions.allow',
+                     'scripts/lib/common.sh', 'scripts/ai-check')
+REVIEW_RISK_WORDS = ('auth', 'RLS', r'row\s+level', 'polic(?:y|ies)', 'grant', 'revoke', r'security\s+definer',
+                     'migrat', 'payment', 'billing', 'invoice', 'money', 'price', 'lock', 'mutex', 'concurren',
+                     'race', 'transaction', 'deadlock', 'secret', 'token', 'password', 'crypt', 'permission')
+
+
+def risk_path(path, globs):
+    """The first risk glob PATH matches (case-insensitive), or None. Under `.ai/` only globs
+    naming `.ai/` count: workflow records are not reviewed code."""
+    lowered = path.lower()
+    for glob in globs:
+        if lowered.startswith('.ai/') and not glob.lower().startswith('.ai/'):
+            continue
+        if fnmatch.fnmatchcase(lowered, glob.lower()):
+            return glob
+    return None
+
+
+def risk_word(base, head, words):
+    """(word, path) of the first changed `+`/`-` line outside `.ai/` that names a risk word at a
+    word start (case-insensitive; `_` separates words, so `is_auth` names auth), or None."""
+    pattern = re.compile(r'(?<![^\W_])(' + '|'.join(f'(?:{word})' for word in words) + ')', re.I)
+    diff = git('-c', 'core.quotepath=off', 'diff', '--no-color', '--no-ext-diff', '-U0', base, head,
+               '--', '.', ':!.ai').decode(errors='replace')
+    path, header = None, False
+    for line in diff.split('\n'):
+        if line.startswith('diff --git '):
+            path, header = None, True
+        elif header and line.startswith('--- '):
+            path = line[6:] if line.startswith('--- a/') else path
+        elif header and line.startswith('+++ '):
+            path = line[6:] if line.startswith('+++ b/') else path
+        elif line.startswith('@@'):
+            header = False
+        elif not header and line[:1] in ('+', '-'):
+            match = pattern.search(line[1:])
+            if match:
+                return match.group(1).lower(), path
+    return None
+
+
+def route_fix_rounds(base):
+    """Host-recorded fix rounds reachable in BASE..HEAD, without writing. A branch without a host
+    record counts none: triage commit subjects are agent-controlled history and never make a
+    review eligible for routing (A10); only `fix-rounds init` migrates them."""
+    base = git('rev-parse', '--verify', f'{base}^{{commit}}').decode().strip()
+    records = fix_round_records()
+    if records is None:
+        return 0
+    reachable = set(git('log', '--format=%H', f'{base}..HEAD').decode().split())
+    return sum(1 for record in records if fix_round_commit(record) in reachable)
+
+
+def queue_at(commit):
+    try:
+        text = git('show', f'{commit}:.ai/tasks.md').decode()
+    except subprocess.CalledProcessError:
+        return []
+    return tasks(text)
+
+
+def review_route_reason(mode, base, head):
+    route = os.environ.get('AI_REVIEW_ROUTE', '')
+    if route == 'codex':
+        return 'codex routing off'
+    if route not in ('', 'risk'):
+        return 'codex invalid AI_REVIEW_ROUTE'
+    if mode == 'plan':
+        return 'codex plan review'
+    if mode == 'recheck':
+        return 'codex re-check'
+    if mode != 'code':
+        raise ValueError(f'unknown mode {mode}')
+    head = git('rev-parse', '--verify', f'{head}^{{commit}}').decode().strip()
+    if route_fix_rounds(base) == 0:
+        return 'codex first full code review'
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    project, branch = project_name(), current_branch() or 'detached'
+    rows = [r for r in read_outcomes([outcomes_path()], strict=True)
+            if r.get('kind') == 'review' and r.get('mode') == 'code' and r.get('project') == project
+            and r.get('branch') == branch and isinstance(r.get('head'), str)
+            and re.fullmatch(r'[0-9a-f]{40,64}', r['head'])]
+    reachable = [r for r in rows if is_ancestor(r['head'], head)]
+    if not any(r.get('reviewer') == 'codex' for r in reachable):
+        return 'codex no Codex review of this branch yet'
+    last = next((r['head'] for r in reversed(reachable) if r['head'] != head), None)
+    if last is None:
+        return 'codex no earlier review'
+    limit = os.environ.get('AI_REVIEW_SMALL_LINES', '')
+    limit = int(limit) if re.fullmatch(r'\d{1,9}', limit) else REVIEW_SMALL_LINES
+    lines, binary = 0, False
+    for line in git('diff', '--numstat', '--no-ext-diff', last, head, '--', '.', ':!.ai').decode().splitlines():
+        added, deleted = line.split('\t')[:2]
+        if added == '-' or deleted == '-':
+            binary = True
+        else:
+            lines += int(added) + int(deleted)
+    if binary:
+        return f'codex fix round diff {lines} lines and a binary file'
+    if lines > limit:
+        return f'codex fix round diff {lines} lines'
+    globs = REVIEW_RISK_PATHS + tuple(os.environ.get('AI_REVIEW_RISK_PATHS', '').split())
+    fields = git('diff', '--name-status', '-z', '-M', '--no-ext-diff', last, head).decode(errors='replace').split('\0')
+    paths = []
+    while len(fields) > 1:
+        status, fields = fields[0], fields[1:]
+        count = 2 if status[:1] in ('R', 'C') else 1  # a rename or copy names both paths
+        paths += fields[:count]
+        fields = fields[count:]
+    for path in paths:
+        if risk_path(path, globs):
+            return f'codex risk path {path}'
+    words = REVIEW_RISK_WORDS + tuple(re.escape(word) for word in os.environ.get('AI_REVIEW_RISK_WORDS', '').split())
+    found = risk_word(last, head, words)
+    if found:
+        return f'codex risk word {found[0]} in {found[1]}'
+    before = {t['id'] for t in queue_at(last) if t['status'] == 'DONE'}
+    for task in queue_at(head):
+        if task['status'] == 'DONE' and task['id'] not in before \
+                and task['model'].lower().startswith(('opus', 'claude-opus')):
+            return f"codex {task['id']} runs on opus"
+    return f'claude small low-risk fix round ({lines} lines)'
+
+
+def review_route(arguments):
+    """review-route MODE BASE HEAD (BR-14, A9/A10): `codex REASON` or `claude REASON`, from host
+    records only (fix-round records, outcome review rows) and the diff since the last
+    host-recorded code review; never review commit subjects (`review_rounds`). Exit 0 always;
+    any error routes to Codex."""
+    if len(arguments) != 3 or arguments[0] not in ('plan', 'code', 'recheck'):
+        fail('Usage: review-route plan|code|recheck BASE HEAD')
+    try:
+        reason = review_route_reason(*arguments)
+    except Exception:  # Routing never fails a review: Codex is the safe choice.
+        reason = 'codex routing unavailable'
+    print(reason)
+
+
+def codex_limit_reset():
+    """The recorded Codex reset (epoch seconds) while it lies in the future, else None. A missing,
+    symlinked, unreadable or malformed record counts as no record."""
+    path = state_root() / 'codex-limit.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    reset = record.get('reset') if isinstance(record, dict) else None
+    if type(reset) is not int or reset <= time.time():
+        return None
+    return reset
+
+
+def codex_limit(arguments):
+    """codex-limit set RESET | active (BR-14, A11): the host's memory of a Codex usage limit.
+    `set` records a future reset (epoch seconds) in the state root; `active` prints it and exits
+    0 while it lies ahead, else exits 1 without writing."""
+    if arguments[:1] == ['active'] and len(arguments) == 1:
+        reset = codex_limit_reset()
+        if reset is None:
+            sys.exit(1)
+        print(reset)
+        return
+    if arguments[:1] != ['set'] or len(arguments) != 2 or not re.fullmatch(r'[1-9][0-9]{0,11}', arguments[1]) \
+            or int(arguments[1]) <= time.time():
+        fail('Usage: codex-limit set RESET (epoch seconds in the future) | codex-limit active')
+    root = check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / 'codex-limit.json'
+    if path.is_symlink():
+        path.unlink()
+    atomic(path, json.dumps({'reset': int(arguments[1]), 'recorded': now()}) + '\n')
 
 
 FALLBACK_LOG = Path('.ai/reviews/fallback-log.md')
@@ -3864,7 +4320,7 @@ def recheck_counts(answers, levels):
 
 def outcome(arguments):
     """Append one outcome line to the host-side log (outside every checkout).
-    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT]
+    task TASK RESULT MODEL SECONDS | review MODE REVIEWER MODEL EFFORT SECONDS [REPORT] [--route REASON]
     | plan_revision ROUND RESULT MODEL SECONDS (not part of outcomes_report)
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
@@ -3945,9 +4401,18 @@ def outcome(arguments):
         if attempt_id is not None:
             record['attempt_id'] = attempt_id
     elif kind == 'review':
+        route = None
+        if '--route' in rest:
+            at = rest.index('--route')
+            if at != len(rest) - 2:
+                fail('Usage: outcome review MODE REVIEWER MODEL EFFORT SECONDS [REPORT] [--route REASON]')
+            route = ' '.join(rest[at + 1].split())[:200]
+            rest = rest[:at]
         mode, reviewer, model, effort, seconds, *report = rest
         record.update(mode=mode, reviewer=reviewer, model=model or 'default', effort=effort,
                       seconds=int(seconds), head=git('rev-parse', 'HEAD').decode().strip())
+        if route:
+            record['route'] = route
         if report and mode != 'recheck':
             try:
                 counts = review_counts(Path(report[0]).read_text())
@@ -4011,6 +4476,135 @@ def gate_seconds(arguments):
               and type(r.get('seconds')) is int and r['seconds'] >= 0]
     print(max(passes[-3:], default=0))
 
+
+ATTEMPT_NOTE_LIMIT = 600
+ATTEMPT_LOG_LIMIT = 256 * 1024
+FAILING_CHECK = re.compile(r'^(?:(?:FAIL|ERROR): (.+?)|FAILED ([^\s(]\S*)(?: - .*)?)\s*$')  # not unittest's `FAILED (failures=1)`
+
+
+def raised_model(model):
+    """One tier up from MODEL (BR-03, A7): haiku → sonnet, sonnet → opus; opus, fable and
+    unknown names stay; no model → opus."""
+    if not model:
+        return 'opus'
+    lowered = model.lower()
+    if 'haiku' in lowered:
+        return 'sonnet'
+    if 'sonnet' in lowered:
+        return 'opus'
+    return model
+
+
+def attempt_note_item(text, limit=ATTEMPT_NOTE_LIMIT):
+    """One note item on one line: `|`, backslashes and line breaks become spaces, at most LIMIT."""
+    text = ' '.join(re.sub(r'[|\\\r\n\x0b\x0c\x1c-\x1e\x85  ]', ' ', str(text)).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def gate_log_lines():
+    """The last ai-check's log lines, read like `stamp outcome` (pinned `.ai/local`, never a
+    symlink): only a log that is a regular file directly inside `.ai/local`, at most
+    ATTEMPT_LOG_LIMIT bytes from its end. None when there is no such log."""
+    root = checkout_root()
+    dir_fd = local_dir_fd(root)
+    if dir_fd is None:
+        return None
+    try:
+        record = read_record(dir_fd, 'validation.json', STAMP_LIMIT + 1)
+        if record is None or len(record[0]) > STAMP_LIMIT:
+            return None
+        try:
+            data = json.loads(record[0])
+        except (ValueError, RecursionError):
+            return None
+        log = data.get('log') if isinstance(data, dict) else None
+        if not isinstance(log, str) or not log or '\0' in log:
+            return None
+        path = Path(log)
+        parent = path.parent if path.is_absolute() else Path(root) / path.parent
+        if path.name in ('', '.', '..') or os.path.normpath(parent) != os.path.normpath(Path(root) / '.ai/local'):
+            return None
+        content = read_record(dir_fd, path.name, ATTEMPT_LOG_LIMIT, tail=True)
+    finally:
+        os.close(dir_fd)
+    return None if content is None else content[0].splitlines()
+
+
+def failing_checks_item():
+    lines = gate_log_lines()
+    if not lines:
+        return None
+    names = []
+    for line in lines:
+        match = FAILING_CHECK.match(line)
+        name = match and (match.group(1) or match.group(2))
+        if name and name not in names:
+            names.append(name)
+    if names:
+        return 'Failing checks: ' + ', '.join(names[:5]) + '.'
+    last = next((line for line in reversed(lines) if line.strip()), None)
+    return f'Last gate line: {last.strip()}' if last else None
+
+
+def result_notes_line(task):
+    section = None
+    last = None
+    for line in task['lines']:
+        if line.startswith('### '):
+            section = line[4:].strip()
+        elif section == 'Result / notes' and line.strip():
+            last = line.strip()
+    return last
+
+
+def attempt_info(arguments):
+    """attempt-info TASK [BASE_MODEL] (BR-03): line 1 `N MODEL RAISED` for the next attempt of
+    TASK on this project and branch, then (from attempt 2) a short failure note, from the host
+    outcome log, the last gate log and the queue. Never fails the runner: any read error prints
+    `1 <task or base model or -> no` and exits 0."""
+    if len(arguments) not in (1, 2) or not re.fullmatch(r'T\d{3,}', arguments[0]):
+        fail('Usage: attempt-info TASK [BASE_MODEL]')
+    task_id, base = arguments[0], (arguments[1] if len(arguments) == 2 else '')
+    known = base
+    try:
+        task = next((t for t in tasks() if t['id'] == task_id), None)
+        known = (task and task['model']) or base
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        try:
+            branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+        except subprocess.CalledProcessError:
+            branch = 'detached'
+        rows = [r for r in read_outcomes([outcomes_path()], strict=True) if r.get('kind') == 'task']
+        rows = ordered_attempts(rows).get((project_name(), branch, task_id), [])
+    except (ValueError, OSError, subprocess.CalledProcessError, RecursionError):
+        print(f"1 {known or '-'} no")
+        return
+    failures = [r for r in rows if r.get('result') != 'done']
+    attempt = len(failures) + 1
+    model = raised_model(known) if attempt >= 3 else known
+    print(f"{attempt} {model or '-'} {'yes' if model != known else 'no'}")
+    if attempt < 2:
+        return
+    last = failures[-1]
+    seconds = last.get('seconds')
+    took = f' after {seconds} s' if type(seconds) is int else ''
+    items = [f"Attempt {attempt - 1} ended {last.get('result')}{took} on {last.get('model') or 'default'}."]
+    try:
+        checks = failing_checks_item()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        checks = None
+    if checks:
+        items.append(checks)
+    notes = task and result_notes_line(task)
+    if notes:
+        items.append('Last result line: ' + attempt_note_item(notes, 200))
+    room = ATTEMPT_NOTE_LIMIT
+    for item in items:
+        if room <= 1:
+            break
+        item = attempt_note_item(item, room)
+        print(item)
+        room -= len(item) + 1  # the newline between items counts
 
 def outcomes_report(arguments):
     """Summary of the outcome log(s) for tuning the model rules."""
@@ -4249,6 +4843,40 @@ def pr_title(arguments):
     print(line[:72])
 
 
+REVIEWER_NAMES = {'codex': 'Codex', 'claude': 'Claude', 'claude-fallback': 'Claude fallback',
+                  'claude-routed': 'Claude, routed'}
+
+
+def reviewed_by_entries(review):
+    """Who reviewed each round of this project and branch, from the outcome log (plan and code
+    reviews, oldest first, at most 10, newest kept); the current report's `Reviewed by:` line
+    when the log is unreadable or has none."""
+    entries = []
+    try:
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        project, branch = project_name(), current_branch() or 'detached'
+        rows = [r for r in read_outcomes([outcomes_path()])
+                if r.get('kind') == 'review' and r.get('mode') in ('plan', 'code')
+                and r.get('project') == project and r.get('branch') == branch]
+        code_rounds = 0
+        for row in rows:
+            name = REVIEWER_NAMES.get(row.get('reviewer'), str(row.get('reviewer')))
+            text = f"{name} ({row.get('model') or 'default'})"
+            if row.get('route'):
+                text += f": {row['route']}"
+            if row['mode'] == 'plan':
+                entries.append(f'plan: {text}')
+            else:
+                code_rounds += 1
+                entries.append(f'code round {code_rounds}: {text}')
+    except (OSError, ValueError, SystemExit, subprocess.CalledProcessError):
+        entries = []
+    if not entries:
+        line = re.search(r'^Reviewed by: (.+)$', review, re.M)
+        return [line.group(1).strip()] if line else ['not recorded']
+    return entries[-10:]
+
+
 def pr_body(arguments):
     """Markdown PR description from workflow records. Args: rounds unresolved(0/1)."""
     rounds, unresolved = int(arguments[0]), arguments[1] == '1'
@@ -4298,10 +4926,17 @@ def pr_body(arguments):
         lines.append('No local validation evidence recorded.')
     lines.append('')
     fallback = re.search(r'^> \*\*Reviewer: (Claude(?: fallback)?) \(([^,;)]+), effort [^;]*; ([^)]*)\)', review, re.M)
-    lines += [f'## Independent review ({fallback.group(1) + ", " + fallback.group(2) if fallback else "Codex"})', '']
-    if fallback:
+    routed = re.search(r'^> \*\*Reviewer: Claude, routed \(([^,;)]+), effort [^;]*; (.*)\)\. Codex reviewed', review, re.M)
+    heading = f'Claude, routed, {routed.group(1)}' if routed else \
+        fallback.group(1) + ', ' + fallback.group(2) if fallback else 'Codex'
+    lines += [f'## Independent review ({heading})', '']
+    if routed:
+        lines += ['> [!NOTE]', f'> Codex reviewed this branch earlier; this fix round was routed to a fresh Claude '
+                  f'session: {routed.group(2)}.', '']
+    elif fallback:
         lines += ['> [!NOTE]', f'> A read-only Claude session reviewed this instead of Codex ({fallback.group(3)}). '
                   'Codex reviews it later in one catch-up review (`.ai/reviews/fallback-log.md`).', '']
+    lines += ['Reviewed by:'] + [f'- {entry}' for entry in reviewed_by_entries(review)] + ['']
     if review:
         verdict = review_verdict(review)
         counts = COUNTS.search(review)
@@ -5014,6 +5649,8 @@ def main():
         stage_verify(arguments)
     elif command == 'run-manifest':
         run_manifest(arguments)
+    elif command == 'ruling-row':
+        ruling_row(arguments)
     elif command == 'state-root-check':
         state_root_check(arguments)
     elif command == 'checkpoint-guard':
@@ -5054,6 +5691,10 @@ def main():
         start_plan_dispositions(arguments)
     elif command == 'plan-dispositions-check':
         plan_dispositions_check(arguments)
+    elif command == 'disposition-ruling':
+        disposition_ruling(arguments)
+    elif command == 'flow-line-ruling':
+        flow_line_ruling(arguments)
     elif command == 'plan-revision-scope':
         plan_revision_scope(arguments)
     elif command == 'plan-revision-allowlist':
@@ -5080,12 +5721,18 @@ def main():
         review_allowlist(arguments)
     elif command == 'review-risk':
         review_risk(arguments)
+    elif command == 'review-route':
+        review_route(arguments)
+    elif command == 'codex-limit':
+        codex_limit(arguments)
     elif command == 'fallback-record':
         fallback_record(arguments)
     elif command == 'outcome':
         outcome(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
+    elif command == 'attempt-info':
+        attempt_info(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
     elif command == 'pr-draft':

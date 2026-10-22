@@ -1,6 +1,6 @@
 # Review dispositions (Claude)
 
-Review HEAD: 5c73c56d55b8e9b4548855151255aa67e19f62b3
+Review HEAD: 41e45a825380b1cc72ac2558606bc93ddbfa1496
 
 <!-- One row per BLOCKER/MAJOR finding (MINOR optional), the finding ID alone in the first cell,
 e.g. "| M1 | accepted | evidence | T012 |". Disposition: accepted (needs a
@@ -10,5 +10,6 @@ with "Convergence:" (see the triage prompt). Never edit .ai/reviews/current.md. 
 
 | Finding | Disposition | Evidence / reason | Fix task |
 | --- | --- | --- | --- |
-| M2 | accepted | Confirmed in `scripts/ai-check` lines 22–33: when `flock -w "$limit" 8` fails the waiter calls `out_of_time`, which runs `ai_helper stamp invalidate` without holding the lock. `stamp invalidate` (`scripts/lib/workflow.py` ~760) rewrites `before` with the current fingerprint, and the holder's `stamp record` then compares against it, so a mid-run content change can record PASS with `unchanged: true`. `test_gate_lock_wait_exhausts_the_timeout_while_waiting` has no active stamp, so it misses this. Before T044 the wait-failure path used `ai_die` and never touched the stamp; T046 restores that for the timeout exit and adds concurrent-stamp regressions. | T046 |
-| N2 | accepted | `.ai/handoff.md` listed T045 as TODO and its next action as T045, but `.ai/bin/ai-task show T045` is DONE (tests in 5d94082). Fixed in this triage commit: T045 is DONE with its validation line and test names, and the next action is T046. T046 keeps the handoff current. | T046 |
+| M3 | accepted | Confirmed: `route_fix_rounds` (scripts/lib/workflow.py:3712) counts `TRIAGE_COMMIT` subjects in BASE..HEAD when `fix_round_records()` returns None (missing store), so agent-controlled history can make the round count non-zero and route to Claude. A10 says routing reads host records only and anything missing means Codex. | T116 |
+| N2 | accepted | Confirmed: tests/isolation.py:18 checks only `AI_STATE_DIR`; when it is already under the temp dir, `XDG_STATE_HOME` stays unset or external, contrary to A13 (both variables isolated). Cheap, test-only. | T117 |
+| N3 | accepted | Confirmed: `ai_queue_ruling` (scripts/lib/common.sh) returns after `tasks preflight --dry-run` when nothing needs repair, and ai-run planning and revision only use `--dry-run`; `tasks_preflight` writes `.ai/local/preflight.md` only without `--dry-run` (workflow.py ~718). A5 says the report is printed and written. Cheap, in scope. | T118 |

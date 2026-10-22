@@ -184,7 +184,9 @@ Before leaving an implementation session unattended:
    line by hand. Use narrow tool entries such as `Bash(npm run test *)`; dependency installation
    may need an explicit permission entry. Do not give unrestricted Bash by default.
    `.ai/bin/ai-task check` validates the task queue read-only (the pipeline runs the same
-   check and stops on an invalid queue). `.ai/bin/ai-task reorder` rewrites the queue so every
+   check and stops on an invalid queue, unless its pre-flight scan could fix it: only TODO tasks
+   out of dependency order or missing an empty section, repaired once per task per run, committed
+   as `chore(ai): ruling: task queue` with a `Ruling (…)` run-log row and a 🔧 notification). `.ai/bin/ai-task reorder` rewrites the queue so every
    task comes after its dependencies (task text unchanged); it rejects cycles, unknown IDs and
    prose in `Dependencies:`. `python3 scripts/lib/workflow.py tasks fill-sections` (host-only)
    adds a missing `### Likely affected modules` or `### Result / notes` heading to TODO tasks and
@@ -425,6 +427,7 @@ commits. `--no-pr` stops after the review;
 | ✅ Done / ⚠ Blocked | a task finished (with progress, e.g. 1/2), or was blocked |
 | ⏸ PAUSED | usage limit; it resumes by itself at the stated time |
 | 🔧 Recovering / Recovered | auto-recovery is handling a stop; no action needed yet |
+| 🔧 Ruling | the host fixed a task queue whose only fault was the order or an empty section, once per task per run; see the run log |
 | ⚠ HUNG? | a runner is alive but silent for too long; it keeps running |
 | ⛔ STOPPED, needs you | fully stopped; nothing automatic follows. Says why and what to do |
 | 🏁 FINISHED | all tasks done: review result, PR link and your numbered todo list |
@@ -512,8 +515,27 @@ A Codex limit on a review doesn't pause by default: see "Claude fallback reviewe
 `AI_REVIEWER` picks the reviewer for plan reviews, code reviews and re-checks:
 `auto` (default) asks Codex first and, only when Codex reports a usage limit (or the
 Codex CLI is missing), runs a fresh read-only Claude review instead; `codex` keeps the
-old behaviour (pause until Codex resets); `claude` skips Codex. Codex is tried again on
-every later review, so it takes over as soon as it has usage.
+old behaviour (pause until Codex resets); `claude` skips Codex. When Codex names its reset
+time, the host remembers it (`codex-limit.json` in the host state directory): until then
+`auto` reviews go straight to the Claude fallback (labelled `(recorded)`) without calling
+Codex; afterwards Codex takes over again. `codex` ignores that record.
+
+Review routing (`auto` only): Codex reviews the plan, re-checks, the first full code review and
+every large or risky fix round. A small low-risk fix-round re-review goes to a fresh read-only
+Claude session instead, labelled `Claude, routed (…)`, with no catch-up entry (Codex reviewed
+the branch earlier). Small: at most `AI_REVIEW_SMALL_LINES` (default 200) changed lines outside
+`.ai/` since the last host-recorded code review. Risky: a changed path matching the risk globs
+(migrations, SQL, Supabase, auth, policies, RLS, security, payment, billing, `.github/`,
+`.claude/`, permissions, `scripts/lib/common.sh`, `scripts/ai-check`; add globs with
+`AI_REVIEW_RISK_PATHS`), a changed line with a risk word (auth, RLS, grant, migration, payment,
+lock, race, transaction, secret, token, password, permission and similar; add words with
+`AI_REVIEW_RISK_WORDS`), or a task finished since that review running on opus. The decision
+reads host records only; anything missing sends the review to Codex. `AI_REVIEW_ROUTE=codex`
+turns routing off.
+
+Every published plan and code review names its reviewer in a `Reviewed by:` line (BR-14), and the
+PR lists one `Reviewed by:` bullet per plan and code round, so a Claude fallback or routed review is
+visible in the PR itself.
 
 The Claude reviewer is a separate `claude -p` session with no access to the
 implementing session and no shell: tools Read/Glob/Grep only, whatever
@@ -596,6 +618,11 @@ A task may override it with an optional line under its `Dependencies:` line, e.g
 `Model: opus` for a hard task while routine tasks use `sonnet`. Lighter models
 stretch subscription limits.
 
+A task that failed before starts each new session fresh with a short host note of what failed
+(the last attempt's result, failing checks, its last result line). From the third attempt the
+runner raises the model one tier (haiku → sonnet → opus; opus stays) and says so in the prompt;
+the run log names each attempt's number and model, e.g. `completed (attempt 3, opus)`.
+
 Codex reviews (plan and implementation) use `AI_REVIEW_MODEL` (default: Codex's own
 default model) at `AI_REVIEW_EFFORT` reasoning (low, medium, high, xhigh, max;
 default **high**). Reviews are where a stronger model pays off most: findings caught
@@ -628,7 +655,8 @@ subscribe to a hard-to-guess topic, and put this in
 `AI_LIMIT_RETRY`, `AI_LIMIT_MAX_WAIT`, `AI_REVIEW_MODEL`, `AI_REVIEW_EFFORT`, `AI_RECHECK_EFFORT`,
 `AI_REVIEWER`, `AI_CLAUDE_REVIEW_MODEL`, `AI_CLAUDE_REVIEW_EFFORT`, `AI_DIAGNOSIS_MODEL`,
 `AI_AUTO_RECOVER`, `AI_RECOVER_MAX`, `AI_LIMIT_RELAUNCH_MAX`, `AI_SUPERVISE`, `AI_SUPERVISE_PLAN_ROUNDS`,
-`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`; environment variables win):
+`AI_SUPERVISE_ESCALATE_ROUND`, `AI_SUPERVISE_ESCALATE_MODEL`, `AI_REVIEW_ROUTE`, `AI_REVIEW_SMALL_LINES`,
+`AI_REVIEW_RISK_PATHS`, `AI_REVIEW_RISK_WORDS`; environment variables win):
 
 ```bash
 AI_NOTIFY_CMD=curl -fsS -d "$1" https://ntfy.sh/<your-secret-topic>
@@ -974,6 +1002,11 @@ batch a temp directory there (`Temp dir: /dev/shm/ai-tests-… (tmpfs)`, removed
 The directory is probed by running a script from it; a `noexec` mount falls back to the
 default temp dir. `AI_TEST_TMPFS=0` turns it off (`AI_TEST_TMPFS_DIR` replaces `/dev/shm`, for
 the tests only).
+
+Test runs keep host state out of the real registry (FL-33): `tests/isolation.py`, imported first by
+every test module, points `AI_STATE_DIR` and `XDG_STATE_HOME` at throwaway temp directories unless a
+parallel worker already set a temp one. `run_parallel.py` then fails the run (`self-check registered
+fixture runs in the real registry: …`) if the real registry lists a checkout under its temp dir.
 
 Test timeouts are all scaled by one factor (`tests/timeouts.py`): `AI_TEST_TIMEOUT_SCALE`
 when set (a number greater than 0, otherwise the tests stop with an error), else 2 when

@@ -1,45 +1,34 @@
-<!-- Host evidence: HEAD 74034f7904b8b0f181c2e9e6d6d56bd3ba07fa21; merge-base c32f7684f967aaa8be5935e38272a70fb00fe313; saved 2026-10-20T22:29:18Z. -->
+<!-- Host evidence: HEAD 6cca6bf6879fdc22c1e3087fdcae4c970616237b; merge-base 20fe2ab452cdd7917af6c11e715fbff0ad6b4489; saved 2026-10-21T21:29:58Z. -->
 
 # Independent review
 
-Overall verdict: PASS — no findings in the inspected scope; both accepted MAJOR findings are fixed.
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=0
+Overall verdict: APPROVE WITH MINOR FINDINGS — previous findings are fixed; two localized integration gaps remain.
+Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
 
-Reviewed HEAD: `74034f7904b8b0f181c2e9e6d6d56bd3ba07fa21`
+Reviewed HEAD: `6cca6bf6879fdc22c1e3087fdcae4c970616237b`
 
-Supplied base and verified merge-base: `c32f7684f967aaa8be5935e38272a70fb00fe313`
-
-Previous-round delta: `5c73c56d55b8e9b4548855151255aa67e19f62b3..74034f7904b8b0f181c2e9e6d6d56bd3ba07fa21`
+Supplied base and verified merge-base: `20fe2ab452cdd7917af6c11e715fbff0ad6b4489`
 
 ## Scope and validation
 
-Inspected AGENTS.md, specification, plan, relevant tasks, state, handoff, review/dispositions, documentation, Git history, both requested diffs, and affected source/tests. The checkout was clean before and after review.
+Inspected repository instructions, specification, plan, tasks, state, handoff, previous review/dispositions, relevant documentation, Git history, the full supplied diff, changes since round 2, and affected source/tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json` records PASS at `2026-10-20T22:27:42Z`, on revision `c7955203b5ce3675d9998f0414015e6a05a746d3`.
-- Its referenced log reports **1,035 tests passed in 685.2 seconds**.
-- Independent `stamp verify` confirms the recorded fingerprint matches this checkout. Subsequent changes affect only excluded workflow records.
-- Independent discovery finds 1,035 tests.
+- `.ai/local/validation.json` records PASS at `2026-10-21T21:26:19Z`, on revision `72bda9c12cd2c8c0c2f5dcbbaf8b179df7057b65`.
+- Its referenced log reports **1,107 tests passed**.
+- Independent `stamp verify` confirms that evidence matches the reviewed content.
 
-Checks independently run:
+Checks independently completed:
 
-- Three documentation-consistency tests passed.
-- Fixture-free assertions passed for background-gate instructions, shared prompt contracts, and the protected-path list.
-- Task queue validation, Python AST parsing, and shell syntax checks across 14 files passed.
-- Original and revised guard digests match.
-- `git diff --check` reports an extra blank line at `.ai/tasks.md:3984`; this is cosmetic.
+- Python AST checks across nine files and shell syntax checks across 14 files.
+- Discovery of 1,107 tests and execution of three passing documentation-consistency tests.
+- Task queue validation and `git diff --check`.
+- Write-free reproductions using actual helpers, with storage inputs and writes mocked where necessary.
 
-The full `./scripts/ai-check` and writable integration fixtures were not rerun because the sandbox is read-only. No project files were written or network/MCP integrations invoked.
+Previous findings **M1, M2, M3, N1, N2 and N3 are fixed**: registry capture precedes discovery; indirectly moved tasks consume claims; missing routing records retain Codex; routed reviews default to opus while preserving overrides; both state variables are isolated independently; advisory scans refresh the overlap report.
 
-## Previous finding verification
-
-- **M1 fixed:** lock waiting is capped by `AI_CHECK_TIMEOUT` and deducted from the validator’s remaining budget. Exhaustion returns 124 without starting validation.
-- **M2 fixed:** the pre-acquisition timeout path no longer invokes `stamp invalidate`. Remaining stamp mutations occur after lock acquisition.
-- T046’s regressions directly cover preservation of RUNNING/PASS evidence and concurrent content-change detection. Their assertions would detect the original stamp-overwrite defect.
-- **N1 remains fixed:** decimal normalization and leading-zero regressions remain present.
-- **N2 fixed:** the handoff identifies T045 as DONE and directs the next reader to review.
-- **N5 remains fixed:** executable repair uses the guard’s shared protected-path list and skips roots and descendants.
+The full `./scripts/ai-check` and writable integration fixtures were not rerun because the sandbox is read-only. Discovery required pinning Python’s temporary-directory value to avoid its write probe. No project files were written or network/MCP integrations invoked.
 
 ## BLOCKER findings
 
@@ -51,32 +40,67 @@ None found in the inspected scope.
 
 ## MINOR findings
 
-None found in the inspected scope.
+### N4 — Triage section repairs bypass ruling claims and logging
+
+**Location:** `scripts/ai-run:658`, before `ai_queue_ruling` at line 663.
+
+**Requirement:** R2/R3 and assumption A2 require bounded, logged rulings for section repairs after triage. The uncapped exceptions cover planning and plan-revision sessions.
+
+**Problem:** Triage calls `tasks fill-sections` before the ruling helper scans the queue. Missing sections are therefore already repaired when preflight runs, so it neither claims `task-sections:TASK` nor writes its ruling row.
+
+**Impact:** These triage repairs remain unlogged and can repeat despite an existing claim. The impact is limited to empty sections; queue-order claims still work.
+
+**Evidence:** Running the actual fill and preflight helpers in sequence, with queue writes held in memory, repaired a TODO task’s missing `Result / notes`. The following preflight returned no changes, leaving nothing for the ruling helper to claim or log.
+
+**Recommended direction:** Let the claimed preflight path perform triage section repairs before queue validation. Test first repair, refused repeat, and the resulting run-log row.
+
+This is a gap in the new ruling contract around retained legacy behavior.
+
+### N5 — Outcomes report incorrectly requests catch-up for routed reviews
+
+**Location:** `scripts/lib/workflow.py:4696`.
+
+**Requirement:** R6 and assumption A12 distinguish routed reviews from fallback reviews: routed reviews need no Codex catch-up.
+
+**Problem:** `outcomes_report()` treats every reviewer beginning with `claude` as a fallback, including the newly introduced `claude-routed`.
+
+**Impact:** `ai-status --outcomes` reports a successfully routed review under “Codex catch-up pending,” contradicting its review record and PR description and suggesting unnecessary work.
+
+**Evidence:** The actual reporting function, given a Codex code-review row followed by a `claude-routed` row, listed the routed row under `## Claude-only reviews (Codex catch-up pending)`.
+
+**Recommended direction:** Exclude routed reviews from catch-up accounting while preserving fallback behavior. Add a reporting regression alongside the existing catch-up tests.
+
+The reporting filter predates this branch; introducing the routed reviewer category creates this integration regression.
 
 ## Missing coverage
 
-Positive retry integration tests use RUNNING evidence. Equivalent end-to-end cases for PASS and changed-content evidence would strengthen coverage; helper tests already verify their classification. This is not a demonstrated correctness gap.
+Add automated regressions for:
+
+- Triage section repairs consuming a claim and writing a ruling row, with repeats refused.
+- Routed reviews remaining visible in reviewer statistics without appearing as catch-up pending.
+
+The recorded suite covers the earlier accepted findings but misses these integration cases.
 
 ## Security concerns
 
-No additional significant security or authorization defect found in the inspected changes. Stamp outcome reading remains bounded, nonblocking, and protected against symlink following. A retry still requires a host gate, and eventual completion requires a later DONE checkpoint with validation.
+No additional demonstrated security, authentication or authorization defect was found in the inspected changes. The previous routing authority defect, M3, is fixed.
 
-No pre-existing defect is counted among the findings.
+No unrelated pre-existing defects are counted.
 
 ## Architecture concerns
 
-The changes preserve host-controlled, bounded retries and add no dependencies. The protected-path refactor preserves guard-digest compatibility.
+The implementation retains standard-library helpers and minimal dependencies. The remaining issues concern inconsistent use of the shared ruling path and an existing report’s handling of a new reviewer category.
 
-**Flow chart updated:** the inspected vault note documents background validation, lock waiting, shared timeout accounting, stamp preservation, retry notifications, and protected-path exclusions.
+**Flow chart updated:** the inspected vault note has `updated: 2026-10-21` and documents the workflow changes. Same-session editing timing was not independently established.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-After the normal toolkit upgrade, observe a real slow-gate Claude session: confirm background execution, result reading, and no edits or commits during validation. If a gate-only block occurs, confirm one retry notification and a fresh session.
+After the normal toolkit upgrade, observe reviewer selection, attribution, notifications and resumption during a real fix round and Codex-limit window using the actual CLIs.
 
 ### Covered by automated tests
 
-Recorded coverage includes manifest lifecycle, safe stamp reading, combined timeout budgets, concurrent stamp preservation and change detection, one-time retry, neighboring BLOCKED cases, and protected-path exclusions.
+Queue repair, ruling lifecycle, retries, routing, limit memory, attribution and registry isolation have recorded automated coverage. Add the two regressions above and run `./scripts/ai-check` after any fixes.
 
 Reviewing does not constitute human acceptance.

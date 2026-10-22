@@ -37,7 +37,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -61,6 +61,14 @@ ai_supervise_settings() {
   [[ "$AI_SUPERVISE_ESCALATE_MODEL" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || \
     ai_die "Invalid AI_SUPERVISE_ESCALATE_MODEL: $AI_SUPERVISE_ESCALATE_MODEL"
   export AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+}
+
+# Review routing (AI_REVIEWER=auto): AI_REVIEW_ROUTE empty/risk routes small low-risk fix
+# rounds to Claude, codex turns that off; AI_REVIEW_SMALL_LINES is the size limit.
+ai_review_route_settings() {
+  [[ "${AI_REVIEW_ROUTE:-}" =~ ^(|risk|codex)$ ]] || ai_die "Invalid AI_REVIEW_ROUTE: $AI_REVIEW_ROUTE (risk or codex)"
+  [[ -z "${AI_REVIEW_SMALL_LINES:-}" || "$AI_REVIEW_SMALL_LINES" =~ ^[1-9][0-9]{0,5}$ ]] || \
+    ai_die "Invalid AI_REVIEW_SMALL_LINES: $AI_REVIEW_SMALL_LINES (1-999999)"
 }
 
 # Codex review model/effort: reviews are where a stronger model pays off most.
@@ -311,4 +319,109 @@ ai_log() {
   printf '| %s | runner | %s | %s | %s | %s | %s |\n' \
     "$(date -u +%FT%TZ)" "$1" "$2" "$3" \
     "$(git rev-parse --short HEAD 2>/dev/null || printf none)" "$4" >> .ai/run-log.md
+}
+# BR-02 host rulings (T103). OUT is `tasks preflight` output: `queue-order`/`task-sections`
+# change lines, then `overlap` lines. ai_ruling_rows TASK OUT appends one run-log Ruling row per
+# change line under TASK.
+ai_ruling_rows() {
+  local line kind rest why cost
+  while IFS= read -r line; do
+    read -r kind rest <<< "$line"
+    case "$kind" in
+      queue-order) why='only the order was wrong; dependencies first, no DONE task moved'
+                   cost='a task runs later than planned' ;;
+      task-sections) why='empty section added to a TODO task'; cost='none, the section is empty' ;;
+      *) continue ;;
+    esac
+    ai_log "$1" "$(ai_helper ruling-row "$kind" "$rest" "$why" "$cost")" 'n/a' 'host ruling'
+  done <<< "$2"
+}
+# The overlap report of OUT (advisory: never stops a run).
+ai_overlap_lines() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" != overlap\ * ]] || printf '%s\n' "$line"
+  done <<< "$1"
+}
+# ai_queue_ruling TASK: repair .ai/tasks.md when its only faults are the order of TODO tasks or
+# their empty sections, each moved or filled task claimed once per run (`run-manifest ruling`),
+# with Ruling rows under TASK and one 🔧 notification. Returns 0 when it changed the queue; 1
+# when it changed nothing (valid, unfixable or a refused claim, e.g. a repeat or no run
+# manifest), and the caller's queue check decides as before. The caller commits.
+ai_queue_ruling() {
+  local out line kind id rest changes=() moved=() filled=() summary=''
+  out=$(ai_helper tasks preflight --dry-run 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    read -r kind id rest <<< "$line"
+    case "$kind" in
+      queue-order) changes+=("$line"); moved+=("$id ${rest#placed }") ;;
+      queue-moved) changes+=("$line") ;;
+      task-sections) changes+=("$line"); filled+=("$id") ;;
+    esac
+  done <<< "$out"
+  if (( ${#changes[@]} == 0 )); then
+    ai_overlap_lines "$out"
+    return 1
+  fi
+  for line in "${changes[@]}"; do
+    read -r kind id _ <<< "$line"
+    [[ "$kind" != queue-moved ]] || kind=queue-order
+    ai_helper run-manifest ruling "$kind" "$id" >/dev/null 2>&1 || return 1
+  done
+  out=$(ai_helper tasks preflight 2>/dev/null) || return 1
+  printf '%s\n' "$out"
+  ai_ruling_rows "$1" "$out"
+  if (( ${#moved[@]} )); then
+    summary=$(printf '; %s' "${moved[@]}")
+    summary="reordered (${summary#; })"
+  fi
+  if (( ${#filled[@]} )); then
+    line=$(printf ', %s' "${filled[@]}")
+    summary+="${summary:+, }sections added (${line#, })"
+  fi
+  ai_notify "🔧 Ruling: task queue $summary; see the run log."
+}
+# ai_disposition_ruling triage|plan TASK (BR-01, T104): a disposition row whose first cell holds
+# exactly one finding ID of the review in markup or with extra text gets the bare ID, each ID
+# claimed once per run (`run-manifest ruling disposition-cell DIGEST12.ID`), with Ruling rows
+# under TASK. A refused claim (a repeat, no run manifest) changes nothing and the caller's check
+# stops as before. The caller commits.
+ai_disposition_ruling() {
+  local out line digest='' ids=() id cell
+  out=$(ai_helper disposition-ruling "$1" --dry-run 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      digest\ *) digest=${line#digest } ;;
+      ?*) ids+=("${line%% *}") ;;
+    esac
+  done <<< "$out"
+  [[ -n "$digest" ]] && (( ${#ids[@]} )) || return 0
+  for id in "${ids[@]}"; do
+    ai_helper run-manifest ruling disposition-cell "$digest.$id" >/dev/null 2>&1 || return 0
+  done
+  out=$(ai_helper disposition-ruling "$1" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != digest\ * ]] || continue
+    read -r id cell <<< "$line"
+    printf 'Disposition cell "%s" read as %s.\n' "$cell" "$id"
+    ai_log "$2" "$(ai_helper ruling-row disposition-cell "finding cell \"$cell\" read as $id" \
+      'the cell held exactly one finding ID of this review' \
+      "the row is counted for $id; a wrong reading shows in the PR's dispositions")" 'n/a' 'host ruling'
+  done <<< "$out"
+}
+# ai_flow_line_ruling KEY TASK (BR-01, T105): a handoff `## Flow chart` section that does not start
+# with "Flow chart updated" or "Flow unchanged" gets that line once per KEY per run (`run-manifest
+# ruling flow-line KEY`), with a Ruling row under TASK. A refused claim (a repeat, no run manifest)
+# leaves the handoff as the session wrote it. The caller commits the handoff and run log.
+ai_flow_line_ruling() {
+  local line
+  line=$(ai_helper flow-line-ruling --dry-run 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  ai_helper run-manifest ruling flow-line "$1" >/dev/null 2>&1 || return 0
+  line=$(ai_helper flow-line-ruling 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  printf 'Flow chart line: "%s" placed under the heading.\n' "$line"
+  ai_log "$2" "$(ai_helper ruling-row flow-line "handoff Flow chart section starts with \"$line\"" \
+    'the section must start with one of the two phrases' \
+    'the PR says the flow changed or not when the other is true; the section text below it stays')" 'n/a' 'host ruling'
 }

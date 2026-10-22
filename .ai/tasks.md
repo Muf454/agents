@@ -8,13 +8,16 @@ changes the flow updates `~/zWiki/zWiki/20 Projects/agents/agents-flow.md` and i
 date in the same task and appends a dated line to the Log of `agents.md`; never tick vault
 checkboxes. If the vault edit is denied, record it in the result and in the handoff's
 "## Flow chart" section.
-Current batch (batch 8, `fix/flow-batch-8` from `master` at c32f768, planned 2026-10-19): T037–T043,
-from vault `agents-backlog.md` FL-32 and PR #34's final review finding N5. Design:
-`.ai/current-plan.md`; scope and assumptions: `.ai/project-spec.md`. Line references for T037–T043
-are at c32f768; re-check them before editing. T001–T036 are batch 6's and batch 7's DONE tasks
-(merged in #31 and #34), kept unchanged because the host protects DONE blocks; their line
-references and their gate notes are historical.
-BATCH 8 GATE RULE (overrides the gate note below and the installed runner prompt for this batch):
+Current batch (batch 9, `fix/flow-batch-9` from `fix/flow-batch-8` at 48fd9b5, planned 2026-10-20,
+approved by Zack 2026-10-20): T101–T112, from vault `agents-backlog.md` BR-01, BR-02, BR-03, BR-14
+(section "Borrowed from other projects (2026-10-20)"), FL-24, FL-25, FL-30 and FL-33. Design:
+`.ai/current-plan.md`; scope and assumptions A1–A13: `.ai/project-spec.md`. Line references for
+T101–T112 are at 48fd9b5; re-check them before editing. T001–T046 are batches 6, 7 and 8 (DONE;
+batch 8 on `fix/flow-batch-8`, PR #35, not merged; T044–T046 are its review fixes), kept unchanged because the host protects DONE blocks;
+their line references and gate notes are historical.
+Run-log rows written by the host must contain no `|` (ai_log does not escape it): use the
+`ruling-row` helper (T101) or strip it.
+BATCH 8 GATE RULE (still in force for batch 9; overrides the gate note below and the installed runner prompt):
 run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, wait for
 its completion notice and read the result; make no edits and no commits while it runs, and do not
 end the session while it runs. If its result cannot be obtained in the session, do NOT mark the task
@@ -3981,4 +3984,1154 @@ deadline" bullet updated; hub Log line appended.
 Validation: `-k gate_lock_wait` Ran 13 OK; `-k gate_only` Ran 7 OK; `-k gate_time` Ran 4 OK;
 `-k session_gate_allowance` Ran 5 OK; `.ai/bin/ai-check` PASS (1035 tests, 675.5 s, background
 and waited for).
+
+## T101 — Host ruling record and run-log row format (BR-01, helpers)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+The host can claim a ruling once per kind per key per human-started run, and write it as one
+run-log row in the `Ruling: what, why, cost if wrong` shape that cannot break the table.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "Rulings: one record, one row format". File `scripts/lib/workflow.py`.
+- `run_manifest`: action `ruling KIND KEY` modelled on `gate-unblock` (batch 8, T038; grep
+  `gate-unblock` and `task_list_valid`). KIND in `queue-order`, `task-sections`,
+  `disposition-cell`, `flow-line` (else usage error); KEY `[A-Za-z0-9._-]{1,48}` (else usage
+  error). Optional field `rulings`: list of unique `KIND:KEY` strings, at most 200; any other shape
+  invalidates the manifest (extend the validity check and its comment). A repeat fails `ruling KIND
+  for KEY was already made once in this run` with the bytes unchanged; else one atomic append.
+  `clear-attempts` keeps it; `start` drops it.
+- New action `ruling-row KIND WHAT WHY COST`: prints `Ruling (KIND): WHAT. Why: WHY. Cost if
+  wrong: COST.` with each `|`, backslash, CR and LF replaced by a space, runs of spaces collapsed,
+  cut to 400 characters at a word boundary; wrong argument count → usage error.
+- No caller yet (T103–T105). Flow unchanged in this task; say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (the run-manifest field list)
+
+### Acceptance criteria
+- Tests named `test_ruling_manifest_*` in tests/test_workflow.py (after `run-manifest start` as
+  `approve_run` does):
+  - `ruling queue-order T004` exits 0 and the manifest holds `rulings: ["queue-order:T004"]`; a
+    second identical call exits 1 with `already made once` and identical manifest bytes;
+    `ruling task-sections T004` and `ruling queue-order T005` exit 0;
+  - `ruling bogus T004`, `ruling queue-order 'a b'`, a 49-character key and missing arguments exit
+    non-zero with usage;
+  - `clear-attempts` keeps `rulings`; a new `start` drops it; a manifest with `rulings` `"x"`,
+    `["a:b", "a:b"]` or `[1]` is invalid (an action that validates fails, as for `gate_unblocks`);
+  - `ruling-row queue-order 'moved T004 | after T006' 'only the order was wrong' 'none'` prints one
+    line starting `Ruling (queue-order): moved T004 after T006.` with no `|`, no newline inside, and
+    at most 400 characters for a 2000-character WHAT.
+- All `test_gate_unblock_manifest_*` and `test_timeout_rerun_manifest_*` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k ruling_manifest` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_unblock_manifest` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/lib/workflow.py`: `RULING_KINDS`, `ruling_valid`, the
+`rulings` check inside `timeout_reruns_valid` (list, ≤200, unique, each `KIND:KEY` with a known
+kind and a valid key), `run-manifest ruling KIND KEY` (usage error on bad kind/key/count; repeat
+fails `ruling KIND for KEY was already made once in this run`, bytes unchanged; `too many` at
+200), `clear-attempts` keeps it, `start` drops it; top-level helper `ruling-row KIND WHAT WHY COST`
+(KIND validated too; `|`, `\`, CR, LF → space, space runs collapsed, ≤400 chars cut at the last
+word boundary, or hard-cut when that boundary would keep under 300 chars, e.g. one 2000-char
+word). docs/workflow.md run-manifest paragraph updated. Tests: `test_ruling_manifest_once_per_kind_and_key`,
+`_kept_on_resume_dropped_on_start`, `_wrong_shape_is_invalid`, `_row_is_one_safe_line`.
+Validation: `-k ruling_manifest` Ran 4 OK; `-k gate_unblock_manifest` Ran 5 OK;
+`-k timeout_rerun_manifest` Ran 4 OK; `.ai/bin/ai-check` PASS (1039 tests, 701.4 s, background
+and waited). No caller yet (T103–T105); flow unchanged, vault flow chart not edited.
+
+## T102 — `tasks preflight`: order-only reorder, empty sections, overlap report (BR-02, helper)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+One host helper decides whether a queue's only faults are order and empty sections, repairs only
+TODO tasks, says what it changed, and reports task pairs that share a likely-affected file.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-02 pre-flight"; assumptions A1 and A5 in
+  `.ai/project-spec.md`. File `scripts/lib/workflow.py` (`tasks_reorder` ~493–557,
+  `fill_task_sections` ~576–598, `tasks_fill_sections` ~601–620, `task_command` ~623).
+- Factor the order computation out of `tasks_reorder` (parse + DFS → `order`, `ids`) so both use
+  it; `tasks reorder` keeps its behaviour and output exactly.
+- `tasks preflight [--dry-run]`:
+  1. order: when `order != ids` and every task whose index differs between `ids` and `order` has
+     `Status: TODO`, the order is fixable; a non-TODO task that moves → fail with `{T}:
+     dependencies must exist earlier in the queue: {dep}` (the `tasks()` wording, first offending
+     dependency) and leave the file unchanged. Cycles, unknown IDs, prose, duplicates: the
+     `tasks_reorder` errors, unchanged;
+  2. sections: TODO tasks missing `Likely affected modules`/`Result / notes` (as `fill-sections`);
+  3. print one line per change, `queue-order TASK placed after DEP[, DEP]` (the dependencies that
+     were later) and `task-sections TASK added SECTION[, SECTION]`;
+  4. overlap: for each pair of TODO tasks A before B whose `### Likely affected modules` tokens
+     (split on commas and whitespace; tokens containing `/` or `.`; strip trailing `,.;:` and
+     backticks) intersect, print `overlap A B PATH[, PATH]` (at most 20 lines, then `overlap …
+     N more`); write the same lines to `.ai/local/preflight.md` through the safe local writer used
+     for observation records (skip quietly when `.ai/local` is unsafe);
+  5. without `--dry-run` apply 1–2 in one atomic write (mode kept), then run `tasks()` on the
+     result; a remaining fault fails with its message. With `--dry-run` write nothing (no
+     preflight.md either) and exit 0 when 1–2 would make the queue valid, else fail as in 5.
+- No caller yet (T103). Flow unchanged in this task; say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (the `ai-task`/helper list)
+
+### Acceptance criteria
+- Tests named `test_preflight_helper_*` in tests/test_workflow.py, on queues built with the
+  existing `task()` fixture helper:
+  - raid-f4 shape (T001–T006 TODO; T004 `Dependencies: T001, T005, T006`): `--dry-run` prints
+    `queue-order T004 placed after T005, T006`, leaves the bytes unchanged; the real run gives the
+    order T001 T002 T003 T005 T006 T004 with every block's text unchanged, and `tasks check` passes;
+  - a TODO task without `### Result / notes` and `### Likely affected modules` gets both and a
+    `task-sections` line; a DONE task missing one is not touched and the queue still fails;
+  - DONE T001, DONE T002 depending on a later TODO T003 → fails `T002: dependencies must exist
+    earlier in the queue: T003`, file unchanged;
+  - a cycle, an unknown ID and `Dependencies: after T002` fail with the `tasks reorder` messages,
+    file unchanged; a valid queue prints no `queue-order`/`task-sections` line and is unchanged;
+  - T002 and T005 both list `scripts/ai-run` → `overlap T002 T005 scripts/ai-run` and the same
+    line in `.ai/local/preflight.md`; DONE tasks never appear in overlap lines.
+- Existing `-k reorder` and `-k fill_sections` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight_helper` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k reorder` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21. `scripts/lib/workflow.py`: `queue_order` (parse + DFS) and `reordered_text`
+factored out of `tasks_reorder` (behaviour and output unchanged), `filled_text` out of
+`tasks_fill_sections` (output unchanged), new `tasks_preflight` (`tasks preflight [--dry-run]`),
+`likely_paths`, `task_status`. One deliberate tightening of the notes: the repaired text is checked
+with `tasks()` *before* the write, so a remaining fault fails with its message and leaves the file
+unchanged in both modes (the caller dry-runs first anyway). The moved-non-TODO failure names the
+moved task's own first later dependency, else the queue's first one. `preflight.md` is written on
+every successful real run (empty when there are no overlaps) through `write_record` on the pinned
+`.ai/local`; an unsafe or missing `.ai/local` is skipped quietly. docs/workflow.md helper paragraph.
+Evidence: `-k preflight_helper` Ran 7 tests OK; `-k reorder` Ran 12 OK; `-k task_sections` Ran 8 OK
+(the `-k fill_sections` filter matches no test names; the fill tests are `test_task_sections_fill_*`);
+`.ai/bin/ai-check` PASS, 1046 tests, 706.7 s (moved to the background at 600 s and waited for,
+no edits meanwhile). No caller yet (T103); flow unchanged, vault not edited.
+
+## T103 — Pre-flight at pipeline start, after plan revisions and after triage (BR-02, FL-24, wiring)
+Status: DONE
+Dependencies: T101, T102
+Model: opus
+
+### Goal
+A committed queue whose only fault is order no longer stops the run: the pipeline repairs it once,
+commits it with a ruling row and continues; plan revisions, planning sessions and triage log their
+repairs the same way.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-02 pre-flight" (chart). Assumptions A1, A2, A4.
+- `scripts/ai-pipeline` (~451–464): after the `revision-queue-repair` block and before
+  `tasks check`, when not `armed_resume` and the tree is clean: `ai_helper tasks preflight
+  --dry-run`; on success with change lines: for each `queue-order T`/`task-sections T` line claim
+  `run-manifest ruling KIND T` (any failure → fall through to `tasks check`, which stops as
+  today); then `tasks preflight` (real), one `ai_log` row per change built with `ruling-row`
+  (WHY `only the order was wrong; dependencies first, no DONE task moved` or `empty section added
+  to a TODO task`; COST `a task runs later than planned` or `none, the section is empty`), and
+  `host_commit 'chore(ai): ruling: task queue' .ai/tasks.md .ai/run-log.md`; print the overlap
+  lines. A dry-run failure changes nothing (today's `tasks check` stop follows).
+- `scripts/ai-run --triage` (~641–645): after `fill-sections`, the same claim + `tasks preflight`
+  + rows, inside the counted triage commit (no extra commit). `--plan` (~440–446) and
+  `--revise-plan` (~551–560): keep today's `fill-sections` + `reorder` (no claim: no run manifest
+  in a planning session), and add one ruling row per printed change plus the overlap lines on
+  stdout; the rows land in the plan's run log (planning) or the revision commit.
+- Notify once per ruling commit: `🔧 Ruling: task queue reordered (T004 after T005, T006); see the
+  run log.`
+- Flow chart (vault `agents-flow.md`, "The big picture" before the plan review, and "When
+  something goes wrong"): a "Pre-flight queue scan" step and a bullet "Rulings (BR-01/BR-02, T103,
+  2026-10-20)": order-only faults and empty sections of TODO tasks are fixed once per task per run,
+  logged `Ruling (…)`, else the stop as today; the notifications table gains the 🔧 Ruling row.
+  Update `updated:`; append a dated hub Log line in `agents.md` (never tick checkboxes); set the
+  handoff's `## Flow chart` line. If the vault edit is denied, record it in the result and in the
+  handoff's "## Flow chart" section.
+
+### Likely affected modules
+scripts/ai-pipeline, scripts/ai-run, tests/test_workflow.py, docs/workflow.md, README.md, vault
+agents-flow.md and agents.md Log, .ai/handoff.md
+
+### Acceptance criteria
+- Tests named `test_preflight_pipeline_*` in tests/test_workflow.py (pipeline fixtures with a run
+  manifest, mock Codex/Claude as the existing pipeline tests):
+  - `raid_f4_committed_queue`: the raid-f4 queue (T004 depends on the later T005, T006) committed
+    → the pipeline commits `chore(ai): ruling: task queue` before `chore(ai): record plan review`,
+    the run log has a `Ruling (queue-order)` row naming T004 with no extra `|` cells, the
+    notifications contain `Ruling: task queue reordered`, the plan is reviewed and the run
+    completes with T001 T002 T003 T005 T006 T004 DONE in that order;
+  - `same_ruling_twice_stops`: the manifest already holds `queue-order:T004` (claimed) and the
+    committed queue is out of order again → stops with `Task queue is invalid: T004: dependencies
+    must exist earlier in the queue` as today, no ruling commit;
+  - `done_task_would_move_stops`: a DONE task depending on a later TODO task → today's stop;
+  - `triage_reorders_fix_task`: a mock triage appends two fix tasks, T010 (`Dependencies: T011`)
+    and then T011 → after triage T011 is before T010 in the queue, the triage commit holds the
+    ruling row, and the run goes on;
+  - `plan_session_logs_rulings`: `ai-run --plan` whose mock session writes an out-of-order queue →
+    `Ruling (queue-order)` row in the run log and the overlap line on stdout.
+- Existing `-k revision_queue_repair`, `-k plan_revision` and `-k triage` tests pass unchanged
+  (update only expected run-log rows where a ruling row is now added, and say which in the result).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight_pipeline` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k revision_queue_repair` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/lib/common.sh`: `ai_queue_ruling TASK` (dry run →
+`run-manifest ruling` per `queue-order`/`task-sections` line → real `tasks preflight` → one
+`ai_log` row per change via `ruling-row` → one `🔧 Ruling: task queue reordered (T004 after T005,
+T006); see the run log.`; returns 1 and changes nothing on a failed dry run or the first refused
+claim; earlier claims of the same scan stay spent), `ai_ruling_rows`, `ai_overlap_lines`.
+`ai-pipeline`: after the `revision-queue-repair` block, not armed and clean →
+`ai_queue_ruling preflight` → `host_commit 'chore(ai): ruling: task queue' .ai/tasks.md
+.ai/run-log.md`, then `tasks check` as before. `ai-run --triage`: `ai_queue_ruling triage` after
+`fill-sections`, inside the counted triage commit (also notifies). `--plan`/`--revise-plan`: a
+dry run before today's fill+reorder names the changes; rows (`planning`/`plan-revision`) and
+overlap lines added after the check (no claim, no notification). Tests: `test_preflight_pipeline_*`
+(6: `raid_f4_committed_queue`, `same_ruling_twice_stops` (manifest claimed, resumed with
+`AI_RECOVERY_ATTEMPT=1`), `done_task_would_move_stops`, `triage_reorders_fix_task` (mock
+`triage-out-of-order`: T002 depends on T003; IDs follow the fixture queue instead of T010/T011),
+`plan_session_logs_rulings` (mock `plan-out-of-order-shared`), `revision_logs_rulings_in_the_revision_commit`).
+Changed existing tests: `test_queue_check_invalid_queue_stops_plan_review`, `_escalates_without_recovery_session`,
+`_stops_with_skip_plan_review` now use `unfixable_queue()` (a cycle), because the old order-only
+queue is now repaired; `test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline`
+removed (its behaviour is reversed by this task; covered by the new raid-f4 and repeat tests). No
+expected run-log rows in `-k revision_queue_repair`/`plan_revision`/`triage` tests needed changes.
+Docs: docs/workflow.md "Pre-flight queue scan" paragraph, README queue sentence and 🔧 Ruling
+row; vault flow chart (pre-flight step, note, Rulings bullet, 🔧 Ruling row, `updated:`) and hub Log.
+Validation: `-k preflight_pipeline` Ran 6 OK; `-k revision_queue_repair` Ran 0 (matches no test
+name; the tests are `test_queue_repair_*`/`test_queue_recovery_*`: with `-k queue_check`,
+`-k task_sections` Ran 32 OK); `-k plan_revision -k triage` Ran 49 OK; `-k Docs -k flow_this_repo
+-k preflight` Ran 18 OK; `.ai/bin/ai-check` PASS (1051 tests, 678.6 s, background and waited, no
+edits meanwhile).
+
+## T104 — Ruling: a disposition cell with more than the bare finding ID (BR-01, FL-30, FL-25)
+Status: DONE
+Dependencies: T101
+Model: opus
+
+### Goal
+A triage or plan-revision row whose first cell wraps the one finding ID in markup or adds text the
+parser rejects is repaired once by the host instead of stopping the run.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-01 record-format rulings". File `scripts/lib/workflow.py`
+  (`FINDING_CELL`/`DISPOSITION_ROW` ~1056–1066, `unmatched_cell_hint` ~1069, `triage_check`
+  ~1105, `PLAN_DISPOSITION_ROW` ~2897 and its check ~3077).
+- New action `disposition-ruling triage|plan [--dry-run]`: target `.ai/reviews/dispositions.md`
+  (triage, the whole table) or the last section of `.ai/reviews/plan-dispositions.md` (plan); the
+  known IDs are the current review's BLOCKER/MAJOR (and MINOR) finding IDs (`finding_ids` on
+  `.ai/reviews/current.md` or `.ai/reviews/plan.md`). For each known ID with no matching row
+  (same regex as the check), find table lines whose first cell, after removing `*`, `` ` ``, `[`
+  and `]`, contains that ID word-bounded and no other known ID; exactly one such line → rewrite its
+  first cell to ` ID ` (the rest of the line byte-identical); print `ID`. Zero or several lines →
+  no change for that ID. Never touch the header, `Review HEAD:` line, comments or other sections.
+  Print also `digest <sha256-12 of the review>` first, for the claim key.
+- `scripts/ai-run --triage`, before `triage-check --fresh` (~647): run the dry run; for each ID
+  claim `run-manifest ruling disposition-cell <digest12>.<ID>` (failure → skip all rewrites;
+  today's check stops); then the real run and one `ruling-row` row per ID (WHAT `finding cell
+  "<old cell, 60 chars>" read as ID`, WHY `the cell held exactly one finding ID of this review`,
+  COST `the row is counted for ID; a wrong reading shows in the PR's dispositions`), all inside the
+  counted triage commit. `--revise-plan`, before `plan-dispositions-check` (~562): the same with
+  `plan`.
+- Prompts unchanged (`templates/.ai/prompts/` already show the bare-ID row).
+- Flow chart: the "Rulings" bullet (T103) gains "a disposition cell with more than the bare ID".
+  Update `updated:`, hub Log line (or record a denied vault edit). If T103's bullet is missing, add
+  the bullet here.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, tests/test_workflow.py, docs/workflow.md, vault
+agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_ruling_disposition_*` in tests/test_workflow.py:
+  - helper: review with MAJOR M1 and M2; rows `| **M1** | accepted | evidence | T012 |` and
+    `` | `M2` (CRITICAL) | rejected | concrete evidence here | - | `` → both first cells become
+    `| M1 |`/`| M2 |`, the rest of each line byte-identical, `triage-check` then passes;
+  - helper, no change: a cell `M1/M2`, a cell naming an ID not in the review, two lines both
+    mentioning M1, an already matching row → output without IDs and file bytes unchanged;
+  - helper `plan`: the same rewrite only inside the last plan-dispositions section; an earlier
+    section's identical bad cell stays;
+  - triage flow: a mock triage writes `| **M1** | accepted | … | T012 |` → triage completes, the
+    triage commit has a `Ruling (disposition-cell)` row, the manifest holds
+    `disposition-cell:<digest12>.M1`; with that key already claimed → `Triage incomplete: MAJOR
+    finding M1 has no disposition` as today;
+  - plan revision flow: the mock revision writes `| **P1** | accepted | … | T009 |` → the revision
+    is recorded and the run continues.
+- Existing `-k disposition` and `-k triage_check` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k ruling_disposition` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k disposition` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+Done 2026-10-21. `workflow.py disposition-ruling triage|plan [--dry-run]` prints `digest
+<sha256-12>` and then `ID <old cell>` for each rewrite. Only BLOCKER/MAJOR findings without a
+counted row are rewritten. The rest of the line must stay byte-identical and the rewritten line
+must match the row pattern for that ID, so a ruling that would not fix the row claims nothing.
+Comment lines are skipped. `ai_disposition_ruling` in `scripts/lib/common.sh` does dry run →
+claims → real run → `Ruling (disposition-cell)` rows. `ai-run` calls it before `triage-check
+--fresh` (task `triage`) and before `plan-dispositions-check` (task `plan-revision`), so both
+land in the counted commit. Mock modes added: `triage-bold-cell`, `revise-accept-bold`.
+Evidence: `-k ruling_disposition` Ran 6 tests OK (helper rewrite, ambiguous cells (`M1/M2`,
+unknown ID, two lines, already matching, `M10`), plan last section only, triage flow, repeat claim
+stops as today, plan revision flow). `-k disposition` Ran 31 OK, `-k triage_check` Ran 1 OK,
+`-k preflight` Ran 14 OK. Full gate `.ai/bin/ai-check`: PASS, 1057 tests in 689.8 s.
+docs/workflow.md (Triage paragraph), vault agents-flow.md Rulings bullet and the agents.md Log
+line are updated. One deviation from the criteria: the helper criterion uses `T012`, but the
+fixture uses `T001`, the existing TODO task, so `triage-check` passes.
+
+## T105 — Ruling: the handoff's `## Flow chart` line (BR-01, wiring)
+Status: DONE
+Dependencies: T101
+Model: opus
+
+### Goal
+A handoff whose `## Flow chart` section does not start with `Flow chart updated` or `Flow
+unchanged` is repaired once before the host gate and the PR body, instead of failing the gate.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-01 record-format rulings"; assumption A6.
+- New action `flow-line-ruling [--dry-run]` (workflow.py; reuse `section()` boundaries as
+  `pr_body` ~4282 does): only when `.ai/handoff.md` has a `## Flow chart` heading outside code
+  fences. Let L be its first non-empty line. When L starts with `Flow chart updated` or `Flow
+  unchanged` and directly follows the heading: no change. When L starts with one of them but blank
+  lines precede it: remove those blank lines. Otherwise insert, right after the heading,
+  `Flow unchanged (host ruling)` when the section text matches `\bunchanged\b` or `no flow change`
+  (case-insensitive), else `Flow chart updated (host ruling; see below)`, and drop the blank lines
+  between the heading and L. Print the inserted or moved line; nothing when unchanged. A missing
+  section: no change.
+- `scripts/ai-run`: in `checkpoint_done` and before the final `host_gate` (~856): `--dry-run`; when
+  it prints, claim `run-manifest ruling flow-line <task or final>` (failure → no change), run it
+  and `ai_log` one `ruling-row` row (WHY `the section must start with one of the two phrases`,
+  COST `the PR says the flow changed or not when the other is true; the section text below it
+  stays`). The handoff and run log are records, so the runner checkpoint commits them as today.
+- `scripts/ai-pipeline`, before the PR body is built: the same with key `final` (already claimed →
+  skip) and the rows in the PR's record commit.
+- Flow chart: the "Rulings" bullet gains "the handoff's Flow chart line". Update `updated:`, hub Log
+  line (or record a denied vault edit).
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-run, scripts/ai-pipeline, tests/test_workflow.py,
+docs/workflow.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_ruling_flow_line_*` in tests/test_workflow.py:
+  - helper: `## Flow chart\n\nFlow chart: updated the Inside one task node.\n` → the line after the
+    heading is `Flow chart updated (host ruling; see below)` followed by the original text;
+    `## Flow chart\nNo flow change in this batch.\n` → `Flow unchanged (host ruling)`;
+    `## Flow chart\n\nFlow unchanged.\n` → the blank line removed only; a correct section and a
+    handoff without the section → no output, bytes unchanged; a `## Flow chart` line inside a code
+    fence is ignored;
+  - runner: a mock session finishes T001 with a handoff whose section has a blank line first → the
+    host gate passes, the run log has a `Ruling (flow-line)` row, the PR body (pipeline fixture)
+    contains `Flow chart updated (host ruling`; with `flow-line:T001` already claimed the handoff
+    is left as the session wrote it.
+- `test_pr_body_flow_this_repo_declares_the_flow_chart` and `-k pr_body` pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k ruling_flow_line` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k pr_body` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21. `workflow.py flow-line-ruling [--dry-run]` (first `## Flow chart` heading outside
+code fences; HTML comments count as empty, so the template's comment-only section is left alone;
+an empty section too). `ai_flow_line_ruling KEY TASK` in `scripts/lib/common.sh`: dry run, claim
+`run-manifest ruling flow-line KEY`, real run, `Flow chart line: "…" placed under the heading.` and
+one `Ruling (flow-line)` row. Called in `ai-run` `checkpoint_done` before `host_gate` (key = task)
+and before the final gate (key `final`, row under `none`; `.ai/handoff.md` added to the `record
+review handoff` commit), and in `ai-pipeline` before `pr-body` (key `final`; `.ai/handoff.md` added
+to the `record pull request` commit). Deviation: a correct phrase line preceded by a comment is
+moved above the comment (the comment stays below it). Tests: 5 `test_ruling_flow_line_*` (mock
+mode `flow-blank`; fixture gate fails on a blank line under the heading). Evidence: `-k
+ruling_flow_line` Ran 5 OK; `-k pr_body` Ran 4 OK (unchanged); `-k ruling -k preflight` Ran 29 OK;
+`.ai/bin/ai-check` PASS, 1062 tests, 723.0 s (the 600 s foreground call was moved to the
+background by the tool and waited for). docs/workflow.md, vault agents-flow.md Rulings bullet and
+agents.md Log updated.
+
+## T106 — `attempt-info`: attempt number, raised model and failure note from the host outcome log (BR-03, helper)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+The runner can ask the host record how many times a task already failed, which model the next
+session should use, and what to tell it about the last failure.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-03 fresh retry"; assumptions A7 and A8. File
+  `scripts/lib/workflow.py` (`outcome` ~3865, `read_outcomes`, `project_name` ~3416,
+  `outcomes_path` ~3412, `stamp_outcome` for the safe `.ai/local` read).
+- `attempt-info TASK [BASE_MODEL]` (TASK must be a valid task ID, else usage error):
+  - rows = outcome rows with `kind` task, this `project_name()`, current branch and `task` TASK,
+    in `seq` order; failures = rows whose `result` is not `done`; N = len(failures) + 1;
+  - model: the task's `Model:` from `.ai/tasks.md`, else BASE_MODEL, else none. When N ≥ 3: a
+    model containing `haiku` → `sonnet`, containing `sonnet` → `opus`, containing `opus` or
+    `fable` → unchanged, none → `opus`; RAISED is `yes` when the printed model differs from the
+    task's or base model;
+  - line 1: `N MODEL RAISED` (`-` for no model);
+  - note (only when N ≥ 2), at most 600 characters in total, `|` and newlines removed per item:
+    `Attempt N-1 ended RESULT after S s on MODEL.`; `Failing checks: a, b, c.` from the validation
+    log (read `.ai/local/validation.json` like `stamp outcome`, then its log path only when it is
+    a regular file directly inside `.ai/local`, opened without following symlinks, at most 256 KiB
+    from the end; unittest `FAIL: name`/`ERROR: name`, pytest `FAILED name`, at most 5; else `Last
+    gate line: …` with the last non-empty line; nothing when no log); `Last result line: …` (the
+    last non-empty line of the task's `### Result / notes`, 200 characters);
+  - any error reading the outcome log or the queue → `1 <task or base model or -> no` and exit 0.
+- No ai-run change here (T107). Flow unchanged in this task; say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (helper list / outcome log)
+
+### Acceptance criteria
+- Tests named `test_attempt_info_*` in tests/test_workflow.py (outcome rows written with the
+  `outcome task` helper under the test state root):
+  - no rows → `1 sonnet no` for a sonnet task and no note; a `done` row only → still attempt 1;
+  - one `timeout` row (1800 s, sonnet) → `2 sonnet no` and a note with `Attempt 1 ended timeout
+    after 1800 s on sonnet.`;
+  - two failed rows → `3 opus yes` for a sonnet task, `3 sonnet yes` for a haiku task, `3 opus no`
+    for an opus task, `3 opus yes` for a task without `Model:` and no BASE_MODEL, `3 opus yes` for
+    BASE_MODEL `claude-sonnet-5-5`; a fourth attempt of a haiku task is still `sonnet`;
+  - rows of another branch, project or task are not counted;
+  - a validation log with `FAIL: test_a (tests.T)` and `ERROR: test_b (tests.T)` → `Failing checks:
+    test_a (tests.T), test_b (tests.T).`; a symlinked log path → no failing-checks item;
+  - the note has no `|`, no newline inside an item, and at most 600 characters with a huge result
+    line; a corrupt outcome log → `1 … no`, exit 0.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k attempt_info` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k outcome` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21 (claude opus). `workflow.py attempt-info TASK [BASE_MODEL]` (`attempt_info`,
+`raised_model`, `attempt_note_item`, `gate_log_lines`, `failing_checks_item`, `result_notes_line`):
+rows from `read_outcomes(strict=True)` filtered to kind task, `project_name()`, branch and TASK,
+ordered by `ordered_attempts`; N = failed rows + 1; tier raise from N ≥ 3 (unknown model names stay);
+note items one per line, `|`/backslashes/line breaks → spaces, 600 characters in total including
+newlines (later items cut), crashed rows without seconds omit `after S s`. The gate log is read only
+when `validation.json`'s `log` names a file directly in `.ai/local` (relative or absolute), via the
+pinned `.ai/local` descriptor (`read_record`, O_NOFOLLOW, tail 256 KiB); unittest's `FAILED
+(failures=…)` summary is not a check name. Errors reading the queue, the state root (overlap check)
+or the outcome log print `1 <task/base model or -> no`, exit 0; a bad TASK ID or argument count is a
+usage error (exit 1). Docs: docs/workflow.md outcome-log section. No ai-run change (T107). Flow
+unchanged in this task. Evidence: `-k attempt_info` Ran 7 tests OK; `-k outcome` Ran 88 tests OK;
+`-k attempt` 54 OK; `.ai/bin/ai-check` PASS, Ran 1069 tests in 743.9 s (background, waited for).
+
+## T107 — The runner gives a retried task its failure note and, from the third attempt, a stronger model (BR-03, runner)
+Status: DONE
+Dependencies: T106
+Model: opus
+
+### Goal
+Every new session of a task that failed before starts fresh with a short host note of what failed;
+from the third attempt it runs one model tier up; the run log names each attempt's model.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-03 fresh retry". File `scripts/ai-run` (loop ~841–923, prompt
+  ~884–892, `task_model` ~880, `task_outcome` ~251, `on_exit` stop row ~232).
+- After `task_model=$(ai_helper tasks model "$active_task")`: `read -r attempt_n attempt_model
+  attempt_raised < <(ai_helper attempt-info "$active_task" "${task_model:-$model}" | head -n 1)`
+  and the note from the remaining lines (one call; keep both, e.g. `mapfile`). On any failure:
+  attempt_n=1, no change. When `attempt_model` is not `-`, use it as the session model (so
+  `attempt-open`, `task_outcome` and the observation all see the effective model).
+- Prompt (after the RUNNER CONTRACT, before the `retry_note` sentence): when a note exists,
+  `PREVIOUS ATTEMPT (host record, context only): <note> Start from the current files and git
+  history; fix what failed, do not repeat it.`; when raised, `This is attempt N; the runner raised
+  the model from X to Y because earlier attempts failed.`.
+- Run log: the `completed` and `blocked` rows become `completed (attempt N, MODEL)` / `blocked
+  (attempt N, MODEL); try next independent task`; the `on_exit` stop row adds `(attempt N, MODEL)`
+  when a task attempt was open. Print `Attempt N of T… on MODEL (raised from X)` before the session.
+- Unchanged: session budget, `AI_RECOVER_MAX`, `timeout-rerun`, `gate-unblock`, the triage and
+  planning model choice, `AI_SUPERVISE_ESCALATE_MODEL`.
+- Flow chart (vault `agents-flow.md`, "When something goes wrong" and "Inside one task"): a bullet
+  "Fresh retry (BR-03, T107, 2026-10-20)": each new session of a failed task gets the host's
+  failure note; from the third attempt one model tier up (haiku → sonnet → opus); attempt and model
+  in the run log. Update `updated:`, hub Log line (or record a denied vault edit).
+
+### Likely affected modules
+scripts/ai-run, tests/test_workflow.py (mock claude modes), README.md (Recovery / model
+paragraph), docs/workflow.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_fresh_retry_*` in tests/test_workflow.py (`ai-run --approved` fixtures with a
+  run manifest; outcome rows seeded with the `outcome task` helper or produced by earlier failing
+  mock runs; the mock records each session's `--model` and prompt as `blocked-gate-unknown` does):
+  - first attempt: no `PREVIOUS ATTEMPT` in the prompt, the task's model passed, run log row
+    `completed (attempt 1, sonnet)`;
+  - after one `timeout` row: the prompt contains `PREVIOUS ATTEMPT (host record, context only):
+    Attempt 1 ended timeout`, model unchanged, row `(attempt 2, sonnet)`;
+  - after two failed rows of a sonnet task: `--model opus`, the prompt says `raised the model from
+    sonnet to opus`, the host outcome row of this attempt has model `opus`, the run log row says
+    `(attempt 3, opus)`;
+  - an opus task after two failures: `--model opus`, no `raised` sentence;
+  - `attempt-info` failing (corrupt outcome log): the session runs as today.
+- `-k gate_only_block`, `-k timeout_rerun`, `-k session_gate_allowance` and `-k blocked` pass
+  (update only expected run-log row texts, and list them in the result).
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k fresh_retry` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k gate_only_block` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21 (claude opus). `scripts/ai-run`: one `attempt-info "$task" "${task_model:-$model}"`
+call (mapfile) right after `tasks model`, before the dashboard step; line 1 is accepted only when
+N is a number, RAISED yes/no and MODEL `-` or matching the `--model` pattern (`model_pattern` now
+global), else attempt 1 and nothing changes. A non-`-` MODEL becomes `task_model`, so `--model`,
+`attempt-open`, `task_outcome` and the observation see it. Prompt sentences (`PREVIOUS ATTEMPT (host
+record, context only): …` with the note lines joined by spaces; `This is attempt N; the runner raised
+the model from X to Y because earlier attempts failed.`) after the RUNNER CONTRACT, before the
+gate-only retry sentence; `Attempt N of T… on MODEL (raised from X)` printed; run-log rows `completed
+(attempt N, MODEL)`, `blocked (attempt N, MODEL); try next independent task`, and the `on_exit` stop
+row `stopped (exit C) (attempt N, MODEL); …` when an attempt was open (the armed-checkpoint route
+keeps a plain `completed`). Mock claude records each task prompt in `.ai/local/mock-prompts`. 7
+`test_fresh_retry_*` tests. No existing test checked those run-log row texts, so no expected texts
+changed. Docs: README Models, docs/workflow.md (Fresh retry paragraph); vault flow chart pick node +
+two Fresh retry bullets, hub Log line. Evidence: `-k fresh_retry` Ran 7 tests OK; `-k gate_only_block
+-k timeout_rerun -k session_gate_allowance -k blocked` Ran 30 tests OK; `.ai/bin/ai-check` PASS, Ran
+1076 tests in 725.6 s (foreground call moved to background by the tool, waited for).
+
+## T108 — `review-route`: Codex or Claude by risk, from host records and the diff (BR-14, helper)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+One host helper decides, deterministically and from records agent sessions cannot forge, whether a
+review needs Codex or can go to a fresh Claude session.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-14 review routing"; assumptions A9 and A10. File
+  `scripts/lib/workflow.py` (`review_risk` ~3369 and `RISK_TITLE` ~3363 for the style; the
+  `fix-rounds` host record helpers; outcome review rows ~3947; `review_rounds` ~1168 is context
+  only and must NOT be used).
+- `review-route MODE BASE HEAD` (MODE plan, code or recheck; BASE and HEAD commits): print one line
+  `codex REASON` or `claude REASON`, exit 0; any exception → `codex routing unavailable`. Rules, the
+  first that applies wins:
+  1. `AI_REVIEW_ROUTE` = `codex` → `codex routing off`; any value other than empty, `risk` or
+     `codex` → `codex invalid AI_REVIEW_ROUTE`;
+  2. MODE plan → `codex plan review`; recheck → `codex re-check`;
+  3. host fix-round records for BASE (the same reader as `fix-rounds count`) = 0 → `codex first
+     full code review`;
+  4. outcome review rows of this project and branch with mode `code`: none with reviewer `codex`
+     whose `head` is an ancestor of HEAD → `codex no Codex review of this branch yet`; LAST = the
+     newest row (any reviewer) whose head is an ancestor of HEAD and differs from HEAD, none →
+     `codex no earlier review`;
+  5. `git diff --numstat LAST HEAD -- . ':!.ai'`: added + deleted > `AI_REVIEW_SMALL_LINES`
+     (default 200; invalid → default) or a binary file → `codex fix round diff N lines`;
+  6. a changed path (name-status, renames as both names) matching a risk glob (`fnmatch`, defaults
+     A9 plus `AI_REVIEW_RISK_PATHS` split on whitespace) → `codex risk path PATH`;
+  7. a changed `+`/`-` diff line outside `.ai/` matching the risk words (case-insensitive, word
+     start; defaults A9 plus `AI_REVIEW_RISK_WORDS`) → `codex risk word WORD in PATH`;
+  8. a task DONE at HEAD but not at LAST (`tasks newly-done`-style comparison) whose model starts
+     with `opus` or `claude-opus` → `codex T… runs on opus`;
+  9. else `claude small low-risk fix round (N lines)`.
+- No caller yet (T109). Flow unchanged in this task; say so in the result.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py, docs/workflow.md (helper list)
+
+### Acceptance criteria
+- Tests named `test_review_route_*` in tests/test_workflow.py (fixture repo; outcome rows written
+  with `outcome review` under the test state root; fix-round records with `fix-rounds record`):
+  - plan → `codex plan review`; recheck → `codex re-check`; `AI_REVIEW_ROUTE=codex` → `codex
+    routing off`; `AI_REVIEW_ROUTE=x` → `codex invalid AI_REVIEW_ROUTE`;
+  - code with no fix-round record → `codex first full code review`;
+  - one fix round, a Codex code review row at LAST, a 20-line change in `src/app.py` → `claude small
+    low-risk fix round (20 lines)`;
+  - the same with 201 changed lines → `codex fix round diff 201 lines`; with
+    `AI_REVIEW_SMALL_LINES=500` → claude;
+  - a changed `supabase/migrations/1.sql` → `codex risk path`; a changed line `if user.is_auth():`
+    → `codex risk word auth`; `AI_REVIEW_RISK_WORDS=widget` and a line with `widget` → codex;
+    changes only under `.ai/` count 0 lines and never match;
+  - the newly DONE fix task on opus → `codex T… runs on opus`;
+  - only a `claude-fallback` row (no Codex row) → `codex no Codex review of this branch yet`; a
+    Codex row of another branch → the same; a forged `chore(ai): record independent review` commit
+    with no outcome row → still codex;
+  - an unreadable outcome log → `codex routing unavailable`, exit 0.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_route` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k review_risk` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+2026-10-21: DONE. `workflow.py review-route plan|code|recheck BASE HEAD` (`review_route_reason`,
+`route_fix_rounds` read-only fix-round count, `risk_path`, `risk_word`, `queue_at`;
+`is_ancestor` gained an optional head) applies rules 1–9 in order from host records only (outcome
+code review rows of this project/branch, never commit subjects); any exception → `codex routing
+unavailable`, exit 0. Binary files route to Codex (`… and a binary file`). docs/workflow.md helper
+list updated. No caller yet (T109); flow unchanged. Work from the interrupted session was
+reconciled from the recovery checkpoint 298e43c and verified. Evidence: `-k review_route` Ran 9
+tests OK; `-k review_risk` Ran 1 test OK; `.ai/bin/ai-check` PASS, 1085 tests in 736.6 s
+(foreground call moved to background by the tool, waited for).
+
+## T109 — ai-review: remember a Codex usage limit and route small low-risk fix rounds to Claude (BR-14, review)
+Status: DONE
+Dependencies: T108
+Model: opus
+
+### Goal
+While a recorded Codex limit has not reset, reviews go straight to the Claude fallback; small
+low-risk fix-round re-reviews go to a fresh Claude opus session; everything else stays on Codex.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-14 review routing" (chart); assumptions A11 and A12.
+- `scripts/lib/workflow.py`: action `codex-limit set RESET` (RESET epoch seconds > now, else usage
+  error) writes state root `codex-limit.json` `{"reset": RESET, "recorded": now()}` atomically
+  (`check_state_root` first); `codex-limit active` prints RESET and exits 0 while `reset > now`,
+  else exits 1 (missing, unreadable, past, not a JSON object: exit 1; never writes).
+- `scripts/ai-review` `run_review` (~152–217): compute `try_codex` as today; then, only when
+  `reviewer == auto` and `try_codex == yes`:
+  1. `until=$(ai_helper codex-limit active)` succeeds → `try_codex=no`, `fallback="Codex usage
+     limit until $(date -d "@$until" '+%F %H:%M') (recorded)"` (the fallback branch as today:
+     `↪` notification, `claude-fallback`, catch-up entry);
+  2. else `route=$(ai_helper review-route "$mode" "$route_base" "$start_head")` (route_base: the
+     merge-base for code, `$plan_base` or `-` for plan, `-` for recheck; the helper answers codex for
+     plan/recheck anyway); `claude *` → `try_codex=no`, `routed=${route#claude }`.
+  On the Claude path with `routed` set: `review_by=claude-routed`, `who='Claude (routed)'`,
+  `AI_REVIEW_BY="Claude (routed), $claude_model"`, `AI_REVIEW_LABEL="Claude, routed ($claude_model,
+  effort $claude_effort; $routed). Codex reviewed this branch earlier; no catch-up needed."`;
+  print `Routed to Claude: $routed`; no `↪` notification; `review_reason=$routed`.
+  `review_records`: no `fallback-record` for `claude-routed`. Reset `routed` per call like the
+  other per-call variables.
+- After a Codex limit (~177–186) with `reset != 0`: `ai_helper codex-limit set "$reset" || true`
+  before falling back (also when `reviewer == codex`, which still pauses as today).
+- `pr_body` (~4300): its fallback regex must not mistake the routed label for a fallback; the
+  heading reads `Independent review (Claude, routed, MODEL)` and the `[!NOTE]` says `routed to a
+  fresh Claude session: REASON` instead of the catch-up text.
+- Settings `AI_REVIEW_ROUTE`, `AI_REVIEW_SMALL_LINES`, `AI_REVIEW_RISK_PATHS`,
+  `AI_REVIEW_RISK_WORDS`: add to the manifest capture/restore lists (`scripts/lib/common.sh` ~40,
+  workflow.py ~2374, `scripts/ai-recover` ~81 and ~84); `ai-review` validates `AI_REVIEW_ROUTE`
+  (empty, `risk`, `codex`) and `AI_REVIEW_SMALL_LINES` (`^[1-9][0-9]{0,5}$`) with `ai_die
+  "Invalid …"`. Usage text of `ai-review` and `ai-pipeline`: one sentence each.
+- Flow chart (vault `agents-flow.md`, "Reviewer choice"): Codex for plan, re-check, first full code
+  review and large or risky fix rounds; small low-risk fix rounds on a fresh Claude opus session
+  (routed, no catch-up); a recorded Codex limit sends reviews to the fallback until its reset.
+  Update `updated:`, hub Log line (or record a denied vault edit).
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-review, scripts/ai-recover, scripts/lib/common.sh,
+scripts/ai-pipeline (usage text), tests/test_workflow.py (mock codex), README.md,
+docs/workflow.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_codex_limit_*` (helper) and `test_review_routing_*` (ai-review / pipeline) in
+  tests/test_workflow.py:
+  - `codex-limit set <now+600>` then `active` prints it, exit 0; a past reset or no file → exit 1;
+    `set` with a past value or text → usage error; a symlinked or garbage file → exit 1;
+  - a mock Codex that reports a usage limit with a reset in 10 minutes → the first review falls back
+    and writes the record; a second review in the same window makes no Codex call (the mock counts
+    calls), runs the Claude fallback with `(recorded)` in the label and adds a fallback-log row;
+    with the record in the past → Codex is called again;
+  - pipeline fixture with one fix round of a 10-line low-risk change after a Codex round 1 → the
+    round-2 review makes no Codex call, `.ai/reviews/current.md` carries `Claude, routed`, no new
+    fallback-log row, the outcome row has reviewer `claude-routed`, and the PR body heading says
+    `routed`;
+  - the same fix round touching `supabase/migrations/x.sql` → Codex reviews round 2;
+  - `AI_REVIEWER=codex` → Codex called despite an active record (and pauses on its limit as today);
+    `AI_REVIEWER=claude` → unchanged; `AI_REVIEW_ROUTE=bogus` → `Invalid AI_REVIEW_ROUTE`;
+  - `ai-recover` restores the four settings from the manifest (extend the existing settings test).
+- Existing `-k fallback`, `-k reviewer` and `-k recheck` tests pass unchanged.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_routing` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k codex_limit` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k fallback` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+DONE 2026-10-21 (opus). `workflow.py codex-limit set RESET|active` (state root `codex-limit.json`,
+atomic after `check_state_root`; a symlink is replaced; `active` never writes; symlinked, garbage,
+non-object, non-int or past record → exit 1). `ai-review` `run_review`: under `auto` with Codex
+installed, an active record → fallback `Codex usage limit until DATE TIME (recorded)`; else
+`review-route MODE BASE HEAD` (code: merge-base, plan: plan base, recheck: `-`; helper failure →
+Codex); `claude …` → `review_by=claude-routed`, `Routed to Claude: REASON`, label `Claude, routed
+(MODEL, effort E; REASON). Codex reviewed this branch earlier; no catch-up needed.`, no `↪`, no
+`fallback-record`. A Codex limit with a known reset runs `codex-limit set` (also for
+`AI_REVIEWER=codex`, which still ignores the record and pauses). `pr_body`: heading `Claude, routed,
+MODEL` with a routed `[!NOTE]`. `ai_review_route_settings` (common.sh) validates `AI_REVIEW_ROUTE`
+and `AI_REVIEW_SMALL_LINES` in `ai-review` and `ai-pipeline`; the four settings added to the
+manifest/config/recover lists. Tests: 3 `test_codex_limit_*`, 4 `test_review_routing_*`, the
+recovery settings and key-list tests extended. Test fixture: `AI_REVIEW_ROUTE=codex` by default in
+`setUp` (routing has its own tests; old pipeline fixtures would otherwise route their fix rounds),
+`route()` drops it. Two existing tests changed for A11: `test_claude_review_usage_limit_pauses_then_retries_codex_first`
+now uses an unknown reset for the "Codex first again" case and adds the recorded case;
+`test_format_retry_after_claude_fallback_attributes_the_codex_review` uses mock mode
+`limit-once-unknown` (a 3-minute reset would now be remembered). Docs: README, docs/workflow.md,
+usage text of both scripts; vault flow chart "Reviewer choice" + bullet, hub Log line.
+Validation: -k codex_limit -k review_routing -k review_route 17 OK; -k fallback -k reviewer
+-k recheck (+ claude_review_usage, recovery_restores, key_lists, pr_body, codex_usage) 55 run, 1
+failure fixed as above, then -k format_retry -k limit_once -k codex_usage 11 OK; fix-round
+pipeline/convergence/review_context/outcomes 21 OK; ai-check PASS, 1092 tests (787.0 s; moved to
+the background by the tool timeout and waited for).
+
+## T110 — "Reviewed by" in every review record and in the PR body (BR-14, records)
+Status: DONE
+Dependencies: T109
+Model: sonnet
+
+### Goal
+Every published review says which family and model reviewed it and why, and the PR shows who
+reviewed each round.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "BR-14 review routing", last bullet.
+- `scripts/lib/workflow.py` `publish_review` (~943) and the plan publisher (`publish-plan-review`):
+  after the host header, one line `Reviewed by: WHO` for every reviewer: Codex → `Codex (MODEL,
+  effort E)` from new env `AI_REVIEW_WHO` set by `ai-review` before publishing (Codex: `Codex
+  (${AI_REVIEW_MODEL:-default}, effort $codex_effort)`; fallback and routed: the existing
+  `AI_REVIEW_BY` text plus the reason). Keep the existing Claude `> **Reviewer: …**` label. The line
+  goes before the content, after the bindings' header, so digests are taken over the final text
+  (check `bind_review` and the plan binding). Re-check reports: the heading already names the
+  reviewer; leave them.
+- `outcome review`: optional trailing `--route REASON` (≤ 200 chars) stored as `route`;
+  `ai-review` `review_records` passes `$review_reason` for routed and fallback reviews.
+- `pr_body` (~4300–4320): under "Independent review", a line `Reviewed by:` followed by one bullet
+  per review row of this project and branch from the outcome log (mode plan or code, oldest first,
+  at most 10, newest kept): `plan: Codex (MODEL)`, `code round K: Claude, routed (MODEL): REASON`;
+  when the log is unreadable or empty, the current report's `Reviewed by:` line.
+- Update tests that pin the exact bytes of a published Codex report (say which in the result).
+- Flow unchanged in the chart's steps; the "Reviewer choice" section gets one sentence "Every
+  review and the PR say who reviewed it" (update `updated:`, hub Log line).
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/ai-review, tests/test_workflow.py, docs/workflow.md, README.md,
+vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- Tests named `test_reviewed_by_*` in tests/test_workflow.py:
+  - a Codex code review publishes `.ai/reviews/current.md` with `Reviewed by: Codex (` after the
+    host header and `review-info` still verifies; a Codex plan review the same in
+    `.ai/reviews/plan.md` and `plan-review-info` still says current;
+  - a fallback review has both the `> **Reviewer:` label and `Reviewed by: Claude fallback`;
+  - a routed review's outcome row has `route` `small low-risk fix round (10 lines)`;
+  - `pr-body` with outcome rows plan/codex, code/codex, code/claude-routed lists three bullets in
+    that order with the route reason; with no outcome log it shows the report's `Reviewed by:` line.
+- Existing `-k pr_body`, `-k publish` and `-k review_info` tests pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k reviewed_by` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k pr_body` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+Done. `reviewed_by_line()` writes `Reviewed by: WHO` (env `AI_REVIEW_WHO`, set by `ai-review` for
+Codex, fallback and routed reviews) after the host header in `publish_review` and
+`publish_plan_review`, before the binding digest. `outcome review … --route REASON` stores `route`
+(≤ 200 chars); `review_records` passes the reason for non-Codex reviews. `pr_body` lists a
+"Reviewed by:" bullet per plan/code row (`reviewed_by_entries`), else the report's line. No existing
+test pinned the exact bytes of a Codex report (none changed). 4 new `test_reviewed_by_*` tests pass;
+`-k pr_body` (5) OK. Gate: first run had one failure, `test_gate_lock_wait_runner_waits_for_the_session_gate`
+("could not record the task in the run manifest"), which passes alone and is unrelated; the rerun
+passed (OK).
+
+## T111 — Self-check fixtures never register in the real run registry (FL-33, tests)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+A whole self-check leaves no fixture run in the host's real `ai-toolkit` registry, and the
+parallel runner fails if one appears.
+
+### Implementation notes
+- Design: `.ai/current-plan.md`, "FL-33 isolated test state"; assumption A13.
+- New `tests/isolation.py`: at import, unless `AI_STATE_DIR` is already a path under
+  `tempfile.gettempdir()`, create `tempfile.mkdtemp(prefix='ai-test-state-')`, set
+  `os.environ['AI_STATE_DIR']` to it and `os.environ['XDG_STATE_HOME']` to a sibling dir, and
+  remove both at exit (`atexit`, `shutil.rmtree(..., ignore_errors=True)`). Import it first in
+  `tests/test_workflow.py`, `tests/test_dashboard.py` and `tests/test_observation.py`.
+- Find the leaking tests: those that clear `AI_STATE_DIR` (grep `AI_STATE_DIR=''`, ~2348, ~2373)
+  or build an environment from scratch without it; make each pass a temp `XDG_STATE_HOME` or
+  `AI_STATE_DIR` explicitly. Name every one you changed in the result.
+- `tests/run_parallel.py`: before building the workers' env, compute the caller's real registry
+  directory the same way `state_root()` does (from the caller's environment) + `/pipelines`; after
+  the batches, list it (skip if missing; do not follow symlinks; read each entry as the dashboard
+  does or by its recorded checkout path) and fail with `self-check registered fixture runs in the
+  real registry: PATH…` (exit non-zero) when an entry names a checkout under the suite's temp dir
+  (`self.tmpdir` / the chosen `ai-tests-*` dir or `tempfile.gettempdir()` for the default).
+  Entries for other paths are ignored (real pipelines may register during the suite).
+- Flow unchanged; say so in the result.
+
+### Likely affected modules
+tests/isolation.py (new), tests/test_workflow.py, tests/test_dashboard.py,
+tests/test_observation.py, tests/run_parallel.py
+
+### Acceptance criteria
+- Tests named `test_state_isolation_*` in tests/test_workflow.py:
+  - at import `os.environ['AI_STATE_DIR']` and `os.environ['XDG_STATE_HOME']` are under the temp
+    dir, and a child `python3 workflow.py pipeline-register` started with plain `os.environ`
+    writes under them;
+  - `run_parallel.py`'s registry guard, called on a fake real registry dir holding an entry for a
+    checkout under the suite temp dir, reports it and returns failure; an entry for another path
+    passes; a missing registry passes (unit-test the guard function directly).
+- The tests changed for the leak still pass; `-k dashboard` and `-k observation` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k dashboard` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+- New `tests/isolation.py` (temp `AI_STATE_DIR` and `XDG_STATE_HOME`, removed at exit; kept when
+  `AI_STATE_DIR` is already under the temp dir), imported first in test_workflow, test_dashboard
+  and test_observation.
+- No individual test needed changing: the ones clearing `AI_STATE_DIR` (`''`) already pass a temp
+  `XDG_STATE_HOME`, and the others copy `os.environ`, which is now isolated.
+- `tests/run_parallel.py`: `real_registry`, `registry_leaks`, `registry_problem`; main() fails
+  with `self-check registered fixture runs in the real registry: PATH…` after the batches.
+- Tests `test_state_isolation_env_under_temp_and_child_registers_there` and
+  `test_state_isolation_registry_guard` pass; `-k dashboard` (108) and `-k observation` (76) pass.
+- Flow unchanged.
+- Gate: the session timed out (exit 124) before committing and recovery had used its two tries; mission control ran `.ai/bin/ai-check` on this tree: 1098 tests, 0 failing, 766.4 s, OK (2026-10-21).
+
+## T112 — Docs, flow chart and handoff audit (batch 9)
+Status: DONE
+Dependencies: T101, T102, T103, T104, T105, T106, T107, T108, T109, T110, T111
+Model: haiku
+
+### Goal
+README, docs/workflow.md, the vault flow chart and the handoff match the code of this batch.
+
+### Implementation notes
+- Check against the code: README (pre-flight and rulings, fresh retry and model raise, review
+  routing and the four new settings, Codex limit memory, "Reviewed by"), docs/workflow.md (the
+  same, plus the helper list: `tasks preflight`, `run-manifest ruling`, `ruling-row`,
+  `disposition-ruling`, `flow-line-ruling`, `attempt-info`, `review-route`, `codex-limit`, the
+  `rulings` manifest field). Wording fixes only; a behaviour mismatch is recorded in the handoff,
+  not fixed here.
+- Vault `agents-flow.md`: the T103, T104, T105, T107, T109 and T110 changes are present and agree.
+  Fix the wording if needed (update `updated:` then) and append one hub Log line.
+- `.ai/handoff.md`: "What has been implemented", "Validation run", "## Flow chart" (one line
+  starting `Flow chart updated`), and "Manual testing for the human" with `### Needs you` and
+  `### Covered by automated tests` (each test group with its task). `.ai/state.md` counts are
+  runner-managed; do not hand-edit them.
+
+### Likely affected modules
+README.md, docs/workflow.md, .ai/handoff.md, vault agents-flow.md and agents.md Log
+
+### Acceptance criteria
+- `-k Docs` and `-k flow_this_repo` pass; the handoff names every new test group of T101–T111.
+- The result lists every mismatch found and how it was fixed or recorded.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k flow_this_repo` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` in the background, waited for (BATCH 8 GATE RULE in the header).
+
+### Result / notes
+Done. Audit of README.md, docs/workflow.md, the vault flow chart and the handoff against the code.
+Helpers (`tasks preflight`, `run-manifest ruling`, `ruling-row`, `disposition-ruling`,
+`flow-line-ruling`, `attempt-info`, `review-route`, `codex-limit`) and the four routing settings
+exist and match the docs. Vault `agents-flow.md` agrees (Reviewer choice, Pre-flight, Rulings,
+Fresh retry, Review routing bullets); no change. Mismatches found and fixed:
+- README lacked the "Reviewed by:" lines (T110): added a paragraph after the routing text.
+- README lacked the FL-33 test isolation (T111): added a paragraph in the test-harness section.
+- Handoff: T111 missing from "What has been implemented", no validation entries for T108–T111,
+  "Next action" still said T111, and the live `ai-dashboard` check (FL-33) moved to covered tests
+  as `test_state_isolation_*`; flow-chart paragraph updated.
+Vault hub Log: one dated T112 line in `agents.md`.
+Targeted: `-k Docs` 3 OK; `-k flow_this_repo` 1 OK; `-k state_isolation` 2 OK.
+Gate: `.ai/bin/ai-check` (background): 1098 tests OK, 770.0 s, exit 0.
+
+## T113 — Registry guard reads the caller's registry before discovery (review M1, FL-33)
+Status: DONE
+Dependencies: none
+Model: sonnet
+
+### Goal
+`tests/run_parallel.py` checks the caller's real registry, not the temp registry that
+`tests/isolation.py` installs when discovery imports the test modules.
+
+### Implementation notes
+- Review round 1, M1: `main()` calls `collect(start_dir)` (in-process `unittest` discovery, which
+  imports every test module and with it `isolation`, which rewrites `os.environ['AI_STATE_DIR']`
+  and `XDG_STATE_HOME`) before `registry = real_registry()`. So the guard lists the temp registry.
+- Capture `real_registry()` from the caller's environment before `collect()`, e.g. as the first
+  step of `main()` after argument parsing, or from a copy of `os.environ` taken at module import
+  of `run_parallel` (that is safe only if `isolation` cannot have been imported first, so the
+  start of `main()` is simpler). Leave the workers' env and the rest of the guard unchanged.
+- Flow unchanged (test harness only); say so in the result.
+
+### Likely affected modules
+tests/run_parallel.py, tests/test_workflow.py
+
+### Acceptance criteria
+- A regression test `test_state_isolation_guard_reads_the_registry_before_discovery` in
+  tests/test_workflow.py runs `run_parallel.main()` (or the script as a subprocess) with
+  `AI_STATE_DIR` pointing at a fake "real" registry outside the suite temp dir, a discovery that
+  imports `isolation` (or that changes `AI_STATE_DIR` the way it does), and a leaked entry in the fake
+  registry. It asserts that the guard reports that entry and exits non-zero. It fails on the
+  current ordering.
+- The existing `test_state_isolation_*` tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+Done. `main()` in tests/run_parallel.py now captures `real_registry()` first (before `worker_count()`
+and `collect()`), so the guard lists the caller's registry, not the one `isolation` installs during
+discovery. Workers' env and the rest of the guard are unchanged. Flow unchanged (test harness only).
+New `test_state_isolation_guard_reads_the_registry_before_discovery` runs the script as a subprocess
+with a fake host registry holding a leaked entry and a fake test module that rewrites `AI_STATE_DIR`
+on import; it asserts a non-zero exit and the leak path in the output. Verified it fails with the old
+ordering (temporarily restored) and passes with the fix.
+Targeted: `-k state_isolation` 3 OK.
+Gate: `.ai/bin/ai-check`: 1099 tests OK, 795.5 s, exit 0 (the harness moved it to the background past 600 s; waited for it).
+
+## T114 — Queue ruling claims every task the repair moves (review M2, BR-02, A2)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+A pre-flight queue repair claims `queue-order:<ID>` for every task whose position changes, not
+only for tasks with late dependencies. So a later repair that would move an already-moved task
+is refused and leaves the queue unchanged (A2).
+
+### Implementation notes
+- Review round 1, M2: `tasks_preflight` (`scripts/lib/workflow.py`) computes `moved`, but it prints
+  `queue-order ID placed after …` only for `task_id in order if late[task_id]`.
+  `ai_queue_ruling` (`scripts/lib/common.sh`) claims only the IDs it parses from those lines.
+  Prerequisites and intervening tasks move without a claim.
+- Make the claimed set equal to `moved`: e.g. emit one `queue-order ID …` line per moved task
+  (with `placed after DEPS` for late-dependency tasks and a neutral wording such as `moved` for
+  the others). Or add a separate claim line kind that `ai_queue_ruling` claims but that is kept
+  out of the Ruling rows and notification text. Keep `ai_ruling_rows` and the 🔧 summary
+  readable. Update the T102/T103 tests that pin the exact output lines.
+- All claims stay before the rewrite (a refused claim changes nothing).
+- Flow unchanged in shape. If the vault Rulings bullet says "per task with a late dependency",
+  correct it and add a hub Log line.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/lib/common.sh, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- `test_preflight_helper_*`: queue `T001, T002, T003` with T001 depending on T002 prints a claimable
+  line for both T001 and T002.
+- Regression `test_preflight_pipeline_indirectly_moved_task_repeat_stops`: after a first repair
+  that moved T001 and T002, a second queue fault that would move T001 again (with T002 or T003 as
+  the late-dependency task) is refused: no new ruling row, `.ai/tasks.md` bytes unchanged, and
+  the run stops as the existing `_same_ruling_twice_stops` does.
+- Existing `test_preflight_*` and `test_ruling_*` groups pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k ruling` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+Mission control 2026-10-21 12:35Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (3d84f5a). Verify it against the acceptance criteria, run the targeted checks, then run `.ai/bin/ai-check` once in the background and wait for its result WITHOUT editing or committing anything until it finishes (an earlier attempt edited files during the gate and got "Validation modified project content"). Model raised to opus because the task failed once.
+
+2026-10-21 (opus, re-run): verified 3d84f5a against the criteria with no further source change.
+`tasks preflight` prints `queue-order T placed after …` for late-dependency tasks and
+`queue-moved T` for every other moved task; `ai_queue_ruling` claims both as `queue-order` before
+the rewrite, and `ai_ruling_rows` skips `queue-moved` (no Ruling row; the 🔧 summary lists only
+late-dependency tasks). `test_preflight_helper_claims_indirectly_moved_tasks` (T001→T002, T003
+prints lines for T001 and T002) and `test_preflight_pipeline_indirectly_moved_task_repeat_stops`
+(T002 already claimed: refused, tasks.md bytes and HEAD unchanged, no Ruling row, no 🔧) pass.
+Evidence: `-k preflight` Ran 16 OK; `-k ruling` Ran 18 OK; `.ai/bin/ai-check` PASS, 1103 tests,
+764.1 s, with no edits during the gate. Vault Rulings text already says "one ruling per changed
+task" and needed no correction; flow unchanged.
+
+## T115 — Routed reviews default to opus (review N1, BR-14, A12)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+A routed Claude review (a small low-risk fix round) runs on opus as A12 specifies, even when the
+queue holds an earlier, already reviewed opus task. `AI_CLAUDE_REVIEW_MODEL` still overrides the
+model.
+
+### Implementation notes
+- Review round 1, N1: `scripts/ai-review` calls `claude_model` for routed reviews too, and that
+  function calls `review-risk`, which scans every task (DONE included). So an earlier opus task or
+  a risky title picks `claude-fable-5-1`.
+- When `routed` is set, use `claude_model=claude-opus-5-5`, `claude_risk='routed'` (or similar),
+  then apply the `AI_CLAUDE_REVIEW_MODEL` override and the effort validation as `claude_model` does
+  today. Fallback and `AI_REVIEWER=claude` reviews keep the full-queue risk selection.
+- Flow unchanged. If the vault "Review routing" bullet names the model, check that it says opus.
+
+### Likely affected modules
+scripts/ai-review, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_review_routing_routed_review_uses_opus_after_an_opus_task`: with an earlier
+  DONE opus task already reviewed and a one-line low-risk fix round, the routed Claude call gets
+  `--model claude-opus-5-5`, and `Reviewed by:` names it. With `AI_CLAUDE_REVIEW_MODEL=x-model`,
+  the call gets `x-model`. A fallback review on the same queue still picks `claude-fable-5-1`.
+- Existing `test_review_routing_*` and `test_reviewed_by_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_routing` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k reviewed_by` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+Mission control 2026-10-21 12:35Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (a13ffad). Verify it against the acceptance criteria, run the targeted checks, then run `.ai/bin/ai-check` once in the background and wait for its result WITHOUT editing or committing anything until it finishes (an earlier attempt edited files during the gate and got "Validation modified project content"). Model raised to opus because the task failed once.
+BLOCKED on the gate only. Implemented: `claude_model` in `scripts/ai-review` uses opus with risk `routed` when a
+routed review is set (the `AI_CLAUDE_REVIEW_MODEL` override and effort validation still apply). Added
+`test_review_routing_routed_review_uses_opus_after_an_opus_task` and
+`test_review_routing_routed_review_honours_the_model_override`; `routed_pipeline` takes a queue and env.
+`-k review_routing` ran 6 tests with only the since-fixed test assertion failing; the new routed-opus test then
+passes alone (`-k routed_review_uses_opus`, Ran 1, OK). `.ai/bin/ai-check` exceeded the 600000 ms foreground
+timeout with no output, so the full gate result is unknown. The `reviewed_by` targeted run was not done.
+DONE (2026-10-21 re-run, opus): verified a13ffad against the criteria (routed branch in `claude_model` sets opus
+before the `AI_CLAUDE_REVIEW_MODEL` override; the non-routed `AI_REVIEWER=claude` review on the same queue still
+picks `claude-fable-5-1`). Targeted: `-k review_routing` Ran 6 OK; `-k reviewed_by` Ran 4 OK.
+Gate: `.ai/bin/ai-check` Ran 1103 tests, OK, exit 0 (766.5 s; the harness moved it to the background past 600 s;
+no edits until it finished). Vault flow chart routed node now says "(opus)" instead of "(usual model)".
+
+## T116 — Routing never counts fix rounds from commit subjects (review M3, BR-14, A10)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+`review-route` treats a missing host fix-round store as zero eligible fix rounds, so a
+triage commit subject alone (agent-controlled Git history) can never route a review to Claude.
+Missing or unreadable host records keep Codex, as A10 requires.
+
+### Implementation notes
+- Review round 2, M3: `route_fix_rounds` (`scripts/lib/workflow.py`, ~line 3712) falls back to
+  counting `TRIAGE_COMMIT` subjects in `BASE..HEAD` when `fix_round_records()` returns `None`.
+  With a missing store and a matching subject, `review_route_reason` returns
+  `claude small low-risk fix round …`.
+- Make `route_fix_rounds` return 0 when `fix_round_records()` is `None` (no Git-subject
+  fallback). Keep the legacy migration in `fix-rounds init`/`count` (around the
+  `TRIAGE_SUBJECT` handling, ~line 1316) unchanged: it is a separate path and not routing
+  eligibility. Fix the docstring.
+- Check that the normal pipeline path (store written by the host at triage) still routes round 2
+  to Claude: `test_review_routing_pipeline_small_low_risk_fix_round_goes_to_claude` must still pass.
+- Flow unchanged. Only update the vault "Review routing" bullet if it mentions commit subjects.
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_review_route_triage_subject_without_host_record_stays_on_codex`: missing
+  fix-round store, a commit with the triage subject, an earlier host Codex code review of this
+  branch and a one-line low-risk diff → `codex first full code review` (or another `codex …`
+  reason), never `claude …`. With a host store holding that round, the same history returns
+  `claude small low-risk fix round …`.
+- `fix-rounds` legacy migration tests still pass unchanged.
+- Existing `test_review_route_*` and `test_review_routing_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k review_route` (must say `Ran N tests`, N ≥ 1).
+Targeted: `python3 -m unittest discover -s tests -k fix_round` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+DONE 2026-10-21 (claude opus). `route_fix_rounds` returns 0 when `fix_round_records()` is `None`
+(no `TRIAGE_COMMIT` subject fallback) and only counts host records reachable in BASE..HEAD;
+docstring fixed. `fix-rounds init`/`count` legacy migration untouched. `route_project` gained
+`record=True`. Regression `test_review_route_triage_subject_without_host_record_stays_on_codex`:
+missing store + triage subject + host Codex code review + one-line diff → `codex first full code
+review` and no store written; after `fix-rounds record` → `claude small low-risk fix round (1
+lines)`. docs/workflow.md routing paragraph names the rule. Evidence: `-k review_route` Ran 10 OK;
+`-k fix_round` Ran 21 OK; `-k review_routing` Ran 6 OK (incl. the pipeline round-2 test);
+ai-check PASS, 1104 tests, 816.3 s (no edits during the gate). Flow unchanged; the vault flow
+note already says counts never come from commit subjects.
+
+## T117 — Test isolation sets AI_STATE_DIR and XDG_STATE_HOME independently (review N2, FL-33, A13)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+`tests/isolation.py` ensures both `AI_STATE_DIR` and `XDG_STATE_HOME` point under the temp dir,
+each checked on its own, so a temporary `AI_STATE_DIR` with an unset or external
+`XDG_STATE_HOME` still gets an isolated XDG state for the tests and their children.
+
+### Implementation notes
+- Review round 2, N2: the module checks only `AI_STATE_DIR`; when it is already under the temp
+  dir it leaves `XDG_STATE_HOME` untouched (unset or external), and
+  `test_state_isolation_env_under_temp_and_child_registers_there` then raises
+  `KeyError: 'XDG_STATE_HOME'`.
+- Apply `under_temp` to each variable separately: keep a value already under the temp dir
+  (the parallel runner's workers inherit both), otherwise create its own `mkdtemp` and register
+  its cleanup. Update the module docstring.
+- Test-only; flow unchanged.
+
+### Likely affected modules
+tests/isolation.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg`: running the
+  isolation module in a child with `AI_STATE_DIR` under the temp dir and (a) no `XDG_STATE_HOME`,
+  (b) `XDG_STATE_HOME` outside the temp dir, leaves `AI_STATE_DIR` unchanged and sets
+  `XDG_STATE_HOME` to a directory under the temp dir. Both already under the temp dir → both kept.
+- Existing `test_state_isolation_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k state_isolation` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (905bf68). Verify it against the acceptance criteria and run the targeted tests. Do NOT run the full `.ai/bin/ai-check` in the foreground: it takes about 14 minutes, longer than the 10-minute tool limit. Run it once with run_in_background and wait for the result without editing or committing anything until it finishes; or, if the targeted tests pass, mark the task DONE and let the runner's own gate after the session verify it.
+2026-10-21 (opus): verified 905bf68 against the criteria: `tests/isolation.py` applies `under_temp` to `AI_STATE_DIR` and `XDG_STATE_HOME` separately, each with its own `mkdtemp` and cleanup; docstring updated. Regression `test_state_isolation_temp_ai_state_with_missing_or_external_xdg` covers unset, external and both-under-temp XDG. Targeted `-k state_isolation`: Ran 4 tests, OK. Full `.ai/bin/ai-check` not run in this session (≈816 s, beyond the 600 s tool limit; the runner prompt forbids backgrounding it); the runner's post-session gate is the gate evidence. Test-only; flow unchanged.
+
+## T118 — Advisory scans write the overlap report (review N3, BR-02, A5)
+Status: DONE
+Dependencies: none
+Model: opus
+
+### Goal
+Every successful pre-flight scan that prints overlap lines also writes (or refreshes)
+`.ai/local/preflight.md`, as A5 requires, whether or not a queue repair or commit happens.
+
+### Implementation notes
+- Review round 2, N3: `ai_queue_ruling` (`scripts/lib/common.sh`) returns after
+  `tasks preflight --dry-run` when there is nothing to repair, and `scripts/ai-run` (planning
+  ~line 447, plan revision ~line 563) only uses `--dry-run`; `tasks_preflight`
+  (`scripts/lib/workflow.py`, ~line 718) writes `preflight.md` only when not a dry run.
+- Simplest fix: let `tasks preflight --dry-run` still write the ignored advisory report (it is not
+  a queue change), keeping the queue untouched; or add a `--report` mode that writes only the
+  report and call it on the no-repair paths. Keep the unsafe `.ai/local` skip quiet (as
+  `_reports_overlaps_between_todo_tasks` expects). A scan with no overlaps writes an empty report
+  so a stale one is not left behind. No run-log row or commit just for a report (A5).
+- Update docs/workflow.md if it says the report is written only on repair. Flow unchanged.
+
+### Likely affected modules
+scripts/lib/workflow.py, scripts/lib/common.sh, scripts/ai-run, tests/test_workflow.py, docs/workflow.md
+
+### Acceptance criteria
+- Regression `test_preflight_helper_valid_queue_writes_the_overlap_report`: a valid queue with
+  two overlapping TODO tasks leaves `.ai/tasks.md` bytes unchanged and writes the overlap lines to
+  `.ai/local/preflight.md`; after removing the overlap, a second scan refreshes it (no stale line).
+- Regression `test_preflight_pipeline_no_repair_saves_the_overlap_report`: a pipeline start with a
+  valid overlapping queue makes no ruling commit and no Ruling row, and `.ai/local/preflight.md`
+  holds the printed overlap lines.
+- Existing `test_preflight_*` and `test_ruling_*` pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k preflight` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+Mission control 2026-10-21 20:45Z: returned to TODO (was BLOCKED on the gate only; the run stopped). The fix is committed (38f671c). Verify it against the acceptance criteria and run the targeted tests. Do NOT run the full `.ai/bin/ai-check` in the foreground: it takes about 14 minutes, longer than the 10-minute tool limit. Run it once with run_in_background and wait for the result without editing or committing anything until it finishes; or, if the targeted tests pass, mark the task DONE and let the runner's own gate after the session verify it.
+Implemented: `tasks_preflight` (scripts/lib/workflow.py) now writes `.ai/local/preflight.md` on
+`--dry-run` too (empty file when no overlaps); queue still untouched on dry run. docs/workflow.md
+updated; added the two named regressions and adjusted two existing dry-run assertions.
+Evidence: `-k preflight` Ran 18 tests OK; `-k ruling` Ran 18 tests OK.
+BLOCKED: `.ai/bin/ai-check` exceeded the 600000 ms foreground timeout (same as T117), so no green
+gate was obtained; a second invocation said "Validation is already running". Human: rerun the gate.
+2026-10-21 rerun (opus): verified 38f671c against the criteria (dry-run writes the report, empty
+when no overlaps, queue bytes unchanged; both named regressions present). `-k preflight` Ran 18
+tests OK; `-k ruling` Ran 18 tests OK. Full ai-check (≈816 s > 600 s tool limit) left to the
+runner's post-session gate. Flow unchanged; docs/workflow.md already updated in 38f671c.
 

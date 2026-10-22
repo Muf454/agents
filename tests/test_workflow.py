@@ -29,6 +29,7 @@ HELPER = ROOT / 'scripts/lib/workflow.py'
 # Short commands fail fast on a hang; whole-pipeline runs get more room (CI runners are several times
 # slower than a workstation). AI_TEST_TIMEOUT_SCALE (or CI=true) stretches every bound; see timeouts.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import isolation  # noqa: E402,F401  (first: host state goes to a temp dir)
 from timeouts import TIMEOUT_SCALE  # noqa: E402
 SHORT_TIMEOUT = 10 * TIMEOUT_SCALE
 COMMAND_TIMEOUT = 25 * TIMEOUT_SCALE
@@ -244,7 +245,8 @@ if 'REVISION CONTRACT' in prompt:
                 if mode == 'revise-accept-cycle':
                     new_task = new_task.replace('Dependencies: none', f'Dependencies: {first}')
             tasks_file.write_text(text.rstrip('\n') + '\n\n' + new_task)
-            rows += f'| {finding} | accepted | the plan lacks this test | {new_id} |\n'
+            cell = f'**{finding}**' if mode == 'revise-accept-bold' else finding
+            rows += f'| {cell} | accepted | the plan lacks this test | {new_id} |\n'
     if os.environ.get('MOCK_CONVERGENCE'):
         rows += os.environ['MOCK_CONVERGENCE'] + '\n'
     section.write_text(section.read_text() + rows)
@@ -300,8 +302,12 @@ if 'PLANNING CONTRACT' in prompt:
     first, second = template.replace('TXXX', 'T001'), template.replace('TXXX', 'T002')
     if mode == 'plan-missing-sections':
         second = drop_sections(second)
-    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section'):
+    if mode in ('plan-out-of-order', 'plan-bad-queue', 'plan-preamble-section', 'plan-out-of-order-shared'):
         first = first.replace('Dependencies: none', 'Dependencies: T002')
+    if mode == 'plan-out-of-order-shared':
+        first, second = (part.replace(f'### Likely affected modules\n{tid}.txt\n',
+                                      '### Likely affected modules\nsrc/shared.py\n')
+                         for part, tid in ((first, 'T001'), (second, 'T002')))
     if mode == 'plan-bad-queue':
         second = second.replace('Dependencies: none', 'Dependencies: T001')
     preamble = '## Context\nKeep this intro.\n\n' if mode == 'plan-preamble-section' else ''
@@ -337,6 +343,8 @@ if os.path.lexists('.ai/local/scratch'):  # the host empties scratch before ever
 if os.path.exists('.ai/local/observation.json'):  # the stage seen by each agent session
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 with open('.ai/local/mock-args', 'a') as f: f.write(' '.join(a for a in args if a != prompt) + '\n')
+if 'RUNNER CONTRACT' in prompt:  # each task session's prompt (BR-03 fresh retry)
+    with open('.ai/local/mock-prompts', 'a') as f: f.write('=== PROMPT ===\n' + prompt + '\n')
 if os.environ.get('MOCK_COPY_MANIFEST') and 'RUNNER CONTRACT' in prompt:
     # The host run manifest as this session sees it (ai-run's task record).
     copy_id = re.search(r'exactly one task in this invocation: (T\d+)', prompt).group(1)
@@ -424,8 +432,14 @@ if 'TRIAGE CONTRACT' in prompt:
             block = drop_sections(block)
         if mode == 'triage-missing-goal':
             block = drop_sections(block, ('Goal', 'Likely affected modules', 'Result / notes'))
+        if mode == 'triage-out-of-order':
+            # Two fix tasks, the first depending on the second (appended after it).
+            later = 'T%03d' % (max(ids) + 2)
+            block = (block.replace('Dependencies: none', 'Dependencies: ' + later)
+                     + open(os.environ['MOCK_TASK_TEMPLATE']).read().replace('TXXX', later))
         tasks_file.write_text(text.rstrip('\n') + '\n\n' + block)
-        review.write_text(review.read_text() + f'| M1 | accepted | fixture defect confirmed | {new_id} |\n'
+        cell = '**M1**' if mode == 'triage-bold-cell' else 'M1'
+        review.write_text(review.read_text() + f'| {cell} | accepted | fixture defect confirmed | {new_id} |\n'
                           + ('| M2 | deferred | real but out of scope for this change | none |\n'
                              if mode == 'triage-mixed' else '')
                           + ('| M2 | rejected | the second defect is handled by the gate | none |\n'
@@ -580,6 +594,15 @@ if mode not in ('no-progress', 'bad-format'):
     part = re.sub(r'^Status:.*$', 'Status: ' + status, part, flags=re.M)
     file.write_text(text[:start] + part + text[end:])
     pathlib.Path(task_id + '.txt').write_text('checkpointed implementation')
+    if os.environ.get('MOCK_FIX_PATH') and task_id != 'T001':  # a fix task's 10-line change there
+        fix = pathlib.Path(os.environ['MOCK_FIX_PATH'])
+        fix.parent.mkdir(parents=True, exist_ok=True)
+        fix.write_text(''.join(f'fix line {n}\n' for n in range(10)))
+    if mode == 'flow-blank':  # a Flow chart section whose first line is not one of the two phrases
+        handoff = pathlib.Path('.ai/handoff.md')
+        handoff.write_text(re.sub(r'(?m)^## Flow chart\n<!--.*-->\n', '## Flow chart\n\nFlow chart: updated '
+                                  'the Inside one task node.\n', handoff.read_text()))
+        subprocess.run(['git', 'add', '--', '.ai/handoff.md'], check=True)
     if mode == 'tamper':
         target = pathlib.Path(os.environ['MOCK_TAMPER_PATH'])
         if target.suffix == '.py':
@@ -654,7 +677,10 @@ if os.path.exists('.ai/local/observation.json'):
     with open('.ai/local/obs-history', 'a') as f: f.write(open('.ai/local/observation.json').read())
 if os.environ.get('MOCK_CODEX_LIMIT') and 'Diagnose this workflow incident' not in args[-1]:
     with open(state / 'codex-limit-calls', 'a') as f: f.write('call\n')
-    print('ERROR: You have hit your usage limit. Try again in 7 days.')
+    # MOCK_CODEX_LIMIT=10min: a limit that resets soon (the host remembers it until then);
+    # unknown-reset: no reset time (never remembered).
+    print('ERROR: You have hit your usage limit. Try again ' +
+          {'10min': 'in 10 minutes', 'unknown-reset': 'later'}.get(os.environ['MOCK_CODEX_LIMIT'], 'in 7 days') + '.')
     sys.exit(1)
 if 'Diagnose this workflow incident' in args[-1]:
     path = pathlib.Path(args[args.index('--output-last-message')+1])
@@ -708,8 +734,9 @@ if ',' in mode:
     # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
     mode = mode.split(',')[min(count, len(mode.split(','))) - 1]
 if mode == 'error': sys.exit(17)
-if mode == 'limit-once' and count == 1:
-    print('ERROR: usage_limit_reached. You have hit your usage limit. Try again in 3 minutes.')
+if mode in ('limit-once', 'limit-once-unknown') and count == 1:
+    print('ERROR: usage_limit_reached. You have hit your usage limit. Try again ' +
+          ('later.' if mode == 'limit-once-unknown' else 'in 3 minutes.'))
     sys.exit(1)
 path = pathlib.Path(args[args.index('--output-last-message')+1])
 if mode == 'empty': sys.exit(0)
@@ -850,7 +877,8 @@ class ToolkitTest(unittest.TestCase):
         self.env = git_fixture_env()
         for name in ('AI_PIPELINE', 'AI_LOCK_HELD', 'AI_RECOVERY_ATTEMPT', 'AI_SETTINGS_FROM_MANIFEST',
                      'AI_DISPUTES_BASE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
-                     'AI_SUPERVISE_ESCALATE_MODEL'):
+                     'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                     'AI_REVIEW_RISK_WORDS'):
             # set when the gate runs inside a pipeline (or one resumed by ai-recover); the
             # supervision settings would override the fixture's config file
             self.env.pop(name, None)
@@ -873,6 +901,7 @@ class ToolkitTest(unittest.TestCase):
         self.notify_log = self.base / 'notifications.log'
         self.env['AI_AUTO_RECOVER'] = '0'  # recovery has its own tests
         self.env['AI_SUPERVISE'] = '0'  # supervision has its own tests
+        self.env['AI_REVIEW_ROUTE'] = 'codex'  # review routing has its own tests (test_review_routing_*)
         # ai-dashboard on the host lists only real pipelines, not these fixture runners.
         self.env['AI_DASHBOARD_IGNORE'] = '1'
         self.env['XDG_DATA_HOME'] = str(self.base / 'xdg-data')
@@ -2860,6 +2889,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def invalid_queue(self):
         return task('T001', dependencies='T002') + '\n' + task('T002')
 
+    def unfixable_queue(self):
+        """Invalid and beyond the pipeline's pre-flight ruling (a cycle; T103)."""
+        return task('T001', dependencies='T002') + '\n' + task('T002', dependencies='T001')
+
     def test_queue_check_command(self):
         self.ready()
         result = self.tool('ai-task', 'check')
@@ -3035,13 +3068,155 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         result = self.helper('tasks', 'check', expected=1)
         self.assertIn('T001: missing ### Goal', result.stderr)
 
+    def preflight_queue(self, text):
+        self.ready()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        queue = self.project / '.ai/tasks.md'
+        queue.write_text(text)
+        return queue
+
+    def test_preflight_helper_raid_order_is_repaired(self):
+        original = (task('T001') + task('T002') + task('T003')
+                    + task('T004', dependencies='T001, T005, T006') + task('T005') + task('T006'))
+        queue = self.preflight_queue(original)
+        queue.chmod(0o640)
+        before = queue.read_bytes()
+        result = self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
+                                        'queue-moved T005\nqueue-moved T006\n')
+        self.assertEqual(queue.read_bytes(), before)
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(), '')
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout, 'queue-order T004 placed after T005, T006\n'
+                                        'queue-moved T005\nqueue-moved T006\n')
+        text = queue.read_text()
+        self.assertEqual(re.findall(r'(?m)^## (T\d{3}) — ', text),
+                         ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+        self.assertEqual(self.queue_blocks(text), self.queue_blocks(original))
+        self.assertEqual(stat.S_IMODE(queue.stat().st_mode), 0o640)
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(), '')
+        self.helper('tasks', 'check')
+
+    def test_preflight_helper_claims_indirectly_moved_tasks(self):
+        queue = self.preflight_queue(task('T001', dependencies='T002') + task('T002') + task('T003'))
+        result = self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(result.stdout.splitlines(),
+                         ['queue-order T001 placed after T002', 'queue-moved T002'])
+        self.assertEqual(self.queue_ids(queue.read_text()), ['T001', 'T002', 'T003'])
+
+    def test_preflight_helper_fills_todo_sections_only(self):
+        bare = task('T002').replace('### Likely affected modules\nT002.txt\n', '') \
+            .replace('### Result / notes\nPending.\n', '')
+        queue = self.preflight_queue(task('T001') + bare)
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout,
+                         'task-sections T002 added Likely affected modules, Result / notes\n')
+        self.assertEqual(self.queue_blocks(queue.read_text())['T002'].count('### Result / notes'), 1)
+        self.helper('tasks', 'check')
+        done = task('T001', status='DONE').replace('### Result / notes\nPending.\n', '')
+        queue.write_text(done + bare)
+        before = queue.read_bytes()
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args, expected=1)
+            self.assertIn('T001: missing ### Result / notes', result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(queue.read_bytes(), before)
+
+    def test_preflight_helper_done_task_never_moves(self):
+        text = task('T001', status='DONE') + task('T002', status='DONE', dependencies='T003') + task('T003')
+        queue = self.preflight_queue(text)
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args, expected=1)
+            self.assertIn('T002: dependencies must exist earlier in the queue: T003', result.stderr)
+            self.assertEqual(queue.read_text(), text)
+        self.assertFalse((self.project / '.ai/local/preflight.md').exists())
+
+    def test_preflight_helper_unfixable_queues_fail_like_reorder(self):
+        cases = [
+            (task('T001', dependencies='T002') + task('T002', dependencies='T001'),
+             'dependency cycle: T001 -> T002 -> T001'),
+            (task('T001', dependencies='T009'), 'T001: dependency T009 is not a task in the queue'),
+            (task('T001') + task('T002') + task('T003', dependencies='after T002'),
+             'T003: Dependencies: must be "none" or task IDs'),
+        ]
+        queue = self.preflight_queue('')
+        for text, message in cases:
+            queue.write_text(text)
+            for args in (('--dry-run',), ()):
+                result = self.helper('tasks', 'preflight', *args, expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(queue.read_text(), text)
+
+    def test_preflight_helper_valid_queue_is_untouched(self):
+        queue = self.preflight_queue(task('T001') + task('T002', dependencies='T001'))
+        before, mtime = queue.read_bytes(), queue.stat().st_mtime_ns
+        for args in (('--dry-run',), ()):
+            result = self.helper('tasks', 'preflight', *args)
+            self.assertEqual(result.stdout + result.stderr, '')
+            self.assertEqual(queue.read_bytes(), before)
+            self.assertEqual(queue.stat().st_mtime_ns, mtime)
+
+    def test_preflight_helper_reports_overlaps_between_todo_tasks(self):
+        def likely(text, task_id, value):
+            return text.replace(f'### Likely affected modules\n{task_id}.txt\n',
+                                f'### Likely affected modules\n{value}\n')
+        queue = self.preflight_queue(
+            likely(task('T001', status='DONE'), 'T001', '`scripts/ai-run`, docs/a.md')
+            + likely(task('T002'), 'T002', '`scripts/ai-run`, docs/a.md (the helper list).')
+            + task('T003')
+            + likely(task('T004'), 'T004', 'none of these; tests')
+            + likely(task('T005'), 'T005', 'scripts/ai-run; docs/b.md'))
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual(result.stdout, 'overlap T002 T005 scripts/ai-run\n')
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(),
+                         'overlap T002 T005 scripts/ai-run\n')
+        self.assertNotIn('T001', result.stdout)
+        # An unsafe .ai/local (a symlink) is skipped quietly; the report is still printed.
+        local = self.project / '.ai/local'
+        local.rename(self.project / '.ai/local-real')
+        outside = self.base / 'outside-local'
+        outside.mkdir()
+        local.symlink_to(outside)
+        result = self.helper('tasks', 'preflight')
+        self.assertEqual((result.stdout, result.stderr), ('overlap T002 T005 scripts/ai-run\n', ''))
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_preflight_helper_valid_queue_writes_the_overlap_report(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        overlapping = ''.join(task(f'T00{n}').replace(f'### Likely affected modules\nT00{n}.txt\n', shared)
+                              for n in (1, 2))
+        queue = self.preflight_queue(overlapping)
+        before = queue.read_bytes()
+        report = self.project / '.ai/local/preflight.md'
+        for args in (('--dry-run',), ()):
+            report.unlink(missing_ok=True)
+            result = self.helper('tasks', 'preflight', *args)
+            self.assertEqual(result.stdout, 'overlap T001 T002 scripts/ai-run\n')
+            self.assertEqual(queue.read_bytes(), before)
+            self.assertEqual(report.read_text(), 'overlap T001 T002 scripts/ai-run\n')
+        queue.write_text(task('T001') + task('T002'))
+        self.helper('tasks', 'preflight', '--dry-run')
+        self.assertEqual(report.read_text(), '')
+
+    def test_preflight_helper_caps_overlap_lines(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        queue = self.preflight_queue(''.join(
+            task(f'T{n:03d}').replace(f'### Likely affected modules\nT{n:03d}.txt\n', shared)
+            for n in range(1, 9)))
+        lines = self.helper('tasks', 'preflight', '--dry-run').stdout.splitlines()
+        self.assertEqual(len(lines), 21)
+        self.assertEqual(lines[0], 'overlap T001 T002 scripts/ai-run')
+        self.assertEqual(lines[-1], 'overlap … 8 more')
+        self.assertEqual(len((self.project / '.ai/local/preflight.md').read_text().splitlines()), 21)
+        self.assertIn('T001', queue.read_text())
+
     def test_queue_check_empty_template_queue_fails(self):
         self.setup_project()
         result = self.tool('ai-task', 'check', expected=1)
         self.assertIn('No real tasks', result.stderr)
 
     def test_queue_check_invalid_queue_stops_plan_review(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
         self.assertFalse((self.base / 'codex-plan-calls').exists())
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -3056,7 +3231,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual((stopped['stage'], stopped['state']), ('plan_review', 'stopped'))
 
     def test_queue_check_invalid_queue_escalates_without_recovery_session(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1')
         self.assertFalse((self.base / 'recover-calls').exists())
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -3068,7 +3243,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertFalse((self.base / 'codex-plan-calls').exists())
 
     def test_queue_check_invalid_queue_stops_with_skip_plan_review(self):
-        self.ready(self.invalid_queue())
+        self.ready(self.unfixable_queue())
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--skip-plan-review',
                   expected=1)
         self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
@@ -4798,11 +4973,369 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn(done, queue)
         self.helper('tasks', 'check')
 
-    def test_queue_repair_committed_out_of_order_queue_still_stops_the_pipeline(self):
-        self.ready(self.invalid_queue())
+    # ---------------------------------------------------------------- pre-flight rulings (BR-02, T103)
+    def raid_queue(self):
+        """The raid-f4 shape: T004 depends on the later T005 and T006."""
+        return (task('T001') + task('T002') + task('T003')
+                + task('T004', dependencies='T001, T005, T006') + task('T005') + task('T006'))
+
+    def ruling_rows(self, kind):
+        return [line for line in (self.project / '.ai/run-log.md').read_text().splitlines()
+                if f'Ruling ({kind})' in line]
+
+    def assert_one_row_cells(self, row):
+        # The run-log row format: 7 cells, so 8 pipes; the ruling text adds none.
+        self.assertEqual(row.count('|'), 8, row)
+
+    def test_preflight_pipeline_raid_f4_committed_queue(self):
+        self.ready(self.raid_queue())
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('queue-order T004 placed after T005, T006', result.stdout)
+        subjects = self.run_cmd(['git', 'log', '--reverse', '--format=%s']).stdout.splitlines()
+        self.assertEqual(subjects.count('chore(ai): ruling: task queue'), 1)
+        self.assertLess(subjects.index('chore(ai): ruling: task queue'),
+                        subjects.index('chore(ai): record plan review'))
+        ruling = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): ruling: task queue$']).stdout.strip()
+        self.assertEqual(self.run_cmd(['git', 'show', '--name-only', '--format=', ruling]).stdout.split(),
+                         ['.ai/run-log.md', '.ai/tasks.md'])
+        rows = self.ruling_rows('queue-order')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('Ruling (queue-order): T004 placed after T005, T006. Why: only the order was wrong', rows[0])
+        self.assert_one_row_cells(rows[0])
+        self.assertIn('🔧 Ruling: task queue reordered (T004 after T005, T006); see the run log.',
+                      self.notifications())
+        self.assertNotIn('⛔', self.notifications())
+        self.assertTrue((self.base / 'codex-plan-calls').exists())
+        queue = (self.project / '.ai/tasks.md').read_text()
+        self.assertEqual(self.queue_ids(queue), ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+        self.helper('tasks', 'complete')
+        done = [s.split()[1] for s in subjects if re.fullmatch(r'implement T\d{3}', s)]
+        self.assertEqual(done, ['T001', 'T002', 'T003', 'T005', 'T006', 'T004'])
+
+    def test_preflight_pipeline_no_repair_saves_the_overlap_report(self):
+        shared = '### Likely affected modules\nscripts/ai-run\n'
+        self.ready(''.join(task(f'T00{n}').replace(f'### Likely affected modules\nT00{n}.txt\n', shared)
+                           for n in (1, 2)))
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        self.assertIn('overlap T001 T002 scripts/ai-run', result.stdout)
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertEqual((self.project / '.ai/local/preflight.md').read_text(),
+                         'overlap T001 T002 scripts/ai-run\n')
+
+    def test_preflight_pipeline_same_ruling_twice_stops(self):
+        self.ready(self.raid_queue())
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Task queue is invalid: T004: dependencies must exist earlier in the queue',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()),
+                         ['T001', 'T002', 'T003', 'T004', 'T005', 'T006'])
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_indirectly_moved_task_repeat_stops(self):
+        self.ready(task('T001', dependencies='T002') + task('T002') + task('T003'))
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T002')
+        before = (self.project / '.ai/tasks.md').read_bytes()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertIn('Task queue is invalid: T001: dependencies must exist earlier in the queue',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual((self.project / '.ai/tasks.md').read_bytes(), before)
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+        self.assertEqual(self.ruling_rows('queue-order'), [])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_done_task_would_move_stops(self):
+        self.ready(task('T001', 'DONE', dependencies='T002') + task('T002'))
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1)
-        self.assertIn('Task queue is invalid:', (self.project / '.ai/local/last-error').read_text())
+        self.assertIn('Task queue is invalid: T001: dependencies must exist earlier in the queue: T002',
+                      (self.project / '.ai/local/last-error').read_text())
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
         self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T001', 'T002'])
+        self.assertNotIn('🔧 Ruling', self.notifications())
+
+    def test_preflight_pipeline_triage_reorders_fix_task(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-out-of-order')
+        self.assertIn('queue-order T002 placed after T003', result.stdout)
+        counted = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.strip()
+        self.assertEqual(self.queue_ids(self.run_cmd(['git', 'show', f'{counted}:.ai/tasks.md']).stdout),
+                         ['T001', 'T003', 'T002'])
+        row = [line for line in self.run_cmd(['git', 'show', f'{counted}:.ai/run-log.md']).stdout.splitlines()
+               if 'Ruling (queue-order)' in line]
+        self.assertEqual(len(row), 1)
+        self.assertIn('| triage | Ruling (queue-order): T002 placed after T003.', row[0])
+        self.assert_one_row_cells(row[0])
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
+        self.assertIn('🔧 Ruling: task queue reordered (T002 after T003)', self.notifications())
+        self.helper('tasks', 'complete')
+        self.assertEqual(self.open_stage(), '')
+
+    def test_preflight_pipeline_plan_session_logs_rulings(self):
+        self.plan_ready()
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout
+        result = self.plan(MOCK_CLAUDE='plan-out-of-order-shared')
+        self.assertIn('Task queue reordered (dependencies first): T002 T001', result.stdout)
+        self.assertIn('overlap T002 T001 src/shared.py', result.stdout.splitlines())
+        rows = self.ruling_rows('queue-order')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| planning | Ruling (queue-order): T001 placed after T002.', rows[0])
+        self.assert_one_row_cells(rows[0])
+        self.assertEqual(self.queue_ids((self.project / '.ai/tasks.md').read_text()), ['T002', 'T001'])
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout, head)
+
+    def test_preflight_pipeline_revision_logs_rulings_in_the_revision_commit(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-prereq')
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        rows = [line for line in self.run_cmd(['git', 'show', f'{revision}:.ai/run-log.md']).stdout.splitlines()
+                if 'Ruling (queue-order)' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| plan-revision | Ruling (queue-order): T001 placed after T002.', rows[0])
+        subjects = self.run_cmd(['git', 'log', '--format=%s']).stdout.splitlines()
+        self.assertNotIn('chore(ai): ruling: task queue', subjects)
+
+    # ---------------------------------------------------------------- disposition-cell rulings (BR-01, T104)
+    def two_major_dispositions(self):
+        """The current review lists MAJOR M1 and M2; returns the opened dispositions file."""
+        dispositions, rows = self.convergence_fixture(rounds=2)
+        current = self.project / '.ai/reviews/current.md'
+        current.write_text(current.read_text().replace('MAJOR=1', 'MAJOR=2')
+                           .replace('- M1: a short defect\n', '- M1: a short defect\n- M2: another defect\n'))
+        dispositions.write_text(rows.removesuffix('| M1 | accepted | defect confirmed in the fixture | T001 |\n'))
+        return dispositions
+
+    def test_ruling_disposition_helper_rewrites_only_the_first_cell(self):
+        dispositions = self.two_major_dispositions()
+        opened = dispositions.read_text()
+        dispositions.write_text(opened + '| **M1** | accepted | evidence | T001 |\n'
+                                '| `M2` (CRITICAL) | rejected | concrete evidence here | - |\n')
+        self.helper('triage-check', expected=1)
+        digest = hashlib.sha256((self.project / '.ai/reviews/current.md').read_bytes()).hexdigest()[:12]
+        before = dispositions.read_bytes()
+        dry = self.helper('disposition-ruling', 'triage', '--dry-run').stdout
+        self.assertEqual(dry, f'digest {digest}\nM1 **M1**\nM2 `M2` (CRITICAL)\n')
+        self.assertEqual(dispositions.read_bytes(), before)
+        self.assertEqual(self.helper('disposition-ruling', 'triage').stdout, dry)
+        self.assertEqual(dispositions.read_text(), opened + '| M1 | accepted | evidence | T001 |\n'
+                         '| M2 | rejected | concrete evidence here | - |\n')
+        self.assertEqual(self.helper('triage-check').stdout.strip(), 'accepted=1 deferred=0')
+        self.assertEqual(self.helper('disposition-ruling', 'triage').stdout, f'digest {digest}\n')
+
+    def test_ruling_disposition_helper_leaves_ambiguous_cells(self):
+        dispositions = self.two_major_dispositions()
+        opened = dispositions.read_text()
+        good = '| M2 | rejected | concrete evidence here | - |\n'
+        for rows in ('| M1/M2 | accepted | evidence | T001 |\n',
+                     '| **M9** | accepted | evidence | T001 |\n' + good,
+                     '| **M1** | accepted | evidence | T001 |\n| M1 (CRITICAL) | rejected | evidence again | - |\n',
+                     '| M1 | accepted | evidence | T001 |\n' + good,
+                     '| **M10** | accepted | evidence | T001 |\n' + good):
+            with self.subTest(rows=rows):
+                dispositions.write_text(opened + rows)
+                before = dispositions.read_bytes()
+                out = self.helper('disposition-ruling', 'triage').stdout
+                self.assertEqual(out.splitlines()[1:], [])
+                self.assertTrue(out.startswith('digest '))
+                self.assertEqual(dispositions.read_bytes(), before)
+
+    def test_ruling_disposition_helper_plan_touches_only_the_last_section(self):
+        self.ready(task('T001', 'DONE') + task('T002', dependencies='T001'))
+        bad = '| **P1** | accepted | add the missing test | T002 |\n'
+        rejected = '| P2 | rejected | rollback is covered in docs/rollback.md:12 | |\n'
+        self.plan_round('P1|Gap in tests;P2|Unclear rollback', 1)
+        self.plan_dispositions(1, bad + rejected)
+        self.plan_round('P1|Gap in tests;P2|Unclear rollback', 2)
+        start = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        self.helper('start-plan-dispositions', 'main')
+        path = self.project / '.ai/reviews/plan-dispositions.md'
+        opened = path.read_text()
+        path.write_text(opened + bad + rejected)
+        self.plan_check(start, expected=1)
+        out = self.helper('disposition-ruling', 'plan').stdout.splitlines()
+        self.assertEqual(out[1:], ['P1 **P1**'])
+        self.assertEqual(path.read_text(), opened + bad.replace('**P1**', 'P1') + rejected)
+        self.assertEqual(path.read_text().count(bad), 1)  # the earlier section keeps its cell
+        self.assertEqual(self.plan_check(start).stdout.strip(), 'accepted=1 rejected=1 needs_human=0')
+        self.helper('disposition-ruling', 'bogus', expected=1)
+        self.helper('disposition-ruling', 'plan', '--dry', expected=1)
+
+    def test_ruling_disposition_triage_flow_reads_the_bold_cell(self):
+        self.ready()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                           MOCK_CODEX='major-once', MOCK_CLAUDE='triage-bold-cell')
+        self.assertIn('Disposition cell "**M1**" read as M1.', result.stdout)
+        counted = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.strip()
+        self.assertIn('| M1 | accepted | fixture defect confirmed |',
+                      self.run_cmd(['git', 'show', f'{counted}:.ai/reviews/dispositions.md']).stdout)
+        row = [line for line in self.run_cmd(['git', 'show', f'{counted}:.ai/run-log.md']).stdout.splitlines()
+               if 'Ruling (disposition-cell)' in line]
+        self.assertEqual(len(row), 1)
+        self.assertIn('| triage | Ruling (disposition-cell): finding cell "**M1**" read as M1. Why: the cell '
+                      'held exactly one finding ID of this review.', row[0])
+        self.assert_one_row_cells(row[0])
+        review = self.run_cmd(['git', 'show', f'{counted}:.ai/reviews/current.md']).stdout
+        digest = hashlib.sha256(review.encode()).hexdigest()[:12]
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertIn(f'disposition-cell:{digest}.M1', manifest['rulings'])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    def test_ruling_disposition_triage_repeat_claim_stops_as_today(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='major-once')
+        if self.run_cmd(['git', 'status', '--porcelain']).stdout.strip():
+            self.commit('record review')
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        digest = hashlib.sha256((self.project / '.ai/reviews/current.md').read_bytes()).hexdigest()[:12]
+        self.helper('run-manifest', 'ruling', 'disposition-cell', f'{digest}.M1')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+        result = self.tool('ai-run', '--approved', '--triage', '--since', head, expected=1,
+                           MOCK_CLAUDE='triage-bold-cell')
+        self.assertIn('Triage incomplete: MAJOR finding M1 has no disposition', result.stderr)
+        self.assertIn('| **M1** | accepted |', (self.project / '.ai/reviews/dispositions.md').read_text())
+        self.assertEqual(self.ruling_rows('disposition-cell'), [])
+        self.assertEqual(self.triage_rounds(), 0)
+
+    def test_ruling_disposition_plan_revision_flow_reads_the_bold_cell(self):
+        self.ready()
+        self.supervised('--no-pr', MOCK_CODEX_PLAN='major-once', MOCK_CLAUDE='revise-accept-bold')
+        revision = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record plan revision']).stdout.strip()
+        self.assertTrue(revision)
+        section = self.run_cmd(['git', 'show', f'{revision}:.ai/reviews/plan-dispositions.md']).stdout
+        self.assertRegex(section, r'\n\| P1 \| accepted \| the plan lacks this test \| T\d+ \|\n')
+        self.assertNotIn('**P1**', section)
+        rows = [line for line in self.run_cmd(['git', 'show', f'{revision}:.ai/run-log.md']).stdout.splitlines()
+                if 'Ruling (disposition-cell)' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| plan-revision | Ruling (disposition-cell): finding cell "**P1**" read as P1.', rows[0])
+        self.assertIn('🏁 FINISHED', self.notifications())
+
+    # ---------------------------------------------------------------- flow-line ruling (BR-01, T105)
+    FLOW_HANDOFF = '# Handoff\n\n## Assumptions\nNone.\n\n{section}## Human todos\nNone.\n'
+    # This repo's own gate in miniature: a blank line right under the Flow chart heading fails.
+    FLOW_GATE = ('#!/usr/bin/env bash\nset -euo pipefail\n'
+                 "python3 -c \"import sys; sys.exit('## Flow chart\\n\\n' in open('.ai/handoff.md').read())\"\n")
+    FLOW_SESSION = '## Flow chart\n\nFlow chart: updated the Inside one task node.\n'
+
+    def flow_ruling(self, section, *args):
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(self.FLOW_HANDOFF.format(section=section))
+        out = self.helper('flow-line-ruling', *args).stdout
+        return out, handoff.read_text()
+
+    def test_ruling_flow_line_helper_inserts_or_moves_the_line(self):
+        self.setup_project()
+        for section, line, after in (
+                ('## Flow chart\n\nFlow chart: updated the Inside one task node.\n\n',
+                 'Flow chart updated (host ruling; see below)',
+                 '## Flow chart\nFlow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.\n\n'),
+                ('## Flow chart\nNo flow change in this batch.\n\n', 'Flow unchanged (host ruling)',
+                 '## Flow chart\nFlow unchanged (host ruling)\nNo flow change in this batch.\n\n'),
+                ('## Flow chart\nThe flow stays UNCHANGED.\n\n', 'Flow unchanged (host ruling)',
+                 '## Flow chart\nFlow unchanged (host ruling)\nThe flow stays UNCHANGED.\n\n'),
+                ('## Flow chart\n\nFlow unchanged.\n\n', 'Flow unchanged.', '## Flow chart\nFlow unchanged.\n\n'),
+                ('## Flow chart\n<!-- One line, "Flow unchanged" or not. -->\n\nFlow chart updated: audit node.\n\n',
+                 'Flow chart updated: audit node.',
+                 '## Flow chart\nFlow chart updated: audit node.\n<!-- One line, "Flow unchanged" or not. -->\n\n')):
+            with self.subTest(section=section):
+                dry, before = self.flow_ruling(section, '--dry-run')
+                self.assertEqual(dry, line + '\n')
+                self.assertEqual(before, self.FLOW_HANDOFF.format(section=section))
+                out, text = self.flow_ruling(section)
+                self.assertEqual(out, line + '\n')
+                self.assertEqual(text, self.FLOW_HANDOFF.format(section=after))
+                self.assertEqual(self.helper('flow-line-ruling').stdout, '')
+                self.assertIn(line, self.helper('pr-body', '0', '0').stdout)
+
+    def test_ruling_flow_line_helper_leaves_correct_or_missing_sections(self):
+        self.setup_project()
+        fenced = '```markdown\n## Flow chart\n\nFlow chart: in a fence.\n```\n\n'
+        for section in ('## Flow chart\nFlow chart updated: audit node.\n\n', '## Flow chart\nFlow unchanged\n',
+                        '', fenced, '## Flow chart\n<!-- Optional. One line, "Flow unchanged". -->\n\n',
+                        '## Flow chart\n\n'):
+            with self.subTest(section=section):
+                out, text = self.flow_ruling(section)
+                self.assertEqual(out, '')
+                self.assertEqual(text, self.FLOW_HANDOFF.format(section=section))
+        # A fenced heading is skipped; the real section after it is the one ruled on.
+        out, text = self.flow_ruling(fenced + '## Flow chart\nNo flow change.\n\n')
+        self.assertEqual(out, 'Flow unchanged (host ruling)\n')
+        self.assertIn(fenced + '## Flow chart\nFlow unchanged (host ruling)\nNo flow change.\n', text)
+        (self.project / '.ai/handoff.md').unlink()
+        self.assertEqual(self.helper('flow-line-ruling').stdout, '')
+        self.helper('flow-line-ruling', '--dry', expected=1)
+
+    def flow_gate_ready(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text(self.FLOW_GATE)
+        self.commit('gate that fails on a blank line under the Flow chart heading')
+
+    def test_ruling_flow_line_runner_repairs_before_the_gate(self):
+        self.flow_gate_ready()
+        self.add_origin()
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CLAUDE='flow-blank')
+        self.assertIn('Flow chart line: "Flow chart updated (host ruling; see below)" placed under the heading.',
+                      result.stdout)
+        rows = self.ruling_rows('flow-line')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| T001 | Ruling (flow-line): handoff Flow chart section starts with "Flow chart updated '
+                      '(host ruling; see below)". Why: the section must start with one of the two phrases.', rows[0])
+        self.assert_one_row_cells(rows[0])
+        checkpoint = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep',
+                                   '^chore(ai): record T001 runner checkpoint$']).stdout.strip()
+        repaired = '## Flow chart\nFlow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.\n'
+        self.assertIn(repaired, self.run_cmd(['git', 'show', f'{checkpoint}:.ai/handoff.md']).stdout)
+        self.assertIn('Ruling (flow-line)', self.run_cmd(['git', 'show', f'{checkpoint}:.ai/run-log.md']).stdout)
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertIn('flow-line:T001', manifest['rulings'])
+        self.assertNotIn('flow-line:final', manifest['rulings'])  # nothing left to rule on
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('Flow chart updated (host ruling; see below)\nFlow chart: updated the Inside one task node.', body)
+        self.assertEqual(self.run_cmd(['git', 'status', '--porcelain']).stdout, '')
+
+    def test_ruling_flow_line_runner_repeat_claim_leaves_the_handoff(self):
+        self.flow_gate_ready()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'flow-line', 'T001')
+        result = self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='flow-blank')
+        self.assertIn('Validation failed; T001 returned to IN_PROGRESS.', result.stderr)
+        self.assertIn(self.FLOW_SESSION, (self.project / '.ai/handoff.md').read_text())
+        self.assertEqual(self.ruling_rows('flow-line'), [])
+
+    def test_ruling_flow_line_final_gate_repairs_a_later_handoff(self):
+        # The task checkpoint had nothing to rule on; a handoff edited afterwards is ruled on once
+        # at the final gate (key `final`) and lands in the review handoff commit.
+        self.flow_gate_ready()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        handoff = self.project / '.ai/handoff.md'
+        handoff.write_text(re.sub(r'(?m)^## Flow chart\n<!--.*-->\n', '## Flow chart\n\nNo flow change.\n',
+                                  handoff.read_text()))
+        (self.project / '.ai/tasks.md').write_text(task('T001', 'DONE'))
+        self.commit('task done, handoff edited')
+        self.tool('ai-run', '--approved')
+        final = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review handoff$']).stdout.strip()
+        self.assertIn('## Flow chart\nFlow unchanged (host ruling)\nNo flow change.\n',
+                      self.run_cmd(['git', 'show', f'{final}:.ai/handoff.md']).stdout)
+        rows = self.ruling_rows('flow-line')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('| none | Ruling (flow-line):', rows[0])
 
     def test_queue_repair_revision_prompt_places_new_tasks_first(self):
         start = self.revise_ready()
@@ -5700,11 +6233,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
 
     def test_recovery_restores_the_approved_runs_settings(self):
         self.ready()
+        routing = dict(AI_REVIEW_ROUTE='risk', AI_REVIEW_SMALL_LINES='50', AI_REVIEW_RISK_PATHS='docs/*',
+                       AI_REVIEW_RISK_WORDS='widget gadget')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
-                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate', **routing)
         manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
         self.assertEqual(manifest['env']['AI_RECOVER_MAX'], '1')
         self.assertEqual(manifest['env']['AI_AUTO_RECOVER'], '1')
+        for key, value in routing.items():  # review routing settings (T109) are kept with the run
+            self.assertEqual(manifest['env'][key], value)
+        restored = self.helper('run-manifest', 'env').stdout.split('\0')
+        for key, value in routing.items():
+            self.assertIn(f'{key}={value}', restored)
         # Started without those settings (as a detached service would be), it uses the approved ones.
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
@@ -5837,6 +6377,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         for name, keys in lists.items():
             self.assertEqual(keys, lists['RUN_SETTINGS'], name)
         self.assertIn('AI_SUPERVISE_ESCALATE_MODEL', lists['RUN_SETTINGS'])
+        self.assertLessEqual({'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
+                              'AI_REVIEW_RISK_WORDS'}, lists['RUN_SETTINGS'])
 
     def test_committed_content_must_match_validated_files(self):
         self.ready()
@@ -6331,6 +6873,77 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         path.write_text(json.dumps(dict(valid, gate_unblocks=many[:200])) + '\n')
         self.helper('run-manifest', 'gate')
         self.assertIn('too many', self.helper('run-manifest', 'gate-unblock', 'T999', expected=1).stderr)
+
+    def test_ruling_manifest_once_per_kind_and_key(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        self.assertEqual(json.loads(path.read_text())['rulings'], ['queue-order:T004'])
+        before = path.read_bytes()
+        again = self.helper('run-manifest', 'ruling', 'queue-order', 'T004', expected=1)
+        self.assertIn('ruling queue-order for T004 was already made once in this run', again.stderr)
+        self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'ruling', 'task-sections', 'T004')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T005')
+        self.assertEqual(json.loads(path.read_text())['rulings'],
+                         ['queue-order:T004', 'task-sections:T004', 'queue-order:T005'])
+        before = path.read_bytes()
+        for args in (('bogus', 'T004'), ('queue-order', 'a b'), ('queue-order', 'k' * 49),
+                     ('queue-order',), (), ('queue-order', 'T006', 'extra')):
+            with self.subTest(args=args):
+                usage = self.helper('run-manifest', 'ruling', *args, expected=1)
+                self.assertIn('Usage: run-manifest ruling KIND KEY', usage.stderr)
+                self.assertEqual(path.read_bytes(), before)
+        self.helper('run-manifest', 'ruling', 'flow-line', 'k' * 48)
+        self.helper('run-manifest', 'ruling', 'disposition-cell', 'F-1.a_b')
+
+    def test_ruling_manifest_kept_on_resume_dropped_on_start(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        self.helper('run-manifest', 'gate-unblock', 'T004')  # independent claims
+        self.helper('run-manifest', 'clear-attempts')
+        self.assertEqual(json.loads(path.read_text())['rulings'], ['queue-order:T004'])
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004', expected=1)
+        self.approve_run()
+        self.assertNotIn('rulings', json.loads(path.read_text()))
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+
+    def test_ruling_manifest_wrong_shape_is_invalid(self):
+        path = self.timeout_rerun_manifest()
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        valid = json.loads(path.read_text())
+        many = [f'queue-order:T{n:03d}' for n in range(201)]
+        for value in ('x', ['a:b', 'a:b'], [1], ['queue-order'], ['bogus:T004'],
+                      ['queue-order:a b'], {'queue-order:T004': 1}, None, many):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(dict(valid, rulings=value)) + '\n')
+                invalid = self.helper('run-manifest', 'gate', expected=1)
+                self.assertIn('No valid run manifest', invalid.stderr)
+                self.helper('run-manifest', 'clear-attempts', expected=1)
+        path.write_text(json.dumps(dict(valid, rulings=many[:200])) + '\n')
+        self.helper('run-manifest', 'gate')
+        self.assertIn('too many', self.helper('run-manifest', 'ruling', 'flow-line', 'x', expected=1).stderr)
+
+    def test_ruling_manifest_row_is_one_safe_line(self):
+        row = self.helper('ruling-row', 'queue-order', 'moved T004 | after T006',
+                          'only the order was wrong', 'none').stdout
+        self.assertEqual(row, 'Ruling (queue-order): moved T004 after T006. Why: only the order '
+                              'was wrong. Cost if wrong: none.\n')
+        messy = self.helper('ruling-row', 'flow-line', 'a\\b\r\nc |d', 'w|hy', 'co\nst').stdout
+        self.assertEqual(messy, 'Ruling (flow-line): a b c d. Why: w hy. Cost if wrong: co st.\n')
+        long = self.helper('ruling-row', 'queue-order', ' '.join(['word'] * 400), 'why', 'cost').stdout
+        line = long[:-1]
+        self.assertTrue(line.startswith('Ruling (queue-order): word word'))
+        self.assertLessEqual(len(line), 400)
+        self.assertNotIn('\n', line)
+        self.assertNotIn('|', line)
+        self.assertTrue(line.endswith(' word'), line[-20:])  # cut at a word boundary
+        solid = self.helper('ruling-row', 'queue-order', 'x' * 2000, 'why', 'cost').stdout[:-1]
+        self.assertEqual(len(solid), 400)
+        for args in ((), ('queue-order', 'a', 'b'), ('queue-order', 'a', 'b', 'c', 'd'),
+                     ('bogus', 'a', 'b', 'c')):
+            with self.subTest(args=args):
+                usage = self.helper('ruling-row', *args, expected=1)
+                self.assertIn('Usage: ruling-row KIND WHAT WHY COST', usage.stderr)
 
     def stamp_outcome(self):
         result = self.helper('stamp', 'outcome', expected=None)
@@ -8203,6 +8816,347 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                       'Race condition in refresh'):
             self.assertIsNotNone(wf.RISK_TITLE.search(title), title)
 
+    # ---------------------------------------------------------------- review routing (T108, BR-14)
+    def route(self, mode='code', **env):
+        base = {key: value for key, value in self.env.items() if key != 'AI_REVIEW_ROUTE'}
+        result = self.run_cmd(['python3', str(HELPER), 'review-route', mode, 'main', 'HEAD'], env={**base, **env})
+        return result.stdout.strip()
+
+    def route_project(self, queue=None, reviewer='codex', record=True):
+        """A branch after one host-recorded Codex code review and one counted fix round (or only
+        its triage commit without `record`); returns the fix round commit the cases start from."""
+        self.ready(queue)
+        (self.project / 'src').mkdir()
+        (self.project / 'src/app.py').write_text('print(1)\n')
+        self.commit('app')
+        self.helper('outcome', 'review', 'code', reviewer, 'm', 'high', '5')
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.commit('chore(ai): record review triage')
+        if record:
+            self.helper('fix-rounds', 'record', 'HEAD')
+        return self.run_cmd(['git', 'rev-parse', 'HEAD']).stdout.strip()
+
+    def route_change(self, path, text, start=None):
+        if start:
+            self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        file = self.project / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+        self.commit('fix')
+
+    def test_review_route_plan_recheck_and_setting(self):
+        self.ready()
+        self.assertEqual(self.route('plan'), 'codex plan review')
+        self.assertEqual(self.route('recheck'), 'codex re-check')
+        self.assertEqual(self.route(AI_REVIEW_ROUTE='codex'), 'codex routing off')
+        self.assertEqual(self.route('plan', AI_REVIEW_ROUTE='x'), 'codex invalid AI_REVIEW_ROUTE')
+        self.assertEqual(self.route(AI_REVIEW_ROUTE='risk'), 'codex first full code review')
+        self.assertIn('Usage: review-route', self.helper('review-route', 'final', 'main', 'HEAD', expected=1).stderr)
+        self.assertIn('Usage: review-route', self.helper('review-route', 'code', 'main', expected=1).stderr)
+
+    def test_review_route_first_full_code_review(self):
+        self.ready()
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.route_change('src/app.py', 'print(1)\n')
+        self.assertEqual(self.route(), 'codex first full code review')
+
+    def test_review_route_small_low_risk_fix_round_goes_to_claude(self):
+        self.route_project()
+        self.route_change('src/app.py', 'print(1)\n' + ''.join(f'line {i}\n' for i in range(20)))
+        self.assertEqual(self.route(), 'claude small low-risk fix round (20 lines)')
+        # Workflow records count no lines and never match a risk path or word.
+        self.route_change('.ai/handoff.md', 'auth token migration\n' * 300)
+        self.route_change('.ai/reviews/security-notes.md', 'password\n')
+        self.assertEqual(self.route(), 'claude small low-risk fix round (20 lines)')
+
+    def test_review_route_large_fix_round_goes_to_codex(self):
+        start = self.route_project()
+        self.route_change('src/app.py', ''.join(f'line {i}\n' for i in range(201)) + 'print(1)\n')
+        self.assertEqual(self.route(), 'codex fix round diff 201 lines')
+        self.assertEqual(self.route(AI_REVIEW_SMALL_LINES='500'), 'claude small low-risk fix round (201 lines)')
+        self.assertEqual(self.route(AI_REVIEW_SMALL_LINES='lots'), 'codex fix round diff 201 lines')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        (self.project / 'src/logo.png').write_bytes(b'\x89PNG\0\0\x01')
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex fix round diff 0 lines and a binary file')
+
+    def test_review_route_risk_paths_and_words(self):
+        start = self.route_project()
+        self.route_change('supabase/migrations/1.sql', 'select 1;\n')
+        self.assertEqual(self.route(), 'codex risk path supabase/migrations/1.sql')
+        self.route_change('src/app.py', 'print(1)\nif user.is_auth():\n    pass\n', start)
+        self.assertEqual(self.route(), 'codex risk word auth in src/app.py')
+        self.route_change('src/app.py', 'print(1)\nwidget = 2\n', start)
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
+        self.assertEqual(self.route(AI_REVIEW_RISK_WORDS='gadget widget'), 'codex risk word widget in src/app.py')
+        self.assertEqual(self.route(AI_REVIEW_RISK_PATHS='src/*'), 'codex risk path src/app.py')
+        self.route_change('src/app.py', 'print(1)\nmy_trace = 2\n', start)  # not at a word start
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
+        # A removed line counts as well as an added one; a rename names both paths.
+        self.route_change('src/app.py', '', start)
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        (self.project / 'src/app.py').write_text('token = 1\n')
+        self.commit('app token')
+        self.helper('outcome', 'review', 'code', 'claude-routed', 'm', 'high', '5')
+        (self.project / 'src/app.py').write_text('')
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex risk word token in src/app.py')
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        self.run_cmd(['git', 'mv', 'src/app.py', 'src/auth_view.py'])
+        self.commit('fix')
+        self.assertEqual(self.route(), 'codex risk path src/auth_view.py')
+
+    def test_review_route_newly_done_opus_task(self):
+        queue = task('T001', status='DONE') + task('T002').replace('Dependencies: none\n', 'Dependencies: none\nModel: opus\n')
+        self.route_project(queue)
+        self.route_change('.ai/tasks.md', queue.replace('Status: TODO', 'Status: DONE'))
+        self.assertEqual(self.route(), 'codex T002 runs on opus')
+        self.route_change('.ai/tasks.md', queue.replace('Model: opus', 'Model: sonnet').replace('Status: TODO', 'Status: DONE'))
+        self.assertEqual(self.route(), 'claude small low-risk fix round (0 lines)')
+
+    def test_review_route_needs_a_host_codex_review_of_this_branch(self):
+        start = self.route_project(reviewer='claude-fallback')
+        self.route_change('src/app.py', 'print(2)\n')
+        self.assertEqual(self.route(), 'codex no Codex review of this branch yet')
+        # A Codex row of another branch, or a forged review commit subject, is not a host review.
+        self.run_cmd(['git', 'switch', '-q', '-c', 'other'])
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.run_cmd(['git', 'switch', '-q', 'feature/test'])
+        self.run_cmd(['git', 'commit', '-q', '--allow-empty', '-m', 'chore(ai): record independent review'])
+        self.assertEqual(self.route(), 'codex no Codex review of this branch yet')
+        # A Codex row at HEAD counts, but the diff is measured from an earlier review only.
+        self.run_cmd(['git', 'reset', '-q', '--hard', start])
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.assertEqual(self.route(), 'claude small low-risk fix round (0 lines)')
+
+    def test_review_route_no_earlier_review(self):
+        self.ready()
+        self.publish_report('# Review\nOverall verdict: one major\nFinding counts: BLOCKER=0 MAJOR=1 MINOR=0\n'
+                            '## MAJOR findings\n- M1: a real defect.\n')
+        self.commit('chore(ai): record review triage')
+        self.helper('fix-rounds', 'record', 'HEAD')
+        self.helper('outcome', 'review', 'code', 'codex', 'm', 'high', '5')
+        self.assertEqual(self.route(), 'codex no earlier review')
+
+    def test_review_route_triage_subject_without_host_record_stays_on_codex(self):
+        # A triage commit subject is agent-controlled history, not a host fix round record (A10).
+        start = self.route_project(record=False)
+        self.route_change('src/app.py', 'print(1)\nwidget = 2\n')
+        self.assertEqual(list((self.base / 'host-state').rglob('fix-rounds-*.json')), [])
+        self.assertEqual(self.route(), 'codex first full code review')
+        self.assertEqual(list((self.base / 'host-state').rglob('fix-rounds-*.json')), [])  # routing never migrates
+        self.helper('fix-rounds', 'record', start)
+        self.assertEqual(self.route(), 'claude small low-risk fix round (1 lines)')
+
+    def test_review_route_unreadable_records(self):
+        self.route_project()
+        self.route_change('src/app.py', 'print(2)\n')
+        self.assertTrue(self.route().startswith('claude '))
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.unlink()
+        log.mkdir()
+        self.assertEqual(self.route(), 'codex routing unavailable')
+        self.assertEqual(self.route('plan'), 'codex plan review')
+        self.assertEqual(self.route('code').split()[0], 'codex')
+
+    # ------------------------------------------------- Codex limit memory and routing (T109, BR-14)
+    def limit_record(self):
+        return self.base / 'host-state/codex-limit.json'
+
+    def test_codex_limit_set_then_active_until_the_reset(self):
+        self.ready()
+        self.assertEqual(self.helper('codex-limit', 'active', expected=1).stdout, '')
+        self.assertFalse(self.limit_record().exists())
+        reset = str(int(time.time()) + 600)
+        self.helper('codex-limit', 'set', reset)
+        record = json.loads(self.limit_record().read_text())
+        self.assertEqual(record['reset'], int(reset))
+        self.assertRegex(record['recorded'], r'^\d{4}-\d{2}-\d{2}T')
+        self.assertEqual(self.helper('codex-limit', 'active').stdout.strip(), reset)
+        past = json.dumps({'reset': int(time.time()) - 1, 'recorded': 'x'})
+        self.limit_record().write_text(past)
+        self.assertEqual(self.helper('codex-limit', 'active', expected=1).stdout, '')
+        self.assertEqual(self.limit_record().read_text(), past)  # active never writes
+
+    def test_codex_limit_set_refuses_a_past_or_text_reset(self):
+        self.ready()
+        for value in (str(int(time.time()) - 5), '0', '-5', 'soon', '12 34', ''):
+            with self.subTest(value=value):
+                result = self.helper('codex-limit', 'set', value, expected=1)
+                self.assertIn('Usage: codex-limit', result.stderr)
+        for args in ((), ('active', 'x'), ('clear',)):
+            self.assertIn('Usage: codex-limit', self.helper('codex-limit', *args, expected=1).stderr)
+        self.assertFalse(self.limit_record().exists())
+
+    def test_codex_limit_symlinked_or_garbage_record_is_inactive(self):
+        self.ready()
+        target = self.base / 'elsewhere.json'
+        target.write_text(json.dumps({'reset': int(time.time()) + 600, 'recorded': 'x'}))
+        self.limit_record().parent.mkdir(parents=True, exist_ok=True)
+        self.limit_record().symlink_to(target)
+        self.helper('codex-limit', 'active', expected=1)
+        self.limit_record().unlink()
+        for text in ('not json', '[1]', '{"reset": "%d"}' % (time.time() + 600), '{"reset": true}', '{}'):
+            with self.subTest(text=text):
+                self.limit_record().write_text(text)
+                self.helper('codex-limit', 'active', expected=1)
+
+    def test_review_routing_recorded_codex_limit_skips_codex_until_the_reset(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        result = self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='10min', AI_REVIEW_ROUTE='')
+        self.assertIn('Codex usage limit until', result.stdout)
+        self.assertNotIn('(recorded)', result.stdout)
+        self.assertGreater(json.loads(self.limit_record().read_text())['reset'], time.time() + 500)
+        self.commit('record review')
+        # In the same window Codex (which would succeed now) is not called at all.
+        result = self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        self.assertFalse((self.base / 'codex-calls').exists())
+        self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 1)
+        self.assertIn('(recorded); reviewing with Claude instead.', result.stdout)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertRegex(review, r'> \*\*Reviewer: Claude fallback \(claude-opus-5-5, effort high; Codex usage limit '
+                                 r'until [-0-9]+ [0-9:]+ \(recorded\)\)\. Codex catch-up review pending')
+        self.assertEqual((self.project / '.ai/reviews/fallback-log.md').read_text().count('| code |'), 2)
+        self.helper('review-info')
+        self.commit('record review')
+        # Past the reset, Codex reviews again.
+        self.limit_record().write_text(json.dumps({'reset': int(time.time()) - 1, 'recorded': 'x'}))
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertNotIn('Reviewer:', (self.project / '.ai/reviews/current.md').read_text())
+
+    def test_review_routing_codex_and_claude_reviewers_and_invalid_settings(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.helper('codex-limit', 'set', str(int(time.time()) + 600))
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='codex', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertNotIn('Reviewer:', (self.project / '.ai/reviews/current.md').read_text())
+        self.commit('record review')
+        # AI_REVIEWER=codex still pauses at its limit and retries, as before.
+        (self.base / 'codex-calls').unlink()
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='codex', MOCK_CODEX='limit-once', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertIn('⏸ PAUSED: Codex usage limit', self.notifications())
+        self.commit('record review')
+        self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude', AI_REVIEW_ROUTE='')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertIn('> **Reviewer: Claude (claude-opus-5-5, effort high; AI_REVIEWER=claude)',
+                      (self.project / '.ai/reviews/current.md').read_text())
+        self.commit('record review')
+        for key, value in (('AI_REVIEW_ROUTE', 'bogus'), ('AI_REVIEW_SMALL_LINES', '0'),
+                           ('AI_REVIEW_SMALL_LINES', 'lots'), ('AI_REVIEW_SMALL_LINES', '1234567')):
+            with self.subTest(key=key, value=value):
+                result = self.tool('ai-review', '--base', 'main', expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+                result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, **{key: value})
+                self.assertIn(f'Invalid {key}: {value}', result.stderr)
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+
+    def routed_pipeline(self, fix_path, queue=None, **env):
+        """Codex round 1 with one MAJOR finding, one fix task changing FIX_PATH (10 lines), round 2."""
+        self.ready(queue)
+        self.add_origin()
+        return self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CODEX='major-once',
+                         MOCK_FIX_PATH=fix_path, AI_REVIEW_ROUTE='', **env)
+
+    def code_review_rows(self):
+        rows = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        return [row['reviewer'] for row in rows if row.get('kind') == 'review' and row.get('mode') == 'code']
+
+    def test_review_routing_pipeline_small_low_risk_fix_round_goes_to_claude(self):
+        self.routed_pipeline('src/widget.py')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 1)
+        self.assertEqual(len(self.claude_review_args()), 1)
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('> **Reviewer: Claude, routed (claude-opus-5-5, effort high; small low-risk fix round (', review)
+        self.assertIn('Codex reviewed this branch earlier; no catch-up needed.', review)
+        self.assertFalse((self.project / '.ai/reviews/fallback-log.md').exists())
+        self.assertEqual(self.code_review_rows(), ['codex', 'claude-routed'])
+        self.assertNotIn('↪', self.notifications())
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('## Independent review (Claude, routed, claude-opus-5-5)', body)
+        self.assertIn('routed to a fresh Claude session: small low-risk fix round (', body)
+        self.assertNotIn('catch-up', body)
+
+    def test_review_routing_routed_review_uses_opus_after_an_opus_task(self):
+        opus = task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: opus')
+        self.routed_pipeline('src/widget.py', opus)
+        args = self.claude_review_args()
+        self.assertEqual(len(args), 1)
+        self.assertEqual(args[0][args[0].index('--model') + 1], 'claude-opus-5-5')
+        self.assertIn('Reviewed by: Claude, routed (claude-opus-5-5', (self.project / '.ai/reviews/current.md').read_text())
+        # A non-routed Claude review on the same queue still picks the full-queue risk model.
+        result = self.tool('ai-review', '--base', 'main', AI_REVIEWER='claude', AI_REVIEW_ROUTE='')
+        self.assertEqual(len(self.claude_review_args()), 2, result.stdout)
+        args = self.claude_review_args()[-1]
+        self.assertEqual(args[args.index('--model') + 1], 'claude-fable-5-1', result.stdout)
+
+    def test_review_routing_routed_review_honours_the_model_override(self):
+        opus = task('T001').replace('Dependencies: none', 'Dependencies: none\nModel: opus')
+        self.routed_pipeline('src/widget.py', opus, AI_CLAUDE_REVIEW_MODEL='x-model')
+        args = self.claude_review_args()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'x-model')
+        self.assertIn('Reviewed by: Claude, routed (x-model', (self.project / '.ai/reviews/current.md').read_text())
+
+    # ------------------------------------------------------- "Reviewed by" (T110, BR-14)
+    def test_reviewed_by_codex_code_and_plan_reviews(self):
+        self.ready()
+        self.tool('ai-review', '--plan')
+        plan = (self.project / '.ai/reviews/plan.md').read_text()
+        self.assertRegex(plan, r'-->\n\nReviewed by: Codex \([^,)]+, effort [^)]*\)\n')
+        self.assertTrue(self.helper('plan-review-info').stdout.startswith('current'))
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertRegex(review, r'-->\n\nReviewed by: Codex \([^,)]+, effort [^)]*\)\n')
+        self.helper('review-info')
+
+    def test_reviewed_by_fallback_keeps_the_label_and_adds_the_line(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', AI_REVIEW_ROUTE='')
+        review = (self.project / '.ai/reviews/current.md').read_text()
+        self.assertIn('> **Reviewer: Claude fallback', review)
+        self.assertRegex(review, r'(?m)^Reviewed by: Claude fallback \(claude-opus-5-5, effort high\): Codex usage limit')
+        self.helper('review-info')
+
+    def test_reviewed_by_routed_review_outcome_row_has_the_reason(self):
+        self.routed_pipeline('src/widget.py')
+        rows = [json.loads(line) for line in (self.base / 'host-state/outcomes.jsonl').read_text().splitlines()]
+        routed = [r for r in rows if r.get('kind') == 'review' and r.get('reviewer') == 'claude-routed']
+        self.assertEqual(len(routed), 1)
+        self.assertRegex(routed[0]['route'], r'^small low-risk fix round \(\d+ lines\)$')
+        self.assertNotIn('route', next(r for r in rows if r.get('reviewer') == 'codex'))
+        self.assertIn('Reviewed by: Claude, routed', (self.project / '.ai/reviews/current.md').read_text())
+        body = (self.base / 'gh.log.body.md').read_text()
+        self.assertIn('- code round 2: Claude, routed (claude-opus-5-5): small low-risk fix round (', body)
+
+    def test_reviewed_by_pr_body_lists_every_round_and_falls_back_to_the_report(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.unlink(missing_ok=True)
+        self.assertRegex(self.helper('pr-body', '1', '0').stdout, r'Reviewed by:\n- Codex \([^,)]+, effort [^)]*\)\n')
+        self.helper('outcome', 'review', 'plan', 'codex', 'm1', 'high', '5')
+        self.helper('outcome', 'review', 'code', 'codex', 'm1', 'high', '5')
+        self.helper('outcome', 'review', 'code', 'claude-routed', 'm2', 'high', '5', '--route', 'small low-risk fix round (10 lines)')
+        body = self.helper('pr-body', '2', '0').stdout
+        self.assertIn('Reviewed by:\n- plan: Codex (m1)\n- code round 1: Codex (m1)\n'
+                      '- code round 2: Claude, routed (m2): small low-risk fix round (10 lines)\n', body)
+
+    def test_review_routing_pipeline_risky_fix_round_stays_on_codex(self):
+        self.routed_pipeline('supabase/migrations/x.sql')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'DONE')
+        self.assertEqual((self.base / 'codex-calls').read_text().count('call'), 2)
+        self.assertFalse((self.base / 'claude-review-args.log').exists())
+        self.assertEqual(self.code_review_rows(), ['codex', 'codex'])
+        self.assertIn('## Independent review (Codex)', (self.base / 'gh.log.body.md').read_text())
+
     def test_reviewer_setting_codex_and_claude_only(self):
         self.ready()
         self.tool('ai-run', '--approved')
@@ -8231,11 +9185,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_claude_review_usage_limit_pauses_then_retries_codex_first(self):
         self.ready()
         self.tool('ai-run', '--approved')
-        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='limit-once')
+        # An unknown Codex reset is not remembered: after the Claude pause Codex is asked again.
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='unknown-reset', MOCK_CLAUDE_REVIEW='limit-once')
         self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 2)
         self.assertEqual(len(self.claude_review_args()), 2)
         self.assertIn('⏸ PAUSED: Claude usage limit', self.notifications())
         self.helper('review-info')
+        # A known reset is remembered (T109): the retry after the pause goes straight to Claude.
+        self.commit('record review')
+        (self.base / 'claude-review-limit').unlink()
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX_LIMIT='1', MOCK_CLAUDE_REVIEW='limit-once')
+        self.assertEqual((self.base / 'codex-limit-calls').read_text().count('call'), 3)
+        self.assertEqual(len(self.claude_review_args()), 4)
+        self.assertIn('(recorded)', (self.project / '.ai/reviews/current.md').read_text())
 
     def test_plan_review_and_recheck_fall_back_to_claude(self):
         self.ready()
@@ -8735,6 +9697,122 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.gate_seconds(), '60')
         log.write_bytes(log.read_bytes() + b'{"kind": "gate", "project": "project with spaces", "result": "pass", "sec')
         self.assertEqual(self.gate_seconds(), '60')
+
+    def attempt_info_project(self, models=('sonnet', 'haiku', 'opus', ''), notes='Pending.'):
+        self.setup_project()
+        queue = ''
+        for number, model in enumerate(models, 1):
+            block = task(f'T00{number}')
+            if model:
+                block = block.replace('Dependencies: none\n', f'Dependencies: none\nModel: {model}\n')
+            queue += block.replace('Pending.', notes)
+        (self.project / '.ai/tasks.md').write_text('# Tasks\n\n' + queue)
+        self.commit('attempt-info queue')
+
+    def attempt_info(self, *args):
+        result = self.helper('attempt-info', *args)
+        first, *note = result.stdout.splitlines()
+        return first, note
+
+    def test_attempt_info_first_attempt_and_done_rows(self):
+        self.attempt_info_project()
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.helper('outcome', 'task', 'T001', 'done', 'sonnet', '5')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.assertEqual(self.attempt_info('T004'), ('1 - no', []))
+        self.assertEqual(self.attempt_info('T004', 'claude-sonnet-5-5'), ('1 claude-sonnet-5-5 no', []))
+        for args in ((), ('x001',), ('T001', 'a', 'b')):
+            self.assertIn('Usage: attempt-info', self.helper('attempt-info', *args, expected=1).stderr)
+
+    def test_attempt_info_second_attempt_note(self):
+        self.attempt_info_project(notes='First line.\n\nLast | line.')
+        self.helper('outcome', 'task', 'T001', 'timeout', 'sonnet', '1800')
+        first, note = self.attempt_info('T001')
+        self.assertEqual(first, '2 sonnet no')
+        self.assertEqual(note[0], 'Attempt 1 ended timeout after 1800 s on sonnet.')
+        self.assertEqual(note[-1], 'Last result line: Last line.')
+        self.assertEqual(len(note), 2)  # no validation log yet
+
+    def test_attempt_info_third_attempt_raises_one_tier(self):
+        self.attempt_info_project()
+        for task_id in ('T001', 'T002', 'T003', 'T004'):
+            for result in ('error', 'validation_failed'):
+                self.helper('outcome', 'task', task_id, result, 'm', '5')
+        self.assertEqual(self.attempt_info('T001')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T002')[0], '3 sonnet yes')
+        self.assertEqual(self.attempt_info('T003')[0], '3 opus no')
+        self.assertEqual(self.attempt_info('T004')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T004', 'claude-sonnet-5-5')[0], '3 opus yes')
+        self.assertEqual(self.attempt_info('T004', 'claude-fable-5-1')[0], '3 claude-fable-5-1 no')
+        self.helper('outcome', 'task', 'T002', 'crashed', 'sonnet', '0')
+        first, note = self.attempt_info('T002')
+        self.assertEqual(first, '4 sonnet yes')  # one tier only
+        self.assertEqual(note[0], 'Attempt 3 ended crashed after 0 s on sonnet.')
+
+    def test_attempt_info_counts_only_this_project_branch_and_task(self):
+        self.attempt_info_project()
+        self.helper('outcome', 'task', 'T002', 'error', 'm', '5')
+        self.run_cmd(['git', 'checkout', '-qb', 'other'])
+        self.helper('outcome', 'task', 'T001', 'error', 'm', '5')
+        self.run_cmd(['git', 'checkout', '-q', 'main'])
+        foreign = {'time': 't', 'kind': 'task', 'project': 'other', 'branch': 'main', 'task': 'T001',
+                   'result': 'error', 'model': 'm', 'seconds': 5, 'seq': 99}
+        with (self.base / 'host-state/outcomes.jsonl').open('a') as stream:
+            stream.write(json.dumps(foreign) + '\n')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        self.assertEqual(self.attempt_info('T002')[0], '2 haiku no')
+
+    def attempt_info_gate_log(self, content, link=False):
+        local = self.project / '.ai/local'
+        local.mkdir(exist_ok=True)
+        log = local / 'check-test.log'
+        if link:
+            target = self.base / 'outside.log'
+            target.write_text(content)
+            log.symlink_to(target)
+        else:
+            log.write_text(content)
+        (local / 'validation.json').write_text(json.dumps({'result': 'FAIL', 'log': '.ai/local/check-test.log'}))
+
+    def test_attempt_info_failing_checks_from_the_gate_log(self):
+        self.attempt_info_project()
+        self.helper('outcome', 'task', 'T001', 'validation_failed', 'sonnet', '60')
+        self.attempt_info_gate_log('======\nFAIL: test_a (tests.T)\n------\nERROR: test_b (tests.T)\n'
+                                   'FAIL: test_a (tests.T)\n\nFAILED (failures=1, errors=1)\n')
+        note = self.attempt_info('T001')[1]
+        self.assertEqual(note[1], 'Failing checks: test_a (tests.T), test_b (tests.T).')
+        self.attempt_info_gate_log('FAILED tests/x.py::test_c - AssertionError\nok\n')
+        self.assertEqual(self.attempt_info('T001')[1][1], 'Failing checks: tests/x.py::test_c.')
+        self.attempt_info_gate_log('lint ok\nnpm ERR! build broke\n\n')
+        self.assertEqual(self.attempt_info('T001')[1][1], 'Last gate line: npm ERR! build broke')
+        (self.project / '.ai/local/check-test.log').unlink()
+        self.attempt_info_gate_log('FAIL: test_a (tests.T)\n', link=True)
+        self.assertFalse(any(line.startswith(('Failing', 'Last gate')) for line in self.attempt_info('T001')[1]))
+
+    def test_attempt_info_note_is_bounded_and_one_line_per_item(self):
+        self.attempt_info_project(notes='x|' * 2000)
+        self.helper('outcome', 'task', 'T001', 'error', 'son|net', '5')
+        self.attempt_info_gate_log(''.join(f'FAIL: test_{i} {"y" * 55}\n' for i in range(8)))
+        note = self.attempt_info('T001')[1]
+        text = '\n'.join(note)
+        self.assertLessEqual(len(text), 600)
+        self.assertNotIn('|', text)
+        self.assertEqual(len(note), 3)
+        self.assertTrue(note[0].startswith('Attempt 1 ended error after 5 s on son net.'))
+        self.assertTrue(note[2].startswith('Last result line: x x'))
+
+    def test_attempt_info_corrupt_or_unreadable_records(self):
+        self.attempt_info_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b'\xff\xfe{not json\n[1, 2]\n{"kind": "task", "tas')
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        log.unlink()
+        log.mkdir()  # unreadable as a file
+        self.assertEqual(self.attempt_info('T001'), ('1 sonnet no', []))
+        (self.project / '.ai/tasks.md').write_text('## T001 — broken\nStatus: maybe\n')
+        self.assertEqual(self.attempt_info('T001', 'haiku'), ('1 haiku no', []))
+        self.assertEqual(self.attempt_info('T001'), ('1 - no', []))
 
     def test_gate_time_report_unchanged_by_gate_lines(self):
         self.outcome_log_project()
@@ -10248,6 +11326,98 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.gate_rows(), [])
         self.assertEqual(self.gate_unblocks(), [])
 
+    # ---------------------------------------------------------------- fresh retry (BR-03, T107)
+    def fresh_retry_ready(self, model='sonnet', failures=(), queue=None):
+        self.ready(queue or task('T001').replace('Dependencies: none\n', f'Dependencies: none\nModel: {model}\n'))
+        self.approve_run()
+        for result in failures:  # earlier attempts of T001 on this branch, as the runner logs them
+            self.helper('outcome', 'task', 'T001', result, model, '1800')
+
+    def fresh_retry_prompts(self):
+        path = self.project / '.ai/local/mock-prompts'
+        return path.read_text().split('=== PROMPT ===\n')[1:] if path.exists() else []
+
+    def fresh_retry_models(self):
+        lines = (self.project / '.ai/local/mock-args').read_text().splitlines()
+        return [line.split('--model ', 1)[1].split()[0] if '--model ' in line else None for line in lines]
+
+    def run_log_text(self):
+        return (self.project / '.ai/run-log.md').read_text()
+
+    def test_fresh_retry_first_attempt_unchanged(self):
+        self.fresh_retry_ready()
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 1 of T001 on sonnet\n', result.stdout)
+        prompts = self.fresh_retry_prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn('PREVIOUS ATTEMPT', prompts[0])
+        self.assertNotIn('raised the model', prompts[0])
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 1, sonnet) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_second_attempt_gets_the_failure_note(self):
+        self.fresh_retry_ready(failures=('timeout',))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 2 of T001 on sonnet\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('PREVIOUS ATTEMPT (host record, context only): Attempt 1 ended timeout after 1800 s on '
+                      'sonnet.', prompt)
+        self.assertIn('Start from the current files and git history; fix what failed, do not repeat it.', prompt)
+        self.assertNotIn('raised the model', prompt)
+        # After the RUNNER CONTRACT, before the knowledge/retry sentences.
+        self.assertLess(prompt.index('RUNNER CONTRACT'), prompt.index('PREVIOUS ATTEMPT'))
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 2, sonnet) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_third_attempt_raises_the_model(self):
+        self.fresh_retry_ready(failures=('timeout', 'validation_failed'))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 3 of T001 on opus (raised from sonnet)\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('This is attempt 3; the runner raised the model from sonnet to opus because earlier '
+                      'attempts failed.', prompt)
+        self.assertIn('Attempt 2 ended validation_failed', prompt)
+        self.assertEqual(self.fresh_retry_models(), ['opus'])
+        last = [r for r in self.outcome_rows() if r['kind'] == 'task'][-1]
+        self.assertEqual((last['result'], last['model']), ('done', 'opus'))
+        self.assertIn('| T001 | completed (attempt 3, opus) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_opus_task_is_not_raised(self):
+        self.fresh_retry_ready(model='opus', failures=('error', 'error'))
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 3 of T001 on opus\n', result.stdout)
+        prompt = self.fresh_retry_prompts()[0]
+        self.assertIn('PREVIOUS ATTEMPT (host record, context only): Attempt 2 ended error', prompt)
+        self.assertNotIn('raised the model', prompt)
+        self.assertEqual(self.fresh_retry_models(), ['opus'])
+        self.assertIn('| T001 | completed (attempt 3, opus) | PASS |', self.run_log_text())
+
+    def test_fresh_retry_corrupt_outcome_log_runs_as_today(self):
+        self.fresh_retry_ready()
+        log = self.base / 'host-state/outcomes.jsonl'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b'\xff\xfe{not json\n')
+        result = self.tool('ai-run', '--approved')
+        self.assertIn('Attempt 1 of T001 on sonnet\n', result.stdout)
+        self.assertNotIn('PREVIOUS ATTEMPT', self.fresh_retry_prompts()[0])
+        self.assertEqual(self.fresh_retry_models(), ['sonnet'])
+        self.assertIn('| T001 | completed (attempt 1, sonnet) |', self.run_log_text())
+        self.assertIn('Status: DONE', self.helper('tasks', 'show', 'T001').stdout)
+
+    def test_fresh_retry_blocked_row_names_the_attempt(self):
+        model_line = 'Dependencies: none\nModel: haiku\n'
+        self.fresh_retry_ready(queue=task('T001').replace('Dependencies: none\n', model_line)
+                               + task('T002').replace('Dependencies: none\n', model_line))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='blocked-first')
+        log = self.run_log_text()
+        self.assertIn('| T001 | blocked (attempt 1, haiku); try next independent task | not complete |', log)
+        self.assertIn('| T002 | completed (attempt 1, haiku) | PASS |', log)
+
+    def test_fresh_retry_stop_row_names_the_attempt(self):
+        self.fresh_retry_ready(model='haiku', failures=('error',))
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='error')
+        self.assertRegex(self.run_log_text(), r'\| T001 \| stopped \(exit \d+\) \(attempt 2, haiku\); inspect')
+
     # ---------------------------------------------------------------- killed runner (CU-5, T004)
     def crash_attempts_dir(self):
         return Path(self.helper('outcome', 'attempt-dir').stdout.strip())
@@ -10531,8 +11701,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_format_retry_after_claude_fallback_attributes_the_codex_review(self):
         self.ready()
         self.tool('ai-run', '--approved')
-        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back.
-        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once', MOCK_CLAUDE_REVIEW='malformed', AI_SUPERVISE='1')
+        # Call 1: Codex at its limit -> Claude fallback, malformed; the retry: Codex is back. (An
+        # unknown reset, so the host does not remember the limit until it resets.)
+        self.tool('ai-review', '--base', 'main', MOCK_CODEX='limit-once-unknown', MOCK_CLAUDE_REVIEW='malformed',
+                  AI_SUPERVISE='1')
         self.assertEqual(len(self.claude_review_args()), 1)
         self.assertEqual(self.codex_calls(), 2)
         review = (self.project / '.ai/reviews/current.md').read_text()
@@ -14995,6 +16167,83 @@ class ParallelRunnerTest(unittest.TestCase):
     def test_parallel_runner_startup_sigterm_during_worker_start_stops_batch(self):
         result = self.startup_interrupt('SystemExit(143)')
         self.assertIn('raised SystemExit 143', result.stdout, result.stdout + result.stderr)
+
+
+class StateIsolationTest(unittest.TestCase):
+    """FL-33: the suite never registers fixture runs in the host's real registry."""
+
+    def test_state_isolation_env_under_temp_and_child_registers_there(self):
+        temp = os.path.realpath(tempfile.gettempdir())
+        for name in ('AI_STATE_DIR', 'XDG_STATE_HOME'):
+            self.assertTrue(os.path.realpath(os.environ[name]).startswith(temp + os.sep), name)
+        with tempfile.TemporaryDirectory() as checkout:
+            result = subprocess.run([sys.executable, str(HELPER), 'pipeline-register', checkout, 'main'],
+                                    env=dict(os.environ), capture_output=True, text=True,
+                                    timeout=COMMAND_TIMEOUT)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = list((Path(os.environ['AI_STATE_DIR']) / 'pipelines').glob('*.json'))
+            self.assertTrue(any(json.loads(e.read_text())['checkout'] == checkout for e in entries))
+
+    def test_state_isolation_temp_ai_state_with_missing_or_external_xdg(self):
+        isolation = Path(__file__).resolve().parent / 'isolation.py'
+        code = ("import runpy, os, json; runpy.run_path(%r); "
+                "print(json.dumps([os.environ['AI_STATE_DIR'], os.environ['XDG_STATE_HOME']]))"
+                % str(isolation))
+        temp = os.path.realpath(tempfile.gettempdir())
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as both:
+            for xdg in (None, '/nonexistent-external-xdg', both):
+                env = {k: v for k, v in os.environ.items() if k != 'XDG_STATE_HOME'}
+                env['AI_STATE_DIR'] = state
+                if xdg:
+                    env['XDG_STATE_HOME'] = xdg
+                result = subprocess.run([sys.executable, '-c', code], env=env,
+                                        capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                got_state, got_xdg = json.loads(result.stdout)
+                self.assertEqual(got_state, state)
+                self.assertTrue(os.path.realpath(got_xdg).startswith(temp + os.sep), got_xdg)
+                if xdg == both:
+                    self.assertEqual(got_xdg, both)
+
+    def test_state_isolation_registry_guard(self):
+        import run_parallel
+        with tempfile.TemporaryDirectory() as base:
+            suite = Path(base, 'suite')
+            registry = Path(base, 'real/pipelines')
+            self.assertIsNone(run_parallel.registry_problem(registry, suite))  # missing registry
+            registry.mkdir(parents=True)
+            Path(registry, 'a.json').write_text(json.dumps({'checkout': str(suite / 'fixture')}))
+            Path(registry, 'b.json').write_text(json.dumps({'checkout': str(Path(base, 'other'))}))
+            Path(registry, 'c.json').write_text('not json')
+            problem = run_parallel.registry_problem(registry, suite)
+            self.assertEqual(problem, 'self-check registered fixture runs in the real registry: '
+                             + str(registry / 'a.json'))
+            Path(registry, 'a.json').unlink()
+            self.assertIsNone(run_parallel.registry_problem(registry, suite))
+
+    def test_state_isolation_guard_reads_the_registry_before_discovery(self):
+        with tempfile.TemporaryDirectory() as base:
+            suite_tmp = Path(base, 'tmp')
+            registry = Path(base, 'host-state/pipelines')
+            tests_dir = Path(base, 'fake-tests')
+            for path in (suite_tmp, registry, tests_dir):
+                path.mkdir(parents=True)
+            Path(registry, 'leak.json').write_text(json.dumps({'checkout': str(suite_tmp / 'fixture')}))
+            # Discovery rewrites the state env on import, the way `isolation` does.
+            Path(tests_dir, 'test_fake.py').write_text(
+                'import os, unittest\n'
+                "os.environ['AI_STATE_DIR'] = os.path.join(os.environ['TMPDIR'], 'isolated-state')\n"
+                'class FakeTest(unittest.TestCase):\n'
+                '    def test_ok(self):\n'
+                '        pass\n')
+            env = dict(os.environ, AI_STATE_DIR=str(Path(base, 'host-state')), TMPDIR=str(suite_tmp))
+            env.pop('XDG_STATE_HOME', None)
+            result = subprocess.run([sys.executable, str(ROOT / 'tests/run_parallel.py'),
+                                     '--start-dir', str(tests_dir)],
+                                    env=env, capture_output=True, text=True, timeout=PIPELINE_TIMEOUT)
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn(str(registry / 'leak.json'), output)
 
 
 class TestHarnessTimeoutsTest(unittest.TestCase):
