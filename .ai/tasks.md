@@ -5551,7 +5551,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T303 — Interrupts reach the agent session: ai-run and ai-recover (RC-01 G2)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5600,6 +5600,14 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
 Mission control 2026-10-22 01:35Z: the session timed out; its partial edits are committed as WIP. Reconcile them, run targeted checks only, then mark DONE.
+2026-10-22 reconcile: WIP 1e06212 holds the complete change (`ai_run_child`/`ai_stop_child` in
+`scripts/lib/common.sh`; `ai-run` session and traps; `ai-recover` session and INT/TERM/HUP traps;
+fake `sleep` modes and 4 tests; `docs/workflow.md`; vault flow chart and hub Log). This session only
+fixed a spacing nit in the mock. Evidence: `python3 -m unittest discover -s tests -k interrupt -k
+test_session_exit_codes_unchanged` → Ran 13 tests OK (incl. `test_interrupt_reaches_the_session_ai_run`,
+`_term`, `_the_recovery_session`, `test_session_exit_codes_unchanged`); `-k timeout` → Ran 31 tests OK.
+Full gate not run here per the mission-control note (gate exceeds the session limit); the runner
+validates the checkpoint.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
 Status: TODO

@@ -206,6 +206,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
   `tee` logger fails the gate (no PASS stamp).
+  Done so far (T303): `test_interrupt_reaches_the_session_ai_run`,
+  `test_interrupt_reaches_the_session_term`, `test_interrupt_reaches_the_recovery_session`,
+  `test_session_exit_codes_unchanged`.
 - `escalation` (T305, T309, T320, T321, T327): kinds, answers, redaction, hint consumption, a repeated
   write keeps the kind, current run only, answers from the current run record never an earlier
   manifest, a stop request wins, cleared by a new run and a resume; hints at the

@@ -158,7 +158,7 @@ if 'RECOVERY CONTRACT' in prompt:
         # A decision session only a signal ends (T303).
         pathlib.Path('.ai/local/mock-recover.pid').write_text(str(os.getpid()))
         time.sleep(300)
-    decision ={'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
+    decision = {'action': mode.removeprefix('prose-'), 'reason': 'the session crashed once.',
                 'human_action': 'look at T001 yourself'}
     answer = json.dumps(decision)
     if mode == 'escalate-long':
