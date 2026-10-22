@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: fix/flow-batch-11
-Phase: implementing
-Current task: none
-Last completed task: T320
-Tasks complete: 81
-Tasks remaining: 11
-Last validation: PASS at 2026-10-22T19:42:38Z
-Blocked: no
-Next action: Implement T321 (fix-round limit escalation)
-Last updated: 2026-10-22T20:05:00Z
+Phase: blocked
+Current task: T320
+Last completed task: T309
+Tasks complete: 80
+Tasks remaining: 12
+Last validation: FAIL at 2026-10-22T20:17:55Z
+Blocked: yes
+Next action: Validation failed after T320; inspect validation log
+Last updated: 2026-10-22T20:17:56Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.

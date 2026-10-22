@@ -615,3 +615,4 @@
 | 2026-10-22T18:53:39Z | runner | T309 | stopped (exit 1); inspect state/diff before resuming | see local logs | 338153e | No merge or deployment performed |
 | 2026-10-22T19:24:44Z | runner | T320 | stopped (exit 1); inspect state/diff before resuming | see local logs | 0aef581 | No merge or deployment performed |
 | 2026-10-22T20:05:00Z | claude (opus) | T320 | DONE (resume): mission control's checkpoint 0c0fe6e checked against all acceptance criteria; no source change | -k escalation 26 OK (141 s); full gate 1189 OK on the same tree (mission control) | 0c0fe6e | docs, vault flow chart and hub Log already updated |
+| 2026-10-22T20:17:56Z | runner | T320 | stopped (exit 1); inspect state/diff before resuming | see local logs | c666859 | No merge or deployment performed |

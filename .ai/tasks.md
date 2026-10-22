@@ -6346,7 +6346,7 @@ unchanged. Tests: `test_escalation_hint_task_blocked`, `_plan_kinds`, `_needs_hu
 `.ai/bin/ai-check` PASS, Ran 1180 OK (892.5 s).
 
 ## T320 — Escalation records written at every stop for a human, gate first (RC-01 G9, writes)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T307, T309
 Model: opus
 
