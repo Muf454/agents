@@ -5317,7 +5317,7 @@ Mission control 2026-10-22 01:35Z: returned to TODO (BLOCKED only on the gate ti
   the runner's checkpoint gate decides. DONE.
 
 ## T305 — Escalation record helper: schema 1, redaction, allowed answers (RC-01 G9, helper)
-Status: TODO
+Status: DONE
 Dependencies: T315
 Model: opus
 
@@ -5402,6 +5402,16 @@ Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `workflow.py escalation write|hint|show|clear` (record and hint beside `runs/`,
+under `runs/.lock`, current run only, exit 3 otherwise); `run_change` gained an `after` hook so
+`run-record resume` clears it under the same lock, and `start_run` clears it after publishing
+`current` (a recovery's `own` does not clear). Redaction per spec B10 (`redact_error`). Answers
+from the named run record only. Documented in `docs/workflow.md` "Escalation record".
+Evidence: `python3 -m unittest discover -s tests -k escalation` Ran 11 OK (the 9 new
+`test_escalation_*` plus two older plan-escalation tests); `-k test_run_record` Ran 11 OK;
+`DocsConsistencyTest` Ran 3 OK. Full gate result unknown in the session; left to the host gate
+(the background `.ai/bin/ai-check` hit the 20-minute background limit and was stopped).
+Note: `ai-task retry|skip|model` named in the answers land with T312.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
 Status: TODO

@@ -9,6 +9,11 @@
   each naming its run (`--run ID`), checked under `runs/.lock` against `current` and the recorded
   process identity (exit 3 "not the owner"); ended records are immutable; `end … stopped` after a
   stop request stores `human_stop`; `settle_stop()` for T319's `run-stop`. No caller yet.
+- T305 (2026-10-22): `workflow.py escalation write|hint|show|clear`: `<binding dir>/escalation.json`
+  (schema 1) and `escalation-hint.json`, current run only (exit 3), `other` refined (stop request
+  → `human_stop`, then the hint, then the stage), a later `other` never replaces a specific kind,
+  redacted last-error, answers built from the named run record. `run-record start` and `resume`
+  clear it. No writer yet (T309, T320, T321). Described in `docs/workflow.md`.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -76,6 +81,8 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T305: `-k escalation` Ran 11 OK, `-k test_run_record` Ran 11 OK, Docs 3 OK; the full
+gate ran in the background and was stopped at the 20-minute limit, so the runner's gate decides.
 2026-10-22, T315: `-k run_record` Ran 14 OK (51.9 s); full gate not run in session (≈1229 s >
 the tool limit), the runner's gate decides.
 2026-10-22, T301: `.ai/bin/ai-check` PASS, Ran 1113 tests OK (1229 s); `-k run_record` Ran 9 OK.
@@ -196,6 +203,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   validation through recovery, stand-alone `ai-run`, not after a gate change, no classification
   from text; fix-round limit on all four finish paths (`--no-pr`, PR, no origin, no `gh`) and
   plan kinds end to end.
+  Done so far (T305): `test_escalation_record_kinds_and_answers`,
+  `test_escalation_record_redacts_last_error`, `test_escalation_hint_is_consumed_once`,
+  `test_escalation_repeated_write_keeps_kind`, `test_escalation_only_for_the_current_run`,
+  `test_escalation_cleared_by_new_run_and_resume`, `test_escalation_clear_and_invalid`,
+  `test_escalation_answers_belong_to_the_current_run`, `test_escalation_stop_request_wins`.
 - `human_stop` (T306, T318, T323, T307): trap records, bookkeeping commit, stop request in
   `stop()`, gate tampering with a child failure and with an interrupt; PID-only stop in
   implementation, review, validation, dependency setup, the retry wait, `git push`, `git
@@ -223,7 +235,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301 and T315 are DONE (T315: 939c66f, re-verified 2026-10-22, `-k run_record` 14 OK; the full
-gate is left to the runner's checkpoint validation, as mission control directed). T303 has
-partial WIP from a timed-out session (1e06212) to reconcile; then T305 and the rest of the queue.
+T301, T315 and T305 are DONE (T305's full gate is left to the runner's checkpoint validation).
+T303 has partial WIP from a timed-out session (1e06212) to reconcile; then the rest of the queue
+(T302 next by dependency).
 Nothing is merged or deployed.

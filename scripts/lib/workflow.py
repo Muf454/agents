@@ -2039,6 +2039,7 @@ def start_run(runs, checkout, kind, branch, base, argv, pid):
             path.unlink(missing_ok=True)
             raise
         atomic(runs / 'current', run_id + '\n')
+        clear_escalation(runs)
         seqs[seq] = path.name
         for old in sorted(seqs)[:-RUN_KEEP]:
             if seqs[old] != path.name:
@@ -2070,9 +2071,10 @@ def run_detail(text):
     return ' '.join(text.replace('|', '').split())[:200]
 
 
-def run_change(runs, run_id, change):
+def run_change(runs, run_id, change, after=None):
     """Under the lock: `change(record)` returns the new record, True (allowed, nothing to
-    write) or None (refused). Return False when refused, so no record is touched."""
+    write) or None (refused). Return False when refused, so no record is touched; `after()`
+    runs under the same lock once a change is published."""
     with run_lock(runs):
         record = read_run(runs, run_id) if current_run_id(runs) == run_id else None
         result = change(record) if record is not None else None
@@ -2080,6 +2082,8 @@ def run_change(runs, run_id, change):
             return False
         if isinstance(result, dict):
             atomic(runs / f'{run_id}.json', json.dumps(result) + '\n')
+            if after is not None:
+                after()
         return True
 
 
@@ -2097,7 +2101,8 @@ def own_run(runs, run_id, pid, launcher=None):
         else:
             record['launcher'] = launcher
         return record
-    return run_change(runs, run_id, change)
+    # An automatic resume removes the escalation record (P7); a recovery taking over does not.
+    return run_change(runs, run_id, change, after=None if launcher else lambda: clear_escalation(runs))
 
 
 def pause_run(runs, run_id, pid):
@@ -2242,6 +2247,250 @@ def run_record(arguments):
         process = record['process']
         identity = process_identity(process['pid'])
         sys.exit(0 if identity and identity['start_ticks'] == process['start_ticks'] else 1)
+
+
+# Escalation record (RC-01 G9, T305): why the current run waits for a human, with redacted
+# evidence and the allowed answers as argument arrays. One record and one pending hint beside
+# `runs/`, both changed under `runs/.lock`.
+ESCALATION_SCHEMA = 1
+ESCALATION_KINDS = ('plan_review_limit', 'fix_round_limit', 'task_blocked', 'needs_human_question',
+                    'validation', 'usage_limit', 'crash', 'human_stop', 'other')
+ESCALATION_TASK = re.compile(r'T\d{3,}')
+ESCALATION_FINDING = re.compile(r'[A-Z]{1,3}\d{1,4}')
+ESCALATION_REVIEWS = ('.ai/reviews/plan.md', '.ai/reviews/current.md', '.ai/reviews/recheck.md')
+ESCALATION_MAX_ROUNDS = 5
+ESCALATION_ERROR_CHARS = 400
+# Spec B10: provider keys anywhere, and the value after a secret-looking word.
+REDACT_KEYS = re.compile(r'(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{6,}|gh[pousr]_[A-Za-z0-9]{6,}'
+                         r'|github_pat_[A-Za-z0-9_]{6,}|xox[a-z]-[A-Za-z0-9-]+)')
+REDACT_VALUES = re.compile(r'(?i)(?<![a-z])((?:token|password|secret|key|authorization|bearer)[a-z_-]*)'
+                           r'(\s*[=:]\s*|\s+)(?:bearer\s+)?(?!\[redacted\])\S+')
+
+
+def escalation_paths(runs):
+    return runs.parent / 'escalation.json', runs.parent / 'escalation-hint.json'
+
+
+def clear_escalation(runs):
+    """Remove the record and the hint (the caller holds `runs/.lock`)."""
+    for path in escalation_paths(runs):
+        path.unlink(missing_ok=True)
+
+
+def escalation_kind(kind):
+    return kind if kind in ESCALATION_KINDS else 'other'
+
+
+def redact_error(text):
+    """One line of at most 400 characters with secrets replaced by `[redacted]` (spec B10)."""
+    line = REDACT_KEYS.sub('[redacted]', ' '.join(text.split()))
+    line = REDACT_VALUES.sub(lambda match: f'{match.group(1)}{match.group(2)}[redacted]', line)
+    return line[:ESCALATION_ERROR_CHARS]
+
+
+def escalation_local(name):
+    """Text of `.ai/local/NAME` of this checkout through the pinned `.ai/local` (regular file,
+    at most 64 KB), else None."""
+    local_fd = local_dir_fd(checkout_root())
+    if local_fd is None:
+        return None
+    try:
+        found = read_record(local_fd, name, RUN_MAX_BYTES)
+    finally:
+        os.close(local_fd)
+    return found[0] if found is not None else None
+
+
+def read_escalation_file(path):
+    data = read_small(path, RUN_MAX_BYTES)
+    try:
+        value = json.loads(data) if data is not None else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) and value.get('schema') == ESCALATION_SCHEMA \
+        and type(value['schema']) is int else None
+
+
+def escalation_valid(data):
+    evidence = data.get('evidence')
+    return (all(isinstance(data.get(key), str) for key in ('kind', 'stage', 'run', 'branch', 'created'))
+            and isinstance(data.get('tasks'), list) and isinstance(evidence, dict)
+            and isinstance(evidence.get('findings'), list) and isinstance(data.get('answers'), list)
+            and all(isinstance(answer, dict) and isinstance(answer.get('argv'), list)
+                    and all(isinstance(arg, str) for arg in answer['argv']) for answer in data['answers']))
+
+
+def option_value(argv, name):
+    """The last value of `name VALUE` in argv (as bash option parsing keeps it), else None."""
+    value = None
+    for index, arg in enumerate(argv[:-1]):
+        if arg == name:
+            value = argv[index + 1]
+    return value
+
+
+def escalation_answers(kind, tasks, record):
+    """Answers built only from the run record (its kind and argv), never from `run.json`
+    (round 3, P18)."""
+    argv, pipeline = record['argv'], record['kind'] == 'pipeline'
+    if pipeline:
+        resume = ['.ai/bin/ai-pipeline', *argv]
+    elif '--approved' in argv and not {'--plan', '--triage', '--revise-plan'} & set(argv):
+        resume = ['.ai/bin/ai-run', *argv]
+    else:
+        resume = None
+    answers = []
+    if kind == 'task_blocked':
+        for task in tasks:
+            answers += [
+                {'id': 'retry_task', 'task': task, 'label': f'Return {task} to TODO with a note',
+                 'argv': ['.ai/bin/ai-task', 'retry', task, '--note', '{note}', '--commit']},
+                {'id': 'skip_task', 'task': task, 'label': f'Skip {task} with a reason',
+                 'argv': ['.ai/bin/ai-task', 'skip', task, '--reason', '{reason}', '--commit']},
+                {'id': 'set_model', 'task': task, 'label': f'Set the model of {task}',
+                 'argv': ['.ai/bin/ai-task', 'model', task, '{model}', '--commit']}]
+    elif kind == 'needs_human_question':
+        answers.append({'id': 'review_plan',
+                        'label': 'Review the plan again after answering in .ai/reviews/plan-dispositions.md',
+                        'argv': ['.ai/bin/ai-review', '--plan']})
+    elif kind == 'plan_review_limit' and pipeline:
+        if '--skip-plan-review' not in argv:
+            answers.append({'id': 'resume_skip_plan_review', 'label': 'Start the run again without the plan review',
+                            'argv': [*resume, '--skip-plan-review']})
+    elif kind == 'fix_round_limit' and pipeline:
+        rounds = option_value(argv, '--max-fix-rounds')
+        rounds = 2 if rounds is None else int(rounds) if re.fullmatch(r'\d', rounds) else None
+        if rounds is not None and rounds + 1 <= ESCALATION_MAX_ROUNDS:
+            more = list(argv)
+            if '--max-fix-rounds' in more:
+                index = len(more) - 2 - more[-2::-1].index('--max-fix-rounds')
+                more[index + 1] = str(rounds + 1)
+            else:
+                more += ['--max-fix-rounds', str(rounds + 1)]
+            answers.append({'id': 'resume_more_rounds', 'label': f'Start the run again with {rounds + 1} fix rounds',
+                            'argv': ['.ai/bin/ai-pipeline', *more]})
+    if resume is not None:
+        answers.append({'id': 'resume', 'label': 'Start the run again with its approved arguments',
+                        'argv': resume})
+    return answers
+
+
+def escalation_not_before():
+    """Reset epoch from `.ai/local/limit-stop` (`<Agent> <epoch>`), or None when unknown."""
+    stop = re.fullmatch(r'(?:Claude|Codex) (\d{1,12})\n?', escalation_local('limit-stop') or '')
+    return int(stop.group(1)) if stop and int(stop.group(1)) > 0 else None
+
+
+def write_escalation(runs, kind, stage, run_id, tasks, findings, review):
+    """Write the record for the current run `run_id`; False (nothing written) when it is not
+    current. A same-run write whose kind stays `other` keeps a specific kind (P13)."""
+    record_path, hint_path = escalation_paths(runs)
+    with run_lock(runs):
+        record = read_run(runs, run_id) if current_run_id(runs) == run_id else None
+        if record is None:
+            return False
+        hint = read_escalation_file(hint_path)
+        hint = hint if hint is not None and hint.get('run') == run_id else None
+        kind = escalation_kind(kind)
+        if kind == 'other':
+            if record['stop_requested'] is not None or record['outcome'] == 'human_stop':
+                kind = 'human_stop'
+            elif hint is not None:
+                kind = escalation_kind(hint.get('kind'))
+
+                def hinted(key, pattern):
+                    values = hint.get(key) if isinstance(hint.get(key), list) else []
+                    return [value for value in values if isinstance(value, str) and pattern.fullmatch(value)]
+                tasks = list(dict.fromkeys(tasks + hinted('tasks', ESCALATION_TASK)))
+                findings = list(dict.fromkeys(findings + hinted('findings', ESCALATION_FINDING)))
+            elif stage == 'validation':
+                kind = 'validation'
+            elif stage.startswith('crash'):
+                kind = 'crash'
+        if hint is not None:
+            hint_path.unlink(missing_ok=True)
+        existing = read_escalation_file(record_path)
+        if kind == 'other' and existing is not None and existing.get('run') == run_id \
+                and existing.get('kind') != 'other':
+            return True
+        last_error = escalation_local('last-error')
+        data = {'schema': ESCALATION_SCHEMA, 'kind': kind, 'stage': stage, 'run': run_id,
+                'branch': record['branch'], 'created': now(), 'tasks': tasks,
+                'evidence': {'last_error': redact_error(last_error) if last_error is not None else None,
+                             'review': review, 'findings': findings, 'log': record['log']},
+                'answers': escalation_answers(kind, tasks, record)}
+        if kind == 'usage_limit':
+            data['not_before'] = escalation_not_before()
+        atomic(record_path, json.dumps(data, indent=2) + '\n')
+    return True
+
+
+def write_escalation_hint(runs, kind, run_id, tasks, findings):
+    with run_lock(runs):
+        if current_run_id(runs) != run_id or read_run(runs, run_id) is None:
+            return False
+        atomic(escalation_paths(runs)[1], json.dumps(
+            {'schema': ESCALATION_SCHEMA, 'run': run_id, 'kind': escalation_kind(kind), 'tasks': tasks,
+             'findings': findings, 'created': now()}) + '\n')
+    return True
+
+
+def escalation(arguments):
+    """`write KIND STAGE --run ID [--task ID]… [--finding ID]… [--review PATH]`, `hint KIND
+    --run ID [--task ID]… [--finding ID]…`, `show` (exit 1 when none or invalid) and `clear`.
+    `write` and `hint` exit 3, writing nothing, when ID is not the current run."""
+    usage = ('Usage: escalation write KIND STAGE --run ID [--task ID]… [--finding ID]… [--review PATH] | '
+             'hint KIND --run ID [--task ID]… [--finding ID]… | show | clear')
+    if not arguments:
+        fail(usage)
+    action, rest = arguments[0], arguments[1:]
+    runs = runs_dir()
+    if action in ('show', 'clear'):
+        if rest:
+            fail(usage)
+        if action == 'clear':
+            with run_lock(runs):
+                clear_escalation(runs)
+            return
+        data = read_escalation_file(escalation_paths(runs)[0])
+        if data is None or not escalation_valid(data):
+            sys.exit(1)
+        data['kind'] = escalation_kind(data['kind'])
+        print(json.dumps(data, indent=2))
+        return
+    if action not in ('write', 'hint'):
+        fail(usage)
+    positional, options, tasks, findings, index = [], {}, [], [], 0
+    while index < len(rest):
+        name = rest[index]
+        if name in ('--run', '--task', '--finding', '--review') and index + 1 < len(rest):
+            value = rest[index + 1]
+            if name == '--task' and ESCALATION_TASK.fullmatch(value):
+                tasks.append(value)
+            elif name == '--finding' and ESCALATION_FINDING.fullmatch(value):
+                findings.append(value)
+            elif name in ('--run', '--review') and name not in options and (action == 'write' or name == '--run'):
+                options[name] = value
+            else:
+                fail(usage)
+            index += 2
+        else:
+            positional.append(name)
+            index += 1
+    run_id, review = options.get('--run', ''), options.get('--review')
+    stage_ok = action == 'hint' or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}',
+                                                positional[1] if len(positional) > 1 else '')
+    if (not RUN_ID.fullmatch(run_id) or len(positional) != (2 if action == 'write' else 1) or not stage_ok
+            or (review is not None and review not in ESCALATION_REVIEWS)):
+        fail(usage)
+    tasks, findings = list(dict.fromkeys(tasks)), list(dict.fromkeys(findings))
+    if action == 'write':
+        done = write_escalation(runs, positional[0], positional[1], run_id, tasks, findings, review)
+    else:
+        done = write_escalation_hint(runs, positional[0], run_id, tasks, findings)
+    if not done:
+        print(f'escalation {action}: run {run_id} is not the current run', file=sys.stderr)
+        sys.exit(3)
 
 
 # Files a review triage may change: dispositions, the task queue and runner bookkeeping.
@@ -6035,6 +6284,8 @@ def main():
         run_manifest(arguments)
     elif command == 'run-record':
         run_record(arguments)
+    elif command == 'escalation':
+        escalation(arguments)
     elif command == 'ruling-row':
         ruling_row(arguments)
     elif command == 'state-root-check':

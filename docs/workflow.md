@@ -70,6 +70,29 @@ the first. `settle-stop --run ID` (also `settle_stop()` for `run-stop`) ends a s
 not-ended run whose process is gone as `human_stop`. `stop-requested --run ID` exits 0 when a
 stop is requested or the outcome is `human_stop`, 1 when not.
 
+**Escalation record (RC-01 G9, T305; helper only, no writer yet).** `workflow.py escalation`
+keeps `escalation.json` (schema 1) beside `run.json`: why the current run waits for a human.
+`write KIND STAGE --run ID [--task T…]… [--finding ID]… [--review PATH]` and `hint KIND --run ID
+[--task …]… [--finding …]…` hold `runs/.lock` and exit 3, writing nothing, when ID is not the
+current run. KIND is one of `plan_review_limit`, `fix_round_limit`, `task_blocked`,
+`needs_human_question`, `validation`, `usage_limit`, `crash`, `human_stop`, `other` (anything else
+is `other`). `other` is refined: a stop-requested or `human_stop` run → `human_stop` (its hint is
+dropped); else a pending hint of the same run (`escalation-hint.json`, consumed once) gives the
+kind and adds its tasks and findings; else stage `validation` → `validation`, a stage starting
+with `crash` → `crash`. A same-run write whose kind is still `other` leaves a record with a
+specific kind unchanged. The record holds kind, stage, run, branch, created, tasks, evidence
+(`.ai/local/last-error` read through the pinned `.ai/local` as one line of at most 400
+characters with secret values and provider keys replaced by `[redacted]`; the review path;
+finding ids; the run's log) and answers as argument arrays (`.ai/bin/…`, placeholders `{note}`,
+`{reason}`, `{model}`), built only from the named run record: `task_blocked` gives `retry_task`,
+`skip_task`, `set_model` per task; `needs_human_question` `review_plan`; a pipeline's
+`plan_review_limit` `resume_skip_plan_review` and `fix_round_limit` `resume_more_rounds` (only
+while `--max-fix-rounds` + 1 ≤ 5); every kind ends with `resume` (a pipeline's own argv, or a
+stand-alone `ai-run`'s only for a task run: `--approved` without `--plan`, `--triage`,
+`--revise-plan`). `usage_limit` adds `not_before` from `.ai/local/limit-stop`. `show` prints it
+(exit 1 when absent, not schema 1 or malformed; an unknown kind reads as `other`); `clear` removes
+record and hint. `run-record start` and `run-record resume` remove both.
+
 ## Validation and evidence
 
 `.ai/validate` is the one real project gate. `.ai/bin/ai-check` invokes it from the

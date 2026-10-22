@@ -15634,6 +15634,224 @@ PY
         self.run_record('stop-requested', '--run', run_b, expected=3)
         self.run_record('request-stop', '--run', run_b, '--via', 'signal', expected=3)
 
+    # Escalation record (RC-01 G9, T305): `escalation write|hint|show|clear` beside `runs/`.
+    def escalation(self, *args, expected=0):
+        result = subprocess.run(['python3', str(HELPER), 'escalation', *args], cwd=self.project, env=self.env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def escalation_path(self, name='escalation.json'):
+        return self.run_records().parent / name
+
+    def escalation_data(self):
+        return json.loads(self.escalation_path().read_text())
+
+    def escalation_local(self, name, contents):
+        local = self.project / '.ai/local'
+        local.mkdir(parents=True, exist_ok=True)
+        (local / name).write_text(contents)
+
+    def answer_ids(self, data):
+        return [(answer['id'], answer.get('task')) for answer in data['answers']]
+
+    def test_escalation_record_kinds_and_answers(self):
+        run_id = self.run_record_start(os.getpid())
+        resume = ['.ai/bin/ai-pipeline', '--approved', '--base', 'main']
+        expected = {
+            'plan_review_limit': [('resume_skip_plan_review', None), ('resume', None)],
+            'fix_round_limit': [('resume_more_rounds', None), ('resume', None)],
+            'needs_human_question': [('review_plan', None), ('resume', None)],
+            'validation': [('resume', None)], 'usage_limit': [('resume', None)], 'crash': [('resume', None)],
+            'human_stop': [('resume', None)], 'other': [('resume', None)]}
+        for kind, answers in expected.items():
+            self.escalation('clear')
+            self.escalation('write', kind, 'implementation', '--run', run_id, '--finding', 'M1',
+                            '--review', '.ai/reviews/current.md')
+            data = self.escalation_data()
+            self.assertEqual((data['schema'], data['kind'], data['stage'], data['run'], data['branch'], data['tasks']),
+                             (1, kind, 'implementation', run_id, 'fix/x', []))
+            self.assertEqual(data['evidence']['findings'], ['M1'])
+            self.assertEqual(data['evidence']['review'], '.ai/reviews/current.md')
+            self.assertRegex(data['created'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+            self.assertEqual(self.answer_ids(data), answers, kind)
+            for answer in data['answers']:
+                self.assertIsInstance(answer['argv'], list)
+                self.assertTrue(answer['argv'][0].startswith('.ai/bin/'), answer)
+            self.assertEqual(data['answers'][-1]['argv'], resume)
+            self.assertEqual(json.loads(self.escalation('show').stdout), data)
+        self.escalation('write', 'fix_round_limit', 'review', '--run', run_id)
+        self.assertEqual(self.escalation_data()['answers'][0]['argv'], [*resume, '--max-fix-rounds', '3'])
+        self.escalation('write', 'plan_review_limit', 'plan_review', '--run', run_id)
+        self.assertEqual(self.escalation_data()['answers'][0]['argv'], [*resume, '--skip-plan-review'])
+        # task_blocked with two tasks: three answers per task, then resume.
+        self.escalation('write', 'task_blocked', 'implementation', '--run', run_id, '--task', 'T005', '--task', 'T006')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['tasks']), ('task_blocked', ['T005', 'T006']))
+        self.assertEqual(self.answer_ids(data), [(name, task) for task in ('T005', 'T006')
+                                                 for name in ('retry_task', 'skip_task', 'set_model')]
+                         + [('resume', None)])
+        self.assertEqual(data['answers'][0]['argv'], ['.ai/bin/ai-task', 'retry', 'T005', '--note', '{note}', '--commit'])
+        self.assertEqual(data['answers'][-1]['argv'], resume)
+        # usage_limit carries the reset epoch when limit-stop has one.
+        self.escalation_local('limit-stop', 'Claude 1800000000\n')
+        self.escalation('write', 'usage_limit', 'implementation', '--run', run_id)
+        self.assertEqual(self.escalation_data()['not_before'], 1800000000)
+        self.escalation_local('limit-stop', 'Claude soon\n')
+        self.escalation('write', 'usage_limit', 'implementation', '--run', run_id)
+        self.assertIsNone(self.escalation_data()['not_before'])
+        # An unknown kind is `other`; `other` is refined by the stage.
+        for kind, stage, stored in (('deploy', 'implementation', 'other'), ('other', 'validation', 'validation'),
+                                    ('other', 'crash-implementation', 'crash')):
+            self.escalation('clear')
+            self.escalation('write', kind, stage, '--run', run_id)
+            self.assertEqual(self.escalation_data()['kind'], stored)
+        # Usage errors write nothing.
+        self.escalation('clear')
+        for args in (('write', 'other', '--run', run_id), ('write', 'other', 'x', '--run', 'nope'),
+                     ('write', 'other', 'x', '--run', run_id, '--task', 'X1'),
+                     ('write', 'other', 'x', '--run', run_id, '--finding', 'm1'),
+                     ('write', 'other', 'x', '--run', run_id, '--review', 'README.md'),
+                     ('hint', 'other', '--run', run_id, '--review', '.ai/reviews/plan.md'), ('show', 'x')):
+            self.escalation(*args, expected=1)
+        self.assertFalse(self.escalation_path().exists())
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
+    def test_escalation_record_redacts_last_error(self):
+        run_id = self.run_record_start(os.getpid())
+        self.escalation_local('last-error', 'push failed token=abc123 and\nAuthorization: Bearer x.y.z then '
+                                            'sk-ant-api03-AbCdEf123456 or ghp_AbCdEf1234567890 done\n')
+        self.escalation('write', 'other', 'implementation', '--run', run_id)
+        text = self.escalation_data()['evidence']['last_error']
+        self.assertEqual(text, 'push failed token=[redacted] and Authorization: [redacted] then '
+                               '[redacted] or [redacted] done')
+        for secret in ('abc123', 'x.y.z', 'sk-ant', 'ghp_'):
+            self.assertNotIn(secret, text)
+        self.escalation_local('last-error', ('word ' * 100 + '\n') * 5)
+        self.escalation('write', 'other', 'implementation', '--run', run_id)
+        text = self.escalation_data()['evidence']['last_error']
+        self.assertNotIn('\n', text)
+        self.assertEqual(len(text), 400)
+        # A symlinked last-error is ignored.
+        target = self.base / 'outside-error'
+        target.write_text('secret story\n')
+        (self.project / '.ai/local/last-error').unlink()
+        (self.project / '.ai/local/last-error').symlink_to(target)
+        self.escalation('write', 'other', 'implementation', '--run', run_id)
+        self.assertIsNone(self.escalation_data()['evidence']['last_error'])
+
+    def test_escalation_hint_is_consumed_once(self):
+        run_a = self.run_record_start(os.getpid())
+        self.escalation('hint', 'task_blocked', '--run', run_a, '--task', 'T005')
+        self.assertTrue(self.escalation_path('escalation-hint.json').exists())
+        self.escalation('write', 'other', 'implementation', '--run', run_a)
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['tasks']), ('task_blocked', ['T005']))
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
+    def test_escalation_repeated_write_keeps_kind(self):
+        run_a = self.run_record_start(os.getpid())
+        self.escalation('hint', 'task_blocked', '--run', run_a, '--task', 'T005')
+        self.escalation('write', 'other', 'implementation', '--run', run_a)
+        before = self.escalation_path().read_bytes()
+        self.escalation('write', 'other', 'implementation', '--run', run_a)
+        self.assertEqual(self.escalation_path().read_bytes(), before)
+        self.escalation('write', 'human_stop', 'implementation', '--run', run_a)
+        self.assertEqual(self.escalation_data()['kind'], 'human_stop')
+
+    def test_escalation_only_for_the_current_run(self):
+        run_a = self.run_record_start(os.getpid())
+        self.escalation('write', 'validation', 'validation', '--run', run_a)
+        self.run_record_start(os.getpid())  # run B; its start cleared A's record
+        self.assertFalse(self.escalation_path().exists())
+        for args in (('write', 'task_blocked', 'implementation', '--run', run_a, '--task', 'T001'),
+                     ('hint', 'task_blocked', '--run', run_a, '--task', 'T001')):
+            result = self.escalation(*args, expected=3)
+            self.assertIn(f'run {run_a} is not the current run', result.stderr)
+        self.assertFalse(self.escalation_path().exists())
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
+    def test_escalation_cleared_by_new_run_and_resume(self):
+        run_a = self.run_record_start(os.getpid())
+        self.escalation('hint', 'usage_limit', '--run', run_a)
+        self.escalation('write', 'crash', 'implementation', '--run', run_a)
+        self.escalation('hint', 'usage_limit', '--run', run_a)
+        self.run_record_start(os.getpid())
+        self.assertFalse(self.escalation_path().exists())
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+        run_c = self.run_record_start(os.getpid())
+        self.escalation('write', 'crash', 'implementation', '--run', run_c)
+        self.escalation('hint', 'usage_limit', '--run', run_c)
+        self.run_record('resume', '--run', run_c, '--pid', str(os.getpid()))
+        self.assertFalse(self.escalation_path().exists())
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+        # A refused resume and a recovery taking over keep it.
+        self.escalation('write', 'crash', 'implementation', '--run', run_c)
+        self.run_record('own', '--run', run_c, '--pid', str(os.getpid()), '--launcher', 'ai-recover')
+        self.run_record('resume', '--run', run_a, '--pid', str(os.getpid()), expected=3)
+        self.assertEqual(self.escalation_data()['kind'], 'crash')
+
+    def test_escalation_clear_and_invalid(self):
+        self.escalation('clear')  # nothing to clear
+        self.escalation('show', expected=1)
+        run_id = self.run_record('start', 'pipeline', 'fix/x', 'origin/main', 'a' * 40, '--pid', str(os.getpid()),
+                                 '--', '--approved', '--max-fix-rounds', '5').stdout.strip()
+        self.escalation('write', 'fix_round_limit', 'review', '--run', run_id, '--finding', 'B1')
+        self.assertEqual(self.answer_ids(self.escalation_data()), [('resume', None)])
+        self.escalation('clear')
+        self.assertFalse(self.escalation_path().exists())
+        self.escalation('write', 'validation', 'validation', '--run', run_id)
+        data = self.escalation_data()
+        for broken in (dict(data, schema=2), dict(data, schema=True), dict(data, answers='x'), [data]):
+            self.escalation_path().write_text(json.dumps(broken))
+            self.escalation('show', expected=1)
+        self.escalation_path().write_text(json.dumps(dict(data, kind='later_kind', extra=1)))
+        self.assertEqual(json.loads(self.escalation('show').stdout)['kind'], 'other')
+        self.escalation_path().unlink()
+        target = self.base / 'outside.json'
+        target.write_text(json.dumps(data))
+        self.escalation_path().symlink_to(target)
+        self.escalation('show', expected=1)
+
+    def test_escalation_answers_belong_to_the_current_run(self):
+        self.helper('run-manifest', 'start', 'b' * 64, 'fix/x', '--approved', '--base', 'main',
+                    '--max-fix-rounds', '3', '--no-pr')
+        me = str(os.getpid())
+        earlier = self.run_record('start', 'pipeline', 'fix/x', 'origin/main', 'a' * 40, '--pid', me, '--',
+                                  '--approved', '--base', 'main', '--max-fix-rounds', '3', '--no-pr').stdout.strip()
+        self.run_record('end', '--run', earlier, '--pid', me, 'finished')
+        run_id = self.run_record('start', 'ai-run', 'fix/x', '-', '-', '--pid', me, '--',
+                                 '--approved', '--sessions', '2').stdout.strip()
+        for kind in ('task_blocked', 'fix_round_limit', 'plan_review_limit'):
+            self.escalation('write', kind, 'implementation', '--run', run_id, '--task', 'T001')
+            data = self.escalation_data()
+            for answer in data['answers']:
+                self.assertNotEqual(answer['argv'][0], '.ai/bin/ai-pipeline', answer)
+            self.assertNotIn('resume_more_rounds', [answer['id'] for answer in data['answers']])
+            self.assertNotIn('resume_skip_plan_review', [answer['id'] for answer in data['answers']])
+            self.assertEqual(data['answers'][-1], {'id': 'resume', 'label': data['answers'][-1]['label'],
+                                                   'argv': ['.ai/bin/ai-run', '--approved', '--sessions', '2']})
+        # A stand-alone planning run has no resume answer.
+        run_id = self.run_record('start', 'ai-run', 'fix/x', '-', '-', '--pid', me, '--',
+                                 '--plan', '/abs/p.md').stdout.strip()
+        self.escalation('write', 'other', 'planning', '--run', run_id)
+        self.assertEqual(self.escalation_data()['answers'], [])
+        # A pipeline record's resume is its own argv, not the manifest's.
+        run_id = self.run_record('start', 'pipeline', 'fix/x', 'origin/main', 'a' * 40, '--pid', me, '--',
+                                 '--approved', '--base', 'develop').stdout.strip()
+        self.escalation('write', 'validation', 'validation', '--run', run_id)
+        self.assertEqual(self.escalation_data()['answers'][-1]['argv'],
+                         ['.ai/bin/ai-pipeline', '--approved', '--base', 'develop'])
+
+    def test_escalation_stop_request_wins(self):
+        run_a = self.run_record_start(os.getpid())
+        self.run_record('request-stop', '--run', run_a, '--via', 'ai-pipeline --stop')
+        self.escalation('hint', 'task_blocked', '--run', run_a, '--task', 'T005')
+        self.escalation('write', 'other', 'implementation', '--run', run_a)
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['tasks']), ('human_stop', []))
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
 
 class ReviewHistoryTest(unittest.TestCase):
     """T002: review-history summarises earlier review rounds from Git (context only)."""
