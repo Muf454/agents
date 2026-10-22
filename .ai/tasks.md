@@ -5551,7 +5551,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T303 — Interrupts reach the agent session: ai-run and ai-recover (RC-01 G2)
-Status: DONE
+Status: TODO
 Dependencies: none
 Model: opus
 
@@ -5608,6 +5608,7 @@ test_session_exit_codes_unchanged` → Ran 13 tests OK (incl. `test_interrupt_re
 `_term`, `_the_recovery_session`, `test_session_exit_codes_unchanged`); `-k timeout` → Ran 31 tests OK.
 Full gate not run here per the mission-control note (gate exceeds the session limit); the runner
 validates the checkpoint.
+Mission control 2026-10-22 07:12Z: the host gate after b6a4386 failed 7 tests that passed after T302 (a428a3c), so T303's changes caused them: test_supervised_plan_resume_after_stage_clear_watchdog, test_supervised_plan_resume_after_the_record_watchdog, test_supervised_plan_resume_reserved_without_a_stage_watchdog, test_supervised_plan_resume_stage_without_a_reservation_watchdog, test_preflight_pipeline_same_ruling_twice_stops, test_preflight_pipeline_indirectly_moved_task_repeat_stops, test_observation_pipeline_registers_the_checkout_on_start_and_resume. Run exactly these (`python3 -m unittest tests.test_workflow.ToolkitTest.<name>`, one per call), find the regression in the interrupt forwarding, fix it without weakening the tests, then run the targeted checks and mark DONE. Do not run the full gate in the foreground.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
 Status: TODO

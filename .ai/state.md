@@ -2,15 +2,15 @@
 
 Project: agents
 Branch: fix/flow-batch-11
-Phase: implementing
-Current task: none
-Last completed task: T303
-Tasks complete: 68
-Tasks remaining: 23
-Last validation: RUNNING at 2026-10-22T04:13:00Z
+Phase: blocked
+Current task: T303
+Last completed task: T305
+Tasks complete: 67
+Tasks remaining: 24
+Last validation: FAIL at 2026-10-22T05:08:52Z
 Blocked: yes
-Next action: Continue queue (T304 now unblocked); T302 needs the host gate
-Last updated: 2026-10-22T04:41:16Z
+Next action: Validation failed after T303; inspect validation log
+Last updated: 2026-10-22T05:08:52Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
