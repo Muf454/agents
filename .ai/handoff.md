@@ -226,7 +226,13 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   torn lines dropped (`test_events_rotation_small_gain_and_stale_runs`); archive already a full
   copy reads each id once, a failing rename leaves both files and no temp while the append
   happens, the next rotation succeeds (`test_events_rotation_crash_between_replaces_duplicates_only`).
-- `events_gate` (T207: log parsing, FIFO/symlink/outside-path records return promptly; T222:
+- `events_gate` T207 part (DONE): `event-gate` parses unittest OK/FAILED and run_parallel
+  `Workers:`/`failing batches:`/`on W workers` logs, truncated log and missing stamp give null
+  counts with the event written, bad START/RESULT/GATE_ID exit 2 with nothing written
+  (`test_events_gate_parses_the_gate_log`); a FIFO stamp or log, a symlinked log or `.ai/local`,
+  an outside log path and an oversized stamp return promptly with null counts, every planted entry
+  unchanged (`test_events_gate_unsafe_records_return_promptly`).
+- `events_gate` (later parts: T222:
   `gate_id` on rows, each gate counted once across rows and events; T220: runner, pipeline
   validation and recovery gates pass/fail/timeout, epoch starts and row-matching durations, none
   after a gate change),

@@ -6003,7 +6003,7 @@ gate (BATCH 10 GATE RULE); an in-session `.ai/bin/ai-check` started before readi
 the 600 s tool limit and is not used as evidence.
 
 ## T207 — `event-gate` helper: safe, bounded reads of the gate stamp and log (ME-01 part 1, gate)
-Status: TODO
+Status: DONE
 Dependencies: T202, T206
 Model: opus
 
@@ -6062,6 +6062,13 @@ Targeted: `python3 -m unittest discover -s tests -k attempt_info_failing_checks 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): `workflow.py event-gate` (`event_gate`, `gate_log_counts`), writing through
+the shared `record_event` now also used by `event`; counts read only via the unchanged
+`gate_log_lines()`. Unittest `FAILED (…)` counts only `failures=`/`errors=` (not `expected failures=`).
+Targeted: `-k events_gate_parses -k events_gate_unsafe` Ran 2 OK; `-k attempt_info_failing_checks
+-k events_core` Ran 10 OK; `-k events` 21 OK, `-k attempt_info` 7 OK. Full gate left to the host
+gate (BATCH 10 GATE RULE); an in-session ai-check was started by mistake and is not evidence.
+Docs: docs/workflow.md paragraph. Flow unchanged (no callers until T220).
 
 ## T222 — One gate id on the outcome gate row and the gate event, each gate counted once (ME-01 part 1, review round 3 P18)
 Status: TODO

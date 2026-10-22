@@ -1418,6 +1418,18 @@ event runs inside such a `common.sh` function after the same guard, never in its
 `read_events` reads `events.1.jsonl` then `events.jsonl`, keeping only `v == 1` events of known
 kinds, each id once. The writers (T207–T210, T218, T220) come later.
 
+`workflow.py event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID` (T207) appends one `gate`
+event (`task` when the first argument is `T<digits>`, else `stage`; START and SECONDS decimal
+integers, RESULT `pass|fail|timeout`, GATE_ID 16 lower-case hex; anything else exits 2 with
+nothing written). `tests`, `failures` and `workers` are parsed from the last gate log: the last
+`Ran N tests`; from the last summary line `failures=a` + `errors=b` of `FAILED (…)` or the
+number of batches after `failing batches:`, 0 on `OK`; `Workers: W`, else `on W workers`.
+Unknown values are null and the event is still written. The validation stamp and its log are
+agent-writable, so they are read only through `gate_log_lines()` (pinned `.ai/local`,
+`O_NOFOLLOW|O_NONBLOCK` opens with a regular-file `fstat` check, stamp at most 64 KiB, log tail
+256 KiB, log only directly inside `.ai/local`): a FIFO, symlink, swapped directory or outside
+log gives null counts promptly and is never followed. The host callers come with T220.
+
 Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
 exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
 least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`

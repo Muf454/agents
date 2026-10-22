@@ -4374,6 +4374,12 @@ def event_command(arguments):
         event_record(kind, fields)
     except EventUsage as error:
         usage(str(error))
+    record_event(kind, fields)
+
+
+def record_event(kind, fields):
+    """Append one checked event for the current checkout; a busy lock or a write failure prints
+    one Note and exits 1 (the shell callers keep their own status)."""
     note = f'Note: could not record the {kind} event'
     try:
         check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
@@ -4391,6 +4397,83 @@ def event_command(arguments):
     if not written:
         print(f'{note} (short write).', file=sys.stderr)
         sys.exit(1)
+
+
+GATE_RAN = re.compile(r'^Ran (\d+) tests?\b')
+GATE_SUMMARY = re.compile(r'^(?:FAILED \((.*)\)|OK(?: \(.*\))?)\s*$')
+GATE_WORKERS = re.compile(r'^Workers: (\d+)\b')
+GATE_ON_WORKERS = re.compile(r'\bon (\d+) workers\b')
+
+
+def gate_log_counts(lines):
+    """(tests, failures, workers) from gate log LINES (spec A12), each an int or None.
+    tests: the last `Ran N tests`. failures: from the last summary line, `failures=a` +
+    `errors=b` of unittest's `FAILED (…)`, or the number of batches after run_parallel's
+    `failing batches:`; 0 when it is `OK`. workers: run_parallel's `Workers: W` first line, else
+    its `on W workers` summary (the first line may lie outside the log tail)."""
+    tests = failures = workers = summary_workers = None
+    for line in lines or ():
+        match = GATE_RAN.match(line)
+        if match:
+            tests = int(match.group(1))
+        match = GATE_ON_WORKERS.search(line) if line.startswith('Ran ') else None
+        if match:
+            summary_workers = int(match.group(1))
+        match = GATE_WORKERS.match(line)
+        if match and workers is None:
+            workers = int(match.group(1))
+        match = GATE_SUMMARY.match(line)
+        if not match:
+            continue
+        failures = None
+        if match.group(1) is None:
+            failures = 0
+            continue
+        batches = re.search(r'failing batches: ([0-9, ]+)', match.group(1))
+        counts = re.findall(r'(?:^|,\s*)(?:failures|errors)=(\d+)',match.group(1))
+        if batches:
+            failures = len(re.findall(r'\d+', batches.group(1)))
+        elif counts:
+            failures = sum(map(int, counts))
+    return tests, failures, workers if workers is not None else summary_workers
+
+
+def event_gate(arguments):
+    """event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID: append one gate event with tests,
+    failures and workers parsed from the last gate log (spec A12). The validation stamp and the
+    log it names are agent-writable, so they are read only through gate_log_lines(): pinned
+    `.ai/local` (no component followed through a symlink), O_NOFOLLOW|O_NONBLOCK opens with a
+    regular-file fstat check, bounded reads, the log only directly inside `.ai/local`. A FIFO,
+    symlink, swapped directory or oversized stamp gives null counts promptly; the event is still
+    written. Usage errors exit 2 with nothing written; write failures as `event` (Note, exit 1)."""
+    def usage(message):
+        print(f'Error: {message}', file=sys.stderr)
+        sys.exit(2)
+    if len(arguments) != 5:
+        usage('Usage: event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID')
+    where, start, seconds, result, gate_id = arguments
+    if not where:
+        usage('event-gate needs a task or stage')
+    for name, value in (('START', start), ('SECONDS', seconds)):
+        if not EVENT_INT.fullmatch(value):
+            usage(f'event-gate {name} must be a decimal integer: {value}')
+    if result not in ('pass', 'fail', 'timeout'):
+        usage(f'event-gate RESULT must be pass, fail or timeout: {result}')
+    if not EVENT_ID.fullmatch(gate_id):
+        usage(f'event-gate GATE_ID must be 16 lower-case hex digits: {gate_id}')
+    try:
+        lines = gate_log_lines()
+    except (OSError, subprocess.CalledProcessError):
+        lines = None
+    tests, failures, workers = gate_log_counts(lines)
+    fields = {'gate_id': gate_id, 'task' if re.fullmatch(r'T\d+', where) else 'stage': where,
+              'start': int(start), 'seconds': int(seconds), 'tests': tests, 'failures': failures,
+              'workers': workers, 'result': result}
+    try:
+        event_record('gate', fields)
+    except EventUsage as error:
+        usage(str(error))
+    record_event('gate', fields)
 
 
 def attempt_seq_path():
@@ -6178,6 +6261,8 @@ def main():
         outcome(arguments)
     elif command == 'event':
         event_command(arguments)
+    elif command == 'event-gate':
+        event_gate(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
     elif command == 'session-gate':

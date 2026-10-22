@@ -314,6 +314,132 @@ class EventsCoreTests(EventsFixture):
         self.assertTrue(marker.exists())
 
 
+class EventsGateTests(EventsFixture):
+    def gate(self, *args, **env):
+        return subprocess.run([sys.executable, str(HELPER), 'event-gate', *args], cwd=self.repo,
+                              env={**self.env, **env}, capture_output=True, text=True,
+                              timeout=COMMAND_TIMEOUT)
+
+    def gate_log(self, content, log='.ai/local/check-test.log'):
+        local = self.repo / '.ai/local'
+        local.mkdir(parents=True, exist_ok=True)
+        (self.repo / log).write_text(content)
+        (local / 'validation.json').write_text(json.dumps({'result': 'FAIL', 'log': log}))
+
+    def counts(self, *args):
+        result = self.gate(*args)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        record = self.records()[-1]
+        return record['tests'], record['failures'], record['workers']
+
+    def test_events_gate_parses_the_gate_log(self):
+        args = ('T207', '1700000000', '42', 'pass', GATE_ID)
+        self.gate_log('test_a ... ok\n\n------\nRan 12 tests in 0.5s\n\nOK (skipped=1)\n')
+        self.assertEqual(self.counts(*args), (12, 0, None))
+        self.gate_log('FAIL: test_a (t.T)\n------\nRan 7 tests in 0.1s\n\nFAILED (failures=2, errors=1, skipped=4)\n')
+        self.assertEqual(self.counts(*args), (7, 3, None))
+        self.gate_log('Workers: 14 (auto)\n===== batch 3/9: FAILED =====\nRan 5 tests in 1s\n'
+                      'FAILED (failures=1)\n===== batch 7/9: FAILED =====\nRan 4 tests in 1s\nFAILED (errors=4)\n'
+                      'Ran 120 tests in 9.0s (9 batches on 14 workers, 120 collected)\n'
+                      'FAILED (failing batches: 3, 7)\n')
+        self.assertEqual(self.counts(*args), (120, 2, 14))
+        self.gate_log('test_a ... ok\n' * 3 + 'Ran 30 tests in 9.0s (4 batches on 6 workers, 30 collected)\nOK\n')
+        self.assertEqual(self.counts(*args), (30, 0, 6))  # `Workers:` outside the tail: the summary
+        self.gate_log('Workers: 14 (auto)\ntest_a ... ok\ntest_b ... ')
+        self.assertEqual(self.counts(*args), (None, None, 14))
+        self.gate_log('test_a ... ok\ntest_b ... ')
+        self.assertEqual(self.counts(*args), (None, None, None))
+        (self.repo / '.ai/local/validation.json').unlink()
+        self.assertEqual(self.counts('final-validation', '1700000100', '9', 'timeout', GATE_ID), (None, None, None))
+        record = self.records()[-1]
+        self.assertEqual({k: record[k] for k in ('gate_id', 'task', 'stage', 'start', 'seconds', 'result')},
+                         {'gate_id': GATE_ID, 'task': None, 'stage': 'final-validation', 'start': 1700000100,
+                          'seconds': 9, 'result': 'timeout'})
+        self.assertEqual(self.records()[0]['task'], 'T207')
+        written = len(self.lines())
+        good = ['T207', '1700000000', '42', 'fail', GATE_ID]
+        for index, bad in ((1, 'abc'), (1, '-5'), (1, ''), (2, '1.5'), (3, 'passed'), (3, 'PASS'),
+                           (4, ''), (4, GATE_ID[:15]), (4, GATE_ID.upper()), (4, GATE_ID + '0'), (0, '')):
+            with self.subTest(index=index, bad=bad):
+                args = good[:index] + [bad] + good[index + 1:]
+                result = self.gate(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertTrue(result.stderr.startswith('Error: '))
+        for args in (good[:4], good + ['extra'], []):
+            self.assertEqual(self.gate(*args).returncode, 2)
+        self.assertEqual(len(self.lines()), written)
+
+    def snapshot(self, *paths):
+        state = {}
+        for path in paths:
+            info = os.lstat(path)
+            state[str(path)] = (info.st_mode, info.st_ino, os.readlink(path) if os.path.islink(path)
+                                else Path(path).read_bytes() if os.path.isfile(path) else None)
+        return state
+
+    def test_events_gate_unsafe_records_return_promptly(self):
+        ran = 'Ran 99 tests in 1.0s\nFAILED (failures=5)\n'
+
+        def stamp_fifo(local):
+            os.mkfifo(local / 'validation.json')
+            return [local / 'validation.json']
+
+        def log_fifo(local):
+            os.mkfifo(local / 'check.log')
+            (local / 'validation.json').write_text(json.dumps({'log': '.ai/local/check.log'}))
+            return [local / 'check.log', local / 'validation.json']
+
+        def log_symlink(local):
+            target = self.base / 'outside.log'
+            target.write_text(ran)
+            (local / 'check.log').symlink_to(target)
+            (local / 'validation.json').write_text(json.dumps({'log': '.ai/local/check.log'}))
+            return [local / 'check.log', target, local / 'validation.json']
+
+        def local_symlink(local):
+            local.rmdir()
+            target = self.base / 'elsewhere'
+            target.mkdir()
+            (target / 'check.log').write_text(ran)
+            (target / 'validation.json').write_text(json.dumps({'log': '.ai/local/check.log'}))
+            local.symlink_to(target)
+            return [local, target, target / 'check.log', target / 'validation.json']
+
+        def outside(name):
+            def plant(local):
+                target = self.repo.parent / 'x.log' if name == '../x.log' else Path(name)
+                target.write_text(ran)
+                (local / 'validation.json').write_text(json.dumps({'log': name}))
+                return [target, local / 'validation.json']
+            return plant
+
+        def big_stamp(local):
+            (local / 'check.log').write_text(ran)
+            text = json.dumps({'log': '.ai/local/check.log'})
+            (local / 'validation.json').write_text(text + ' ' * (workflow.STAMP_LIMIT + 1 - len(text)))
+            return [local / 'check.log', local / 'validation.json']
+
+        cases = {'stamp FIFO': stamp_fifo, 'log FIFO': log_fifo, 'log symlink': log_symlink,
+                 '.ai/local symlink': local_symlink, 'relative outside': outside('../x.log'),
+                 'absolute outside': outside(str(self.base / 'abs.log')), 'oversized stamp': big_stamp}
+        for number, (name, plant) in enumerate(cases.items()):
+            with self.subTest(name):
+                shutil.rmtree(self.repo / '.ai', ignore_errors=True)
+                local = self.repo / '.ai/local'
+                local.mkdir(parents=True)
+                planted = plant(local)
+                before = self.snapshot(*planted)
+                started = time.monotonic()
+                result = self.gate(f'T{number}', '1700000000', '3', 'fail', GATE_ID)
+                self.assertLess(time.monotonic() - started, BOUND)
+                self.assertEqual((result.returncode, result.stderr), (0, ''))
+                record = self.records()[-1]
+                self.assertEqual((record['task'], record['tests'], record['failures'], record['workers']),
+                                 (f'T{number}', None, None, None))
+                self.assertEqual(self.snapshot(*planted), before)
+        self.assertEqual(len(self.lines()), len(cases))
+
+
 class EventsRotationTests(EventsFixture):
     def setUp(self):
         super().setUp()
