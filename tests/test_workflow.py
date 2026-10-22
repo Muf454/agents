@@ -11473,6 +11473,81 @@ runpy.run_path(real, run_name='__main__')
         self.assertFalse({'stop-category', 'event'} & set(calls.read_text().splitlines()))
         self.assertEqual(self.flow_events('stop', 'recovery'), [])
 
+    # ---------------------------------------------------------------- ruling and review events (ME-01, T210)
+    def assert_ruling_events(self, ruling_kind, count=1, task_id=None):
+        events = self.flow_events('ruling')
+        self.assertEqual([e['ruling_kind'] for e in events], [ruling_kind] * count)
+        rows = [line for line in (self.project / '.ai/run-log.md').read_text().splitlines() if 'Ruling (' in line]
+        self.assertEqual(len(events), len(rows))
+        if task_id:
+            self.assertEqual({e['task'] for e in events}, {task_id})
+        return events
+
+    def test_events_ruling_all_writers_queue_order(self):
+        self.ready(self.raid_queue())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        events = self.assert_ruling_events('queue-order', task_id='T004')
+        self.assertEqual(events[0]['key'], 'T004')
+
+    def test_events_ruling_all_writers_task_sections(self):
+        bare = task('T002').replace('### Likely affected modules\nT002.txt\n', '') \
+            .replace('### Result / notes\nPending.\n', '')
+        self.ready(task('T001') + bare)
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
+        events = self.assert_ruling_events('task-sections', task_id='T002')
+        self.assertEqual(events[0]['key'], 'T002')
+
+    def test_events_ruling_all_writers_disposition_cell(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  MOCK_CODEX='major-once', MOCK_CLAUDE='triage-bold-cell')
+        events = self.assert_ruling_events('disposition-cell')
+        counted = self.run_cmd(['git', 'log', '-1', '--format=%H', '--grep', '^chore(ai): record review triage$']).stdout.strip()
+        review = self.run_cmd(['git', 'show', f'{counted}:.ai/reviews/current.md']).stdout
+        self.assertEqual(events[0]['key'], hashlib.sha256(review.encode()).hexdigest()[:12] + '.M1')
+        self.assertRegex(events[0]['task'], r'^(-|T\d+)$')
+
+    def test_events_ruling_all_writers_flow_line(self):
+        self.flow_gate_ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_CLAUDE='flow-blank')
+        events = self.assert_ruling_events('flow-line', task_id='T001')
+        self.assertEqual(events[0]['key'], 'T001')
+
+    def test_events_ruling_refused_claims_write_none(self):
+        self.ready(self.raid_queue())
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'queue-order', 'T004')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_RECOVERY_ATTEMPT='1')
+        self.assertEqual(self.flow_events('ruling'), [])
+
+    def test_events_ruling_refused_flow_line_claim_writes_none(self):
+        self.flow_gate_ready()
+        gate = self.run_cmd(['bash', '-c', 'source .ai/bin/lib/common.sh; ai_guard_digest']).stdout.strip()
+        self.helper('run-manifest', 'start', gate, 'feature/test', '--approved', '--base', 'main', '--no-pr')
+        self.helper('run-manifest', 'ruling', 'flow-line', 'T001')
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='flow-blank')
+        self.assertEqual(self.flow_events('ruling'), [])
+
+    def test_events_review_routing_reason(self):
+        self.routed_pipeline('src/widget.py')
+        events = self.flow_events('review')
+        code = [e for e in events if e['mode'] == 'code']
+        self.assertEqual([e['reviewer'] for e in code], ['codex', 'claude-routed'])
+        self.assertEqual(code[0]['reason'], '-')
+        self.assertTrue(code[1]['reason'].startswith('small low-risk fix round'), code[1])
+        self.assertEqual(code[1]['model'], 'claude-opus-5-5')
+
+    def test_events_review_recorded_limit_is_a_fallback(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        self.helper('codex-limit', 'set', str(int(time.time()) + 600))
+        self.tool('ai-review', '--base', 'main', AI_REVIEW_ROUTE='')
+        (event,) = self.flow_events('review')
+        self.assertEqual((event['mode'], event['reviewer']), ('code', 'claude-fallback'))
+        self.assertIn('(recorded)', event['reason'])
+
     # ---------------------------------------------------------------- run start, resume and end (ME-01, T209)
     def run_events(self, run_id=None):
         return [e for e in self.flow_events('run') if run_id is None or e['run'] == run_id]

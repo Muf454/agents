@@ -1479,6 +1479,15 @@ final push stops there, never `pr`); `ai-recover` `escalate()` and `on_exit` (`s
 to `ai-recover`, a resume and the usage-limit relaunch wait (exit 75) write no end. A failed write
 prints a Note and changes no exit status, notification or marker.
 
+Ruling and review events (T210): `common.sh` `ai_ruling_event RULING_KIND KEY TASK` (guard first,
+task `-` unless a task id) runs right after the `ai_log` of every Ruling row, in `ai_ruling_rows`
+(`queue-order`, `task-sections`; key and task are the changed task), `ai_disposition_ruling`
+(`disposition-cell`; key `DIGEST12.ID`) and `ai_flow_line_ruling` (`flow-line`; key and task the
+claim key). A refused claim returns before the row, so it records nothing. `ai-review`
+`review_records` writes one `review` event per published review with `mode`, `reviewer` (`codex`,
+`claude`, `claude-routed`, `claude-fallback`), `model` and the routing or fallback `reason` (`-`
+when none), after the outcome row.
+
 Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
 exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
 least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`

@@ -233,6 +233,16 @@ ai_event() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   ai_helper event "$@" 2>/dev/null || printf 'Note: could not record the %s event.\n' "$1" >&2
 }
+# One `ruling` event per Ruling row (T210). Usage: ai_ruling_event RULING_KIND KEY TASK; TASK is
+# recorded only when it is a task id, else `-`. Called right after the row's ai_log, so a refused
+# claim (which returns before the row) records nothing. Returns 0 always.
+ai_ruling_event() {
+  [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
+  local task=-
+  [[ ! "$3" =~ ^T[0-9]+$ ]] || task=$3
+  ai_event ruling "ruling_kind=$1" "key=$2" "task=$task"
+  return 0
+}
 # 16 lowercase hex for a gate id (spec A12): the same id goes on the `outcome gate` row and the
 # `gate` event of one gate. Plain od, no helper, so it runs even when the gate is known bad.
 ai_new_id() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
@@ -404,6 +414,7 @@ ai_ruling_rows() {
       *) continue ;;
     esac
     ai_log "$1" "$(ai_helper ruling-row "$kind" "$rest" "$why" "$cost")" 'n/a' 'host ruling'
+    ai_ruling_event "$kind" "${rest%% *}" "${rest%% *}"
   done <<< "$2"
 }
 # The overlap report of OUT (advisory: never stops a run).
@@ -477,6 +488,7 @@ ai_disposition_ruling() {
     ai_log "$2" "$(ai_helper ruling-row disposition-cell "finding cell \"$cell\" read as $id" \
       'the cell held exactly one finding ID of this review' \
       "the row is counted for $id; a wrong reading shows in the PR's dispositions")" 'n/a' 'host ruling'
+    ai_ruling_event disposition-cell "${digest:0:12}.$id" "$2"
   done <<< "$out"
 }
 # ai_flow_line_ruling KEY TASK (BR-01, T105): a handoff `## Flow chart` section that does not start
@@ -494,4 +506,5 @@ ai_flow_line_ruling() {
   ai_log "$2" "$(ai_helper ruling-row flow-line "handoff Flow chart section starts with \"$line\"" \
     'the section must start with one of the two phrases' \
     'the PR says the flow changed or not when the other is true; the section text below it stays')" 'n/a' 'host ruling'
+  ai_ruling_event flow-line "$1" "$1"
 }

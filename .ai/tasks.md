@@ -6531,7 +6531,7 @@ and validation gates), `ai_event run` start and end with `run-totals` (pipeline 
   its lock). Docs: handoff, vault hub Log line. Flow unchanged.
 
 ## T210 — `ruling` and `review` routing events (ME-01 part 1, BR-01 and BR-14 records, review P5 and P6)
-Status: TODO
+Status: DONE
 Dependencies: T206, T209
 Model: sonnet
 
@@ -6590,6 +6590,14 @@ Targeted: `bash -n scripts/lib/common.sh scripts/ai-review`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE. `ai_ruling_event` in `common.sh` called after each Ruling row's `ai_log` (queue-order,
+task-sections, disposition-cell, flow-line); `review_records` in `ai-review` writes the `review`
+event. Tests (in `tests/test_workflow.py`, split per writer instead of subTests so each has a clean
+fixture): `test_events_ruling_all_writers_{queue_order,task_sections,disposition_cell,flow_line}`,
+`test_events_ruling_refused_claims_write_none`, `..._refused_flow_line_claim_writes_none`,
+`test_events_review_routing_reason`, `test_events_review_recorded_limit_is_a_fallback`.
+Results: `-k events_ruling -k events_review` 8 OK; `-k ruling` 24 OK; `-k review_routing` 7 OK;
+`bash -n` OK. Full gate left to the host gate (BATCH 10 GATE RULE). Flow unchanged.
 
 ## T218 — `pr` events for opened PRs and draft/ready changes (ME-01 part 1, pr)
 Status: TODO
