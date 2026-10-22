@@ -6798,7 +6798,7 @@ plain-output assertion now checks the text); `-k outcome_report -k runner_logs_t
 `bash -n scripts/ai-status` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T213 — Docs, flow chart and handoff audit (batch 10)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: T201, T214, T202, T203, T204, T205, T215, T206, T219, T216, T217, T207, T222, T220, T208, T209, T221, T210, T218, T211, T212
 Model: haiku
 
