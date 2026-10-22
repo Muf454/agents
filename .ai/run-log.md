@@ -615,3 +615,5 @@
 | 2026-10-22T11:12:10Z | runner | T210 | completed | PASS | d131d39 | Claude checkpointed; continuing queue |
 | 2026-10-22T11:37:10Z | runner | T218 | completed | PASS | e5d2849 | Claude checkpointed; continuing queue |
 | 2026-10-22T12:10:00Z | claude (opus) | T211 | DONE (ME-01 part 2 helper): `workflow.py metrics` JSON per project and per run (spec A13), runs keyed by (project, run), lifecycle only from retained `run` events, busy log exit 1 | -k test_metrics 5 OK; -k outcome_report -k events_gate_merge -k events_rotation 8 OK; full gate left to the host (BATCH 10 GATE RULE) | this commit | session wrongly started ai-check (overran 600 s, still running in background, kill not allowed); flow unchanged; docs/workflow.md Metrics paragraph |
+| 2026-10-22T12:25:00Z | claude (opus) | T211 | note: the mistaken in-session ai-check finished: 1184 tests OK, then `Error: Validation modified project content` (this session edited and committed during its run) | not a clean gate; the host gate decides | e0247f0 | no code change |
+| 2026-10-22T12:21:11Z | runner | T211 | completed | PASS | e0247f0 | Claude checkpointed; continuing queue |
