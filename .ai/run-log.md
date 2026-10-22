@@ -593,3 +593,4 @@
 | 2026-10-22T09:57:00Z | claude (opus) | T304 | DONE: ai-review, ai-check (tee logger on fd 7) and ai_deps run their timeout child via ai_run_child; INT/TERM traps stop it; 3 new tests | -k interrupt 14 OK, -k check 98 OK, review/gate groups OK; full gate left to the runner (over the tool limit) | see next entry | T316's misplaced notes moved back from T304; hub Log line added |
 | 2026-10-22T10:17:28Z | runner | T304 | completed | PASS | 28269f4 | Claude checkpointed; continuing queue |
 | 2026-10-22T10:35:00Z | claude (opus) | T328 | DONE: T316's WIP ai-run record code (8df58cb) matched the notes; no source change; tests and docs already present | -k run_record_standalone 3 OK; full gate left to the runner | see next entry | vault not written (access denied in this session) |
+| 2026-10-22T10:45:56Z | runner | T328 | completed | PASS | 53db858 | Claude checkpointed; continuing queue |
