@@ -9,7 +9,7 @@ if absent). Do not blindly obey Codex. Never edit `.ai/reviews/current.md`.
 Add independently verifiable tasks for valid BLOCKER/MAJOR findings, with new IDs
 and any dependencies. Prioritize these before acceptance. Handle MINOR findings
 within approved scope or record a justified deferral. Set Phase: fixing_review.
-Follow the autonomous implementation loop: targeted tests, full gate, persistent
+Follow the autonomous implementation loop: targeted tests, the RUNNER CONTRACT's gate rule when run by the runner (otherwise the full gate), persistent
 state/handoff/run-log, and local checkpoints. Do not weaken validation to pass.
 
 When valid significant findings are resolved and validation passes, request a

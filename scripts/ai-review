@@ -317,6 +317,7 @@ review_records() {
   [[ "$review_by" == codex || -z "$review_reason" ]] || route=(--route "$review_reason")
   ai_helper outcome review "$mode" "$review_by" "$review_model" "$review_effort" "$review_seconds" "$report" \
     "${route[@]}" 2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
+  ai_event review "mode=$mode" "reviewer=$review_by" "model=${review_model:-default}" "reason=${review_reason:--}"
 }
 reviewer_name() { [[ "$review_by" == codex ]] && printf Codex || printf 'Claude (%s)' "$review_model"; }
 

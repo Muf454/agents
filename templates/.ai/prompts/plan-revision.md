@@ -14,7 +14,8 @@ actual source yourself and decide:
   the queue into dependency order and stops on cycles, unknown IDs or prose in
   `Dependencies:`. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`,
   `Status: TODO`, `Dependencies:`, `Model:`, then `### Goal`, `### Implementation notes`,
-  `### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+  `### Likely affected modules`, `### Acceptance criteria`, `### Validation` (one `Targeted:` line per task-specific check, a
+  selector that runs at least one test, and a `Gate:` line), and an empty
   `### Result / notes`.
 - rejected: the finding is wrong or out of scope. Give concrete evidence (file and line,
   plan section, or the decision that covers it). A rejected finding is judged again by the

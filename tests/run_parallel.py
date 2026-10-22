@@ -2,8 +2,8 @@
 """Run the unittest suite in parallel batches (stdlib only).
 
 Discovers the same tests as `python3 -m unittest discover -s tests`, deals the sorted test
-IDs into interleaved batches pulled by AI_TEST_WORKERS workers (default min(8, CPU count))
-and runs each batch as `python3 -m unittest <ids...>` in its own process. Exits 1 when a
+IDs into interleaved batches pulled by AI_TEST_WORKERS workers (default min(14, CPU count - 2),
+at least 1) and runs each batch as `python3 -m unittest <ids...>` in its own process. Exits 1 when a
 batch fails or crashes, when nothing was collected, or when the batches ran a different
 number of tests than were collected. On Python 3.12+ it also reports the slowest tests and
 how busy each worker was. Each batch runs in its own process group; an interrupt, SIGTERM or
@@ -41,6 +41,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # Several batches per worker, so a worker that drew slow tests does not hold up the end of
 # the run while the others sit idle.
 BATCHES_PER_WORKER = 6
+# Upper bound of the default worker count (the CPU count minus 2 when that is lower).
+DEFAULT_WORKERS = 14
 # `python3 -m unittest --durations` exists from Python 3.12.
 TIMINGS = sys.version_info >= (3, 12)
 SLOWEST_SHOWN = 15
@@ -57,16 +59,18 @@ FINAL_WAIT = TERMINATE_GRACE
 
 
 def worker_count():
+    """(workers, source): AI_TEST_WORKERS, else min(DEFAULT_WORKERS, CPU count - 2), at least 1."""
     raw = os.environ.get('AI_TEST_WORKERS', '').strip()
     if not raw:
-        return min(8, os.cpu_count() or 1)
+        cpu = os.cpu_count() or 1
+        return max(1, min(DEFAULT_WORKERS, cpu - 2)), f'default, CPU count {cpu}'
     try:
         value = int(raw)
     except ValueError:
         value = 0
     if value < 1:
         sys.exit(f'run_parallel: AI_TEST_WORKERS must be a positive integer, got {raw!r}')
-    return value
+    return value, 'AI_TEST_WORKERS'
 
 
 def slow_budget():
@@ -636,7 +640,11 @@ def main():
     # Before collect(): discovery imports the test modules, and `isolation` rewrites the state env.
     # Before collect(): discovery imports the test modules, and `isolation` rewrites the state env.
     registry = real_registry()
-    workers = worker_count()
+    workers, workers_source = worker_count()
+    # First line of output, so a gate log cut off by a timeout still shows it.
+    # --collect-only prints just the count, which other tests compare exactly.
+    if not args.collect_only:
+        print(f'Workers: {workers} ({workers_source})', flush=True)
     ids = collect(start_dir)
     if args.collect_only:
         print(f'Collected {len(ids)} tests')

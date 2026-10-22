@@ -1,11 +1,13 @@
-<!-- Plan review of plan digest 304d17cc4a953e3f044c2144f543521ae637532a12b30b95c22c6369049967be; HEAD 1281a0f2596c3f63ebdfe486fb6c5fed0eb20f22; saved 2026-10-17T19:02:51Z. -->
+<!-- Plan review of plan digest ea0dcdee9c4d062b008c7b7a733e96ba897a4dbce68cc55b15a18e3bde344e09; HEAD 01f4093ceb09134fb143bddcb8b74a3c29acf7ad; saved 2026-10-21T21:35:51Z. -->
 
-# Plan review — round 9
+# Plan review
 
-Overall verdict: APPROVE WITH MINOR PLAN CORRECTIONS
-Finding counts: BLOCKER=0 MAJOR=0 MINOR=2
+Overall verdict: REVISE BEFORE IMPLEMENTATION.
+Finding counts: BLOCKER=0 MAJOR=3 MINOR=2
 
-Reviewed HEAD: `1281a0f2596c3f63ebdfe486fb6c5fed0eb20f22`
+Reviewed HEAD: `01f4093ceb09134fb143bddcb8b74a3c29acf7ad`
+
+Scope: batch 10, T201–T221; repository guidance, plan/spec/tasks, previous review, affected source, event schema, tests, templates, documentation and validation.
 
 ## BLOCKER findings
 
@@ -13,42 +15,57 @@ None.
 
 ## MAJOR findings
 
-None.
+- P17: Gate-event wiring mixes elapsed time with epoch time.
 
-The current plan addresses round 8’s P16 through T011/T018/T019: consistency checks, dependency setup and routing occur before disarming, with recovery-enabled regressions requiring no recovery session or commit. T002 also covers P19’s duplicate stall notification after a due relaunch is refused. Neither finding is carried forward.
+  **Location:** `.ai/tasks.md:5912–5918`; `scripts/ai-run:265–269`, `scripts/ai-run:736–739`.
+
+  T220’s new `ai_gate_event` interprets STARTED as epoch seconds. However, `record_gate` currently receives Bash `$SECONDS`, an elapsed counter. Its checkpoint, retry and final-gate callers all use that clock. Simply adding the specified wrapper call would record starts near 1970 and durations approaching the current Unix timestamp, corrupting gate metrics. The proposed runner regression checks result and test count without checking timing.
+
+  **Concrete plan change:** Define the clock conversion explicitly. Preserve elapsed duration measurement and supply a separate epoch start, or change the wrapper interface accordingly. Test checkpoint, retry and final events for plausible epoch starts and durations agreeing with their outcome rows.
+
+- P18: Gate metrics lack a reliable fallback and deduplication rule.
+
+  **Location:** `.ai/tasks.md:6274–6276`; `scripts/lib/workflow.py:4447–4450`.
+
+  T211 specifies “events, fallback outcome gate rows,” but both records describe the same runner gates, and the existing outcome schema has no shared gate identifier. Partial event coverage is expected because writes may fail and events rotate. For example, two outcome gates of 10 and 100 seconds, with only the second event retained, should produce two gates and a median of 55. Choosing events whenever available loses the first gate; combining both sources counts the second twice. Current acceptance fixtures do not exercise overlapping, incomplete coverage.
+
+  **Concrete plan change:** Specify how each gate is counted exactly once. For example, introduce a shared gate ID on both records and merge by ID, with an explicit policy for legacy rows. Add tests for complete overlap, partial event loss, rotation and legacy outcomes alongside new events.
+
+- P19: Rotation makes historical outcome runs disappear from the run table.
+
+  **Location:** `.ai/tasks.md:5805–5810`, `.ai/tasks.md:6277–6282`; `.ai/project-spec.md:257–259`.
+
+  T217 explicitly tests that an ended run disappears after subsequent rotations. Its task/review outcomes remain indefinitely, including their `run` fields. T211 nevertheless lists runs only from retained `run` events, and reserves `(no run record)` for rows without a run ID. Consequently, those surviving outcomes have no defined run entry: per-project totals can include work absent from every per-run row. A missing lifecycle event also cannot reliably mean the run is open.
+
+  **Concrete plan change:** Build run groups from the union of outcome and event run IDs. Define unavailable lifecycle metadata and event coverage explicitly, without labeling expired history as open or reporting missing event counts as complete zeroes. Add an integration regression that retains outcomes, performs multiple rotations, then checks both metrics views.
 
 ## MINOR findings
 
-- P20: T019’s textual span test includes legitimate final-handoff code.
+- P20: The revised triage prompt refers to a contract it never receives.
 
-  **Location:** `.ai/tasks.md:1197`; `scripts/ai-run:623`.
+  **Location:** `.ai/tasks.md:5476–5479`; `scripts/ai-run:644–652`.
 
-  The proposed scan from `limit-disarm` before the task loop to its first `claude_session` would include the loop’s entire `active_task == none` branch. That branch contains three `ai_die` calls, a `git commit` and `exit 0`, which the scan explicitly forbids. These statements are unreachable on the checked session route, but a textual scan still finds them. T011’s planned extraction of `checkpoint_done` does not remove this branch.
+  T205 makes triage follow the RUNNER CONTRACT’s gate rule. The actual triage path appends a TRIAGE CONTRACT, with no gate rule, and T204 changes only implementation prompts. Thus the revised triage instructions depend on absent context; the proposed template string assertions would still pass.
 
-  **Concrete plan change:** make the assertion specific to the executable session route, or explicitly extract the final-handoff branch into a separate function before scanning. Keep the behavioral regressions; do not whitelist final-handoff commits as permitted operations before the session.
+  **Concrete plan change:** Give triage an explicit rule or add the appropriate rule to its TRIAGE CONTRACT. Test the captured triage prompt, including its behavior without a RUNNER CONTRACT.
 
-- P21: A detached planner that finishes before acknowledgement is reported as failed.
+- P21: Reusing a current plan review still skips silently.
 
-  **Location:** `.ai/tasks.md:1583`; `scripts/ai-run:373`.
+  **Location:** `.ai/tasks.md:5162–5166`; `scripts/ai-pipeline:494–522`.
 
-  T006 accepts only a matching `planning/active` observation. If the child completes between polls, its observation becomes `planning/done`; the subsequent child-exit path forces a nonzero result even when `wait` returns zero. A successful plan can therefore produce an “ended early” failure. The sleeping-child acceptance test avoids this case.
+  T201 prints the skip line only when the review loop is not entered. An eligible queue with an already-current, unrevised review enters the loop, sets `review_due=no`, and exits without printing a skip explanation. This misses the stated requirement that every skipped plan review prints why.
 
-  **Concrete plan change:** specify successful completion before acknowledgement as another success case. Require the child’s zero exit status and matching PID’s `planning/done` observation, print the PID and log path, and return zero. Add a regression that deliberately delays the parent’s first observation read until the child finishes.
+  **Concrete plan change:** Print one explanation when reusing the current review, and add a regression asserting the line and absence of another reviewer invocation.
 
-## Validation observed
+## Validation and limitations
 
-- Task queue check passed: `python3 -B scripts/lib/workflow.py tasks check`.
-- Shell syntax passed for 13 script/template files.
-- Python AST parsing passed for eight source/test files.
-- `git diff --check 88b28e7..HEAD` passed.
-- Working tree remained clean.
-
-The full gate and fixture-based tests were not run: they require filesystem writes unavailable in this read-only review. These static checks do not validate the proposed implementation.
-
-## Scope, security and architecture
-
-Inspected repository instructions, spec, plan, all 19 tasks, dispositions, state/handoff, relevant documentation, validation entry points, and affected source and test fixtures. No additional security or architecture findings were identified in those inspected areas. Explicit task models fit their described risks.
+- Read-only task-queue validation passed.
+- Shell syntax checks passed for the affected workflow scripts and `.ai/validate`.
+- Python AST parsing passed for the helper, parallel runner and existing test modules.
+- Previous round findings P12–P16 are covered by the revised plan and are not repeated.
+- Unittest suites and `ai-check` were not run because their fixtures require writes prohibited by this review sandbox. Historical gate evidence was not independently reproduced.
+- No files were modified; no network or MCP integrations were invoked.
 
 ## Manual testing recommendations
 
-Retain T010’s real limit-resume, detached planning and PR draft-ownership checks, including installed-copy upgrades and watchdog timer reinstallation. This plan review is not human acceptance.
+After implementation and upgrade, compare one run’s gate durations with its raw records. Exercise metrics with retained outcomes after multiple event rotations, checking that run attribution and missing-data indicators remain understandable.

@@ -48,8 +48,8 @@ changes during the gate cause a failure, even if the command itself exits zero.
 
 Gate speed (FL-11, FL-23): test suites can run in parallel. A stdlib-only runner
 `tests/run_parallel.py` discovers every test ID, deals the sorted IDs into interleaved
-batches pulled by `AI_TEST_WORKERS` workers (default `min(8, cpu count)`, six batches per
-worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
+batches pulled by `AI_TEST_WORKERS` workers (default `min(14, cpu count - 2)`, at least 1, printed
+as the first output line `Workers: W (source)`; six batches per worker), and runs each batch with `python3 -m unittest`. On Linux it is a child subreaper
 (FL-27): orphans of the batches are reparented to it and reaped without touching a batch's
 exit status (it waits only for specific non-batch zombie pids, never `waitpid(-1)`). A stop
 (worker error, interrupt, SIGTERM, also one that arrives while the workers are still being
@@ -410,7 +410,10 @@ START` fails when anything outside the plan revision records (spec, plan, tasks,
 plan-dispositions, handoff, state, run log) changed since START.
 
 Plan revision (`ai-run --approved --revise-plan [--since COMMIT] [--base REF] [--model M]`; the
-pipeline calls it through the plan revision stage below). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE,
+pipeline calls it through the plan revision stage below). It needs a verified plan review with BLOCKER+MAJOR > 0 and no task DONE
+since the base (`tasks newly-done BASE` empty, so a follow-up batch whose earlier tasks were
+already DONE at the base can be revised; otherwise `Plan revision: a task is already DONE since
+the base (T…)`, first three ids; a helper error stops too),
 syncs and reads the round (`plan-rounds current BASE`, BASE = merge-base with `--base`, default
 `main`) and refuses a report that already has a revision record (`this plan review was already
 revised; review again (ai-review --plan)`). When the section already validates (an interrupted
@@ -431,10 +434,15 @@ sections: …`; any other missing section still stops), `tasks reorder` (the con
 place new tasks before the first task that depends on them; the host repairs a prerequisite
 appended after its dependents, and the reordered queue goes into the revision commit), `tasks
 check` (either failure stops with `Plan revision stage: task queue is invalid: …`, which
-`ai-recover` escalates at once: no recovery session, no second revision), the scope and
+`ai-recover` escalates at once: no recovery session, no second revision), the scope,
+`plan-keeps-done START` (every block DONE at START byte-identical; else `Plan revision stage:
+DONE task T… was changed or removed`, escalated the same way) and
 `plan-dispositions-check --fresh`, then in this order: `ai_log` (`plan revised (round n): accepted a, rejected r,
 needs-human h`) and the state line, `git add` of the plan revision records, `git commit
---allow-empty -m 'chore(ai): record plan revision'`, the gate check, and ONE host record
+--allow-empty -m 'chore(ai): record plan revision'`, the gate check, the post-commit checks
+(clean checkout, scope, and `plan-keeps-done START` again, so a commit hook cannot rewrite a DONE
+block after the first check: `Plan revision stage: the revision commit is out of scope (commit
+hook?): DONE task T… was changed or removed`, with no record written), and ONE host record
 `plan-revisions record BASE HEAD --accepted a --rejected r --needs-human h` (bounded questions on
 stdin) in `plan-revisions-<branch hash>.json`: `{commit, report_digest, round, accepted,
 rejected, needs_human, questions}`. Nothing writes to the checkout after the commit, so a
@@ -467,7 +475,10 @@ this run)`. A human (re)start (`run-manifest start`) resets the list; a recovery
 digest and only plan revision records changed since START; a host `plan-revisions` record for
 the digest whose commit is in START..HEAD means `committed` (the record holds the outcome), a
 dirty tree after it fails `Plan revision stage: uncommitted changes after the counted revision
-commit.`, else `pending` (an agent commit with the revision subject never closes it).
+commit.`, and so does a DONE block that differs from START's (`plan_keeps_done` against
+`start_head`, the same base `ai-run --revise-plan --since START` checks: `Plan revision stage:
+DONE task T… was changed or removed`, so recovery cannot close a stage a commit hook rewrote),
+else `pending` (an agent commit with the revision subject never closes it).
 `complete_plan_stage` (every start and resume dispatches the open stage by name, before the
 clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-reserve` again
 (idempotent), `ai-run --revise-plan --since START --base <base sha> --model M` with the run's
@@ -477,8 +488,14 @@ clean-tree check): `committed` → `stage-clear` only; `pending` → `revision-r
 manifest on resume). It writes nothing to the checkout. A failed check is a `Plan revision stage
 …` stop; a failed reservation is the limit stop; both always need the human.
 
-Supervised plan-review loop (`ai-pipeline`, while no task is DONE and without
-`--skip-plan-review`). Each pass: `plan-rounds sync BASE`; the decision check
+Supervised plan-review loop (`ai-pipeline`, while no task became DONE since the run's base,
+outside an armed resume and without `--skip-plan-review`). The entry check is `tasks newly-done
+BASE` (empty output = untouched; DONE tasks of earlier batches already DONE at the base do not
+lift the review; a helper error fails closed and skips). A skipped review prints exactly one
+line `Plan review skipped: <why>` (`--skip-plan-review`, `resuming preserved work (armed
+resume)`, `tasks done since the base: T…` with the first three ids, or `cannot read the task
+queue against the base`); a current, unrevised review reused on the loop's first pass prints
+`Plan review skipped: the current plan review is reused (BLOCKER b, MAJOR m)`. Each pass: `plan-rounds sync BASE`; the decision check
 (`plan-revisions decision`: exit 0 stops with `plan review needs your decision (round n):
 <stored questions>`, the bounded text from the host record; exit 2 is a `Plan revision stage`
 stop); right after a completed stage, the notification `🔁 Plan revised (round n/N): accepted a,
@@ -541,15 +558,18 @@ per change named by a dry run taken before it (task `planning`, left uncommitted
 or `plan-revision`, in the revision commit) and print the overlap lines; a dry run that fails
 (e.g. a `--revision` plan that moves a DONE task) only means no rows.
 Plan revision recovery: the host repairs an interrupted revision's queue first.
-`workflow.py revision-queue-repair` (run by `ai-pipeline` before this check when the plan review
-is on, and by `ai-run --revise-plan` before its own `tasks check`) reorders `.ai/tasks.md` only
-when it differs from HEAD's, only plan revision records are dirty (`plan-revision-scope HEAD`),
-HEAD's queue is valid with no DONE task, and the verified current plan review has no revision
-record yet; otherwise it does nothing and the checks reject as before (a committed out-of-order
-queue is the pre-flight scan's). A repair failure stops with `Plan revision stage: task queue is
-invalid: …` (escalated). The repaired queue then passes `tasks untouched` and
+`workflow.py revision-queue-repair [--base REV]` (run by `ai-pipeline` with `--base BASE` before
+this check when the plan review is on, and by `ai-run --revise-plan` before its own `tasks check`,
+with `--base` the merge-base of `--base` (default `main`) and HEAD when it resolves) reorders
+`.ai/tasks.md` only when it differs from HEAD's, only plan revision records are dirty
+(`plan-revision-scope HEAD`), HEAD's queue is valid with no DONE task (with `--base`: no task
+DONE that was not DONE at REV, so an earlier batch's DONE tasks don't count; an unknown REV does
+nothing), and the verified current plan review has no revision record yet; otherwise it does
+nothing and the checks reject as before (a committed out-of-order queue is the pre-flight
+scan's). A repair failure stops with `Plan revision stage: task queue is invalid: …`
+(escalated). The repaired queue then passes the revision's `tasks newly-done BASE` check and
 `plan-dispositions-check`, so a complete section is recorded without a new session.
-Stages, each resumable by rerunning: plan review (only while no task is DONE;
+Stages, each resumable by rerunning: plan review (only while no task became DONE since the base;
 `ai-review --plan` saves `.ai/reviews/plan.md` bound to a digest of the committed tree
 minus `.ai/reviews/`, state, run log and handoff, with the report's SHA-256 stored in the
 host review store; committed as `chore(ai): record plan review`; reused while that digest is
@@ -798,7 +818,10 @@ are described in the README; they never write tracked files.
 
 On a human start `ai-pipeline` writes a **run manifest** to the host state directory
 (`run.json` beside the review bindings, outside the checkout, where agent sessions can't
-write): approved gate digest, branch, arguments and the attempt counter. Recovery takes
+write): approved gate digest, branch, arguments and the attempt counter, plus a fresh `run_id`
+(16 hex) and `started` (epoch) on every human start, kept by resumes; `ai-pipeline` and
+`ai-recover` export it as `AI_RUN_ID` (read from the manifest only, an inherited value is
+dropped), so a run finished earlier never tags later standalone commands. Recovery takes
 its authority only from there, never from checkout files. `stop()` re-verifies the gate
 digest against the pipeline's in-memory approved digest and only then execs
 `ai-recover --stage S` (unless `AI_AUTO_RECOVER=0`), keeping the PID, the checkout lock
@@ -1132,7 +1155,8 @@ Incidents:
   start (old logs of a resumed run don't count). The latest `pauses.log` entry counts as activity until
   its resume time, so usage-limit pauses don't alarm. Claude sessions are bounded by
   `--session-timeout` (default 30 minutes), which stays below the default; an implementation
-  session's gate allowance can lengthen it up to double (see `gate-seconds`).
+  session's gate allowance (only under the `full` gate rule, see `session-gate`) can lengthen it
+  up to double (see `gate-seconds`).
 - **stop**: a `last-error` newer than the watchdog's last notification. The
   acknowledged stop remains an incident until removed or replaced.
 
@@ -1278,7 +1302,9 @@ worktrees), branch and task (kept for readers of the log; the report derives its
 `seq`). `seq` orders the attempt among all attempts the host recorded (allocated at the
 attempt open, or at the append for an attempt without one, from `attempt-seq` beside the log;
 gaps are normal); `started` is the attempt's start (epoch seconds, informational, never an
-order key). Failures to write are reported and never stop the run.
+order key). Failures to write are reported and never stop the run. A row written inside an
+approved run carries `run` (`AI_RUN_ID`; absent otherwise); a `crashed` row takes it from its
+attempt marker, never from the run that reconciles it.
 
 A planning session (`ai-run --plan`, so `ai-plan` too) writes one `plan` line: `outcome plan
 RESULT MODEL SECONDS [TASKS] [--revision]`, RESULT `done`, `stopped`, `interrupted` or `timeout`
@@ -1376,6 +1402,183 @@ branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` pr
 project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
+With `--id GATE_ID` (16 lowercase hex from `ai_new_id`, else exit 2 and nothing written) the row
+also stores `gate_id`, the same id as the gate's `gate` event, and `merge_gates` counts each gate
+once across both logs: a row and an event with one id are one gate (the row's seconds, result and
+run; the event's tests, failures, workers, task, stage and start), a row without an id or an event
+without a row is a gate of its own (spec A12).
+
+### Flow data (ME-01)
+
+Where it lives: `events.jsonl` in the host state root (`AI_STATE_DIR`, else
+`$XDG_STATE_HOME/ai-toolkit`, else `~/.local/state/ai-toolkit`), beside `outcomes.jsonl`, with
+`events.1.jsonl` (the archive after a rotation) and the stable `events.lock`. Only host scripts
+write it; no agent session does, and nothing in a checkout is read. The sections below give the
+writers and rules; in short, every line has `v` (1), `id`, `time`, `kind`, `project`, `branch`,
+`run` and the fields of one of the seven kinds (`gate`, `stop`, `recovery`, `ruling`, `review`,
+`pr`, `run`). `run` is the run id from `AI_RUN_ID` (never inferred from the branch or time), so
+rows and events without one, such as older records and standalone commands, form the
+`(no run record)` group in the metrics. Text fields are redacted and folded to one line (see
+below). Flow events go to a separate `<state root>/events.jsonl`, not to new kinds in
+`outcomes.jsonl`. Decision (2026-10-22): `outcomes.jsonl` must never rotate (attempt numbering,
+`first_pass` and crash reconcile read all of it, and older installed copies read it with fixed
+kind filters), while events need rotation and a schema version (spec A6). `workflow.py event KIND
+key=value…` appends one line: the envelope `v` (1), `id`, `time`, `kind`, `project`, `branch`,
+`run` (`AI_RUN_ID` when it is 16 hex, else null; never inferred) plus the kind's fields
+(`EVENT_KINDS`: `gate`, `stop`, `recovery`, `ruling` with its category in `ruling_kind`,
+`review`, `pr`, `run`; a `gate` needs a 16-hex `gate_id`). Strings become one line of at most
+200 characters, after `redact` replaces secret-looking tokens (`sk-…`, `ghp_…`, `github_pat_…`,
+`xox?-…`, `AKIA…`, `Bearer …`, the value of `key=`/`token=`/`secret=`/`password=`) with
+`[redacted]`: best effort for telemetry, not a secret scanner. Unknown kinds or fields, envelope names and bad integers exit 2 with nothing
+written. Writers (exclusive) and readers (shared) serialize on a stable `events.lock` beside
+the log, never renamed or deleted, and every wait is bounded by `AI_EVENTS_LOCK_SECONDS`
+(0.1–60, default 5 s; a blocking `flock` interrupted by a timer): a busy lock or a write error
+prints `Note: could not record the KIND event (…)` and exits 1, and a reader raises `EventsBusy`.
+Shell callers use `ai_event` (`common.sh`), which skips once the gate is known broken, turns any
+failure into one `Note:` and never changes the caller's status; any helper that prepares an
+event runs inside such a `common.sh` function after the same guard, never in its arguments.
+`read_events` reads `events.1.jsonl` then `events.jsonl`, keeping only `v == 1` events of known
+kinds, each id once. The writers are described below; the event-kind table is `EVENT_KINDS` in
+`scripts/lib/workflow.py`.
+
+`workflow.py event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID` (T207) appends one `gate`
+event (`task` when the first argument is `T<digits>`, else `stage`; START and SECONDS decimal
+integers, RESULT `pass|fail|timeout`, GATE_ID 16 lower-case hex; anything else exits 2 with
+nothing written). `tests`, `failures` and `workers` are parsed from the last gate log: the last
+`Ran N tests`; from the last summary line `failures=a` + `errors=b` of `FAILED (…)` or the
+number of batches after `failing batches:`, 0 on `OK`; `Workers: W`, else `on W workers`.
+Unknown values are null and the event is still written. The validation stamp and its log are
+agent-writable, so they are read only through `gate_log_lines()` (pinned `.ai/local`,
+`O_NOFOLLOW|O_NONBLOCK` opens with a regular-file `fstat` check, stamp at most 64 KiB, log tail
+256 KiB, log only directly inside `.ai/local`): a FIFO, symlink, swapped directory or outside
+log gives null counts promptly and is never followed.
+
+Host callers (T220): `common.sh` `ai_gate_event WHERE START_EPOCH SECONDS CODE [GATE_ID]` skips
+itself once `AI_GATE_BROKEN` is set, maps the exit code (0 pass, 124/137 timeout, else fail),
+uses `ai_new_id` without GATE_ID, prints a Note on a write failure and always returns 0. Every
+host full gate on an unchanged gate writes one event: `ai-run` `record_gate CODE STARTED WHERE`
+(the checkpoint gate after a session and the gate-only retry with the task id, the final gate
+with `final`) gives the `outcome gate` row and the event the same `seconds` (its `$SECONDS`
+clock) and `gate_id`, with the epoch start `date +%s - seconds`; `ai-pipeline`
+`ensure_validated` (stage `validation`) and `ai-recover` `commit_validated` (stage `recovery`)
+time the gate on the wall clock, record it after `ai_gate_check`, then take today's failure
+branch, so a failing or timed-out gate is recorded too. A gate that changed records nothing.
+
+Stops and recovery decisions (T208): `common.sh` `ai_stop_event STAGE yes|no` and
+`ai_recovery_event DECISION ATTEMPT` skip themselves once `AI_GATE_BROKEN` is set, and only then
+run their helpers. A `stop` event carries the stage, a category from `workflow.py stop-category
+STAGE` (spec A10: `timeout`, `validation_failed`, `record_format`, `queue_order`,
+`review_round_limit`, `usage_limit`, `needs_human`, `crash`, else `other`; the first match of the
+ordered `STOP_CATEGORIES` table on the first 4 KiB of `.ai/local/last-error`, a regular file read
+through the pinned `.ai/local`; stage `validation` is always `validation_failed`), the redacted
+last-error excerpt as `message`, and `recovery` (`yes` exactly when `ai-pipeline` `stop()` hands
+over to `ai-recover`). `ai-pipeline` `stop()` writes one after its gate check; `ai-recover`
+writes a `recovery` event (`rerun`, `commit_and_rerun`, `relaunch` when it schedules a usage-limit
+relaunch, `escalate`) at each decision with the manifest's task (else `-`) and the reserved attempt
+(`-` before it is reserved), and `escalate()` adds a `stop` with `recovery: no`. Escalations after a
+failed gate check record nothing. The category is telemetry only: recovery never reads it (its hard
+rules match the reason text). Recording never changes the stop's notification, last-error or exit
+status.
+
+Run start, resume and end (T209): once `ai-pipeline` has the run id, it writes `run` with
+`action: start` (a human start) or `action: resume` (a recovery), the base's short sha as `base`
+and the original arguments joined as `args`. `common.sh` `ai_run_end RESULT` writes the run's one
+end: it skips itself once `AI_GATE_BROKEN` is set, without `AI_RUN_ID`, in a subshell
+(`BASHPID != $$`) and when `AI_RUN_ENDED` is already set (set before any helper runs), then asks
+`workflow.py run-totals` for the totals and writes `run` with `action: end`, `result` and them.
+`run-totals` prints `tasks=N gates=N gate_failures=N seconds=N` (`-` is null) from this run's
+records only: `tasks` the distinct task ids of its `outcome task` rows with result `done`; `gates`
+and `gate_failures` (`fail` or `timeout`) from `merge_gates` over its `outcome gate` rows and
+`gate` events, each gate once, null when `events.lock` stays held past the deadline; `seconds`
+from the manifest's `started` when the manifest is this run's. Callers: `finish RESULT [NOTE]`
+(`no_pr`, `no_origin`, `no_gh`, and `pr` only after the final push succeeded); `ai_die`'s pipeline
+branch (`stopped`: `stop()` without recovery and every terminal `ai_die` after the start; a failed
+final push stops there, never `pr`); `ai-recover` `escalate()` and `on_exit` (`stopped`). A hand-over
+to `ai-recover`, a resume and the usage-limit relaunch wait (exit 75) write no end. A failed write
+prints a Note and changes no exit status, notification or marker.
+
+Pull request events (T218): `ai-pipeline` writes a `pr` event with `action`, `state` and the `url` as
+`gh` printed it: `action=opened` (`state=draft` when the run drafts, else `ready`) after a successful
+`gh pr create`, and `action=state` after a verified `gh pr ready --undo` (`draft`) or `gh pr ready`
+(`ready`). Plain `ai_event` calls; the PR path and exit status never change.
+
+Ruling and review events (T210): `common.sh` `ai_ruling_event RULING_KIND KEY TASK` (guard first,
+task `-` unless a task id) runs right after the `ai_log` of every Ruling row, in `ai_ruling_rows`
+(`queue-order`, `task-sections`; key and task are the changed task), `ai_disposition_ruling`
+(`disposition-cell`; key `DIGEST12.ID`) and `ai_flow_line_ruling` (`flow-line`; key and task the
+claim key). A refused claim returns before the row, so it records nothing. `ai-review`
+`review_records` writes one `review` event per published review with `mode`, `reviewer` (`codex`,
+`claude`, `claude-routed`, `claude-fallback`), `model` and the routing or fallback `reason` (`-`
+when none), after the outcome row.
+
+Rotation (T217) keeps `events.jsonl` bounded without losing an active run's events. Inside the
+exclusive lock, before each append, a live file over `AI_EVENTS_MAX_BYTES` (an integer of at
+least 65536; unset or invalid: 8 MiB) is rotated: the active runs are the run ids with no `run`
+event `action=end` in the file whose latest event is at most 7 days old (`EVENT_RUN_STALE_DAYS`;
+any project's, paused recoveries included), and only their lines stay live, in file order. Lines
+with a null `run`, unknown kinds and torn lines go only to the archive. When that would drop less
+than a quarter of the cap, nothing rotates and the append goes on: the live file may exceed the
+cap while that many runs are active. Order: the whole live content is written to a temp file in
+the state root, synced and renamed over `events.1.jsonl` (the previous archive is dropped), then
+the kept lines replace `events.jsonl` the same way and the directory is synced. A crash between
+the two renames leaves duplicates, never loss (`read_events` dedupes by id); a rotation failure
+removes its temp file and leaves the file it failed on as it was, and the append still happens
+(a `Note:` only when the append itself fails).
+
+### Reading the metrics
+
+`ai-status --metrics` (text tables, Projects and Runs) and `ai-status --metrics --json` (the same
+data, `{"v": 1, …}`) take `--since YYYY-MM-DD` (UTC, on or after that day), `--project NAME`
+(exact match). A run whose events rotated away is still listed from its outcome rows, with
+`events 0` and result `unknown`; `open` appears only for a retained start or resume with no end
+and a recent event. The two numbers that need the events (`stops`, lifecycle) are null or
+`unknown` rather than guessed. Check one run against its raw `outcomes.jsonl` and `events.jsonl`
+lines before trusting the totals.
+
+Metrics (T211, spec A13): `workflow.py metrics [--since YYYY-MM-DD] [--project NAME] [--json]
+[--outcomes FILE] [--events FILE…]` (the file options for tests) reads the outcome log and the
+retained events (read only) and prints `{"v": 1, "projects": […], "runs": […]}`; without
+`--json` (T212) it prints two column-aligned text tables, "Projects" and "Runs" (`-` for a missing
+number, stops as `timeout 1, queue_order 2`, findings as `codex 0/2/3` blocker/major/minor), and
+footer lines explaining `unknown` and `events 0`; `ai-status --metrics [--since DATE] [--project
+NAME] [--json]` passes its arguments through. A row or event belongs to the run in its
+own `run` field, never to one matched by branch or time; records without one form their
+project's `(no run record)` group (`run` null, `result` null). Runs are the union of run ids on
+outcome rows and retained events, keyed by project and run, so a run whose events rotated away is
+still listed from its rows with `events: 0`, `stops: null`, `start`/`end` null and `result:
+"unknown"`; otherwise `result` is the retained `run` end's result, `open` with a retained start
+or resume, no end and an event within `EVENT_RUN_STALE_DAYS`, else `unknown`. Each group has
+`attempts`, `tasks`, `first_pass` (tasks whose first attempt over the whole log, in
+`ordered_attempts` order, was `done`; so a retry in a later run is no first pass there),
+`first_pass_rate` (null without tasks), `timeouts`, `median_task_seconds` (per task, the sum of
+its attempts), `gates` and `median_gate_seconds` (`merge_gates`: each gate once),
+`review_rounds` and `findings` (code reviews only, not re-checks or plan reviews; reviewer →
+`blocker`/`major`/`minor`) and `stops` (category → count of retained `stop` events). Projects add
+`runs` and `runs_without_events`; their `attempts`, `timeouts` and `review_rounds` equal the sums
+over their runs and their no-run group. `--since` keeps records whose `time` is on or after that
+UTC date; `--project` matches exactly; a bad option exits 2. A busy event log exits 1 with
+`Error: the event log is busy (lock held for more than N s); try again.`, never numbers computed
+without the events.
+
+### Session gate (TS-01)
+
+`session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
+gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run
+setting `AI_SESSION_GATE` (kept with the approved run like the routing settings) decides: empty
+or `auto` → `full` when at least one pass is recorded and the gate time is under 120 s
+(`FAST_GATE_SECONDS`; a sub-second `0` counts), else `targeted`; `full` or `targeted` forces that
+mode. Any error (a refused state root, a git error) or an invalid value prints `targeted 0` with
+exit 0; `ai-run` and `ai-pipeline` reject an invalid value before any agent runs
+(`Invalid AI_SESSION_GATE`). `ai-run` asks it before each task session (anything but `full` is
+`targeted`) and puts one gate rule into the RUNNER CONTRACT: `full` runs the task's `Targeted:`
+checks, then `.ai/bin/ai-check` with `run_in_background`, waited for, and gets the gate allowance;
+`targeted` runs the `Targeted:` checks and fast static checks only (a task without `Targeted:`
+lines runs its task-specific Validation commands, never a full-gate entry point such as
+`ai-check`, `.ai/validate` or the whole suite), gets no allowance (`Session:` line `gate rule
+targeted (host gate Ns after the session)`), and leaves the full gate to the host gate, which
+decides DONE. Triage sessions (`ai-run --triage`) are not affected by the setting: their TRIAGE
+CONTRACT says triage changes only workflow records and runs neither `.ai/bin/ai-check` nor
+`.ai/validate` nor the suite.
 
 `attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
 for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows

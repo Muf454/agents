@@ -64,6 +64,9 @@ while (( $# )); do
   esac
 done
 [[ "$approved" == yes ]] || ai_die 'Review the plan/permissions/checks, then pass --approved.'
+# A human start belongs to no run until its manifest is written (below); only a resume carries
+# the id ai-recover read from the manifest.
+[[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || unset AI_RUN_ID
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 case "${AI_REVIEWER:-auto}" in
   claude) ;;
@@ -72,6 +75,7 @@ case "${AI_REVIEWER:-auto}" in
   *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
 esac
 ai_review_route_settings
+ai_session_gate_settings
 ai_supervise_settings
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.
@@ -86,8 +90,11 @@ rm -f .ai/local/last-error
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
 printf '%s\n' "$$" > "$AI_PIPELINE_MARKER"
 [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] || ai_observe start
+# finish RESULT [NOTE]: RESULT is the `run` end result (pr, no_pr, no_origin, no_gh), NOTE the
+# dashboard's done text (default "no PR").
 finish() {
-  ai_observe done "${1:-no PR}"
+  ai_observe done "${2:-no PR}"
+  ai_run_end "$1"
   # Keeps the manifest's timeout reruns: a pipeline resumed under the same approval must not
   # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
@@ -163,6 +170,15 @@ else
   ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \
     ai_die 'Cannot record the run manifest in the host state directory.'
 fi
+# The approved run's id, from the manifest only (an inherited value is never trusted): every
+# event and outcome row of this run, resumes included, carries it (spec A8). Not a run setting.
+AI_RUN_ID=$(ai_helper run-manifest run-id 2>/dev/null) || AI_RUN_ID=''
+if [[ "$AI_RUN_ID" =~ ^[0-9a-f]{16}$ ]]; then export AI_RUN_ID; else unset AI_RUN_ID; fi
+# The run's start (a human start) or resume (a recovery) event; its one end is ai_run_end's.
+if [[ -n "${AI_RUN_ID:-}" ]]; then
+  ai_event run "action=$([[ -n "${AI_RECOVERY_ATTEMPT:-}" ]] && printf resume || printf start)" \
+    "base=$(git rev-parse --short "$base_sha")" "args=${orig_args[*]}"
+fi
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
 ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \
@@ -181,8 +197,10 @@ stop() {
   if [[ "${AI_AUTO_RECOVER:-1}" != 0 && -x "$AI_BIN/ai-recover" && "$gate_ok" == yes ]]; then
     # Bounded auto-recovery takes over this process (same PID, lock and marker).
     [[ -s .ai/local/last-error ]] || printf '%s\n' "stopped during $stage (see terminal)" > .ai/local/last-error
+    ai_stop_event "$stage" yes
     exec "$AI_BIN/ai-recover" --stage "$stage"
   fi
+  ai_stop_event "$stage" no
   AI_STOP_NOTIFIED=1
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason%.}. Fix it, then rerun ai-pipeline."
   ai_die "Pipeline stopped during $stage: ${reason:-see output above}"
@@ -262,7 +280,13 @@ push() {
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
     step checks 'Validation'
-    "$AI_BIN/ai-check" || stop validation
+    # The gate event comes before today's decision, so a failing gate is recorded too.
+    local gate_started gate_code=0 gate_secs
+    gate_started=$(date +%s)
+    "$AI_BIN/ai-check" || gate_code=$?
+    gate_secs=$(( $(date +%s) - gate_started ))
+    if ai_gate_check "$AI_APPROVED_GATE"; then ai_gate_event validation "$gate_started" "$gate_secs" "$gate_code"; fi
+    (( gate_code == 0 )) || stop validation
     ai_guard_verify
   fi
 }
@@ -454,7 +478,7 @@ queue_stage='plan review'; [[ "$plan_review" == yes ]] || queue_stage=implementa
 # decides); a committed out-of-order queue still stops below. Never on preserved task work
 # (no host write while armed).
 if [[ "$plan_review" == yes ]] && ! armed_resume; then
-  repair_out=$(ai_helper revision-queue-repair 2>&1) || {
+  repair_out=$(ai_helper revision-queue-repair --base "$base_sha" 2>&1) || {
     printf 'Plan revision stage: task queue is invalid: %s\n' "${repair_out#Error: }" > .ai/local/last-error
     stop 'plan revision'
   }
@@ -475,8 +499,35 @@ queue_error=$(ai_helper tasks check 2>&1 >/dev/null) || {
 # which exists only after this loop broke out in the same run. A committed partial checkpoint
 # makes plan-review-info stale and ai-review --plan cannot run on the preserved tree; the
 # committed part is reviewed by the implementation review like any task commit.
-if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>/dev/null; then
+# The queue is untouched when no task became DONE since the run's base (FL-39): earlier
+# batches' DONE tasks do not lift the review. Fail closed: an unreadable queue is not untouched.
+plan_untouched() {
+  local done_ids ids id
+  if ! done_ids=$(ai_helper tasks newly-done "$base_sha" 2>/dev/null) || \
+      ! [[ "$(ai_helper tasks count 2>/dev/null)" =~ ^[1-9][0-9]*$ ]]; then
+    plan_skip='cannot read the task queue against the base'; return 1
+  fi
+  [[ -n "$done_ids" ]] || return 0
+  mapfile -t ids <<< "$done_ids"
+  plan_skip="tasks done since the base: ${ids[0]}"
+  for id in "${ids[@]:1:2}"; do plan_skip+=", $id"; done
+  (( ${#ids[@]} <= 3 )) || plan_skip+=', …'
+  return 1
+}
+plan_skip=''
+if [[ "$plan_review" != yes ]]; then
+  plan_skip='--skip-plan-review'
+elif armed_resume; then
+  plan_skip='resuming preserved work (armed resume)'
+else
+  plan_untouched || true
+fi
+if [[ -n "$plan_skip" ]]; then
+  printf 'Plan review skipped: %s\n' "$plan_skip"
+else
+  plan_pass=0
   while true; do
+    plan_pass=$((plan_pass + 1))
     ai_helper plan-rounds sync "$base_sha" || stop 'plan review'
     plan_decision_check
     if [[ "$plan_revised" == yes ]]; then
@@ -503,6 +554,12 @@ if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>
         1) ;;
         *) plan_stage_fail 'the plan revision records are unreadable.' ;;
       esac
+    fi
+    # Later passes follow a revision and always review again.
+    if [[ "$review_due" == no ]] && (( plan_pass == 1 )); then
+      read -r _ plan_blockers plan_majors _ <<< "$plan_info"
+      printf 'Plan review skipped: the current plan review is reused (BLOCKER %s, MAJOR %s)\n' \
+        "$plan_blockers" "$plan_majors"
     fi
     if [[ "$review_due" == yes ]]; then
       step plan_review 'Plan review (Codex; Claude fallback)'
@@ -635,7 +692,7 @@ if [[ "$open_pr" != yes ]]; then
   if (( disputes > 0 )); then disputed=" and resolve $disputes disputed finding(s) (.ai/reviews/disputes.md)"; fi
   ai_notify "🏁 FINISHED on $branch: all tasks done, validated and reviewed ($reviews review round(s)); no PR requested. Your todo: review the branch locally$disputed."
   printf '%s\n' 'Pipeline complete (no PR requested).'
-  finish
+  finish no_pr
 fi
 step pr 'Pull request'
 # Draft reasons: the human's --draft (never recorded) or the pipeline's policy (unresolved
@@ -655,12 +712,12 @@ fi
 if ! git remote get-url origin >/dev/null 2>&1; then
   ai_notify "🏁 FINISHED on $branch (local only): no 'origin' remote to open a PR on. Your todo: push and open a PR."
   printf '%s\n' "No 'origin' remote; branch is ready locally."
-  finish 'no PR (local only)'
+  finish no_origin 'no PR (local only)'
 fi
 push push 'git push failed (3 tries)' -u origin "$branch"
 if ! command -v gh >/dev/null; then
   ai_notify "🏁 FINISHED on $branch: pushed, but gh is not installed. Your todo: open the PR yourself."
-  finish 'pushed, no PR (gh missing)'
+  finish no_gh 'pushed, no PR (gh missing)'
 fi
 title=$(ai_helper pr-title)
 # The handoff's Flow chart line, once per run (key `final`, often already claimed by ai-run's
@@ -684,6 +741,7 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
     gh pr ready --undo "$branch" >/dev/null 2>&1 && \
       [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
       { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
+    ai_event pr action=state state=draft "url=$url"
     # Ownership only from a confirmed ready PR: an unknown prior state (failed lookup) may have
     # been a human draft, so it never counts as a pipeline draft.
     if [[ "$pipeline_drafted" == yes && "$is_draft" == false ]]; then
@@ -699,6 +757,7 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
          [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
         printf '%s\n' 'Marked the PR ready (the pipeline had made it a draft).'
         ai_log none "pull request marked ready: $url" PASS 'drafted by the pipeline earlier'
+        ai_event pr action=state state=ready "url=$url"
       else
         printf '%s\n' 'Warning: could not mark the PR ready; it stays a draft.'
         # Best effort: a lost record only leaves the PR draft (fails closed).
@@ -720,6 +779,9 @@ else
   if [[ "$pipeline_drafted" == yes ]]; then
     ai_helper pr-draft record "$url" created || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
   fi
+  opened_state=ready
+  if [[ "$make_draft" == yes ]]; then opened_state=draft; fi
+  ai_event pr action=opened "state=$opened_state" "url=$url"
 fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'
@@ -727,4 +789,4 @@ host_commit 'chore(ai): record pull request' .ai/state.md .ai/run-log.md .ai/han
 push 'final push' "PR is open at $url, but pushing the final handoff commit failed" origin "$branch"
 ai_notify "$(ai_helper finish-summary "$url" "$reviews" "$unresolved" 2>/dev/null || printf '🏁 FINISHED: PR %s' "$url")"
 printf 'Pull request: %s\n' "$url"
-finish "$url"
+finish pr "$url"

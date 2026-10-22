@@ -12,7 +12,10 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import signal
 import stat
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -732,6 +735,21 @@ def tasks_preflight(arguments):
         print(line)
 
 
+def newly_done_ids(rev, blocks):
+    """IDs of the tasks DONE in BLOCKS but not (or absent) at REV, in file order. An unknown REV
+    raises ValueError."""
+    try:
+        commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
+    except subprocess.CalledProcessError:
+        raise ValueError(f'Unknown revision: {rev}') from None
+    try:
+        before = git('show', f'{commit}:.ai/tasks.md').decode()
+    except subprocess.CalledProcessError:
+        before = ''  # no queue at REV: every DONE task is new
+    done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
+    return [task['id'] for task in blocks if task['status'] == 'DONE' and task['id'] not in done]
+
+
 def task_command(arguments):
     if arguments[0] == 'reorder':
         tasks_reorder()
@@ -760,17 +778,11 @@ def task_command(arguments):
         if not rev or rev.startswith('-'):
             fail('Usage: tasks newly-done REV')
         try:
-            commit = git('rev-parse', '--verify', '-q', f'{rev}^{{commit}}').decode().strip()
-        except subprocess.CalledProcessError:
-            fail(f'Unknown revision: {rev}')
-        try:
-            before = git('show', f'{commit}:.ai/tasks.md').decode()
-        except subprocess.CalledProcessError:
-            before = ''  # no queue at REV: every DONE task is new
-        done = {task['id'] for task in tasks(before) if task['status'] == 'DONE'}
-        for task in blocks:
-            if task['status'] == 'DONE' and task['id'] not in done:
-                print(task['id'])
+            ids = newly_done_ids(rev, blocks)
+        except ValueError as error:
+            fail(str(error))
+        for task_id in ids:
+            print(task_id)
     elif action == 'next':
         by_id = {task['id']: task for task in blocks}
         eligible = [task for task in blocks if task['status'] in ('TODO', 'IN_PROGRESS')
@@ -1522,6 +1534,13 @@ def timeout_reruns_valid(data):
             and all(ruling_valid(item) for item in rulings) and len(set(rulings)) == len(rulings))
 
 
+def run_identity_valid(data):
+    """The optional `run_id` (16 hex) and `started` (int epoch) of the approved run (T216)."""
+    return (('run_id' not in data or (isinstance(data['run_id'], str)
+                                      and re.fullmatch(r'[0-9a-f]{16}', data['run_id']) is not None))
+            and ('started' not in data or (type(data['started']) is int and data['started'] >= 0)))
+
+
 def ruling_row(arguments):
     """`ruling-row KIND WHAT WHY COST`: the run-log action cell of one host ruling, on one line
     that cannot break the run-log table (no `|`, backslash or line break; at most 400 chars)."""
@@ -1683,7 +1702,9 @@ def run_manifest(arguments):
             fail('Invalid gate digest.')
         path.parent.mkdir(parents=True, exist_ok=True)
         settings = {key: os.environ[key] for key in RUN_SETTINGS if key in os.environ}
-        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings}
+        # Every human start is a new run (spec A8): a resume never calls start, so it keeps both.
+        data = {'gate': gate, 'branch': branch, 'args': args, 'attempts': 0, 'env': settings,
+                'run_id': secrets.token_hex(8), 'started': int(time.time())}
         # Stages live per branch (stage_path), so a run on another branch neither drops nor
         # inherits them, and one on the same branch completes it first. A legacy stage
         # inside run.json moves to its branch's file.
@@ -1710,7 +1731,8 @@ def run_manifest(arguments):
                  and all(isinstance(a, str) for a in data['args'])
                  and type(data.get('attempts')) is int and 0 <= data['attempts'] <= 100
                  and ('task' not in data or task_id_valid(data['task']))
-                 and limit_fields_valid(data) and timeout_reruns_valid(data))
+                 and limit_fields_valid(data) and timeout_reruns_valid(data)
+                 and run_identity_valid(data))
     except (OSError, ValueError):
         valid = False
     if not valid:
@@ -1721,6 +1743,11 @@ def run_manifest(arguments):
         print(data['gate'])
     elif action == 'branch':
         print(data['branch'])
+    elif action == 'run-id':
+        # The approved run's id; exit 1 for a manifest from before run ids.
+        if 'run_id' not in data:
+            sys.exit(1)
+        print(data['run_id'])
     elif action == 'args':
         sys.stdout.write(''.join(arg + '\0' for arg in data['args']))
     elif action == 'env':
@@ -2542,7 +2569,7 @@ RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFOR
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                 'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
-                'AI_REVIEW_RISK_WORDS')
+                'AI_REVIEW_RISK_WORDS', 'AI_SESSION_GATE')
 
 
 def _no_duplicate_keys(pairs):
@@ -3596,10 +3623,13 @@ def plan_revisions(arguments):
 def revision_queue_repair(arguments):
     """Reorder the uncommitted queue of an interrupted plan revision (as `tasks reorder`) before
     any queue check, only when: .ai/tasks.md differs from HEAD's, only plan revision records are
-    dirty, HEAD's queue is valid with no DONE task, and the verified current plan review is not
-    revised yet. Otherwise do nothing: the usual checks reject the queue as before."""
-    if arguments:
-        fail('Usage: revision-queue-repair')
+    dirty, HEAD's queue is valid with no DONE task (with --base REV: no task DONE that was not
+    DONE at REV, so earlier batches' DONE tasks don't count; an unknown REV does nothing), and
+    the verified current plan review is not revised yet. Otherwise do nothing: the usual checks
+    reject the queue as before."""
+    if arguments and (len(arguments) != 2 or arguments[0] != '--base' or not arguments[1]
+                      or arguments[1].startswith('-')):
+        fail('Usage: revision-queue-repair [--base REV]')
     path = Path('.ai/tasks.md')
     committed = committed_file('HEAD', str(path))
     if not path.is_file() or path.read_text() == committed:
@@ -3607,10 +3637,14 @@ def revision_queue_repair(arguments):
     try:
         records_scope('HEAD', PLAN_REVISION_RECORDS, 'Plan revision')
         before = tasks(committed)
+        if arguments:
+            done = newly_done_ids(arguments[1], before)
+        else:
+            done = [task['id'] for task in before if task['status'] == 'DONE']
         record, verified, _ = plan_revision_lookup()
     except (ValueError, OSError, subprocess.CalledProcessError):
         return
-    if not before or any(task['status'] == 'DONE' for task in before) or not verified or record:
+    if not before or done or not verified or record:
         return
     tasks_reorder()
 
@@ -3635,6 +3669,12 @@ def plan_stage_verify(start, digest):
         return
     if git('status', '--porcelain', '--untracked-files=all').strip():
         fail('Plan revision stage: uncommitted changes after the counted revision commit.')
+    # A commit hook can rewrite a DONE block after the host's pre-commit check; the clean
+    # checkout equals HEAD here, so this compares the counted commit with START.
+    try:
+        plan_keeps_done([start])
+    except ValueError as error:
+        fail(f'Plan revision stage: {error}')
     print('committed')
 
 
@@ -3986,6 +4026,538 @@ def append_outcome(path, record):
     return True
 
 
+# Flow events (ME-01): a separate, rotated log beside outcomes.jsonl, which must never rotate.
+EVENT_SCHEMA = 1
+# Reserved: no kind may define a field with one of these names (review P5).
+EVENT_ENVELOPE = ('v', 'id', 'time', 'kind', 'project', 'branch', 'run')
+EVENT_KINDS = {
+    'gate': {'gate_id': 'str', 'task': 'str', 'stage': 'str', 'start': 'int', 'seconds': 'int',
+             'tests': 'int|None', 'failures': 'int|None', 'workers': 'int|None', 'result': 'str'},
+    'stop': {'stage': 'str', 'category': 'str', 'message': 'str', 'recovery': 'str'},
+    'recovery': {'decision': 'str', 'task': 'str', 'attempt': 'int|None'},
+    'ruling': {'ruling_kind': 'str', 'key': 'str', 'task': 'str'},
+    'review': {'mode': 'str', 'reviewer': 'str', 'model': 'str', 'reason': 'str'},
+    'pr': {'action': 'str', 'state': 'str', 'url': 'str'},
+    'run': {'action': 'str', 'result': 'str', 'base': 'str', 'args': 'str', 'tasks': 'int|None',
+            'gates': 'int|None', 'gate_failures': 'int|None', 'seconds': 'int|None'},
+}
+if any(set(fields) & set(EVENT_ENVELOPE) for fields in EVENT_KINDS.values()):
+    raise AssertionError('An event kind defines a reserved envelope field.')
+# Required fields per kind (spec A12: the gate id joins the event to its `outcome gate` row).
+EVENT_REQUIRED = {'gate': ('gate_id',)}
+EVENT_ID = re.compile(r'[0-9a-f]{16}')
+EVENT_INT = re.compile(r'[0-9]{1,18}')
+EVENT_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+EVENT_TEXT_LIMIT = 200
+EVENT_LOCK_SECONDS = 5.0  # long enough for a rotation (T217) of a full 8 MiB file
+EVENT_MAX_BYTES = 8 * 1024 * 1024
+EVENT_MIN_MAX_BYTES = 65536
+EVENT_RUN_STALE_DAYS = 7  # an open run silent this long is abandoned, no longer active
+REDACTED = '[redacted]'
+# Text redaction for event strings (redact); SECRET_PATTERNS above is about file names.
+EVENT_SECRET_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
+    (r'sk-[A-Za-z0-9_-]{16,}', 0),
+    (r'ghp_[A-Za-z0-9]{20,}', 0),
+    (r'github_pat_[A-Za-z0-9_]{20,}', 0),
+    (r'xox[abp]-[A-Za-z0-9-]{10,}', 0),
+    (r'AKIA[0-9A-Z]{16}', 0),
+    (r'Bearer\s+\S+', re.IGNORECASE),
+    (r'(?P<name>(?:key|token|secret|password)=)\S+', re.IGNORECASE),
+))
+
+
+class EventUsage(ValueError):
+    """An event the schema does not allow; nothing is written."""
+
+
+class EventsBusy(Exception):
+    """events.lock stayed held past the deadline (events_lock_seconds)."""
+
+
+def events_path():
+    return state_root() / 'events.jsonl'
+
+
+def events_archive_path():
+    """The previous generation; written only by rotation (T217)."""
+    return state_root() / 'events.1.jsonl'
+
+
+def events_lock_path():
+    return state_root() / 'events.lock'
+
+
+def events_lock_seconds():
+    """AI_EVENTS_LOCK_SECONDS (float 0.1-60); unset or invalid: EVENT_LOCK_SECONDS."""
+    try:
+        value = float(os.environ.get('AI_EVENTS_LOCK_SECONDS', ''))
+    except ValueError:
+        return EVENT_LOCK_SECONDS
+    return value if 0.1 <= value <= 60 else EVENT_LOCK_SECONDS  # NaN fails both comparisons
+
+
+def events_max_bytes():
+    """AI_EVENTS_MAX_BYTES (int >= EVENT_MIN_MAX_BYTES); unset or invalid: EVENT_MAX_BYTES."""
+    try:
+        value = int(os.environ.get('AI_EVENTS_MAX_BYTES', ''))
+    except ValueError:
+        return EVENT_MAX_BYTES
+    return value if value >= EVENT_MIN_MAX_BYTES else EVENT_MAX_BYTES
+
+
+def event_run(record):
+    """The run id of a known event (v == 1, known kind) tagged with one, else None."""
+    version, run = record.get('v'), record.get('run')
+    if (type(version) is not int or version != EVENT_SCHEMA or record.get('kind') not in EVENT_KINDS
+            or not isinstance(run, str) or not EVENT_ID.fullmatch(run)):
+        return None
+    return run
+
+
+def active_event_runs(records, current=None):
+    """Run ids with no `run` end event among RECORDS whose latest event time is within
+    EVENT_RUN_STALE_DAYS of CURRENT (a datetime, default now): any project's, paused recoveries
+    included. Only known kinds of this schema count; a run without a valid time is not active."""
+    current = current or datetime.now(timezone.utc)
+    ended, latest = set(), {}
+    for record in records:
+        run = event_run(record)
+        if run is None:
+            continue
+        if record['kind'] == 'run' and record.get('action') == 'end':
+            ended.add(run)
+        when = record.get('time')
+        # now()'s fixed-width UTC form sorts as text: only each run's latest time is parsed.
+        if isinstance(when, str) and EVENT_TIME.fullmatch(when) and when > latest.get(run, ''):
+            latest[run] = when
+    stale = timedelta(days=EVENT_RUN_STALE_DAYS)
+    active = set()
+    for run, when in latest.items():
+        try:
+            moment = datetime.strptime(when, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        except ValueError:  # matches the pattern but is no date (month 13)
+            continue
+        if run not in ended and current - moment <= stale:
+            active.add(run)
+    return active
+
+
+def write_replace(directory, data, target):
+    """DATA into a fresh temp file in DIRECTORY, synced, then renamed over TARGET. On failure the
+    temp is removed, TARGET is untouched and the OSError propagates."""
+    fd, temp = tempfile.mkstemp(dir=directory, prefix='.events-', suffix='.tmp')
+    try:
+        try:
+            os.fchmod(fd, 0o644)  # the mode append_event creates the log with
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
+def rotate_events(path):
+    """Archive PATH (the live log) to events.1.jsonl when it is over events_max_bytes, keeping
+    every line of every active run (active_event_runs) live. Caller holds the exclusive
+    events.lock. Order makes a crash leave duplicates, never loss: the archive gets the whole live
+    content first, then the live file is replaced by the kept lines; read_events dedupes by id.
+    True when rotated; OSError propagates (the file it failed on is left as it was)."""
+    cap = events_max_bytes()
+    try:
+        if os.stat(path).st_size <= cap:
+            return False
+    except FileNotFoundError:
+        return False
+    data = Path(path).read_bytes()
+    if len(data) <= cap:
+        return False
+    records = decode_outcome_lines(data)
+    active = active_event_runs(record for _, record in records)
+    lines = data.split(b'\n')
+    # Null-run lines, unknown kinds, other schemas and torn lines are not kept.
+    kept = b''.join(lines[index] + b'\n' for index, record in records if event_run(record) in active)
+    # Rotating for a small gain would rewrite the file on every append: the live file may stay
+    # over the cap while that many runs are active.
+    if len(data) - len(kept) < cap // 4:
+        return False
+    directory = Path(path).parent
+    write_replace(directory, data, events_archive_path())
+    write_replace(directory, kept, path)
+    fsync_dir(directory)
+    return True
+
+
+def redact(text):
+    """Secret-looking tokens become [redacted]; a key=value keeps its name. Best effort for
+    telemetry, not a secret scanner: the event log stays in the host's private state dir."""
+    for pattern in EVENT_SECRET_PATTERNS:
+        text = pattern.sub(lambda m: (m.group('name') if 'name' in pattern.groupindex else '')
+                           + REDACTED, text)
+    return text
+
+
+def event_text(text, limit=EVENT_TEXT_LIMIT):
+    """One line of at most LIMIT characters: line breaks and control characters become spaces.
+    Redaction runs first, so a token the cut would split cannot leak its first half."""
+    text = ''.join(' ' if ord(c) < 32 or 127 <= ord(c) < 160 or c in '  ' else c
+                   for c in redact(str(text)))
+    return text[:limit]
+
+
+def event_record(kind, fields):
+    """The kind's fields checked against EVENT_KINDS (EventUsage otherwise), strings made one
+    bounded line; fields not given are null so every event of a kind has the same keys."""
+    schema = EVENT_KINDS.get(kind)
+    if schema is None:
+        raise EventUsage(f'unknown event kind: {kind}')
+    record = dict.fromkeys(schema)
+    for name, value in fields.items():
+        if name in EVENT_ENVELOPE:
+            raise EventUsage(f'{name} is an envelope field, not a {kind} field')
+        if name not in schema:
+            raise EventUsage(f'unknown {kind} field: {name}')
+        kind_type = schema[name]
+        if kind_type == 'str':
+            if not isinstance(value, str):
+                raise EventUsage(f'{kind} field {name} must be a string')
+            value = event_text(value)
+        elif value is None and kind_type == 'int|None':
+            pass
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise EventUsage(f'{kind} field {name} must be a non-negative integer')
+        record[name] = value
+    for name in EVENT_REQUIRED.get(kind, ()):
+        if record[name] is None:
+            raise EventUsage(f'{kind} event needs {name}')
+    if kind == 'gate' and not EVENT_ID.fullmatch(record['gate_id']):
+        raise EventUsage(f'gate_id must be 16 hex characters: {record["gate_id"]}')
+    return record
+
+
+def flock_bounded(fd, operation, seconds):
+    """A blocking flock interrupted by a real-time timer after SECONDS (EventsBusy). Not a
+    LOCK_NB polling loop like lock_record: polling can starve a waiter behind steady writers,
+    while a blocked flock is queued by the kernel. Main thread only (signal handlers)."""
+    def expired(signum, frame):
+        raise EventsBusy(f'{events_lock_path()} is held by another process')
+    started = time.monotonic()
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    previous_delay, previous_interval = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        fcntl.flock(fd, operation)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_delay:
+            left = max(previous_delay - (time.monotonic() - started), 0.001)
+            signal.setitimer(signal.ITIMER_REAL, left, previous_interval)
+
+
+@contextlib.contextmanager
+def lock_events(shared=False, optional=False):
+    """Hold events.lock: exclusive for writers, shared for readers, bounded by
+    events_lock_seconds (EventsBusy). The lock is a separate file, not the log's descriptor
+    (as append_outcome does): rotation (T217) replaces events.jsonl, and a lock on a replaced
+    inode no longer excludes later lockers (see next_attempt_seq). It is created once and never
+    renamed or deleted. With OPTIONAL, a lock file that cannot be opened (read-only state dir)
+    means no lock; EventsBusy still propagates."""
+    path = events_lock_path()
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f'Not a regular file: {path}')
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+            fd = None
+        if not optional:
+            raise
+    try:
+        if fd is not None:
+            flock_bounded(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX, events_lock_seconds())
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)  # releases the lock
+
+
+def current_run_id():
+    """The approved run from explicit context only (spec A8): AI_RUN_ID when it is 16 hex,
+    else None; never looked up from the manifest or the branch. Events, outcome rows and
+    attempt markers all take it from here."""
+    value = os.environ.get('AI_RUN_ID', '')
+    return value if EVENT_ID.fullmatch(value) else None
+
+
+def append_event(kind, fields, project, branch):
+    """Append one event line under the exclusive events.lock; False when the write was short.
+    EventUsage before anything is opened; OSError and EventsBusy propagate (nothing written)."""
+    record = {'v': EVENT_SCHEMA, 'id': secrets.token_hex(8), 'time': now(), 'kind': kind,
+              'project': project, 'branch': branch, 'run': current_run_id(), **event_record(kind, fields)}
+    path = events_path()
+    created = make_dirs(path.parent)
+    with lock_events():
+        try:
+            rotate_events(path)
+        except OSError:  # rotation is best effort: the log stays as it was and this append proceeds
+            pass
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        try:
+            size = os.fstat(fd).st_size
+            # A torn earlier line (no final newline) must not swallow this record.
+            prefix = b'\n' if size > 0 and os.pread(fd, 1, size - 1) != b'\n' else b''
+            data = prefix + (json.dumps(record, ensure_ascii=False, sort_keys=True) + '\n').encode()
+            if os.write(fd, data) != len(data):  # one write; no retry (see append_outcome)
+                return False
+            os.fsync(fd)
+        finally:
+            os.close(fd)  # the log first, then the lock (leaving the with block)
+    fsync_dir(path.parent)
+    sync_created(created)
+    return True
+
+
+def read_events(paths=None):
+    """Known events (v == 1, known kind) of events.1.jsonl then events.jsonl, each id once, read
+    under the shared events.lock (unlocked when it cannot be opened). EventsBusy when a writer
+    holds it past the deadline: callers report the event data as unavailable, never wait."""
+    paths = [events_archive_path(), events_path()] if paths is None else paths
+    with lock_events(shared=True, optional=True):
+        data = []
+        for path in paths:
+            try:
+                data.append(Path(path).read_bytes())
+            except OSError:  # missing or unreadable: no events from it
+                continue
+    events, seen = [], set()
+    for chunk in data:
+        for _, record in decode_outcome_lines(chunk):
+            version, event_id = record.get('v'), record.get('id')
+            if (type(version) is not int or version != EVENT_SCHEMA or record.get('kind') not in EVENT_KINDS
+                    or not isinstance(event_id, str) or event_id in seen):
+                continue
+            seen.add(event_id)
+            events.append(record)
+    return events
+
+
+def event_command(arguments):
+    """event KIND key=value...: append one flow event. Values are typed per EVENT_KINDS (int
+    fields decimal; `-` is null for int|None fields). Schema errors exit 2 with nothing written;
+    a busy lock or a write failure prints one Note and exits 1 (ai_event keeps status 0)."""
+    def usage(message):
+        print(f'Error: {message}', file=sys.stderr)
+        sys.exit(2)
+    if not arguments:
+        usage('Usage: event KIND key=value...')
+    kind, *pairs = arguments
+    schema = EVENT_KINDS.get(kind)
+    if schema is None:
+        usage(f'unknown event kind: {kind}')
+    fields = {}
+    for pair in pairs:
+        name, equals, value = pair.partition('=')
+        if not equals:
+            usage(f'expected key=value: {pair}')
+        if name in fields:
+            usage(f'{name} given twice')
+        kind_type = schema.get(name)
+        if kind_type in ('int', 'int|None'):
+            if value == '-' and kind_type == 'int|None':
+                value = None
+            elif EVENT_INT.fullmatch(value):
+                value = int(value)
+            else:
+                usage(f'{kind} field {name} must be a decimal integer: {value}')
+        fields[name] = value
+    try:
+        event_record(kind, fields)
+    except EventUsage as error:
+        usage(str(error))
+    record_event(kind, fields)
+
+
+def record_event(kind, fields):
+    """Append one checked event for the current checkout; a busy lock or a write failure prints
+    one Note and exits 1 (the shell callers keep their own status)."""
+    note = f'Note: could not record the {kind} event'
+    try:
+        check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+        try:
+            branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').decode().strip()
+        except subprocess.CalledProcessError:
+            branch = 'detached'
+        written = append_event(kind, fields, project_name(), branch)
+    except EventsBusy:
+        print(f'{note} (event log busy).', file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'{note} ({error}).', file=sys.stderr)
+        sys.exit(1)
+    if not written:
+        print(f'{note} (short write).', file=sys.stderr)
+        sys.exit(1)
+
+
+GATE_RAN = re.compile(r'^Ran (\d+) tests?\b')
+GATE_SUMMARY = re.compile(r'^(?:FAILED \((.*)\)|OK(?: \(.*\))?)\s*$')
+GATE_WORKERS = re.compile(r'^Workers: (\d+)\b')
+GATE_ON_WORKERS = re.compile(r'\bon (\d+) workers\b')
+
+
+def gate_log_counts(lines):
+    """(tests, failures, workers) from gate log LINES (spec A12), each an int or None.
+    tests: the last `Ran N tests`. failures: from the last summary line, `failures=a` +
+    `errors=b` of unittest's `FAILED (…)`, or the number of batches after run_parallel's
+    `failing batches:`; 0 when it is `OK`. workers: run_parallel's `Workers: W` first line, else
+    its `on W workers` summary (the first line may lie outside the log tail)."""
+    tests = failures = workers = summary_workers = None
+    for line in lines or ():
+        match = GATE_RAN.match(line)
+        if match:
+            tests = int(match.group(1))
+        match = GATE_ON_WORKERS.search(line) if line.startswith('Ran ') else None
+        if match:
+            summary_workers = int(match.group(1))
+        match = GATE_WORKERS.match(line)
+        if match and workers is None:
+            workers = int(match.group(1))
+        match = GATE_SUMMARY.match(line)
+        if not match:
+            continue
+        failures = None
+        if match.group(1) is None:
+            failures = 0
+            continue
+        batches = re.search(r'failing batches: ([0-9, ]+)', match.group(1))
+        counts = re.findall(r'(?:^|,\s*)(?:failures|errors)=(\d+)',match.group(1))
+        if batches:
+            failures = len(re.findall(r'\d+', batches.group(1)))
+        elif counts:
+            failures = sum(map(int, counts))
+    return tests, failures, workers if workers is not None else summary_workers
+
+
+def event_gate(arguments):
+    """event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID: append one gate event with tests,
+    failures and workers parsed from the last gate log (spec A12). The validation stamp and the
+    log it names are agent-writable, so they are read only through gate_log_lines(): pinned
+    `.ai/local` (no component followed through a symlink), O_NOFOLLOW|O_NONBLOCK opens with a
+    regular-file fstat check, bounded reads, the log only directly inside `.ai/local`. A FIFO,
+    symlink, swapped directory or oversized stamp gives null counts promptly; the event is still
+    written. Usage errors exit 2 with nothing written; write failures as `event` (Note, exit 1)."""
+    def usage(message):
+        print(f'Error: {message}', file=sys.stderr)
+        sys.exit(2)
+    if len(arguments) != 5:
+        usage('Usage: event-gate TASK_OR_STAGE START SECONDS RESULT GATE_ID')
+    where, start, seconds, result, gate_id = arguments
+    if not where:
+        usage('event-gate needs a task or stage')
+    for name, value in (('START', start), ('SECONDS', seconds)):
+        if not EVENT_INT.fullmatch(value):
+            usage(f'event-gate {name} must be a decimal integer: {value}')
+    if result not in ('pass', 'fail', 'timeout'):
+        usage(f'event-gate RESULT must be pass, fail or timeout: {result}')
+    if not EVENT_ID.fullmatch(gate_id):
+        usage(f'event-gate GATE_ID must be 16 lower-case hex digits: {gate_id}')
+    try:
+        lines = gate_log_lines()
+    except (OSError, subprocess.CalledProcessError):
+        lines = None
+    tests, failures, workers = gate_log_counts(lines)
+    fields = {'gate_id': gate_id, 'task' if re.fullmatch(r'T\d+', where) else 'stage': where,
+              'start': int(start), 'seconds': int(seconds), 'tests': tests, 'failures': failures,
+              'workers': workers, 'result': result}
+    try:
+        event_record('gate', fields)
+    except EventUsage as error:
+        usage(str(error))
+    record_event('gate', fields)
+
+
+# Stop categories (spec A10), first match wins: (stage or None, pattern or None) → category.
+# Telemetry only: recovery never reads a category (its hard rules match the reason itself, OR-04).
+STOP_CATEGORIES = (
+    (None, r'usage limit', 'usage_limit'),
+    (None, r'exit(?:ed)? 124\b|time limit|timed out', 'timeout'),
+    ('validation', None, 'validation_failed'),
+    (None, r'fails validation|validation failed', 'validation_failed'),
+    (None, r'Task queue is invalid|dependencies must exist earlier', 'queue_order'),
+    (None, r'missing ###|has no row|disposition|Flow chart', 'record_format'),
+    (None, r'fix round|review round|supervision limit', 'review_round_limit'),
+    (None, r'needs your decision|questions only you can answer', 'needs_human'),
+    (None, r'crash|killed|without a checkpoint', 'crash'),
+)
+
+
+def stop_category_of(stage, text):
+    """The STOP_CATEGORIES category of a stop during STAGE with last-error TEXT, else `other`."""
+    for wanted, pattern, category in STOP_CATEGORIES:
+        if (wanted is None or stage == wanted) and (pattern is None or re.search(pattern, text, re.IGNORECASE)):
+            return category
+    return 'other'
+
+
+def stop_category(arguments):
+    """stop-category STAGE: print the stop's category from the first 4 KiB of .ai/local/last-error
+    (a regular file in the pinned `.ai/local`; missing, a symlink or unreadable reads as empty)."""
+    if len(arguments) != 1:
+        fail('Usage: stop-category STAGE')
+    text = ''
+    local_fd = local_dir_fd(os.environ.get('AI_ROOT') or os.getcwd())
+    if local_fd is not None:
+        try:
+            record = read_record(local_fd, 'last-error', SMALL_LIMIT)
+        finally:
+            os.close(local_fd)
+        if record is not None:
+            text = record[0]
+    print(stop_category_of(arguments[0], text))
+
+
+def run_totals(arguments):
+    """run-totals: the `run` end totals of the run AI_RUN_ID names, from that run's records only,
+    as one line `tasks=N gates=N gate_failures=N seconds=N` (`-` is null, as `event` reads it).
+    tasks: distinct task ids of its `outcome task` rows with result done. gates, gate_failures:
+    merge_gates over its `outcome gate` rows and `gate` events (each gate once, spec A12); null when
+    events.lock stays held past the deadline (EventsBusy), so the totals never wait longer.
+    seconds: now minus the manifest's `started` when the manifest is this run's, else null."""
+    if arguments:
+        fail('Usage: run-totals')
+    run = current_run_id()
+    if run is None:
+        fail('run-totals needs AI_RUN_ID (16 hex).')
+    check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
+    rows = [r for r in read_outcomes([outcomes_path()]) if r.get('run') == run]
+    tasks = len({r['task'] for r in rows if r.get('kind') == 'task' and r.get('result') == 'done'
+                 and isinstance(r.get('task'), str)})
+    try:
+        events = [e for e in read_events() if e.get('kind') == 'gate' and e.get('run') == run]
+    except EventsBusy:
+        gates = failures = None
+    else:
+        merged = merge_gates([r for r in rows if r.get('kind') == 'gate'], events)
+        gates = len(merged)
+        failures = sum(1 for gate in merged if gate['result'] in ('fail', 'timeout'))
+    seconds = None
+    try:
+        data = json.loads((binding_dir() / 'run.json').read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get('run_id') == run and type(data.get('started')) is int:
+        seconds = max(int(time.time()) - data['started'], 0)
+    print(' '.join(f'{name}={"-" if value is None else value}' for name, value in
+                   (('tasks', tasks), ('gates', gates), ('gate_failures', failures), ('seconds', seconds))))
+
+
 def attempt_seq_path():
     """The host-wide attempt counter, beside the log in the same state root."""
     return state_root() / 'attempt-seq'
@@ -4205,6 +4777,10 @@ def open_attempt(task, model, pid, out=None):
     record = {'id': attempt_id, 'task': task, 'model': model or 'default', 'project': project_name(),
               'branch': branch, 'started': int(time.time()), 'pid': int(pid),
               'pid_start': process_start(pid)}
+    # The run this attempt belongs to, so a later run reconciling it as crashed keeps it there.
+    run = current_run_id()
+    if run is not None:
+        record['run'] = run
     try:
         record['seq'] = next_attempt_seq()
     except OSError as error:
@@ -4259,6 +4835,9 @@ def reconcile_marker(log, marker, record, own_pid):
            'model': record['model'] or 'default', 'result': 'crashed', 'attempt': len(earlier) + 1,
            'first_pass': False, 'seconds': None, 'started': record['started'], 'seq': record['seq'],
            'attempt_id': record['id']}
+    # The marker's run, never the reconciling process's (that may be a later run or none).
+    if isinstance(record.get('run'), str) and EVENT_ID.fullmatch(record['run']):
+        row['run'] = record['run']
     if not append_outcome(log, row):
         note('could not log the crashed attempt completely; will retry at the next start.')
         return
@@ -4325,8 +4904,8 @@ def outcome(arguments):
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
-    | gate pass|fail|timeout SECONDS (one host gate run of ai-run; read by gate-seconds,
-      not part of outcomes_report)
+    | gate pass|fail|timeout SECONDS [--id GATE_ID] (one host gate run of ai-run; read by
+      gate-seconds, not part of outcomes_report; GATE_ID is 16 lowercase hex, stored as gate_id)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
     | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
@@ -4366,6 +4945,9 @@ def outcome(arguments):
     path = outcomes_path()
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     record = {'time': now(), 'kind': kind, 'project': project_name(), 'branch': branch}
+    run = current_run_id()
+    if run is not None:  # absent outside an approved run, so standalone rows look as before
+        record['run'] = run
     marker = None
     if kind == 'task':
         if len(rest) not in (4, 6) or (len(rest) == 6 and rest[4] != '--attempt'):
@@ -4445,9 +5027,19 @@ def outcome(arguments):
             fail('Usage: outcome catchup BRANCH')
         record['branch'] = rest[0]
     elif kind == 'gate':
+        gate_id = None
+        if '--id' in rest:
+            # The id joins this row to its `gate` event (spec A12, merge_gates); a malformed one
+            # is a usage error with exit 2, as `event-gate` gives for the same id.
+            if len(rest) != 4 or rest[2] != '--id' or not EVENT_ID.fullmatch(rest[3]):
+                print('Error: Usage: outcome gate pass|fail|timeout SECONDS [--id GATE_ID]', file=sys.stderr)
+                sys.exit(2)
+            gate_id, rest = rest[3], rest[:2]
         if len(rest) != 2 or rest[0] not in ('pass', 'fail', 'timeout') or not rest[1].isdigit():
-            fail('Usage: outcome gate pass|fail|timeout SECONDS')
+            fail('Usage: outcome gate pass|fail|timeout SECONDS [--id GATE_ID]')
         record.update(result=rest[0], seconds=int(rest[1]))
+        if gate_id is not None:
+            record['gate_id'] = gate_id
     else:
         fail(f'Unknown outcome kind: {kind}')
     try:
@@ -4463,18 +5055,86 @@ def outcome(arguments):
             remove_marker(marker)
 
 
-def gate_seconds(arguments):
-    """Prints this project's gate time: the largest seconds among its last 3 passing host gate
-    runs (`outcome gate pass`), or 0 without any. Torn or foreign lines are ignored; a missing or
-    unreadable log is 0. The log sits in the host state root, which agents cannot write."""
-    if arguments:
-        fail('Usage: gate-seconds')
+def gate_passes():
+    """This project's last 3 passing host gate runs (`outcome gate pass`), in seconds. Torn or
+    foreign lines are ignored; a missing or unreadable log has none. The log sits in the host
+    state root, which agents cannot write."""
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     project = project_name()
     passes = [r['seconds'] for r in read_outcomes([outcomes_path()])
               if r.get('kind') == 'gate' and r.get('result') == 'pass' and r.get('project') == project
               and type(r.get('seconds')) is int and r['seconds'] >= 0]
-    print(max(passes[-3:], default=0))
+    return passes[-3:]
+
+
+def gate_seconds(arguments):
+    """Prints this project's gate time: the largest of its last 3 passing gate seconds, 0 without any."""
+    if arguments:
+        fail('Usage: gate-seconds')
+    print(max(gate_passes(), default=0))
+
+
+GATE_EVENT_DETAILS = ('tests', 'failures', 'workers', 'task', 'stage', 'start')
+
+
+def merge_gates(rows, events):
+    """One dict per host gate from `outcome gate` ROWS and `gate` EVENTS (both already filtered
+    by the caller), each gate counted exactly once (spec A12). The outcome log never rotates but
+    misses gates that only the pipeline runs (validation, recovery); the event log has those but
+    loses events (busy lock, write failure, rotation) and may hold a duplicate after a rotation
+    crash. So neither log alone counts gates, and adding both counts the overlap twice; the
+    16-hex `gate_id` on both records joins them. Key: a valid gate_id, else a key of its own (a
+    row without an id, written before ids, is one gate and never matches an event). A key with a
+    row takes the row's seconds, result and run, and the event adds its details (tests, failures,
+    workers, task, stage, start); an event without a row is one gate by itself. Rows come first
+    in log order, then event-only gates in log order."""
+    gates = {}
+
+    def key(record, index, source):
+        gate_id = record.get('gate_id')
+        return gate_id if isinstance(gate_id, str) and EVENT_ID.fullmatch(gate_id) else (source, index)
+
+    for index, row in enumerate(rows):
+        gate_key = key(row, index, 'row')
+        gates.setdefault(gate_key, {'gate_id': gate_key if isinstance(gate_key, str) else None,
+                                    'seconds': row.get('seconds'), 'result': row.get('result'),
+                                    'run': row.get('run'), **dict.fromkeys(GATE_EVENT_DETAILS)})
+    for index, event in enumerate(events):
+        gate_key = key(event, index, 'event')
+        gate = gates.get(gate_key)
+        if gate is None:
+            gates[gate_key] = {'gate_id': gate_key if isinstance(gate_key, str) else None,
+                               'seconds': event.get('seconds'), 'result': event.get('result'),
+                               'run': event.get('run'),
+                               **{name: event.get(name) for name in GATE_EVENT_DETAILS}}
+        elif all(gate[name] is None for name in GATE_EVENT_DETAILS):
+            gate.update({name: event.get(name) for name in GATE_EVENT_DETAILS})
+    return list(gates.values())
+
+
+# TS-01: projects whose gate is under 120 s keep running it in the implementation session.
+FAST_GATE_SECONDS = 120
+
+
+def session_gate(arguments):
+    """Prints `MODE SECONDS`: whether an implementation session runs the full gate itself (`full`)
+    or only its targeted checks (`targeted`), and the project's gate time. AI_SESSION_GATE
+    full/targeted forces the mode; empty or auto picks full when at least one pass is recorded and
+    the gate time is under FAST_GATE_SECONDS. Any error or an invalid setting is `targeted 0`."""
+    if arguments:
+        fail('Usage: session-gate')
+    setting = os.environ.get('AI_SESSION_GATE', '')
+    try:
+        if setting not in ('', 'auto', 'full', 'targeted'):
+            raise ValueError(setting)
+        passes = gate_passes()
+    except (Exception, SystemExit):  # fail() exits; the safe answer is still targeted
+        print('targeted 0')
+        return
+    seconds = max(passes, default=0)
+    if setting in ('', 'auto'):
+        setting = 'full' if passes and seconds < FAST_GATE_SECONDS else 'targeted'
+    print(f'{setting} {seconds}')
 
 
 ATTEMPT_NOTE_LIMIT = 600
@@ -4721,6 +5381,212 @@ def outcomes_report(arguments):
         lines += [f'{len(fallback) - len(pending)} Claude review(s) covered by a later Codex review or '
                   'catch-up record.', '']
     print('\n'.join(lines).rstrip('\n'))
+
+
+METRICS_SCHEMA = 1
+NO_RUN_LABEL = '(no run record)'
+METRICS_DATE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
+
+
+def record_run(record):
+    """The 16-hex `run` of an outcome row or event, else None (the `(no run record)` group)."""
+    run = record.get('run')
+    return run if isinstance(run, str) and EVENT_ID.fullmatch(run) else None
+
+
+def metrics_numbers(rows, events, first_rows):
+    """The flow numbers of one group (spec A13): its outcome ROWS and EVENTS, already attributed.
+    FIRST_ROWS maps each task key to its first attempt over the whole log, so a task first tried in
+    an earlier run is not a first pass in a later one. `stops` is left to the caller."""
+    task_rows = [r for r in rows if r.get('kind') == 'task']
+    spent = {}
+    for r in task_rows:
+        key = (r.get('project'), r.get('branch'), r.get('task'))
+        seconds = r.get('seconds')
+        spent[key] = spent.get(key, 0) + (seconds if type(seconds) is int else 0)
+    first = sum(1 for key in spent if first_rows[key].get('result') == 'done')
+    gates = merge_gates([r for r in rows if r.get('kind') == 'gate'], [e for e in events if e['kind'] == 'gate'])
+    gate_seconds = [g['seconds'] for g in gates if type(g['seconds']) is int]
+    reviews = [r for r in rows if r.get('kind') == 'review' and r.get('mode') == 'code']
+    findings = {}
+    for r in reviews:
+        counts = findings.setdefault(str(r.get('reviewer')), dict.fromkeys(('blocker', 'major', 'minor'), 0))
+        for level in counts:
+            value = r.get(level)
+            counts[level] += value if type(value) is int else 0
+    return {'attempts': len(task_rows), 'tasks': len(spent), 'first_pass': first,
+            'first_pass_rate': first / len(spent) if spent else None,
+            'timeouts': sum(1 for r in task_rows if r.get('result') == 'timeout'),
+            'median_task_seconds': statistics.median(spent.values()) if spent else None,
+            'gates': len(gates), 'median_gate_seconds': statistics.median(gate_seconds) if gate_seconds else None,
+            'review_rounds': len(reviews), 'findings': findings}
+
+
+def stop_counts(events):
+    counts = {}
+    for e in events:
+        if e['kind'] == 'stop':
+            category = str(e.get('category') or 'other')
+            counts[category] = counts.get(category, 0) + 1
+    return counts
+
+
+def metrics_data(rows, events, since=None, project=None, current=None):
+    """{"v": 1, "projects": [...], "runs": [...]} from outcome ROWS (read_outcomes) and known
+    EVENTS (read_events), spec A13. A record belongs to the run in its own `run` field, never to
+    one matched by branch or time; records without one form their project's `(no run record)`
+    group (`run` null). Runs are the union of run ids on rows and retained events, so a run whose
+    events rotated away (T217) is still listed from its rows, with `events: 0`, `stops: null` and
+    `result: "unknown"`. Lifecycle comes only from retained `run` events: `result` is the end's;
+    `open` needs a retained start or resume, no end, and activity within EVENT_RUN_STALE_DAYS of
+    CURRENT. Runs are keyed by (project, run), so a project's attempts, timeouts and review rounds
+    are exactly the sums over its runs and its no-run group. SINCE (YYYY-MM-DD, inclusive) and
+    PROJECT filter records before grouping; first pass is judged over the whole log."""
+    rows = [r for r in rows if r.get('kind') in ('task', 'review', 'gate')]
+    first_rows = {key: attempts[0] for key, attempts in
+                  ordered_attempts([r for r in rows if r.get('kind') == 'task']).items()}
+
+    def kept(record):
+        when = record.get('time')
+        if since is not None and not (isinstance(when, str) and when[:10] >= since):
+            return False
+        return project is None or record.get('project') == project
+
+    rows = [r for r in rows if kept(r)]
+    events = [e for e in events if kept(e)]
+    groups = {}
+
+    def group(record):
+        key = (record.get('project'), record_run(record))
+        return groups.setdefault(key, {'rows': [], 'events': [], 'first': None})
+
+    for source, records in (('rows', rows), ('events', events)):
+        for record in records:
+            entry = group(record)
+            entry[source].append(record)
+            when = str(record.get('time') or '')
+            if entry['first'] is None or when < str(entry['first'].get('time') or ''):
+                entry['first'] = record
+    active = active_event_runs(events, current)
+    runs = []
+    for (name, run), entry in groups.items():
+        run_events = entry['events']
+        numbers = metrics_numbers(entry['rows'], run_events, first_rows)
+        lifecycle = [e for e in run_events if e['kind'] == 'run']
+        starts = sorted(str(e.get('time')) for e in lifecycle if e.get('action') in ('start', 'resume'))
+        ends = sorted((str(e.get('time')), e.get('result')) for e in lifecycle if e.get('action') == 'end')
+        if run is None:
+            result = None
+        elif ends:
+            result = ends[-1][1]
+        elif starts and run in active:
+            result = 'open'
+        else:
+            result = 'unknown'
+        runs.append({'run': run, 'label': NO_RUN_LABEL if run is None else run, 'project': name,
+                     'branch': entry['first'].get('branch'), 'events': len(run_events),
+                     'start': starts[0] if starts else None, 'end': ends[-1][0] if ends else None,
+                     'result': result, **numbers,
+                     'stops': stop_counts(run_events) if run_events else None})
+    runs.sort(key=lambda r: (str(r['project']), r['run'] is None, str(r['start'] or ''), str(r['run'])))
+    projects = []
+    for name in sorted({key[0] for key in groups}, key=str):
+        project_rows = [r for r in rows if r.get('project') == name]
+        project_events = [e for e in events if e.get('project') == name]
+        named = [r for r in runs if r['project'] == name and r['run'] is not None]
+        projects.append({'project': name, 'runs': len(named),
+                         'runs_without_events': sum(1 for r in named if r['events'] == 0),
+                         **metrics_numbers(project_rows, project_events, first_rows),
+                         'stops': stop_counts(project_events)})
+    return {'v': METRICS_SCHEMA, 'projects': projects, 'runs': runs}
+
+
+METRICS_TAIL = ['tasks', 'first pass %', 'timeouts', 'median task min', 'gates', 'median gate min', 'stops',
+                'review rounds', 'findings']
+
+
+def metrics_cells(entry):
+    """The text cells of one projects/runs entry; `-` stands for a missing number."""
+    def minutes(seconds):
+        return '-' if seconds is None else f'{seconds / 60:.1f}'
+    rate = entry['first_pass_rate']
+    stops = entry['stops']
+    findings = ', '.join(f"{name} {c['blocker']}/{c['major']}/{c['minor']}"
+                         for name, c in sorted(entry['findings'].items()))
+    return [str(entry['tasks']), '-' if rate is None else f'{rate * 100:.0f}', str(entry['timeouts']),
+            minutes(entry['median_task_seconds']), str(entry['gates']), minutes(entry['median_gate_seconds']),
+            '-' if not stops else ', '.join(f'{k} {v}' for k, v in sorted(stops.items())),
+            str(entry['review_rounds']), findings or '-']
+
+
+def metrics_table(title, headers, rows):
+    """Column-aligned plain text (no `|`): TITLE, the header line, then ROWS."""
+    widths = [max(len(line[i]) for line in [headers, *rows]) for i in range(len(headers))]
+    lines = [title] + ['  '.join(c.ljust(w) for c, w in zip(line, widths)).rstrip() for line in [headers, *rows]]
+    return '\n'.join(lines)
+
+
+def metrics_text(data):
+    """The readable view of metrics_data: a Projects table, a Runs table and explanatory footers."""
+    projects = [[str(p['project']), str(p['runs']), *metrics_cells(p)] for p in data['projects']]
+    runs = [[str(r['project']), r['label'] if r['run'] is None else r['run'][:8], str(r['branch'] or '-'),
+             str(r['result'] or '-'), str(r['events']), *metrics_cells(r)] for r in data['runs']]
+    return '\n\n'.join([
+        metrics_table('Projects', ['project', 'runs', *METRICS_TAIL], projects),
+        metrics_table('Runs', ['project', 'run', 'branch', 'result', 'events', *METRICS_TAIL], runs),
+        '\n'.join(['Sources: the outcome log (outcomes.jsonl) and the event log (events.jsonl, events.1.jsonl).',
+                   'result unknown: the run\'s lifecycle events rotated away or were never written.',
+                   'events 0: event numbers unavailable; gates come from the outcome log only.',
+                   'findings are blocker/major/minor from code reviews; - means no data.'])])
+
+
+def metrics(arguments):
+    """metrics [--since YYYY-MM-DD] [--project NAME] [--json] [--outcomes FILE] [--events FILE...]:
+    print metrics_data as JSON with --json, else as two plain-text tables. Read only. Usage errors exit 2; a busy
+    event log exits 1 with an error instead of numbers computed without the events."""
+    def usage(message):
+        print(f'Error: {message}\nUsage: metrics [--since YYYY-MM-DD] [--project NAME] [--json] '
+              '[--outcomes FILE] [--events FILE...]', file=sys.stderr)
+        sys.exit(2)
+    since = project = outcomes = event_paths = None
+    as_json = False
+    rest = list(arguments)
+    while rest:
+        option = rest.pop(0)
+        if option == '--json':
+            as_json = True
+            continue
+        if option == '--events':
+            event_paths = []
+            while rest and not rest[0].startswith('--'):
+                event_paths.append(rest.pop(0))
+            if not event_paths:
+                usage('--events needs at least one file')
+            continue
+        if option not in ('--since', '--project', '--outcomes') or not rest:
+            usage(f'unexpected argument: {option}')
+        value = rest.pop(0)
+        if option == '--since':
+            try:
+                if not METRICS_DATE.fullmatch(value):
+                    raise ValueError(value)
+                datetime.strptime(value, '%Y-%m-%d')
+            except ValueError:
+                usage(f'--since needs a date YYYY-MM-DD: {value}')
+            since = value
+        elif option == '--project':
+            project = value
+        else:
+            outcomes = value
+    rows = read_outcomes([outcomes or outcomes_path()])
+    try:
+        events = read_events(event_paths)
+    except EventsBusy:
+        print(f'Error: the event log is busy (lock held for more than {events_lock_seconds():g} s); try again.',
+              file=sys.stderr)
+        sys.exit(1)
+    data = metrics_data(rows, events, since, project)
+    print(json.dumps(data, indent=2) if as_json else metrics_text(data))
 
 
 LIMIT_TEXT = re.compile(
@@ -5729,12 +6595,24 @@ def main():
         fallback_record(arguments)
     elif command == 'outcome':
         outcome(arguments)
+    elif command == 'event':
+        event_command(arguments)
+    elif command == 'event-gate':
+        event_gate(arguments)
+    elif command == 'stop-category':
+        stop_category(arguments)
+    elif command == 'run-totals':
+        run_totals(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
+    elif command == 'session-gate':
+        session_gate(arguments)
     elif command == 'attempt-info':
         attempt_info(arguments)
     elif command == 'outcomes-report':
         outcomes_report(arguments)
+    elif command == 'metrics':
+        metrics(arguments)
     elif command == 'pr-draft':
         pr_draft(arguments)
     elif command == 'pr-title':
