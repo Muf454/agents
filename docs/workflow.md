@@ -1479,6 +1479,11 @@ final push stops there, never `pr`); `ai-recover` `escalate()` and `on_exit` (`s
 to `ai-recover`, a resume and the usage-limit relaunch wait (exit 75) write no end. A failed write
 prints a Note and changes no exit status, notification or marker.
 
+Pull request events (T218): `ai-pipeline` writes a `pr` event with `action`, `state` and the `url` as
+`gh` printed it: `action=opened` (`state=draft` when the run drafts, else `ready`) after a successful
+`gh pr create`, and `action=state` after a verified `gh pr ready --undo` (`draft`) or `gh pr ready`
+(`ready`). Plain `ai_event` calls; the PR path and exit status never change.
+
 Ruling and review events (T210): `common.sh` `ai_ruling_event RULING_KIND KEY TASK` (guard first,
 task `-` unless a task id) runs right after the `ai_log` of every Ruling row, in `ai_ruling_rows`
 (`queue-order`, `task-sections`; key and task are the changed task), `ai_disposition_ruling`

@@ -741,6 +741,7 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
     gh pr ready --undo "$branch" >/dev/null 2>&1 && \
       [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == true ]] || \
       { printf '%s\n' 'could not convert the existing PR to draft' > .ai/local/last-error; stop 'pull request'; }
+    ai_event pr action=state state=draft "url=$url"
     # Ownership only from a confirmed ready PR: an unknown prior state (failed lookup) may have
     # been a human draft, so it never counts as a pipeline draft.
     if [[ "$pipeline_drafted" == yes && "$is_draft" == false ]]; then
@@ -756,6 +757,7 @@ if url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null) && [[ -n "$url" 
          [[ "$(gh pr view "$branch" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
         printf '%s\n' 'Marked the PR ready (the pipeline had made it a draft).'
         ai_log none "pull request marked ready: $url" PASS 'drafted by the pipeline earlier'
+        ai_event pr action=state state=ready "url=$url"
       else
         printf '%s\n' 'Warning: could not mark the PR ready; it stays a draft.'
         # Best effort: a lost record only leaves the PR draft (fails closed).
@@ -777,6 +779,9 @@ else
   if [[ "$pipeline_drafted" == yes ]]; then
     ai_helper pr-draft record "$url" created || printf '%s\n' 'Warning: could not record the pipeline draft; a later clean run leaves the PR draft.'
   fi
+  opened_state=ready
+  if [[ "$make_draft" == yes ]]; then opened_state=draft; fi
+  ai_event pr action=opened "state=$opened_state" "url=$url"
 fi
 ai_helper state ready_for_acceptance "Human: test and merge the pull request $url"
 ai_log none "pull request ready: $url" PASS 'Human acceptance and merge remain'

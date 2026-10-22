@@ -6600,7 +6600,7 @@ Results: `-k events_ruling -k events_review` 8 OK; `-k ruling` 24 OK; `-k review
 `bash -n` OK. Full gate left to the host gate (BATCH 10 GATE RULE). Flow unchanged.
 
 ## T218 — `pr` events for opened PRs and draft/ready changes (ME-01 part 1, pr)
-Status: TODO
+Status: DONE
 Dependencies: T206, T209
 Model: sonnet
 
@@ -6638,6 +6638,11 @@ Targeted: `bash -n scripts/ai-pipeline`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE. `ai-pipeline` writes `pr` events: `opened` (state draft/ready from `make_draft`) after `gh pr create`,
+`state` draft after the verified `--undo`, `state` ready after the verified `gh pr ready`. Tests
+`test_events_pr_opened_draft_when_the_run_drafts`, `test_events_pr_opened_and_ready`. `-k events_pr` 2 OK;
+`-k pr_undraft -k existing_ready_pr -k failed_draft_conversion` 17 OK; `bash -n scripts/ai-pipeline` OK;
+full gate left to the host gate (BATCH 10 GATE RULE). Flow unchanged; docs/workflow.md paragraph.
 
 ## T211 — Metrics data and JSON from outcomes and events (ME-01 part 2, helper)
 Status: TODO

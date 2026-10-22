@@ -11473,6 +11473,39 @@ runpy.run_path(real, run_name='__main__')
         self.assertFalse({'stop-category', 'event'} & set(calls.read_text().splitlines()))
         self.assertEqual(self.flow_events('stop', 'recovery'), [])
 
+    # ---------------------------------------------------------------- pr events (ME-01, T218)
+    def assert_pr_event(self, count, action, state):
+        events = self.flow_events('pr')
+        self.assertEqual(len(events), count, events)
+        last = events[-1]
+        self.assertEqual((last['action'], last['state'], last['url']), (action, state, self.GH_PR_URL))
+        self.assertEqual(last['run'], self.run_context_manifest()['run_id'])
+
+    def test_events_pr_opened_draft_when_the_run_drafts(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--max-fix-rounds', '1', MOCK_CODEX='major-always')
+        self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        self.assert_pr_event(1, 'opened', 'draft')
+
+    def test_events_pr_opened_and_ready(self):
+        self.ready()
+        self.add_origin()
+        self.tool('ai-pipeline', '--approved', '--base', 'main')
+        self.assertNotIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][0])
+        self.assert_pr_event(1, 'opened', 'ready')
+        # An existing ready PR converted to draft by policy.
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1',
+                  MOCK_CODEX='major-always', MOCK_CLAUDE='triage-defer')
+        self.assertIn(['pr', 'ready', '--undo', 'feature/test'], self.gh_calls())
+        self.assert_pr_event(2, 'state', 'draft')
+        # The pipeline-drafted PR made ready again by a clean run.
+        self.pr_undraft_human_commit()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', MOCK_GH_EXISTING='1')
+        self.assertIn(self.UNDRAFT, self.gh_calls())
+        self.assert_pr_event(3, 'state', 'ready')
+
     # ---------------------------------------------------------------- ruling and review events (ME-01, T210)
     def assert_ruling_events(self, ruling_kind, count=1, task_id=None):
         events = self.flow_events('ruling')
