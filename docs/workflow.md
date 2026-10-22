@@ -301,6 +301,9 @@ timed-out command, with a 10-second forced termination grace. An interrupt (INT 
 HUP for `ai-recover`) ends the running Claude session of `ai-run` or `ai-recover` at once: the
 session runs as a background child (`ai_run_child`), and the trap TERMs it (`ai_stop_child`,
 waiting up to 30 s) before the script exits 130/143; partial work stays as after a timeout.
+The same holds for the Codex or Claude reviewer of `ai-review`, the validator of `ai-check`
+(its logger `tee` runs on its own descriptor; the stamp stays invalidated, a failed logger
+fails the gate) and the `.ai/ci-setup` run of dependency setup.
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

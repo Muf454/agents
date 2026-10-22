@@ -60,6 +60,10 @@ else
 fi
 ai_root
 ai_lock
+# An INT/TERM ends the running reviewer at once (TERM alone when this review is a background
+# child); the prior review stays, and the EXIT trap of a format retry still logs it.
+trap 'ai_stop_child; exit 130' INT
+trap 'ai_stop_child; exit 143' TERM
 if [[ "$recheck" == yes ]]; then mode=recheck; elif [[ "$plan" == yes ]]; then mode=plan; else mode=code; fi
 
 # Claude reviewer model by risk (re-checks: opus); the human's overrides win.
@@ -134,7 +138,7 @@ claude_attempt() {
   printf 'Claude review (%s, effort %s; %s): %s mode, limit %ss, log %s\n' \
     "$claude_model" "$claude_effort" "$claude_risk" "$mode" "$limit" "$log"
   set +e
-  timeout --signal=TERM --kill-after=10s "$limit" claude -p \
+  ai_run_child timeout --signal=TERM --kill-after=10s "$limit" claude -p \
     --permission-mode dontAsk --output-format json \
     --tools Read,Glob,Grep --allowedTools "${allowed[@]}" \
     --setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
@@ -184,7 +188,7 @@ run_review() {
     fi
     if [[ "$try_codex" == yes ]]; then
       set +e
-      timeout --signal=TERM --kill-after=10s "$limit" codex exec \
+      ai_run_child timeout --signal=TERM --kill-after=10s "$limit" codex exec \
         --ignore-user-config -c 'approval_policy="never"' --sandbox read-only "${AI_REVIEW_ARGS[@]}" \
         --output-last-message "$report" "$prompt" < /dev/null > "$events" 2>&1
       code=$?

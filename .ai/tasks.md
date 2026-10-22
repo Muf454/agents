@@ -5566,6 +5566,38 @@ working (e.g. no record, or a record owned by the dead pipeline pid). Fix the se
 shared fixtures, never weaken an assertion. Check those tests with targeted `-k` runs (the
 names above), not the full gate: leave the full gate to the runner, it outlives the tool limit.
 
+Mission control 2026-10-22 10:40: a second opus session also hit the 1800 s limit (empty log).
+Its uncommitted test changes (a `crashed_run_record()` helper that `tool('ai-recover', ...)` and
+the direct `ai-recover` Popen fixtures call, so they start from a crashed pipeline's running
+record) are committed as WIP: continue from them. Task split: only the ai-recover part stays
+here; the stand-alone ai-run record is T328. Budget the session: run the failing tests in a few
+`-k` groups of at most ~10 tests each, never the whole file or the full gate (the runner runs
+the gate), and checkpoint as soon as the named tests pass.
+
+Mission control 2026-10-22 11:25: a third session hit the limit after changing only
+`.ai/handoff.md` (kept: its T316 entry and the next action). Mission control then ran the 30
+tests that matter on the committed source (030fc61), each alone, eight in parallel: the 28
+that failed at 10:05 plus `test_run_record_recovery_owns_before_its_session` and
+`test_run_record_recovery_refuses_a_stopped_run`. All 30 OK (Ran 1 each, 3–46 s). So the code
+is finished. Do NOT rerun them: check the diff against the notes and acceptance criteria in a
+few minutes, check `docs/workflow.md` "Recovery contract", record this result and checkpoint at
+once. The runner runs the full gate.
+
+Result 2026-10-22 (fourth session, wrap-up): the diff 8df58cb..a40f19e matches the notes.
+`scripts/ai-recover` sets `AI_RUN_ID` (or `run-record current`) and runs `run-record own --pid $$
+--launcher ai-recover` right after `state-root-check`, before `run-manifest gate` and
+`reserve-attempt`; no record → `there is no run record to resume.`, refusal → `the run was
+stopped by you or replaced; not resumed automatically.`. `escalate()` and `on_exit` end the
+record `stopped` (200 chars) only with `AI_RUN_ID` set and no `AI_GATE_BROKEN`; `relaunch_wait`
+pauses it; `resume()` passes `AI_RUN_ID`. Tests: `test_run_record_recovery_owns_before_its_session`
+and `test_run_record_recovery_refuses_a_stopped_run` exist as in the acceptance criteria; the
+shared fixture `crashed_run_record()` gives a direct `ai-recover` a crashed pipeline's record
+(no assertion weakened). Evidence: mission control's 30 targeted runs on 030fc61 (all OK, Ran 1
+each); not rerun in this session per the note above; the full gate is left to the runner.
+`docs/workflow.md` "Recovery contract" describes the early own; this session corrected the
+stand-alone `ai-run` record paragraph's task label to T328 (its code stays for T328 to check).
+(Moved here from T304's notes by the T304 session, where they had been appended by mistake.)
+
 ## T303 — Interrupts reach the agent session: ai-run and ai-recover (RC-01 G2)
 Status: DONE
 Dependencies: none
@@ -5639,7 +5671,7 @@ claimed clean.
 Mission control 2026-10-22 07:45Z: set DONE: its session showed the seven gate failures come from T302's resume check, not this task (ad420a2); T302's rerun and its host gate cover this commit too.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
-Status: TODO
+Status: DONE
 Dependencies: T303
 Model: opus
 
@@ -5687,37 +5719,24 @@ tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
-
-Mission control 2026-10-22 10:40: a second opus session also hit the 1800 s limit (empty log).
-Its uncommitted test changes (a `crashed_run_record()` helper that `tool('ai-recover', ...)` and
-the direct `ai-recover` Popen fixtures call, so they start from a crashed pipeline's running
-record) are committed as WIP: continue from them. Task split: only the ai-recover part stays
-here; the stand-alone ai-run record is T328. Budget the session: run the failing tests in a few
-`-k` groups of at most ~10 tests each, never the whole file or the full gate (the runner runs
-the gate), and checkpoint as soon as the named tests pass.
-
-Mission control 2026-10-22 11:25: a third session hit the limit after changing only
-`.ai/handoff.md` (kept: its T316 entry and the next action). Mission control then ran the 30
-tests that matter on the committed source (030fc61), each alone, eight in parallel: the 28
-that failed at 10:05 plus `test_run_record_recovery_owns_before_its_session` and
-`test_run_record_recovery_refuses_a_stopped_run`. All 30 OK (Ran 1 each, 3–46 s). So the code
-is finished. Do NOT rerun them: check the diff against the notes and acceptance criteria in a
-few minutes, check `docs/workflow.md` "Recovery contract", record this result and checkpoint at
-once. The runner runs the full gate.
-
-Result 2026-10-22 (fourth session, wrap-up): the diff 8df58cb..a40f19e matches the notes.
-`scripts/ai-recover` sets `AI_RUN_ID` (or `run-record current`) and runs `run-record own --pid $$
---launcher ai-recover` right after `state-root-check`, before `run-manifest gate` and
-`reserve-attempt`; no record → `there is no run record to resume.`, refusal → `the run was
-stopped by you or replaced; not resumed automatically.`. `escalate()` and `on_exit` end the
-record `stopped` (200 chars) only with `AI_RUN_ID` set and no `AI_GATE_BROKEN`; `relaunch_wait`
-pauses it; `resume()` passes `AI_RUN_ID`. Tests: `test_run_record_recovery_owns_before_its_session`
-and `test_run_record_recovery_refuses_a_stopped_run` exist as in the acceptance criteria; the
-shared fixture `crashed_run_record()` gives a direct `ai-recover` a crashed pipeline's record
-(no assertion weakened). Evidence: mission control's 30 targeted runs on 030fc61 (all OK, Ran 1
-each); not rerun in this session per the note above; the full gate is left to the runner.
-`docs/workflow.md` "Recovery contract" describes the early own; this session corrected the
-stand-alone `ai-run` record paragraph's task label to T328 (its code stays for T328 to check).
+2026-10-22 (claude opus): `scripts/ai-review` runs the Codex and the Claude reviewer through
+`ai_run_child` and traps INT/TERM (`ai_stop_child; exit 130/143`; it had no INT/TERM traps; the
+format retry's EXIT trap still logs). `scripts/ai-check` starts `tee` as a logger on fd 7
+(`exec 7> >(tee "$log")`, `tee_pid=$!`), runs `ai_run_child timeout … bash .ai/validate >&7 2>&1`,
+closes fd 7 and waits for the logger; a failed logger replaces the result (P14), then `stamp
+record`. Its INT/TERM traps (installed right before the logger, so the lock wait is unchanged)
+stop the child, close fd 7, wait up to 5 s for the logger and exit 130/143, leaving the
+invalidated stamp. `ai_deps` runs `.ai/ci-setup` through `ai_run_child`. Mocks: `MOCK_CODEX=sleep`
+and `MOCK_CLAUDE_REVIEW=sleep`. New tests: `test_interrupt_reaches_the_gate` (group SIGINT → 130
+and pid-only SIGTERM → 143, validator gone, stamp not PASS, log and output hold the line written
+before), `test_interrupt_reaches_the_review` (Codex and Claude × group SIGINT / pid-only SIGTERM,
+reviewer gone, current review unchanged), `test_check_logger_failure_fails_the_gate`. Evidence:
+`-k interrupt` Ran 14 OK; `-k check` Ran 98 OK (805 s); `-k gate_lock -k validation_ -k
+test_check -k ai_check` Ran 27 OK; `-k test_review_` Ran 49 OK; review/deps groups (`-k
+failed_or_malformed -k concurrent_checkout -k falls_back_to_claude -k format_retry -k deps`) Ran
+35 OK; `-k limit_relaunch_verify -k fallback` Ran 14 OK. Full gate not run in session (≈1300 s,
+over the 600 s tool limit); the runner's gate decides. `docs/workflow.md` sentence added; hub Log
+line added. T316's last three notes, appended here by mistake, were moved back to T316.
 
 ## T328 — Stand-alone ai-run publishes and ends its run record (RC-01 G3, plan review P7, P18)
 Status: TODO

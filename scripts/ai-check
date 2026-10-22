@@ -43,11 +43,31 @@ fi
 log=$(mktemp .ai/local/check-XXXXXXXX.log)
 # Remove old evidence first: a failed/interrupted run cannot retain a green stamp.
 ai_helper stamp invalidate
+# The logger runs on its own descriptor so the validator is the recorded child: an INT/TERM
+# (TERM alone when this gate is itself a background child) ends it at once. The stamp stays
+# invalidated; only a finished run records a result.
+tee_pid=''
+stop_gate() {
+  local tries=0
+  ai_stop_child || true
+  exec 7>&-
+  if [[ -n "$tee_pid" ]]; then
+    while kill -0 "$tee_pid" 2>/dev/null && (( tries++ < 50 )); do sleep 0.1; done
+    kill -TERM "$tee_pid" 2>/dev/null || true
+  fi
+}
+trap 'stop_gate; exit 130' INT
+trap 'stop_gate; exit 143' TERM
+exec 7> >(tee "$log")
+tee_pid=$!
 set +e
-timeout --signal=TERM --kill-after=10s "$budget" bash .ai/validate 2>&1 | tee "$log"
-codes=("${PIPESTATUS[@]}")
+ai_run_child timeout --signal=TERM --kill-after=10s "$budget" bash .ai/validate >&7 2>&1
+result=$?
+exec 7>&-
+wait "$tee_pid"
+logged=$?
 set -e
-result=${codes[0]}
-if (( codes[1] != 0 )); then result=${codes[1]}; fi
+# A failed logger fails the gate even when the validator passed.
+if (( logged != 0 )); then result=$logged; fi
 ai_helper stamp record "$result" "$log"
 exit "$result"

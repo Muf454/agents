@@ -205,6 +205,10 @@ if 'CLAUDE REVIEWER' in prompt:
         sys.exit(1)
     if review_mode == 'error':
         sys.exit(3)
+    if review_mode == 'sleep':
+        # A review only a signal ends (T304).
+        pathlib.Path('.ai/local/mock-review.pid').write_text(str(os.getpid()))
+        time.sleep(300)
     if 'RECHECK SCOPE' in prompt:
         text = os.environ.get('MOCK_RECHECK', '{"answers": [{"id": "M1", "verdict": "withdrawn", "reason": "Claude agrees"}]}')
     else:
@@ -751,6 +755,11 @@ if ',' in mode:
     # 'malformed,success': mode of review call 1, 2, ...; the last one repeats.
     mode = mode.split(',')[min(count, len(mode.split(','))) - 1]
 if mode == 'error': sys.exit(17)
+if mode == 'sleep':
+    # A review only a signal ends (T304).
+    import time
+    pathlib.Path('.ai/local/mock-review.pid').write_text(str(os.getpid()))
+    time.sleep(300)
 if mode in ('limit-once', 'limit-once-unknown') and count == 1:
     print('ERROR: usage_limit_reached. You have hit your usage limit. Try again ' +
           ('later.' if mode == 'limit-once-unknown' else 'in 3 minutes.'))
@@ -11013,6 +11022,51 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-run', '--approved', expected=1)
         self.assertIn('Claude exited 17', (self.project / '.ai/local/last-error').read_text())
         self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'timeout'), (2, 'error')])
+
+    def test_interrupt_reaches_the_gate(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text(
+            '#!/usr/bin/env bash\necho written before the interrupt\necho $$ > .ai/local/mock-gate.pid\nexec sleep 300\n')
+        self.commit('sleeping gate')
+        for name, send, expected in (('INT', lambda runner: os.killpg(runner.pid, signal.SIGINT), 130),
+                                     ('TERM', lambda runner: runner.send_signal(signal.SIGTERM), 143)):
+            with self.subTest(signal=name):
+                for log in (self.project / '.ai/local').glob('check-*.log'):
+                    log.unlink()
+                code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-check')], 'mock-gate.pid', send)
+                self.assertEqual(code, expected, output)
+                self.assertIn('written before the interrupt', output)
+                self.helper('stamp', 'verify', expected=1)
+                self.assertNotIn('PASS', (self.project / '.ai/local/validation.json').read_text())
+                logs = list((self.project / '.ai/local').glob('check-*.log'))
+                self.assertEqual(len(logs), 1)
+                self.assertIn('written before the interrupt', logs[0].read_text())
+
+    def test_interrupt_reaches_the_review(self):
+        self.ready()
+        self.tool('ai-run', '--approved')
+        original = (self.project / '.ai/reviews/current.md').read_bytes()
+        for reviewer, env in (('codex', {'MOCK_CODEX': 'sleep'}), ('claude', {'MOCK_CLAUDE_REVIEW': 'sleep'})):
+            for name, send, expected in (('INT', lambda runner: os.killpg(runner.pid, signal.SIGINT), 130),
+                                         ('TERM', lambda runner: runner.send_signal(signal.SIGTERM), 143)):
+                with self.subTest(reviewer=reviewer, signal=name):
+                    code, output = self.interrupt_session(
+                        [str(self.project / '.ai/bin/ai-review'), '--base', 'main'], 'mock-review.pid', send,
+                        AI_REVIEWER=reviewer, **env)
+                    self.assertEqual(code, expected, output)
+                    self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
+
+    def test_check_logger_failure_fails_the_gate(self):
+        self.ready()
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')
+        self.commit('passing gate')
+        self.tool('ai-check')
+        self.helper('stamp', 'verify')
+        (self.mock_bin / 'tee').write_text('#!/usr/bin/env bash\ncat > /dev/null\nexit 1\n')
+        (self.mock_bin / 'tee').chmod(0o755)
+        self.tool('ai-check', expected=1)
+        self.helper('stamp', 'verify', expected=1)
+        self.assertNotIn('PASS', (self.project / '.ai/local/validation.json').read_text())
 
     def test_outcome_malformed_queue_then_retry(self):
         self.ready()

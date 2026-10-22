@@ -277,7 +277,7 @@ ai_deps() {
   log=$(mktemp .ai/local/deps-XXXXXXXX.log)
   started=$SECONDS
   set +e
-  timeout --signal=TERM --kill-after=10s "$limit" bash .ai/ci-setup < /dev/null > "$log" 2>&1
+  ai_run_child timeout --signal=TERM --kill-after=10s "$limit" bash .ai/ci-setup < /dev/null > "$log" 2>&1
   code=$?
   set -e
   if ! ai_gate_check "$gate"; then

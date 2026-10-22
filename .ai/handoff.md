@@ -29,6 +29,12 @@
   when none is running. `docs/workflow.md` "Recovery contract". Flow unchanged. The stand-alone
   `ai-run` record code from the first T316 session is in `scripts/ai-run`; T328 checks and
   finishes it.
+- T304 (2026-10-22): `ai-review` (Codex and Claude reviewer), `ai-check` (validator) and
+  `ai_deps` (`.ai/ci-setup`) run their `timeout` child through `ai_run_child`; `ai-review` and
+  `ai-check` trap INT/TERM with `ai_stop_child` and exit 130/143 (TERM alone does the full job,
+  for T317/T318's background children). `ai-check`'s `tee` is a logger on fd 7 whose failure
+  still fails the gate; an interrupted gate leaves the stamp invalidated. `docs/workflow.md`
+  "Interruption, limits, and recovery". Flow unchanged beyond T303's note.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -225,7 +231,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `tee` logger fails the gate (no PASS stamp).
   Done so far (T303): `test_interrupt_reaches_the_session_ai_run`,
   `test_interrupt_reaches_the_session_term`, `test_interrupt_reaches_the_recovery_session`,
-  `test_session_exit_codes_unchanged`.
+  `test_session_exit_codes_unchanged`; T304: `test_interrupt_reaches_the_gate`,
+  `test_interrupt_reaches_the_review` (Codex and Claude, group SIGINT and pid-only SIGTERM),
+  `test_check_logger_failure_fails_the_gate`.
 - `escalation` (T305, T309, T320, T321, T327): kinds, answers, redaction, hint consumption, a repeated
   write keeps the kind, current run only, answers from the current run record never an earlier
   manifest, a stop request wins, cleared by a new run and a resume; hints at the
@@ -265,6 +273,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302 and T316 are DONE (T302's gate PASSED on 086ff5f's source).
+T301, T315, T305, T303, T302, T316 and T304 are DONE (T302's gate PASSED on 086ff5f's source).
 Next: the rest of the queue by dependency (T328 follows T316).
 Nothing is merged or deployed.
