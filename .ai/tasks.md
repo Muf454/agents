@@ -5420,7 +5420,7 @@ source as b99ceac) PASSED at 2026-10-22T03:23:47Z. Re-checked: `-k escalation` R
 that gate-lock test plus `-k test_run_record` Ran 12 OK. DONE.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
-Status: BLOCKED
+Status: TODO
 Dependencies: T305
 Model: opus
 
@@ -5497,6 +5497,7 @@ the four `test_supervised_plan_resume_*_watchdog` resumes get an empty `AI_RUN_I
 This fails the acceptance line "Existing pipeline and recovery tests pass". Needs: a T302 fix
 (test fixtures that resume must start a run record; check how the watchdog and observation resume
 paths obtain the id and owner), then the host gate.
+Mission control 2026-10-22 07:45Z: returned to TODO. The host gate now shows that this task's resume check breaks 7 tests: test_supervised_plan_resume_after_stage_clear_watchdog, test_supervised_plan_resume_after_the_record_watchdog, test_supervised_plan_resume_reserved_without_a_stage_watchdog, test_supervised_plan_resume_stage_without_a_reservation_watchdog, test_preflight_pipeline_same_ruling_twice_stops, test_preflight_pipeline_indirectly_moved_task_repeat_stops, test_observation_pipeline_registers_the_checkout_on_start_and_resume. Diagnosis from T303's session (ad420a2): `run-record resume` gets a usage error, then 'The run record refuses this resume'. Run exactly these tests one per call, fix the resume path (a resume without a matching record, e.g. from a watchdog or an older run, must behave as these tests expect), keep the new run-record tests green, and mark DONE. Do not run the full gate in the foreground.
 
 ## T316 — ai-recover owns the run early; stand-alone ai-run records (RC-01 G3, plan review P4, P7)
 Status: TODO
@@ -5632,6 +5633,7 @@ them reaches `ai_run_child`/`ai_stop_child`. Diagnosis recorded under T302. T303
 `python3 -m unittest discover -s tests -k interrupt -k test_session_exit_codes_unchanged` → Ran 13
 tests OK. No source change in this session. The full gate stays red until T302 is fixed; it is not
 claimed clean.
+Mission control 2026-10-22 07:45Z: set DONE: its session showed the seven gate failures come from T302's resume check, not this task (ad420a2); T302's rerun and its host gate cover this commit too.
 
 ## T304 — Interrupts reach reviews, the gate and dependency setup (RC-01 G2)
 Status: TODO
