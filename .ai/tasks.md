@@ -6346,7 +6346,7 @@ unchanged. Tests: `test_escalation_hint_task_blocked`, `_plan_kinds`, `_needs_hu
 `.ai/bin/ai-check` PASS, Ran 1180 OK (892.5 s).
 
 ## T320 — Escalation records written at every stop for a human, gate first (RC-01 G9, writes)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T307, T309
 Model: opus
 
@@ -6413,6 +6413,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 - Mission control 2026-10-22 21:42: both sessions timed out (slow in-session gate, FL-38/FL-32). The uncommitted work covers every listed module and the handoff describes it. Mission control ran on that working tree: `python3 -m unittest -k escalation_wiring test_workflow` 9 tests OK (66 s), and the full `.ai/bin/ai-check`: Ran 1189 tests, OK (973 s). Next session: check the work against the acceptance criteria, finish anything missing, run only targeted tests (do NOT run the full `ai-check`; the runner's gate follows the session), then checkpoint.
 - 2026-10-22 (claude, opus, resume): the checkpointed work in 0c0fe6e checked against every acceptance criterion: `test_escalation_wiring_task_blocked`, `_plan_review_stop_final_record`, `_validation_and_recovery`, `_recovery_crash_and_resume` (crash kind; a resuming recovery removes the record), `_standalone_ai_run`, `_cleared_on_human_start`, `_ignores_last_error_text`, `_not_after_gate_change` and `_standalone`. One write per chain: `ai_escalation_write` and `ai_human_stop` set `AI_ESCALATION_WRITTEN`; `ai_die` writes only when unset. The `ai-run` edit is one line. Docs in `docs/workflow.md` "Writers (T320)"; vault flow chart and hub Log already updated. No source change in this session. Targeted: `python3 -m unittest discover -s tests -k escalation` Ran 26 tests OK (141 s). Full gate: mission control's run on this same tree, 1189 OK (973 s); not rerun here, the runner's gate follows.
+- 2026-10-22 (claude, opus, second resume): the runner's gate after c666859 failed on one timeout in an unrelated test (`test_committed_bytes_run_stops_on_a_filtered_final_handoff`, 25 s limit; whole run 1868 s against the usual ~900–970 s, so machine load). Recovery checkpoint 87b0099 recorded a gate PASS at 20:38:14Z on the same code. No source change. Targeted: `python3 -m unittest discover -s tests -k escalation` Ran 26 tests OK (134 s).
 
 ## T321 — Fix-round limit escalation on every finish path (RC-01 G9, B9, plan review round 3 P19)
 Status: TODO
