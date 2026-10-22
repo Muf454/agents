@@ -591,3 +591,4 @@
 | 2026-10-22T09:30:00Z | claude (opus) | T316 | DONE: WIP diff checked against notes and acceptance criteria; docs task label for the stand-alone ai-run record set to T328 | mission control's 30 targeted tests on 030fc61 OK (not rerun); full gate left to the runner | a40f19e (code) | ai-run record code stays for T328; vault not written from this session |
 | 2026-10-22T09:34:18Z | runner | T316 | completed | PASS | 247d903 | Claude checkpointed; continuing queue |
 | 2026-10-22T09:57:00Z | claude (opus) | T304 | DONE: ai-review, ai-check (tee logger on fd 7) and ai_deps run their timeout child via ai_run_child; INT/TERM traps stop it; 3 new tests | -k interrupt 14 OK, -k check 98 OK, review/gate groups OK; full gate left to the runner (over the tool limit) | see next entry | T316's misplaced notes moved back from T304; hub Log line added |
+| 2026-10-22T10:17:28Z | runner | T304 | completed | PASS | 28269f4 | Claude checkpointed; continuing queue |
