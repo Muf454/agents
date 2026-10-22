@@ -605,3 +605,4 @@
 | 2026-10-22T08:37:42Z | runner | T220 | completed | PASS | 6e93176 | Claude checkpointed; continuing queue |
 | 2026-10-22T08:53:10Z | runner | T208 | stopped (exit 1); inspect state/diff before resuming | see local logs | 4b40821 | No merge or deployment performed |
 | 2026-10-22T09:25:00Z | claude (opus) | T208 | DONE (ME-01 stops): reviewed WIP 7da9f68 against notes and criteria; `stop-category`, `ai_stop_event`/`ai_recovery_event` (gate-broken guard first), `stop()` and every `ai-recover` decision/escalation | -k events_stop 5 OK; -k runs_no_helper/observation_gate/recovery_escalates 11 OK; -k events_run/events_gate/recovery_ 83 OK; bash -n OK; full gate left to the host (BATCH 10 GATE RULE) | 7da9f68 + this commit | flow chart: vault bullet "Stop and recovery events"; hub Log line |
+| 2026-10-22T09:26:43Z | runner | T208 | completed | PASS | 76f35fc | Claude checkpointed; continuing queue |
