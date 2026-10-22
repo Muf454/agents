@@ -5420,7 +5420,7 @@ source as b99ceac) PASSED at 2026-10-22T03:23:47Z. Re-checked: `-k escalation` R
 that gate-lock test plus `-k test_run_record` Ran 12 OK. DONE.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
-Status: TODO
+Status: BLOCKED
 Dependencies: T305
 Model: opus
 
@@ -5473,6 +5473,18 @@ Targeted: `python3 -m unittest discover -s tests -k run_record` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): implementation complete. `scripts/ai-pipeline`: human start runs
+`run-record start pipeline …` right after `run-manifest start` (required, `ai_die` on failure),
+recovery resume runs `run-record resume` (id from `AI_RUN_ID` or `run-record current`), the id
+format is checked and `AI_RUN_ID` exported; `finish` ends the record `finished` (warning on
+failure). `scripts/lib/common.sh` `ai_die` (pipeline shell only) ends it `stopped` with the
+first 200 characters of the reason, only with `AI_RUN_ID`, `AI_APPROVED_GATE`, no
+`AI_GATE_BROKEN` and a passing `ai_gate_check`. Docs: `docs/workflow.md` "Pipeline contract".
+Flow unchanged. Evidence: `-k run_record` 19 OK (all five new tests included; the no-PR detail
+is `no PR`); `-k test_pipeline_` 14 OK; `-k test_recovery_` 23 OK.
+BLOCKED only on the gate: `.ai/bin/ai-check` ran past the session's 600 s foreground limit, and
+the background run was killed at its limit (no result). Needs: the host gate on this checkpoint;
+when it passes, set T302 DONE (no source change expected).
 
 ## T316 — ai-recover owns the run early; stand-alone ai-run records (RC-01 G3, plan review P4, P7)
 Status: TODO

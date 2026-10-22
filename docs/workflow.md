@@ -561,6 +561,18 @@ stops are terminal for `ai-recover`.
 
 ## Pipeline contract (`ai-pipeline`)
 
+Run record (RC-01 G3, T302): a human start of `ai-pipeline` writes the run record
+(`<host state>/reviews/<checkout key>/runs/<id>.json`, schema 1: kind `pipeline`, checkout,
+branch, review base ref and sha, the exact arguments, launcher, log, process identity,
+`resumes`, outcome; the 20 newest records are kept) right after the run manifest, before any
+agent or review runs, and exports its id `AI_RUN_ID` (`<UTC stamp>-<pid>-<seq>`). It is
+required: when the record cannot be written the pipeline stops (`Cannot record the run in the
+host state directory.`). A resume after recovery takes over the current record (`run-record
+resume`, `resumes` + 1) and stops when the record refuses (stopped by you or replaced). The end
+is recorded as `finished` (detail: the PR or `no PR`) or, through `ai_die`, `stopped` with the
+first 200 characters of the reason; `ai_die` writes it only when the approved gate still
+verifies, so no changed checkout helper runs.
+
 Before the plan review (review on or off) the queue is validated like `ai-task check`; an
 invalid queue stops with `Task queue is invalid: …` and recovery always escalates it.
 `ai-task reorder` (`workflow.py tasks reorder`) repairs a queue whose tasks depend on later

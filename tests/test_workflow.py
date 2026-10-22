@@ -15634,6 +15634,65 @@ PY
         self.run_record('stop-requested', '--run', run_b, expected=3)
         self.run_record('request-stop', '--run', run_b, '--via', 'signal', expected=3)
 
+    # Pipeline wiring (T302): a human start records the run, resume keeps it, every end records it.
+    def pipeline_records(self):
+        runs = self.run_records()
+        names = sorted(path.name for path in runs.glob('*.json')) if runs.is_dir() else []
+        return [json.loads((runs / name).read_text()) for name in names]
+
+    def test_run_record_pipeline_start_and_finish(self):
+        self.ready()
+        args = ['--approved', '--base', 'main', '--no-pr']
+        self.tool('ai-pipeline', *args, AI_AUTO_RECOVER='0')
+        records = self.pipeline_records()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        main = self.run_cmd(['git', 'rev-parse', 'main']).stdout.strip()
+        self.assertEqual((record['kind'], record['argv'], record['branch'], record['base']),
+                         ('pipeline', args, 'feature/test', {'ref': 'main', 'sha': main}))
+        self.assertEqual((record['outcome'], record['detail'], record['resumes']),
+                         ('finished', 'no PR', 0))
+        self.assertIsNotNone(record['ended'])
+        self.assertEqual(self.run_record('current').stdout.strip(), record['id'])
+
+    def test_run_record_pipeline_stop_ends_stopped(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='0', MOCK_CLAUDE='error')
+        [record] = self.pipeline_records()
+        self.assertEqual(record['outcome'], 'stopped')
+        self.assertTrue(record['detail'].startswith('Pipeline stopped during implementation'), record['detail'])
+        self.assertLessEqual(len(record['detail']), 200)
+
+    def test_run_record_pipeline_refuses_without_record(self):
+        self.ready()
+        runs = self.run_records()
+        runs.parent.mkdir(parents=True, exist_ok=True)
+        runs.write_text('not a directory\n')
+        result = self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                           AI_AUTO_RECOVER='0')
+        self.assertIn('Cannot record the run in the host state directory.', result.stderr)
+        self.assertFalse((self.project / '.ai/local/mock-args').exists())
+        self.assertFalse((self.base / 'codex-plan-calls').exists())
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+
+    def test_run_record_pipeline_resume_keeps_one_record(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr',
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error-once')
+        self.assertEqual(len(self.recovery_calls()), 1)
+        [record] = self.pipeline_records()
+        self.assertEqual((record['outcome'], record['resumes']), ('finished', 1))
+        self.assertEqual(self.run_record('current').stdout.strip(), record['id'])
+
+    def test_run_record_ai_die_after_gate_change(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0',
+                  MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        [record] = self.pipeline_records()
+        self.assertEqual((record['outcome'], record['ended']), ('running', None))
+
     # Escalation record (RC-01 G9, T305): `escalation write|hint|show|clear` beside `runs/`.
     def escalation(self, *args, expected=0):
         result = subprocess.run(['python3', str(HELPER), 'escalation', *args], cwd=self.project, env=self.env,

@@ -91,6 +91,8 @@ finish() {
   # Keeps the manifest's timeout reruns: a pipeline resumed under the same approval must not
   # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
+  ai_helper run-record end --run "$AI_RUN_ID" --pid $$ finished "${1:-no PR}" 2>/dev/null || \
+    printf 'Warning: could not record the end of run %s.\n' "$AI_RUN_ID" >&2
   ai_drop_marker
   exit 0
 }
@@ -158,11 +160,20 @@ if [[ -n "${AI_RECOVERY_ATTEMPT:-}" ]]; then
     { AI_GATE_BROKEN=1; ai_die 'Gate files changed since the run was approved; rerun ai-pipeline --approved yourself.'; }
   [[ "$AI_START_BRANCH" == "$(ai_helper run-manifest branch 2>/dev/null)" ]] || \
     ai_die 'Resumed on a different branch than the approved run.'
+  # The resumed pipeline holds the checkout lock, so the current run record is this run's.
+  AI_RUN_ID=${AI_RUN_ID:-$(ai_helper run-record current 2>/dev/null || true)}
+  ai_helper run-record resume --run "$AI_RUN_ID" --pid $$ || \
+    ai_die 'The run record refuses this resume (stopped by you or replaced); rerun ai-pipeline --approved yourself.'
 else
   # A human (re)start: record the approved run and give it a fresh recovery budget.
   ai_helper run-manifest start "$AI_APPROVED_GATE" "$AI_START_BRANCH" "${orig_args[@]}" || \
     ai_die 'Cannot record the run manifest in the host state directory.'
+  # The run record is required: no controlled work runs without it.
+  AI_RUN_ID=$(ai_helper run-record start pipeline "$AI_START_BRANCH" "$base_ref" "$base_sha" \
+    --pid $$ -- "${orig_args[@]}") || ai_die 'Cannot record the run in the host state directory.'
 fi
+[[ "$AI_RUN_ID" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]{1,10}-[0-9]{1,9}$ ]] || ai_die "Invalid run id: $AI_RUN_ID"
+export AI_RUN_ID
 export AI_PIPELINE=1
 branch=$AI_START_BRANCH
 ai_helper pipeline-register "$AI_ROOT" "$AI_START_BRANCH" || \

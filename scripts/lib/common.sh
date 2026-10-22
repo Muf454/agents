@@ -19,6 +19,12 @@ ai_die() {
       ai_observe stop '' "$*" 2>/dev/null || true
     fi
     AI_STOP_NOTIFIED=1
+    # End the run record, but run the checkout's helper only under the approved gate.
+    if [[ -n "${AI_RUN_ID:-}" && -n "${AI_APPROVED_GATE:-}" && -z "${AI_GATE_BROKEN:-}" ]] && \
+       ai_gate_check "$AI_APPROVED_GATE"; then
+      local reason="$*"
+      ai_helper run-record end --run "$AI_RUN_ID" --pid $$ stopped "${reason:0:200}" 2>/dev/null || true
+    fi
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker
   fi

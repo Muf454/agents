@@ -14,6 +14,10 @@
   → `human_stop`, then the hint, then the stage), a later `other` never replaces a specific kind,
   redacted last-error, answers built from the named run record. `run-record start` and `resume`
   clear it. No writer yet (T309, T320, T321). Described in `docs/workflow.md`.
+- T302 (2026-10-22): `ai-pipeline` writes the run record at every human start (required: no
+  record, no run) and exports `AI_RUN_ID`; a recovery resume takes over the current record
+  (`resumes` + 1) or stops; `finish` ends it `finished`; `ai_die` ends it `stopped` only after
+  the approved gate verifies. `docs/workflow.md` "Pipeline contract". Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -194,7 +198,10 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_run_record_lock_is_bounded`, `test_run_record_invalid_records`; T315:
   `test_run_record_end_keeps_human_stop`, `test_run_record_end_after_stop_request_is_human_stop`,
   `test_run_record_own_and_resume`, `test_run_record_stop_request_identity`,
-  `test_run_record_interleaving_never_touches_another_run`.
+  `test_run_record_interleaving_never_touches_another_run`; T302:
+  `test_run_record_pipeline_start_and_finish`, `test_run_record_pipeline_stop_ends_stopped`,
+  `test_run_record_pipeline_refuses_without_record`, `test_run_record_pipeline_resume_keeps_one_record`,
+  `test_run_record_ai_die_after_gate_change`.
 - `interrupt` (T303, T304, T317): SIGINT/SIGTERM (group and pid only) end a sleeping fake
   session, recovery session, review, gate, the runner's and recovery's host gate and a limit
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
