@@ -5233,7 +5233,7 @@ fixtures are own `sleep` children in their own session, the zombie case included
 Targeted `-k run_record`: Ran 9 tests OK. Full `.ai/bin/ai-check`: Ran 1113 tests OK (1229 s).
 
 ## T315 — Run record lifecycle bound to the run id and process identity (RC-01 G3, plan review P5)
-Status: TODO
+Status: DONE
 Dependencies: T301
 Model: opus
 
@@ -5310,6 +5310,11 @@ Mission control 2026-10-22 01:35Z: returned to TODO (BLOCKED only on the gate ti
   T301's gate took 1229 s. The runner rules forbid restarting it in the background. Code looks
   complete; next step: rerun `.ai/bin/ai-check` outside the session limit (or let the runner's
   checkpoint validation run it) and, on PASS, set T315 DONE.
+- 2026-10-22 (claude, opus, rerun): re-verified 939c66f against the five acceptance criteria and
+  the implementation notes (exit 3 under `runs/.lock` for non-current/invalid/identity failures;
+  ended records immutable; `end stopped` after a stop request stores `human_stop`). Targeted
+  `-k run_record`: Ran 14 tests, OK (51.9 s). Full gate not run in session per mission control;
+  the runner's checkpoint gate decides. DONE.
 
 ## T305 — Escalation record helper: schema 1, redaction, allowed answers (RC-01 G9, helper)
 Status: TODO

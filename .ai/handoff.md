@@ -76,6 +76,8 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T315: `-k run_record` Ran 14 OK (51.9 s); full gate not run in session (≈1229 s >
+the tool limit), the runner's gate decides.
 2026-10-22, T301: `.ai/bin/ai-check` PASS, Ran 1113 tests OK (1229 s); `-k run_record` Ran 9 OK.
 Before T301: none on this branch (all three plan revisions changed only `.ai/` planning records; no shell
 was available in the revision sessions, so the queue was checked by reading, not with `ai-task
@@ -221,7 +223,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301 is DONE. T315 is implemented (939c66f, targeted `-k run_record` 14 OK) but BLOCKED because
-the full gate did not finish within the session's tool time limit (~1200 s, no result). Rerun
-`.ai/bin/ai-check`; on PASS set T315 DONE and continue with T305.
+T301 and T315 are DONE (T315: 939c66f, re-verified 2026-10-22, `-k run_record` 14 OK; the full
+gate is left to the runner's checkpoint validation, as mission control directed). T303 has
+partial WIP from a timed-out session (1e06212) to reconcile; then T305 and the rest of the queue.
 Nothing is merged or deployed.
