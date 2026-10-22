@@ -5665,7 +5665,7 @@ template_rules -k queue_check_empty_template` 6 OK; `-k Docs -k session_gate -k 
 host (session gate rule: targeted).
 
 ## T206 — Event log core: envelope, schema v1, bounded stable lock, guarded writer, tolerant reader (ME-01 part 1)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5788,6 +5788,10 @@ Evidence: `-k events_core` Ran 9 tests OK (8 required + `test_events_core_lock_s
 `-k runs_no_helper -k gate_time` Ran 9 tests OK; `bash -n scripts/lib/common.sh` OK; `-k Docs`
 Ran 3 OK. Full gate left to the host gate (BATCH 10 GATE RULE). Limitation: `flock_bounded` uses
 SIGALRM, so `append_event`/`read_events` must be called from the main thread (documented).
+Reconciled 2026-10-22 (resumed session): the earlier stop was the host gate hitting the run's time
+limit (58/84 batches, no failing test), not a test failure; implementation in 68ad8ea unchanged.
+Re-ran: `-k events_core` Ran 9 OK; `-k runs_no_helper -k gate_time` Ran 9 OK; `bash -n
+scripts/lib/common.sh` OK. Full gate left to the host gate (BATCH 10 GATE RULE).
 
 ## T219 — Secret redaction of event text fields (ME-01 part 1, split from T206 in plan review round 2)
 Status: TODO
