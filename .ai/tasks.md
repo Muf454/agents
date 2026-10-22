@@ -5665,7 +5665,7 @@ template_rules -k queue_check_empty_template` 6 OK; `-k Docs -k session_gate -k 
 host (session gate rule: targeted).
 
 ## T206 — Event log core: envelope, schema v1, bounded stable lock, guarded writer, tolerant reader (ME-01 part 1)
-Status: DONE
+Status: IN_PROGRESS
 Dependencies: none
 Model: opus
 
