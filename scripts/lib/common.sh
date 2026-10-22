@@ -231,6 +231,9 @@ ai_event() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   ai_helper event "$@" 2>/dev/null || printf 'Note: could not record the %s event.\n' "$1" >&2
 }
+# 16 lowercase hex for a gate id (spec A12): the same id goes on the `outcome gate` row and the
+# `gate` event of one gate. Plain od, no helper, so it runs even when the gate is known bad.
+ai_new_id() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 ai_notify_log() {
   [[ -z "${AI_GATE_BROKEN:-}" ]] || return 0
   python3 -B "$AI_BIN/lib/workflow.py" notify-log "${AI_ROOT:-$PWD}" "$1" 2>/dev/null || true

@@ -4822,8 +4822,8 @@ def outcome(arguments):
     | plan RESULT MODEL SECONDS [TASKS] [--revision] (a planning session; done, stopped,
       interrupted or timeout; not part of outcomes_report)
     | catchup BRANCH (the human recorded a Codex catch-up of that branch)
-    | gate pass|fail|timeout SECONDS (one host gate run of ai-run; read by gate-seconds,
-      not part of outcomes_report)
+    | gate pass|fail|timeout SECONDS [--id GATE_ID] (one host gate run of ai-run; read by
+      gate-seconds, not part of outcomes_report; GATE_ID is 16 lowercase hex, stored as gate_id)
     | attempt-dir (prints the attempt marker directory)
     | attempt-open TASK MODEL PID (reconciles, then prints a new attempt id and publishes its marker)
     | attempt-reconcile [OWN_PID] (logs dead runners' attempts as crashed; always exit 0)
@@ -4945,9 +4945,19 @@ def outcome(arguments):
             fail('Usage: outcome catchup BRANCH')
         record['branch'] = rest[0]
     elif kind == 'gate':
+        gate_id = None
+        if '--id' in rest:
+            # The id joins this row to its `gate` event (spec A12, merge_gates); a malformed one
+            # is a usage error with exit 2, as `event-gate` gives for the same id.
+            if len(rest) != 4 or rest[2] != '--id' or not EVENT_ID.fullmatch(rest[3]):
+                print('Error: Usage: outcome gate pass|fail|timeout SECONDS [--id GATE_ID]', file=sys.stderr)
+                sys.exit(2)
+            gate_id, rest = rest[3], rest[:2]
         if len(rest) != 2 or rest[0] not in ('pass', 'fail', 'timeout') or not rest[1].isdigit():
-            fail('Usage: outcome gate pass|fail|timeout SECONDS')
+            fail('Usage: outcome gate pass|fail|timeout SECONDS [--id GATE_ID]')
         record.update(result=rest[0], seconds=int(rest[1]))
+        if gate_id is not None:
+            record['gate_id'] = gate_id
     else:
         fail(f'Unknown outcome kind: {kind}')
     try:
@@ -4980,6 +4990,44 @@ def gate_seconds(arguments):
     if arguments:
         fail('Usage: gate-seconds')
     print(max(gate_passes(), default=0))
+
+
+GATE_EVENT_DETAILS = ('tests', 'failures', 'workers', 'task', 'stage', 'start')
+
+
+def merge_gates(rows, events):
+    """One dict per host gate from `outcome gate` ROWS and `gate` EVENTS (both already filtered
+    by the caller), each gate counted exactly once (spec A12). The outcome log never rotates but
+    misses gates that only the pipeline runs (validation, recovery); the event log has those but
+    loses events (busy lock, write failure, rotation) and may hold a duplicate after a rotation
+    crash. So neither log alone counts gates, and adding both counts the overlap twice; the
+    16-hex `gate_id` on both records joins them. Key: a valid gate_id, else a key of its own (a
+    row without an id, written before ids, is one gate and never matches an event). A key with a
+    row takes the row's seconds, result and run, and the event adds its details (tests, failures,
+    workers, task, stage, start); an event without a row is one gate by itself. Rows come first
+    in log order, then event-only gates in log order."""
+    gates = {}
+
+    def key(record, index, source):
+        gate_id = record.get('gate_id')
+        return gate_id if isinstance(gate_id, str) and EVENT_ID.fullmatch(gate_id) else (source, index)
+
+    for index, row in enumerate(rows):
+        gate_key = key(row, index, 'row')
+        gates.setdefault(gate_key, {'gate_id': gate_key if isinstance(gate_key, str) else None,
+                                    'seconds': row.get('seconds'), 'result': row.get('result'),
+                                    'run': row.get('run'), **dict.fromkeys(GATE_EVENT_DETAILS)})
+    for index, event in enumerate(events):
+        gate_key = key(event, index, 'event')
+        gate = gates.get(gate_key)
+        if gate is None:
+            gates[gate_key] = {'gate_id': gate_key if isinstance(gate_key, str) else None,
+                               'seconds': event.get('seconds'), 'result': event.get('result'),
+                               'run': event.get('run'),
+                               **{name: event.get(name) for name in GATE_EVENT_DETAILS}}
+        elif all(gate[name] is None for name in GATE_EVENT_DETAILS):
+            gate.update({name: event.get(name) for name in GATE_EVENT_DETAILS})
+    return list(gates.values())
 
 
 # TS-01: projects whose gate is under 120 s keep running it in the implementation session.

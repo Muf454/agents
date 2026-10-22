@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -438,6 +439,93 @@ class EventsGateTests(EventsFixture):
                                  (f'T{number}', None, None, None))
                 self.assertEqual(self.snapshot(*planted), before)
         self.assertEqual(len(self.lines()), len(cases))
+
+
+class EventsGateIdTests(EventsFixture):
+    def helper(self, *args, **env):
+        return subprocess.run([sys.executable, str(HELPER), *args], cwd=self.repo, env={**self.env, **env},
+                              capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+
+    def rows(self, state=None):
+        path = (state or self.state) / 'outcomes.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_events_gate_id_on_outcome_rows(self):
+        result = self.helper('outcome', 'gate', 'pass', '12', '--id', GATE_ID)
+        self.assertEqual((result.returncode, result.stderr), (0, ''))
+        self.assertEqual({k: self.rows()[0][k] for k in ('kind', 'result', 'seconds', 'gate_id')},
+                         {'kind': 'gate', 'result': 'pass', 'seconds': 12, 'gate_id': GATE_ID})
+        for args in (['--id', GATE_ID[:15]], ['--id', GATE_ID.upper()], ['--id'], ['--id', GATE_ID + '0'],
+                     ['--id', GATE_ID, 'extra'], ['--id', ''], ['--id', GATE_ID[:15] + '\n']):
+            with self.subTest(args=args):
+                result = self.helper('outcome', 'gate', 'pass', '12', *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('Usage: outcome gate pass|fail|timeout SECONDS [--id GATE_ID]', result.stderr)
+                self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.helper('outcome', 'gate', 'fail', '7').returncode, 0)
+        self.assertNotIn('gate_id', self.rows()[1])
+        # gate-seconds reads the same seconds whether the rows carry ids or not.
+        other = self.base / 'other-state'
+        for seconds in ('30', '50'):
+            self.assertEqual(self.helper('outcome', 'gate', 'pass', seconds).returncode, 0)
+            self.assertEqual(self.helper('outcome', 'gate', 'pass', seconds, '--id', os.urandom(8).hex(),
+                                         AI_STATE_DIR=str(other)).returncode, 0)
+        self.assertTrue(all('gate_id' in row for row in self.rows(other)))
+        with_ids = self.helper('gate-seconds', AI_STATE_DIR=str(other))
+        without = self.helper('gate-seconds')
+        self.assertEqual((with_ids.returncode, without.returncode), (0, 0))
+        self.assertEqual(with_ids.stdout, '50\n')
+        self.assertEqual(without.stdout, '50\n')
+        first, second = (self.shell('ai_new_id').stdout for _ in range(2))
+        self.assertRegex(first, r'\A[0-9a-f]{16}\Z')
+        self.assertRegex(second, r'\A[0-9a-f]{16}\Z')
+        self.assertNotEqual(first, second)
+
+    def test_events_gate_merge_counts_each_gate_once(self):
+        ids = {name: name * 16 for name in 'abc'}
+
+        def row(seconds, name=None):
+            return {'kind': 'gate', 'result': 'pass', 'seconds': seconds, 'run': 'r' * 16,
+                    **({'gate_id': ids[name]} if name else {})}
+
+        def event(name, seconds, tests=None, **extra):
+            return {'kind': 'gate', 'gate_id': ids[name], 'seconds': seconds, 'result': 'pass', 'tests': tests,
+                    'failures': 0, 'workers': 4, 'task': 'T1', 'stage': None, 'start': 1700000000,
+                    'run': None, **extra}
+
+        def seconds(gates):
+            return sorted(gate['seconds'] for gate in gates)
+
+        with self.subTest('complete overlap'):
+            gates = workflow.merge_gates([row(10, 'a'), row(100, 'b')], [event('a', 10, 40), event('b', 100, 41)])
+            self.assertEqual(len(gates), 2)
+            self.assertEqual(statistics.median(seconds(gates)), 55)
+            self.assertEqual([(g['gate_id'], g['tests'], g['run']) for g in gates],
+                             [(ids['a'], 40, 'r' * 16), (ids['b'], 41, 'r' * 16)])
+        with self.subTest('partial event loss'):
+            gates = workflow.merge_gates([row(10, 'a'), row(100, 'b')], [event('b', 100, 41)])
+            self.assertEqual(len(gates), 2)
+            self.assertEqual(statistics.median(seconds(gates)), 55)
+            self.assertEqual([g['tests'] for g in gates], [None, 41])
+        with self.subTest('events rotated away'):
+            gates = workflow.merge_gates([row(10, 'a'), row(100, 'b')], [])
+            self.assertEqual((len(gates), seconds(gates)), (2, [10, 100]))
+        with self.subTest('legacy rows without gate_id'):
+            gates = workflow.merge_gates([row(30), row(50), row(70, 'c')], [event('c', 70, 9)])
+            self.assertEqual((len(gates), seconds(gates)), (3, [30, 50, 70]))
+            self.assertEqual([g['gate_id'] for g in gates], [None, None, ids['c']])
+            self.assertEqual(gates[2]['tests'], 9)
+        with self.subTest('event-only validation gate'):
+            only = event('b', 200, 5, task=None, stage='final-validation')
+            gates = workflow.merge_gates([row(10, 'a')], [only])
+            self.assertEqual((len(gates), seconds(gates)), (2, [10, 200]))
+            self.assertEqual((gates[1]['stage'], gates[1]['tests']), ('final-validation', 5))
+        with self.subTest('row seconds win'):
+            gates = workflow.merge_gates([row(10, 'a')], [event('a', 13, 7, result='fail')])
+            self.assertEqual([(g['seconds'], g['result'], g['tests']) for g in gates], [(10, 'pass', 7)])
+        with self.subTest('duplicate event after a rotation crash'):
+            gates = workflow.merge_gates([], [event('a', 10, 40), event('a', 10, 40)])
+            self.assertEqual(len(gates), 1)
 
 
 class EventsRotationTests(EventsFixture):

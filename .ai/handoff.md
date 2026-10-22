@@ -44,6 +44,11 @@
   days old; any project) stay live; no rotation when less than a quarter of the cap would be
   dropped. Temp file + fsync + `os.replace` for the archive, then the live file, then a directory
   sync; a rotation failure is silent and the append still happens. docs/workflow.md paragraph.
+- T222 (ME-01 part 1, review P18, 2026-10-22): `outcome gate … [--id GATE_ID]` stores a 16-hex
+  `gate_id` (malformed → exit 2, nothing written); `common.sh` `ai_new_id`; pure
+  `workflow.py merge_gates(rows, events)` counts each gate once across outcome rows and gate
+  events (id join, row's seconds/result/run win, event adds the counts; id-less rows and
+  event-only gates count alone). No caller passes `--id` yet (T220); T209/T211 use the merge.
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -232,8 +237,14 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   (`test_events_gate_parses_the_gate_log`); a FIFO stamp or log, a symlinked log or `.ai/local`,
   an outside log path and an oversized stamp return promptly with null counts, every planted entry
   unchanged (`test_events_gate_unsafe_records_return_promptly`).
-- `events_gate` (later parts: T222:
-  `gate_id` on rows, each gate counted once across rows and events; T220: runner, pipeline
+- `events_gate_id` / `events_gate_merge` (T222, DONE): `outcome gate pass 12 --id <16 hex>` stores
+  `gate_id`, a 15-hex, upper-case, missing or extra `--id` exits 2 with no row, a row without
+  `--id` has no `gate_id`, `gate-seconds` is the same with and without ids, `ai_new_id` prints 16
+  lowercase hex and differs per call (`test_events_gate_id_on_outcome_rows`); `merge_gates` counts
+  complete overlap, partial event loss, rotated-away events, legacy id-less rows, an event-only
+  validation gate and a duplicate event once each, the row's seconds win
+  (`test_events_gate_merge_counts_each_gate_once`).
+- `events_gate` (later part: T220: runner, pipeline
   validation and recovery gates pass/fail/timeout, epoch starts and row-matching durations, none
   after a gate change),
   `events_stop` (T208), `events_run_end` (T209), `events_lock_held` (T221: pipeline completion,
@@ -253,5 +264,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T206 (T219: secret redaction in `event_text`).
+The runner continues with the next task after T222 (T220: `gate` events from every host gate).
 Nothing is merged or deployed.

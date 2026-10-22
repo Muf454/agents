@@ -1396,6 +1396,11 @@ branch, result, seconds); `outcomes-report` skips these lines. `gate-seconds` pr
 project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0` with none or no
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
+With `--id GATE_ID` (16 lowercase hex from `ai_new_id`, else exit 2 and nothing written) the row
+also stores `gate_id`, the same id as the gate's `gate` event, and `merge_gates` counts each gate
+once across both logs: a row and an event with one id are one gate (the row's seconds, result and
+run; the event's tests, failures, workers, task, stage and start), a row without an id or an event
+without a row is a gate of its own (spec A12).
 
 Flow events (ME-01) go to a separate `<state root>/events.jsonl`, not to new kinds in
 `outcomes.jsonl`. Decision (2026-10-22): `outcomes.jsonl` must never rotate (attempt numbering,

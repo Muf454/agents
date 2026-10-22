@@ -6071,7 +6071,7 @@ gate (BATCH 10 GATE RULE); an in-session ai-check was started by mistake and is 
 Docs: docs/workflow.md paragraph. Flow unchanged (no callers until T220).
 
 ## T222 — One gate id on the outcome gate row and the gate event, each gate counted once (ME-01 part 1, review round 3 P18)
-Status: TODO
+Status: DONE
 Dependencies: T203, T216, T207
 Model: opus
 
@@ -6127,6 +6127,19 @@ Targeted: `bash -n scripts/lib/common.sh`.
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): `outcome gate pass|fail|timeout SECONDS [--id GATE_ID]` stores a valid
+id as `gate_id`; a malformed `--id` (15 hex, upper case, no value, extra argument, trailing newline)
+prints the usage and exits 2 with nothing written; the other usage errors stay exit 1 as before
+(`test_gate_time_outcome_records_a_gate_run` unchanged). `common.sh` `ai_new_id` (od, no helper).
+`workflow.py merge_gates(rows, events)` (pure, docstring with the counting rule): key = valid
+`gate_id` else one key per record; the row's seconds/result/run win, the event adds tests, failures,
+workers, task, stage, start; event-only gates count once; a duplicate event (rotation crash) of one
+id is one gate. No caller passes `--id` yet (T220). docs/workflow.md: paragraph after the
+`outcome gate` description. Flow unchanged.
+Evidence: `-k events_gate_id -k events_gate_merge` Ran 2 tests OK (7 subTests in the merge test,
+exact numbers); `-k gate_time -k session_gate_mode -k events_gate_parses` Ran 6 tests OK;
+`bash -n scripts/lib/common.sh` OK. Full gate left to the host gate (BATCH 10 GATE RULE; an
+in-session ai-check started by mistake is not evidence).
 
 ## T220 — `gate` events from every host gate, failed and timed-out recovery gates included (ME-01 part 1, gate wiring)
 Status: TODO
