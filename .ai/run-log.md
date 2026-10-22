@@ -607,3 +607,4 @@
 | 2026-10-22T15:53:16Z | runner | T307 | stopped (exit 1); inspect state/diff before resuming | see local logs | 2f74653 | No merge or deployment performed |
 | 2026-10-22T16:30:00Z | claude (opus) | T307 | DONE (resume): code in recovery checkpoint 8d45821 reviewed against the notes; no source change | -k human_stop 19 OK, -k watchdog 62 OK; recovery gate PASS 16:08:15Z on 8d45821 | 8d45821 | vault flow chart and hub Log already updated |
 | 2026-10-22T17:05:20Z | runner | T307 | completed | PASS | 25f38dd | Claude checkpointed; continuing queue |
+| 2026-10-22T17:25:10Z | claude (opus) | T308 | DONE: ai-pipeline --stop [CHECKOUT] [--wait S] → workflow.py run-stop (record-only lookup, identity twice, request-stop, SIGTERM group or pid, poll; exit 0/3/4/1); 7 test_stop_command_* tests | -k stop_command 7 OK; ai-check PASS 1171 OK (936 s) | see next entry | README, docs/workflow.md, vault flow chart and hub Log updated |

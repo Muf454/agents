@@ -25,8 +25,37 @@ an interrupted review triage is verified and recorded once, and pending re-check
 rejected findings run, before anything else.
 Usage limits pause and resume (see ai-run); a reset beyond AI_LIMIT_MAX_WAIT is relaunched by the
 watchdog timer (--recover), at most AI_LIMIT_RELAUNCH_MAX times per run. Notifications use AI_NOTIFY_CMD.
+ai-pipeline --stop [CHECKOUT] [--wait SECONDS] stops the checkout's current run (default: this
+checkout; waits up to SECONDS, default 60): exit 0 stopped (or recorded as stopped when its process
+is already gone), 3 no run to stop, 4 signalled but still ending (rerun to wait again), 1 error.
 EOF
 }
+# Stop the checkout's run (RC-01 G1): found through its run record, never by command line; no
+# checkout lock (the running pipeline holds it) and no last-error write.
+if [[ "${1:-}" == --stop ]]; then
+  shift
+  stop_checkout=. stop_wait=60
+  while (( $# )); do
+    case "$1" in
+      --wait)
+        if (( $# < 2 )) || [[ ! "$2" =~ ^[1-9][0-9]{0,3}$ ]]; then
+          printf '%s\n' 'Error: --wait must be 1-9999 seconds' >&2; exit 1
+        fi
+        stop_wait=$2; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      -*) printf 'Error: Unknown argument: %s\n' "$1" >&2; exit 1 ;;
+      *)
+        [[ "$stop_checkout" == . ]] || { printf '%s\n' 'Error: only one CHECKOUT' >&2; exit 1; }
+        stop_checkout=$1; shift ;;
+    esac
+  done
+  stop_root=$(git -C "$stop_checkout" rev-parse --show-toplevel 2>/dev/null) || {
+    printf 'Error: Not a Git checkout: %s\n' "$stop_checkout" >&2; exit 1; }
+  cd -- "$stop_root"
+  [[ -d .ai && ! -L .ai ]] || { printf '%s\n' 'Error: Missing/unsafe .ai directory.' >&2; exit 1; }
+  python3 "$AI_BIN/lib/workflow.py" paths "$stop_root"
+  exec python3 "$AI_BIN/lib/workflow.py" run-stop --wait "$stop_wait"
+fi
 orig_args=("$@")
 base=main; pr_base=''; max_fix_rounds=2; draft=no; open_pr=yes; approved=no; plan_review=yes
 knowledge_dir=''

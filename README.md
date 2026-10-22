@@ -410,6 +410,12 @@ tmux new -s my-app-ai
    branch head equals HEAD; any mismatch stops the run.
 5. **Notify** at start, pause, stop, and PR (`AI_NOTIFY_CMD`, see below).
 
+`ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` stops a checkout's running pipeline from
+any terminal: it finds the run through its run record,
+verifies the process, sends SIGTERM and waits (default 60 s). Exit 0 stopped, 3 nothing to stop,
+4 still ending (rerun to wait again), 1 error; a stopped run is never resumed automatically (see
+`docs/workflow.md`).
+
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed
 dispositions for that review are reused, an interrupted triage is completed (counted

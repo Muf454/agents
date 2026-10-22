@@ -6158,7 +6158,7 @@ the notes (`mark_crashed` relies on `run_change`'s still-current check). Rerun o
 `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK. No source change in this session.
 
 ## T308 — `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]`: find, verify, signal, wait (RC-01 G1, command)
-Status: TODO
+Status: DONE
 Dependencies: T307, T318, T323
 Model: opus
 
@@ -6219,6 +6219,15 @@ Targeted: `python3 -m unittest discover -s tests -k stop_command` (must say `Ran
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` dispatches before option parsing
+(cd into the checkout, paths check, no lock, no `last-error` write) to `workflow.py run-stop`
+(`run_stop`, `stop_gone`, `stop_signal`): run found only through `runs/current`, id kept;
+identity → `request_stop(expect=…)` → identity → SIGTERM (group only when pgid == pid and not
+the caller's group, else the pid; never PID ≤ 1) → poll 0.2 s (liveness read before the record).
+Exit 0 / 3 / 4 / 1 with the planned messages; an ended record is never rewritten. Evidence:
+`-k stop_command` Ran 7 OK (15.6 s): the six acceptance tests plus `test_stop_command_arguments`;
+`.ai/bin/ai-check` PASS, Ran 1171 tests OK (936 s). Docs: README, `docs/workflow.md` (exit-status
+table), vault flow chart and hub Log. T319 adds the local completion and relaunch message.
 
 ## T319 — `--stop` completion bound to its run; relaunch cancel; stopping a recovery (RC-01 G1, plan review P4, P5, P9)
 Status: TODO

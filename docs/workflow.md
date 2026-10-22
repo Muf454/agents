@@ -334,6 +334,25 @@ commit. The publication stage is reached too: `git push` runs through `ai_run_ch
 to one ignored `.ai/local/publish-*.out` file (a trap does not run while the shell waits on a
 command substitution) that `finish` and the stop remove. The TERM reaches the `git` or `gh`
 process only: a push hook that git started may outlive it (known limitation).
+
+`ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` stops a checkout's run from anywhere (default
+CHECKOUT `.`, wait 60 s, 1–9999). It changes into the checkout, runs the paths safety check
+(no checkout lock: the running pipeline holds it; no `last-error` write) and runs `workflow.py
+run-stop`, which finds the run only through the current run record and keeps that id for every
+later step. A live run: it checks the recorded identity (pid and start ticks), records the stop
+request `via ai-pipeline --stop` (refused when the identity changed meanwhile), checks the
+identity again, sends SIGTERM to the run's process group when the recorded pid leads it and it
+is not the caller's own group, else to the pid alone (never PID 1), and polls every 0.2 s. The
+run's own trap then ends it as a human stop with the records above, the run-log row naming
+`ai-pipeline --stop`. Exit statuses:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `Run <id> stopped (stopped by you).`; or the run ended on its own first: `Run <id> ended (<outcome>) before the stop took effect; nothing will resume it.` (an ended record is never rewritten); or the record was still `running`/`paused` but its process is gone (or its pid now belongs to another process, which is never signalled): the stop request and `human_stop` are recorded so neither `ai-recover` nor the watchdog resumes it, `Run <id> was not running (its process is gone); recorded as stopped by you, it will not be resumed.` |
+| 3 | Nothing to stop, nothing written: `No run active in <checkout>.`, `No run active in <checkout> (run <id> ended <outcome>).` or, after an earlier stop, `Run <id> was already stopped by you.` |
+| 4 | `Signalled run <id>; still ending after N s. Rerun to wait again.` The request stays recorded, so recovery refuses the run. |
+| 1 | Invalid arguments, not a Git checkout, unsafe paths, the run replaced meanwhile, or another error. |
+
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

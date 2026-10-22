@@ -51,6 +51,16 @@
   copy: a dead pipeline whose run was stopped gets one ⛔ STOPPED by you and no recovery; an
   unrecovered death ends the record `crashed`. `docs/workflow.md` "Recovery contract" and
   "Checkout health monitoring"; vault flow chart recovery part updated.
+- T308 (2026-10-22): `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` (bash dispatch before
+  option parsing: cd into the checkout, paths check, no checkout lock, no `last-error` write)
+  execs `workflow.py run-stop`: the run is found only through `runs/current` and kept by id;
+  identity checked, `request-stop --expect-*`, identity checked again, SIGTERM to the group when
+  the pid leads it and it is not the caller's group (else the pid alone, never PID 1), polled
+  every 0.2 s. Exit 0 stopped / ended on its own first (record untouched) / process gone or pid
+  reused (request + `settle-stop` → `human_stop`, the other process never signalled); 3 no run,
+  ended run or "already stopped by you" (nothing written); 4 still ending after the wait; 1
+  error. The local completion (escalation, marker, last-error) is T319's. README, `docs/workflow.md`
+  (exit-status table), vault flow chart and hub Log updated.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -118,6 +128,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T308: `-k stop_command` Ran 7 OK (15.6 s); full gate result in the T308 notes.
 2026-10-22, T307: `-k human_stop` Ran 19 OK, `-k watchdog` Ran 62 OK; full gate PASS 16:08:15Z on
 recovery checkpoint 8d45821.
 2026-10-22, T323: `-k human_stop` Ran 16 OK, `-k pr_` Ran 33 OK, `-k push` Ran 13 OK; full gate
@@ -172,7 +183,9 @@ Recorded as B1–B24 in `.ai/project-spec.md`. The ones that shape behaviour mos
 Flow chart updated: T306 added the "Stopped by you" path (interrupt → child ended → inline gate
 check → record or nothing → ⛔ STOPPED by you, no recovery) and its notification row. T307 added
 the recovery's run-record check (stopped by you → no recovery), the watchdog's "stopped by you"
-edge and an interrupt during the recovery decision going to the human-stop path. T303, T306, T307, T308, T311, T313 and T320 change the
+edge and an interrupt during the recovery decision going to the human-stop path. T308 named
+`ai-pipeline --stop` on the "You stop the pipeline" node and added its "process already gone →
+record human_stop" edge. T303, T306, T307, T308, T311, T313 and T320 change the
 flow and update the vault `agents-flow.md` and the hub Log in their own task; T314 audits them.
 
 ## For mission control (phase 2 switch; filled in by T314)
@@ -297,6 +310,15 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
   wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
   stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
+  Done so far (T308): `test_stop_command_stops_a_running_pipeline` (from outside the checkout:
+  exit 0 within a scaled 60 s, pipeline 143, T306 records with `via ai-pipeline --stop`),
+  `test_stop_command_not_group_leader` (only the pid is signalled; a sibling in the group
+  survives), `test_stop_command_no_run` (exit 3, bytes unchanged, "already stopped by you"),
+  `test_stop_command_dead_process_is_recorded` (`human_stop`; `ai-watchdog --recover` launches
+  nothing), `test_stop_command_identity_mismatch` (an unrelated live pid is not signalled),
+  `test_stop_command_wait_expires` (TERM-ignoring runner: exit 4 after `--wait 2`, request kept,
+  `ai-recover` refuses), `test_stop_command_arguments` (invalid `--wait`, not a checkout, default
+  checkout, no `last-error`).
 - `ai_task` (T310, T312, T322): lock, `--commit`, dirty or protected refusal, hook failure, plain
   `set` unchanged; retry, model, skip; reauthorize and its refusals.
 - `skip` (T311): SKIPPED semantics, forged status refused, new branch, merge and second worktree,
@@ -316,6 +338,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323 and T307 are DONE (T302's gate PASSED on 086ff5f's source).
-Next: T308 (`ai-pipeline --stop`), then the rest of the queue by dependency.
+T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
+Next: the rest of the queue by dependency (T319 completes `--stop`).
 Nothing is merged or deployed.

@@ -11344,6 +11344,161 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.pid_only_publication_stop('mock-gh.pid', MOCK_GH_HOLD='1')
         self.assertEqual([call[:2] for call in self.gh_calls()], [['pr', 'view']])
 
+    # `ai-pipeline --stop` (RC-01 G1, T308): found through the run record, verified, SIGTERM, waited.
+    def stop_command(self, *args, expected=0, timeout=None):
+        """`ai-pipeline --stop <checkout> ARGS…` run from outside the checkout."""
+        result = subprocess.run([str(self.project / '.ai/bin/ai-pipeline'), '--stop', str(self.project), *args],
+                                cwd=self.base, env=self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=timeout or 60 * TIMEOUT_SCALE + SHORT_TIMEOUT)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def stop_pipeline(self, command):
+        """Start COMMAND (a fixture pipeline) in its own session, stop it with `--stop` once its
+        sleeping fake session runs; asserts the T306 records named `ai-pipeline --stop`."""
+        stopped = {}
+
+        def send(runner):
+            started = time.monotonic()
+            stopped['result'] = self.stop_command()
+            stopped['seconds'] = time.monotonic() - started
+        code, output = self.interrupt_session(command, 'mock-session.pid', send, AI_AUTO_RECOVER='1',
+                                              MOCK_CLAUDE='sleep')
+        self.assertEqual(code, 143, output)
+        self.assertLess(stopped['seconds'], 60 * TIMEOUT_SCALE)
+        record = self.pipeline_records()[-1]
+        self.assertIn(f'Run {record["id"]} stopped (stopped by you).', stopped['result'].stdout)
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'ai-pipeline --stop'))
+        self.assert_not_recovered()
+        [line] = self.human_stop_lines()
+        self.assertIn('during build.', line)
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']), ('human_stop', 'build'))
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.assertIn('stopped by the human (ai-pipeline --stop)', (self.project / '.ai/run-log.md').read_text())
+        return record
+
+    def test_stop_command_stops_a_running_pipeline(self):
+        self.ready()
+        record = self.stop_pipeline(self.pipeline_command())
+        self.assertEqual(record['process']['pgid'], record['process']['pid'])
+
+    def test_stop_command_not_group_leader(self):
+        self.ready()
+        sibling_file = self.base / 'sibling.pid'
+        # The fixture shell leads the group; its background sibling shares it with the pipeline.
+        shell = ('sleep 300 >/dev/null 2>&1 & echo $! > "$0"\n'
+                 '"$@"\nexit $?\n')
+        sibling = None
+        try:
+            record = self.stop_pipeline(['bash', '-c', shell, str(sibling_file), *self.pipeline_command()])
+            sibling = int(sibling_file.read_text())
+            self.assertNotEqual(record['process']['pgid'], record['process']['pid'])
+            os.kill(sibling, 0)  # still alive: only the pipeline's pid was signalled
+        finally:
+            if sibling is None and sibling_file.exists():
+                sibling = int(sibling_file.read_text())
+            if sibling is not None:
+                with contextlib.suppress(OSError):
+                    os.kill(sibling, signal.SIGKILL)
+
+    def test_stop_command_no_run(self):
+        self.ready()
+        result = self.stop_command(expected=3)
+        self.assertIn(f'No run active in {self.project}.', result.stderr)
+        self.assertFalse(self.run_records().exists() and list(self.run_records().glob('*.json')))
+        # An ended record is left byte for byte.
+        me = str(os.getpid())
+        run_id = self.run_record_start(os.getpid())
+        self.run_record('end', '--run', run_id, '--pid', me, 'finished')
+        before = self.run_record_bytes(run_id)
+        result = self.stop_command(expected=3)
+        self.assertIn(f'No run active in {self.project} (run {run_id} ended finished).', result.stderr)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+        # A second stop after a stop.
+        run_id = self.dead_run_record()
+        self.stop_command()
+        before = self.run_record_bytes(run_id)
+        result = self.stop_command(expected=3)
+        self.assertIn(f'Run {run_id} was already stopped by you.', result.stderr)
+        self.assertEqual(self.run_record_bytes(run_id), before)
+
+    def test_stop_command_dead_process_is_recorded(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        run_id = self.dead_run_record()
+        self.crashed_marker()
+        result = self.stop_command()
+        self.assertIn(f'Run {run_id} was not running (its process is gone); recorded as stopped by you, '
+                      'it will not be resumed.', result.stdout)
+        record = self.run_record_data(run_id)
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'ai-pipeline --stop'))
+        self.host_watchdog('--recover', expected=None, AI_AUTO_RECOVER='1')
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+
+    def test_stop_command_identity_mismatch(self):
+        self.ready()
+        child = self.run_record_fixture()
+        run_id = self.run_record_start(child.pid)
+        path = self.run_records() / f'{run_id}.json'
+        data = json.loads(path.read_text())
+        data['process']['start_ticks'] += 1
+        path.write_text(json.dumps(data) + '\n')
+        result = self.stop_command()
+        self.assertIn(f'Run {run_id} was not running (its process is gone)', result.stdout)
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+        time.sleep(0.2)
+        self.assertIsNone(child.poll(), 'the unrelated process was signalled')
+
+    def test_stop_command_wait_expires(self):
+        self.ready()
+        self.start_recoverable_run()
+        # A fixture runner that ignores SIGTERM: it records its run, then sleeps with TERM ignored.
+        ids = self.base / 'stubborn-run'
+        runner = subprocess.Popen(
+            ['bash', '-c', 'trap "" TERM\npython3 "$0" run-record start pipeline feature/test - - --pid $$ -- '
+             '--approved --base main --no-pr > "$1"\nexec sleep 300\n', str(HELPER), str(ids)],
+            cwd=self.project, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            start_new_session=True)
+        try:
+            deadline = time.monotonic() + SHORT_TIMEOUT
+            while not (ids.exists() and ids.read_text().strip()):
+                if runner.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the fixture runner never recorded its run')
+                time.sleep(0.05)
+            run_id = ids.read_text().strip()
+            started = time.monotonic()
+            result = self.stop_command('--wait', '2', expected=4)
+            self.assertGreaterEqual(time.monotonic() - started, 2)
+            self.assertIn(f'Signalled run {run_id}; still ending after 2 s. Rerun to wait again.', result.stderr)
+            self.assertIsNone(runner.poll())
+            record = self.run_record_data(run_id)
+            self.assertEqual((record['outcome'], record['stop_requested']['via']), ('running', 'ai-pipeline --stop'))
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+        result = self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('the run was stopped by you', result.stderr)
+        self.assertEqual(self.recovery_calls(), [])
+
+    def test_stop_command_arguments(self):
+        self.ready()
+        for args in (('--wait', '0'), ('--wait', '10000'), ('--wait',), ('--bogus',)):
+            with self.subTest(args=args):
+                self.stop_command(*args, expected=1)
+        result = subprocess.run([str(self.project / '.ai/bin/ai-pipeline'), '--stop', str(self.base / 'missing')],
+                                cwd=self.base, env=self.env, capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Not a Git checkout', result.stderr)
+        # From inside the checkout, the default CHECKOUT is the current one.
+        result = subprocess.run([str(self.project / '.ai/bin/ai-pipeline'), '--stop'], cwd=self.project,
+                                env=self.env, capture_output=True, text=True, timeout=SHORT_TIMEOUT)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -2156,6 +2157,101 @@ def stop_requested(runs, run_id):
     if record is None:
         return None
     return record['stop_requested'] is not None or record['outcome'] == 'human_stop'
+
+
+STOP_VIA = 'ai-pipeline --stop'
+STOP_POLL_SECONDS = 0.2
+
+
+def stop_ended_message(record):
+    """Exit-0 message for a run that ended on its own after the stop began (P16: never settled)."""
+    if record['outcome'] == 'human_stop':
+        return f'Run {record["id"]} stopped (stopped by you).'
+    return f'Run {record["id"]} ended ({record["outcome"]}) before the stop took effect; nothing will resume it.'
+
+
+def stop_gone(runs, run_id, message):
+    """The run's process is gone but its record has not ended: record the request and settle it
+    as `human_stop`, so nothing resumes it. Return MESSAGE, or the ended record's own message
+    when the run ended by itself in between."""
+    request_stop(runs, run_id, STOP_VIA)
+    settled = settle_stop(runs, run_id)
+    record = read_run(runs, run_id)
+    if record is None or not run_ended(record):
+        fail(f'Run {run_id} could not be recorded as stopped.')
+    return message if settled else stop_ended_message(record)
+
+
+def stop_not_running(run_id):
+    return f'Run {run_id} was not running (its process is gone); recorded as stopped by you, it will not be resumed.'
+
+
+def stop_signal(process):
+    """SIGTERM to the run's group when its pid leads it (and it is not our own group), else to
+    the pid alone; never PID 1."""
+    pid, pgid = process['pid'], process['pgid']
+    if pid <= 1:
+        fail(f'refusing to signal process {pid}')
+    with contextlib.suppress(ProcessLookupError):  # ended in between: the wait sees it gone
+        if pgid == pid and pgid != os.getpgrp():
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+
+
+def run_stop(arguments):
+    """`run-stop [--wait SECONDS]` (RC-01 G1, `ai-pipeline --stop`): stop the checkout's current
+    run, found through its record only and kept by id. Exit 0 stopped or recorded as stopped,
+    3 nothing to stop, 4 still ending after the wait, 1 refused or error."""
+    wait = 60
+    if arguments:
+        if len(arguments) != 2 or arguments[0] != '--wait' or not re.fullmatch(r'[1-9]\d{0,3}', arguments[1]):
+            fail('Usage: run-stop [--wait SECONDS]')
+        wait = int(arguments[1])
+    runs, checkout = runs_dir(), checkout_root()
+    run_id = current_run_id(runs)
+    record = read_run(runs, run_id) if run_id else None
+    if record is None:
+        print(f'No run active in {checkout}.', file=sys.stderr)
+        sys.exit(3)
+    if run_ended(record):
+        if record['outcome'] == 'human_stop':
+            print(f'Run {run_id} was already stopped by you.', file=sys.stderr)
+        else:
+            print(f'No run active in {checkout} (run {run_id} ended {record["outcome"]}).', file=sys.stderr)
+        sys.exit(3)
+    process = record['process']
+    if not run_process_alive(process):
+        print(stop_gone(runs, run_id, stop_not_running(run_id)))
+        return
+    if not request_stop(runs, run_id, STOP_VIA, expect=(process['pid'], process['start_ticks'])):
+        latest = read_run(runs, run_id)
+        if latest is not None and run_ended(latest):
+            print(stop_ended_message(latest))
+            return
+        fail(f'Run {run_id} is no longer the current run of {checkout}; nothing signalled.')
+    # Checked again just before the signal: a pid reused since the request is never signalled.
+    identity = process_identity(process['pid'])
+    if identity is None or identity['start_ticks'] != process['start_ticks']:
+        print(stop_gone(runs, run_id, stop_not_running(run_id)))
+        return
+    stop_signal(identity)
+    deadline = time.monotonic() + wait
+    while True:
+        # Liveness first: once the process is gone, every record write it made is visible.
+        alive = run_process_alive(process)
+        latest = read_run(runs, run_id)
+        if latest is not None and run_ended(latest):
+            print(stop_ended_message(latest))
+            return
+        if not alive:
+            print(stop_gone(runs, run_id, f'Run {run_id} stopped (stopped by you).'))
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(STOP_POLL_SECONDS)
+    print(f'Signalled run {run_id}; still ending after {wait} s. Rerun to wait again.', file=sys.stderr)
+    sys.exit(4)
 
 
 def run_lifecycle(action, rest, runs):
@@ -6284,6 +6380,8 @@ def main():
         run_manifest(arguments)
     elif command == 'run-record':
         run_record(arguments)
+    elif command == 'run-stop':
+        run_stop(arguments)
     elif command == 'escalation':
         escalation(arguments)
     elif command == 'ruling-row':
