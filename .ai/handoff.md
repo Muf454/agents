@@ -70,6 +70,16 @@
   `paused` run with `limit_relaunch_at` prints "Cancelled the scheduled usage-limit relaunch of
   <id>."; a recovery is stopped through its own record and trap. `.ai/local` is created when
   missing (as `ai_root`). `docs/workflow.md` "Completion (T319)". Flow unchanged beyond T308.
+- T320 (2026-10-22): escalation records written at every stop for a human. `common.sh`
+  `ai_escalation_write other STAGE` (STAGE made a step key: `plan review` → `plan-review`,
+  `crash (…)` → `crash`, invalid → `other`; skipped without `AI_RUN_ID`; sets
+  `AI_ESCALATION_WRITTEN=1` also when the helper failed). Called after a passing gate check by
+  `ai-pipeline` `stop()` (non-recovery path, before `ai_die`), `ai_die` in a pipeline (only when
+  nothing was written yet, after the run record's end), `ai-recover` `escalate()` (beside its
+  run-record end, skipped with `AI_GATE_BROKEN`; `AI_STAGE` is now computed before the first
+  possible escalation) and a stand-alone `ai-run`'s `on_exit` stop path (one line). The kind comes
+  from the hint or the stage, never from `last-error`. `docs/workflow.md` "Writers (T320)", vault
+  flow chart bullet "Escalation record (G9)" and hub Log.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -299,6 +309,16 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_escalation_repeated_write_keeps_kind`, `test_escalation_only_for_the_current_run`,
   `test_escalation_cleared_by_new_run_and_resume`, `test_escalation_clear_and_invalid`,
   `test_escalation_answers_belong_to_the_current_run`, `test_escalation_stop_request_wins`.
+  T320 (records read after the stopping process exited): `test_escalation_wiring_task_blocked`,
+  `test_escalation_wiring_plan_review_stop_final_record` (stage `plan-review`; the mock plan
+  review gives MAJOR findings, the same stop path as a BLOCKER),
+  `test_escalation_wiring_validation_and_recovery`, `test_escalation_wiring_recovery_crash_and_resume`
+  (a recovery's escalation `other`, the crash stage → `crash`, a resuming recovery removes it),
+  `test_escalation_wiring_standalone_ai_run` (after a `--max-fix-rounds 3` pipeline: no
+  `ai-pipeline` answer, `resume` = `.ai/bin/ai-run --approved`; a fresh `ai-run` removes it),
+  `test_escalation_wiring_cleared_on_human_start`, `test_escalation_wiring_ignores_last_error_text`,
+  `test_escalation_wiring_not_after_gate_change` (pipeline) and `_standalone` (no record, no
+  sentinel).
 - `human_stop` (T306, T318, T323, T307): trap records, bookkeeping commit, stop request in
   `stop()`, gate tampering with a child failure and with an interrupt; PID-only stop in
   implementation, review, validation, dependency setup, the retry wait, `git push`, `git
@@ -359,5 +379,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
-Next: the rest of the queue by dependency (T319 completes `--stop`).
+T319, T309 and T320 are DONE as well.
+Next: the rest of the queue by dependency (T321 the fix-round limit record).
 Nothing is merged or deployed.

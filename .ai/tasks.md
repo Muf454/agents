@@ -6346,7 +6346,7 @@ unchanged. Tests: `test_escalation_hint_task_blocked`, `_plan_kinds`, `_needs_hu
 `.ai/bin/ai-check` PASS, Ran 1180 OK (892.5 s).
 
 ## T320 — Escalation records written at every stop for a human, gate first (RC-01 G9, writes)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T307, T309
 Model: opus
 
@@ -6410,6 +6410,8 @@ Targeted: `python3 -m unittest discover -s tests -k escalation` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+
+- Mission control 2026-10-22 21:42: both sessions timed out (slow in-session gate, FL-38/FL-32). The uncommitted work covers every listed module and the handoff describes it. Mission control ran on that working tree: `python3 -m unittest -k escalation_wiring test_workflow` 9 tests OK (66 s), and the full `.ai/bin/ai-check`: Ran 1189 tests, OK (973 s). Next session: check the work against the acceptance criteria, finish anything missing, run only targeted tests (do NOT run the full `ai-check`; the runner's gate follows the session), then checkpoint.
 
 ## T321 — Fix-round limit escalation on every finish path (RC-01 G9, B9, plan review round 3 P19)
 Status: TODO

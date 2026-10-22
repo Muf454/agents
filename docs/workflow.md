@@ -70,7 +70,7 @@ the first. `settle-stop --run ID` (also `settle_stop()` for `run-stop`) ends a s
 not-ended run whose process is gone as `human_stop`. `stop-requested --run ID` exits 0 when a
 stop is requested or the outcome is `human_stop`, 1 when not.
 
-**Escalation record (RC-01 G9, T305; helper only, no writer yet).** `workflow.py escalation`
+**Escalation record (RC-01 G9, T305 helper, T309 hints, T320 writers).** `workflow.py escalation`
 keeps `escalation.json` (schema 1) beside `run.json`: why the current run waits for a human.
 `write KIND STAGE --run ID [--task T…]… [--finding ID]… [--review PATH]` and `hint KIND --run ID
 [--task …]… [--finding …]…` hold `runs/.lock` and exit 3, writing nothing, when ID is not the
@@ -91,7 +91,22 @@ while `--max-fix-rounds` + 1 ≤ 5); every kind ends with `resume` (a pipeline's
 stand-alone `ai-run`'s only for a task run: `--approved` without `--plan`, `--triage`,
 `--revise-plan`). `usage_limit` adds `not_before` from `.ai/local/limit-stop`. `show` prints it
 (exit 1 when absent, not schema 1 or malformed; an unknown kind reads as `other`); `clear` removes
-record and hint. `run-record start` and `run-record resume` remove both.
+record and hint. `run-record start` and `run-record resume` remove both (a new run or an
+automatic resume; a recovery that only takes the run over does not); nothing else clears it.
+Readers treat an unknown kind as `other`.
+
+Writers (T320): every stop that waits for a human writes the record for its own run (`AI_RUN_ID`)
+through `ai_escalation_write other STAGE` (`lib/common.sh`), so the kind comes from the hint or the
+stage, never from `last-error` text; STAGE is made a step key (`plan review` → `plan-review`,
+`crash (…)` → `crash`, anything invalid → `other`). Each write runs only after a passing gate check
+in its path, so no checkout helper writes one after the gate changed. One write per shutdown chain
+(the first consumes the hint): each site sets `AI_ESCALATION_WRITTEN=1`, also when the helper
+failed. Sites: `ai-pipeline` `stop()` on its non-recovery path (before `ai_die`, which then skips
+its own); `ai_die` inside a pipeline only for a direct `ai_die` without `stop()` (stage
+`${AI_STAGE:-other}`, after the run record's end); `ai_human_stop` (`human_stop`); `ai-recover`
+`escalate()` (skipped with `AI_GATE_BROKEN` or without a run id; the watchdog's crash stage gives
+`crash`) and its `stopped_by_human`; a stand-alone `ai-run`'s `on_exit` stop path. The watchdog
+writes none. Tests: `test_escalation_wiring_*`.
 
 ## Validation and evidence
 

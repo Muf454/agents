@@ -613,3 +613,4 @@
 | 2026-10-22T18:23:37Z | runner | T319 | completed | PASS | b29701d | Claude checkpointed; continuing queue |
 | 2026-10-22T18:46:00Z | claude (sonnet) | T309 | DONE: ai_escalation_hint at the plan, validation, task_blocked and usage_limit stops; new `workflow.py tasks blocked`; 5 test_escalation_hint_* tests | -k escalation_hint 6 OK; ai-check PASS 1180 OK (892.5 s) | see next entry | no docs yet (T320); flow unchanged |
 | 2026-10-22T18:53:39Z | runner | T309 | stopped (exit 1); inspect state/diff before resuming | see local logs | 338153e | No merge or deployment performed |
+| 2026-10-22T19:24:44Z | runner | T320 | stopped (exit 1); inspect state/diff before resuming | see local logs | 0aef581 | No merge or deployment performed |

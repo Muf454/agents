@@ -16640,9 +16640,11 @@ PY
         self.escalation('write', 'other', 'implementation', '--run', run_id)
         self.assertIsNone(self.escalation_data()['evidence']['last_error'])
 
-    # Hints at the producers of stops for a human (T309): written right before the stop.
+    # Hints at the producers of stops for a human (T309): written right before the stop, which
+    # consumes the hint into its escalation record (T320).
     def hint_data(self):
-        return json.loads(self.escalation_path('escalation-hint.json').read_text())
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+        return self.escalation_data()
 
     def test_escalation_hint_task_blocked(self):
         self.ready(queue=task('T001', 'BLOCKED'))
@@ -16784,6 +16786,100 @@ PY
         data = self.escalation_data()
         self.assertEqual((data['kind'], data['tasks']), ('human_stop', []))
         self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
+    # Writes at every stop for a human, gate first (T320): read after the stopping process exited.
+    def test_escalation_wiring_task_blocked(self):
+        self.ready(queue=task('T001', 'BLOCKED'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['tasks'], data['stage']), ('task_blocked', ['T001'], 'implementation'))
+        self.assertEqual(data['run'], self.pipeline_records()[-1]['id'])
+        self.assertIn(('retry_task', 'T001'), self.answer_ids(data))
+        self.assertFalse(self.escalation_path('escalation-hint.json').exists())
+
+    def test_escalation_wiring_plan_review_stop_final_record(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='0', AI_SUPERVISE='0', MOCK_CODEX_PLAN='major')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['stage']), ('plan_review_limit', 'plan-review'))
+        self.assertIn(('resume_skip_plan_review', None), self.answer_ids(data))
+        self.assertEqual(data['run'], self.pipeline_records()[-1]['id'])
+
+    def test_escalation_wiring_validation_and_recovery(self):
+        self.ready(queue=task('T001', 'DONE'))
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\nexit 1\n')
+        self.commit('a failing gate')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_RECOVER='escalate')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['stage']), ('validation', 'validation'))
+        self.assertEqual(data['run'], self.pipeline_records()[-1]['id'])
+
+    def test_escalation_wiring_recovery_crash_and_resume(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']), ('other', 'implementation'))
+        # The watchdog's crash stage gives kind crash.
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1,
+                  MOCK_RECOVER='escalate')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['stage'], data['run']), ('crash', 'crash', self.pipeline_records()[-1]['id']))
+        # A recovery that resumes removes the record (the resumed run then finishes).
+        self.tool('ai-recover', '--stage', 'implementation', MOCK_RECOVER='rerun')
+        self.assertEqual(self.pipeline_records()[-1]['outcome'], 'finished')
+        self.assertFalse(self.escalation_path().exists())
+
+    def test_escalation_wiring_standalone_ai_run(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', '--max-fix-rounds', '3')
+        self.assertTrue(any((self.base / 'host-state').rglob('run.json')))
+        (self.project / '.ai/tasks.md').write_text(task('T002', 'BLOCKED'))
+        self.commit('a blocked task')
+        self.tool('ai-run', '--approved', expected=1)
+        data = self.escalation_data()
+        record = self.pipeline_records()[-1]
+        self.assertEqual((data['kind'], data['tasks'], data['run']), ('task_blocked', ['T002'], record['id']))
+        self.assertEqual(record['kind'], 'ai-run')
+        self.assertFalse([a for a in data['answers'] if a['argv'][:1] == ['.ai/bin/ai-pipeline']])
+        [resume] = [a['argv'] for a in data['answers'] if a['id'] == 'resume']
+        self.assertEqual(resume, ['.ai/bin/ai-run', '--approved'])
+        self.helper('tasks', 'set', 'T002', 'TODO')
+        self.commit('reopen T002')
+        self.tool('ai-run', '--approved')
+        self.assertFalse(self.escalation_path().exists())
+
+    def test_escalation_wiring_cleared_on_human_start(self):
+        self.ready(queue=task('T001', 'BLOCKED'))
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0')
+        self.assertTrue(self.escalation_path().exists())
+        self.helper('tasks', 'set', 'T001', 'TODO')
+        self.commit('reopen T001')
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='0')
+        self.assertFalse(self.escalation_path().exists())
+
+    def test_escalation_wiring_ignores_last_error_text(self):
+        self.ready()
+        self.start_recoverable_run()
+        self.escalation_local('last-error', 'plan review needs your decision (round 1): P1: A or B?\n')
+        self.tool('ai-recover', '--stage', 'implementation', expected=1, MOCK_RECOVER='escalate')
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['stage']), ('other', 'implementation'))
+        self.assertIn('plan review needs your decision', data['evidence']['last_error'])
+
+    def test_escalation_wiring_not_after_gate_change(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='0',
+                  MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertFalse(self.escalation_path().exists())
+
+    def test_escalation_wiring_not_after_gate_change_standalone(self):
+        self.ready()
+        self.tool('ai-run', '--approved', expected=1, MOCK_CLAUDE='tamper', MOCK_TAMPER_PATH='.ai/bin/lib/workflow.py')
+        self.assertFalse((self.project / 'UNTRUSTED_HELPER_RAN').exists())
+        self.assertFalse(self.escalation_path().exists())
 
 
 class ReviewHistoryTest(unittest.TestCase):

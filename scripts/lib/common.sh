@@ -24,6 +24,8 @@ ai_die() {
        ai_gate_check "$AI_APPROVED_GATE"; then
       local reason="$*"
       ai_helper run-record end --run "$AI_RUN_ID" --pid $$ stopped "${reason:0:200}" 2>/dev/null || true
+      # A direct ai_die without stop(): stop() and ai_human_stop already wrote this chain's record.
+      [[ -n "${AI_ESCALATION_WRITTEN:-}" ]] || ai_escalation_write other "${AI_STAGE:-other}"
     fi
     # A reported stop is not a crash: drop ai-pipeline's liveness marker (see ai-watchdog).
     ai_drop_marker
@@ -240,6 +242,17 @@ ai_helper() { python3 "$AI_BIN/lib/workflow.py" "$@"; }
 ai_escalation_hint() {
   [[ -n "${AI_RUN_ID:-}" ]] || return 0
   ai_helper escalation hint "$@" --run "$AI_RUN_ID" 2>/dev/null || true
+}
+# The escalation record of this run at a stop for a human: KIND (`other` takes the hint or the
+# stage, never last-error text) and STAGE as a step key ("plan review" → plan-review,
+# "crash (…)" → crash). Callers check the gate first. One attempt per shutdown chain (plan
+# review P13): AI_ESCALATION_WRITTEN is set also when the helper failed. Usage: KIND STAGE.
+ai_escalation_write() {
+  local stage=${2%% (*}
+  stage=${stage// /-}
+  [[ "$stage" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$ ]] || stage=other
+  [[ -z "${AI_RUN_ID:-}" ]] || ai_helper escalation write "$1" "$stage" --run "$AI_RUN_ID" 2>/dev/null || true
+  AI_ESCALATION_WRITTEN=1
 }
 # The armed-tree acceptance contract (ai-pipeline, before its start check): one predicate for
 # ai-pipeline and ai-run. A resume (a human start drops the arm), the checkout exactly the armed
