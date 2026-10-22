@@ -6243,7 +6243,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('Claude session failed', (self.project / '.ai/local/last-error').read_text())
         lock.kill()
         lock.wait()
-        # A killed recovery still sends exactly one final ⛔ and drops its own marker.
+        # A terminated recovery sends exactly one final ⛔ (a human stop since T307) and drops its marker.
         slow = self.mock_bin / 'slow-claude'
         (self.mock_bin / 'claude').rename(slow)
         (self.mock_bin / 'claude').write_text('#!/usr/bin/env bash\nsleep 3\n')
@@ -6260,7 +6260,8 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         recover.terminate()
         out = recover.communicate(timeout=MEDIUM_TIMEOUT)[0].decode()
         self.assertEqual(self.notifications().count('⛔') - before, 1, out + self.notifications())
-        self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
+        self.assertIn('⛔ STOPPED by you: feature/test during implementation.', self.notifications())
+        self.assertNotIn('auto-recovery failed unexpectedly', self.notifications())
         self.assertFalse(marker.exists())
 
     def test_recovery_restores_the_approved_runs_settings(self):
@@ -11002,17 +11003,32 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted')])
         self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
 
-    def test_interrupt_reaches_the_recovery_session(self):
+    def test_human_stop_interrupt_during_recovery(self):
+        # T307: Ctrl-C to the group or TERM to the recovery's pid alone during its decision session
+        # is a human stop: recorded as one, never "failed unexpectedly", never resumed.
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
-                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
-        self.crashed_run_record()
-        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation'],
-                                              'mock-recover.pid', lambda runner: os.killpg(runner.pid, signal.SIGINT),
-                                              AI_AUTO_RECOVER='1', MOCK_RECOVER='sleep')
-        self.assertEqual(code, 130, output)
-        self.assertIn('auto-recovery failed unexpectedly (exit 130)', self.notifications())
-        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+                  AI_AUTO_RECOVER='1', AI_RECOVER_MAX='9', MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
+        recover = [str(self.project / '.ai/bin/ai-recover'), '--stage', 'implementation']
+        for name, send, expected in (('INT', lambda runner: os.killpg(runner.pid, signal.SIGINT), 130),
+                                     ('TERM', lambda runner: runner.send_signal(signal.SIGTERM), 143)):
+            with self.subTest(signal=name):
+                self.crashed_run_record()
+                run_id = self.run_record('current').stdout.strip()
+                stops = len(self.human_stop_lines())
+                code, output = self.interrupt_session(recover, 'mock-recover.pid', send,
+                                                      AI_AUTO_RECOVER='1', MOCK_RECOVER='sleep')
+                self.assertEqual(code, expected, output)
+                self.assertEqual(len(self.human_stop_lines()), stops + 1)
+                self.assertIn('during implementation.', self.human_stop_lines()[-1])
+                record = self.run_record_data(run_id)
+                self.assertEqual((record['outcome'], record['stop_requested']['via'], record['resumes']),
+                                 ('human_stop', 'signal', 0))
+                self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']),
+                                 ('human_stop', 'implementation'))
+                self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.assertNotIn('auto-recovery failed unexpectedly', self.notifications())
+        self.assertNotIn('Resuming the pipeline', self.notifications())
 
     def test_session_exit_codes_unchanged(self):
         self.ready()
@@ -11126,7 +11142,10 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 with contextlib.suppress(OSError):
                     os.kill(gate, signal.SIGKILL)
         self.assert_partial_uncommitted()
-        self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
+        # A TERM to the recovery is a human stop (T307).
+        self.assertIn('⛔ STOPPED by you: feature/test during implementation. Partial work is kept uncommitted.',
+                      self.notifications())
+        self.assertNotIn('auto-recovery failed unexpectedly', self.notifications())
 
     def test_interrupt_pid_only_limit_pause(self):
         self.ready()
@@ -15541,7 +15560,7 @@ PY
                 self.assertEqual((stopped['stage'], stopped['state']), ('checks', 'stopped'))
                 self.assertIn(f'(stopped during {label})', stopped['note'])
 
-    def test_observation_recovery_unexpected_term_stops_once_and_keeps_the_substage(self):
+    def test_observation_recovery_term_stops_once_and_keeps_the_substage(self):
         self.ready()
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1, AI_AUTO_RECOVER='1',
                   MOCK_CLAUDE='error', MOCK_RECOVER='escalate')
@@ -15550,7 +15569,7 @@ PY
                   MOCK_RECOVER_KILL='1')
         stopped = self.observation()
         self.assertEqual((stopped['stage'], stopped['state']), ('build', 'stopped'))
-        self.assertIn('auto-recovery failed unexpectedly (exit 143)', stopped['note'])
+        self.assertIn('stopped by the human', stopped['note'])  # a TERM during recovery (T307)
         self.assertEqual(self.stopped_notifications(), notified + 1)
 
     def test_observation_recovery_unexpected_failing_command_stops_once(self):
@@ -16101,7 +16120,7 @@ PY
         self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop')
         attempts = self.manifest()['attempts']
         result = self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1)
-        self.assertIn('the run was stopped by you or replaced', result.stderr)
+        self.assertIn('the run was stopped by you', result.stderr)
         self.assertEqual(self.manifest()['attempts'], attempts)
         self.assertEqual(self.recovery_calls(), [])
         self.assertFalse((self.project / '.ai/local/mock-args').exists())
@@ -16111,6 +16130,63 @@ PY
                            crashed_run=False)
         self.assertIn('there is no run record to resume', result.stderr)
         self.assertEqual(self.manifest()['attempts'], attempts)
+
+    # A human stop is never resumed by recovery or the watchdog (RC-01 G1, T307).
+    def test_human_stop_recovery_refuses(self):
+        self.ready()
+        self.start_recoverable_run()
+        run_id = self.dead_run_record()
+        self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop')
+        local = self.project / '.ai/local'
+        self.escalation_local('last-error', 'stopped by the human during build\n')
+        attempts = self.manifest()['attempts']
+        result = self.tool('ai-recover', '--stage', 'implementation', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn('the run was stopped by you; not resumed automatically', result.stderr)
+        self.assertEqual(self.manifest()['attempts'], attempts)
+        self.assertEqual(self.recovery_calls(), [])
+        self.assertFalse((local / 'mock-args').exists())
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']),
+                         ('human_stop', 'implementation'))
+        [line] = self.human_stop_lines()
+        self.assertIn('⛔ STOPPED by you: feature/test; not resumed automatically. '
+                      'Rerun ai-pipeline --approved --base main --no-pr to continue.', line)
+        self.assertNotIn('needs you', self.notifications())
+        self.assertFalse((local / 'pipeline.active').exists())
+        # Already announced (last-error.notified is newer): refused again, quietly.
+        self.tool('ai-recover', '--stage', 'crash (pipeline killed or restarted)', expected=1, crashed_run=False)
+        self.assertEqual(len(self.human_stop_lines()), 1)
+        self.assertEqual(self.escalation_data()['stage'], 'crash')
+        self.assertEqual(self.manifest()['attempts'], attempts)
+
+    def test_human_stop_watchdog_does_not_recover(self):
+        self.setup_project()
+        self.commit('bootstrap')
+        self.approve_run()
+        self.mock_systemd_run()
+        run_id = self.dead_run_record()
+        self.run_record('request-stop', '--run', run_id, '--via', 'ai-pipeline --stop')
+        self.crashed_marker()
+        for _ in range(2):
+            self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        self.assertEqual(self.launches(), '')
+        self.assertEqual(self.notifications().count(
+            '⛔ STOPPED by you: the run was stopped by the human; not resumed automatically.'), 1)
+        self.assertNotIn('needs you', self.notifications())
+        self.assertIsNone(self.run_record_data(run_id)['ended'])
+        # Without a stop request the death is recovered as before; the recovery owns the record.
+        run_id = self.dead_run_record()
+        self.crashed_marker()
+        self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1')
+        self.assertIn(str(self.project / '.ai/bin/ai-recover') + ' --stage crash', self.launches())
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'running')
+        # A death nothing recovers ends the record crashed.
+        run_id = self.dead_run_record()
+        self.crashed_marker()
+        self.host_watchdog(expected=1)
+        record = self.run_record_data(run_id)
+        self.assertEqual(record['outcome'], 'crashed')
+        self.assertIsNotNone(record['ended'])
 
     def test_run_record_standalone_ai_run(self):
         self.ready()

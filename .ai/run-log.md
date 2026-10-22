@@ -604,3 +604,4 @@
 | 2026-10-22T14:36:11Z | runner | T318 | completed | PASS | eed774e | Claude checkpointed; continuing queue |
 | 2026-10-22T15:20:00Z | claude (opus) | T323 | DONE: git push via ai_run_child, git ls-remote and every gh call via new ai_run_capture (output in .ai/local/publish-*.out, removed by finish and ai_human_stop); 3 test_human_stop_pid_only_* tests (push, ls_remote, gh) | -k human_stop 16 OK, -k pr_ 33 OK, -k push 13 OK; full gate over the 600 s tool limit, left to the runner | see next entry | vault hub Log updated; flow unchanged |
 | 2026-10-22T15:06:14Z | runner | T323 | stopped (exit 1); inspect state/diff before resuming | see local logs | a648352 | No merge or deployment performed |
+| 2026-10-22T15:53:16Z | runner | T307 | stopped (exit 1); inspect state/diff before resuming | see local logs | 2f74653 | No merge or deployment performed |

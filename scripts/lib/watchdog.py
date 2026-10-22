@@ -19,7 +19,8 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workflow import (OBSERVATION_LIMIT, check_state_root, checkout_fds, close_fds,  # noqa: E402
-                      overlap, read_record)
+                      current_run_id, now as stamp, overlap, read_record, read_run, run_change,
+                      run_ended, run_process_alive, runs_dir)
 
 # A stall must still hold this long after its first sighting: a probe right before a
 # pipeline starts (e.g. just after --install-timer) is not a killed runner.
@@ -368,6 +369,38 @@ def start_recovery(root, local, marker, stage='crash (pipeline killed or restart
     return 'auto-recovery did not confirm it started within 20 seconds'
 
 
+def current_run():
+    """(runs dir, id, record) of the current run record, read by THIS copy's code (never a
+    checkout helper), with T301's validation; (None, None, None) when there is none or it is
+    unreadable."""
+    try:
+        runs = runs_dir()
+        run_id = current_run_id(runs)
+        record = read_run(runs, run_id) if run_id else None
+    except Exception:  # noqa: BLE001 - an unsafe or missing state dir is "no record"
+        return None, None, None
+    return (runs, run_id, record) if record is not None else (None, None, None)
+
+
+def stopped_by_human(record):
+    return record is not None and (record['stop_requested'] is not None or record['outcome'] == 'human_stop')
+
+
+def mark_crashed(runs, run_id):
+    """Best effort: the death this probe does not recover ends run `run_id` as `crashed`, only
+    while it is still current, not ended and its process is gone (one atomic write under the lock)."""
+    def change(record):
+        if run_ended(record) or run_process_alive(record['process']):
+            return None
+        record.update(outcome='crashed', ended=stamp(),
+                      detail='ai-pipeline is gone without finishing or reporting a stop')
+        return record
+    try:
+        run_change(runs, run_id, change)
+    except Exception:  # noqa: BLE001 - never fail the probe over the record
+        pass
+
+
 def planning(root):
     """True when the observation record is at stage planning (a planning session or a plan
     waiting for approval, not an implementation); unreadable or malformed counts as no."""
@@ -493,7 +526,14 @@ def main():
                           or (scheduled_ns is not None and scheduled_ns > now)
                           or (scheduled_ns is not None and scheduled_ns <= now and args.recover))
         stall_seen = None
+        runs = run_id = None
         if died:
+            runs, run_id, run = current_run()
+        if died and stopped_by_human(run):
+            # The human stopped this run: theirs to rerun, never recovered (said once per run).
+            incidents['human_stop:' + run_id] = ('⛔ STOPPED by you: the run was stopped by the human; '
+                                                 'not resumed automatically.')
+        elif died:
             incidents['died:' + str(died)] = (
                 '⛔ STOPPED, needs you: ai-pipeline is gone without finishing or reporting a stop '
                 '(killed, crashed or machine restarted). Rerun ai-pipeline to resume.')
@@ -540,14 +580,18 @@ def main():
             message = ' '.join(incidents[key] for key in loud)
             if not loud and args.diagnose:
                 message = '🩺 Diagnosis of the stop (' + incidents[fresh[0]][:200] + ').'
-            if args.recover and any(key.startswith('died:') for key in fresh):
-                refused = start_recovery(root, local, marker)
+            if any(key.startswith('died:') for key in fresh):
+                refused = start_recovery(root, local, marker) if args.recover else 'no recovery'
                 if refused is None:
                     # ai-recover announces itself (🔧 Recovering / ⛔ STOPPED); stay quiet.
                     loud = [key for key in loud if not key.startswith('died:')]
                     message = ' '.join(incidents[key] for key in loud)
                 else:
-                    message += ' (' + refused + '.)'
+                    if args.recover:
+                        message += ' (' + refused + '.)'
+                    # Nothing resumes this run: its record says so (plan review P5).
+                    if run_id is not None:
+                        mark_crashed(runs, run_id)
             if not message:
                 save(state_file, json.dumps(record) + '\n')
                 return 1

@@ -922,9 +922,19 @@ original stop reason, without a Claude session, commit or attempt; then, before 
 (T316), it owns the run record (`AI_RUN_ID`, or `run-record current` for a watchdog-started
 recovery with a new pid, under the checkout lock): `run-record own --launcher ai-recover`
 puts its process in the record, so the record always names the live process; no record
-escalates (`there is no run record to resume.`), and a refusal (a stop request, an ended or
-replaced run) escalates (`the run was stopped by you or replaced; not resumed
-automatically.`), both before an attempt is reserved. Every escalation and an unexpected exit
+escalates (`there is no run record to resume.`), and a refusal (an ended or replaced run)
+escalates (`the run was stopped by you or replaced; not resumed automatically.`), both
+before an attempt is reserved. A refusal whose run the human stopped (`run-record
+stop-requested` exits 0; T307) is not an escalation: `run-record settle-stop` (or `end … stopped`,
+which a stop request turns into `human_stop`), `escalation write human_stop`, one `⛔ STOPPED by
+you: <branch>; not resumed automatically. Rerun ai-pipeline <approved args> to continue.` only
+when `last-error.notified` is older than `last-error` (the stopping process usually said it
+already), the marker removed, exit 1: no attempt, no session. Once the manifest gate is read
+`ai-recover` sets `AI_APPROVED_GATE`, and INT and TERM run `ai_human_stop` as in `ai-pipeline`:
+an interrupt during recovery (Ctrl-C to the group, `kill -TERM` to its pid) is a human stop
+(record `human_stop`, escalation `human_stop`, `⛔ STOPPED by you`), never `auto-recovery failed
+unexpectedly` and never a resume; an interrupt before the gate is read takes the gate-broken path
+(no helper). Every escalation and an unexpected exit
 end the record `stopped` (not when the gate is broken), a usage-limit relaunch wait pauses it,
 and the resume passes `AI_RUN_ID` to the resumed pipeline (`resumes` + 1); current gate
 digest must equal the manifest's, the branch must be the manifest's, then one attempt is
@@ -1226,7 +1236,14 @@ Incidents:
   after the marker was written doesn't either). `ai-pipeline` writes this marker at start and removes it on every exit it controls (completion
   and `ai_die`, which also records `last-error`), so a leftover marker means it was
   killed, crashed or the machine restarted, in any phase. A new pipeline run rewrites
-  the marker and rearms the incident.
+  the marker and rearms the incident. Before reporting it or starting a recovery, the probe
+  reads the current run record with its own copy's code (`runs/current` and the record JSON,
+  T301's validation; never a checkout helper). A stop request or a `human_stop` outcome turns
+  the incident into `⛔ STOPPED by you: the run was stopped by the human; not resumed
+  automatically.` once per run (dedupe key `human_stop:<run id>`) and no recovery starts
+  (T307). A death the probe does not recover (no `--recover`, or a refused start) ends the
+  record `crashed`, best effort, under `runs/.lock` and only while that id is still current,
+  not ended and its process is gone.
 - **stalled**: implementing/fixing_review, no runner, no marker and no `last-error`
   (a killed standalone `ai-run`), confirmed: the first probe that sees it only records
   `stall_seen_ns` in `watchdog.json`; a probe at least 5 minutes later that still sees it

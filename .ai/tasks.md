@@ -6069,7 +6069,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 - Mission control 2026-10-22 17:23: the session's own gate outlived its time limit (FL-38); mission control ran `.ai/bin/ai-check` on a648352 by hand: Ran 1162 tests, OK (942 s). DONE stands.
 
 ## T307 — ai-recover and the watchdog never resume a human stop (RC-01 G1, recovery)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T306, T316
 Model: opus
 
@@ -6125,6 +6125,33 @@ tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22: `scripts/ai-recover`: a refused `own` whose run has a stop request calls
+`stopped_by_human` (`settle-stop`, else `end … stopped` which stores `human_stop`; `escalation
+write human_stop <stage key>`; one `⛔ STOPPED by you: <branch>; not resumed automatically. Rerun
+ai-pipeline <manifest args> to continue.` only when `last-error` is newer than
+`last-error.notified`; marker removed; exit 1, before the attempt reservation, the relaunch
+schedule and any session). Other refusals keep T316's escalation. `AI_STAGE` is the stage as a
+step key (`crash (…)` → `crash`, spaces → `-`), `AI_APPROVED_GATE` is set once the manifest gate
+is read and `orig_args` from the manifest; INT/TERM traps run `ai_human_stop` (HUP unchanged),
+and `AI_ARMED=yes` after a relaunch's `limit-arm` so a stop then writes nothing tracked.
+`scripts/lib/watchdog.py`: `current_run()` reads `runs/current` and the record with this copy's
+`workflow` functions (`read_run`, T301 validation; no checkout helper process); a died marker
+whose run has a stop request or `human_stop` becomes incident `human_stop:<id>` (`⛔ STOPPED by
+you: the run was stopped by the human; not resumed automatically.`, once) and no recovery; a
+fresh death not recovered (no `--recover`, or refused) runs `mark_crashed` (`run_change` under
+`runs/.lock`: still current, not ended, process gone; best effort).
+Tests: new `test_human_stop_recovery_refuses`, `test_human_stop_watchdog_does_not_recover`;
+`test_interrupt_reaches_the_recovery_session` became `test_human_stop_interrupt_during_recovery`
+(group SIGINT → 130 and pid-only SIGTERM → 143, record and escalation `human_stop`, `resumes` 0,
+no "failed unexpectedly", no resume). Updated to the new contract (a TERM during recovery is a
+human stop): `test_interrupt_pid_only_recovery_gate`,
+`test_observation_recovery_term_stops_once_and_keeps_the_substage` (renamed from
+`…unexpected_term…`), `test_recovery_signal_and_rejected_process_handling`;
+`test_run_record_recovery_refuses_a_stopped_run` matches the new stderr. Docs: `docs/workflow.md`
+"Recovery contract" and "Checkout health monitoring". Vault: flow chart recovery part, hub Log.
+Validation: `-k human_stop` Ran 19 OK (144.9 s); the eight targeted recovery/watchdog tests OK;
+first full gate: 1163/1164, the one failure was `test_recovery_signal_and_rejected_process_handling`
+(old contract), now updated and passing alone; final gate result below / in the run log.
 
 ## T308 — `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]`: find, verify, signal, wait (RC-01 G1, command)
 Status: TODO

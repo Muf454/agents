@@ -76,15 +76,45 @@ if ! check=$(ai_helper state-root-check 2>&1); then
   escalate 'the host state directory is not safe for recovery.' \
     'set AI_STATE_DIR to an absolute directory outside the checkout, then rerun ai-pipeline.'
 fi
+# The stage as a step key for the escalation record and ai_human_stop ("crash (…)" → crash).
+AI_STAGE=${stage%% (*}
+AI_STAGE=${AI_STAGE// /-}
+[[ "$AI_STAGE" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$ ]] || AI_STAGE=recovery
+# A run the human stopped (ai-pipeline --stop, a signal) is theirs: recorded as a human stop,
+# announced once (quiet when the stopping process already did), never resumed. No attempt, no session.
+stopped_by_human() {
+  local rerun=()
+  AI_STOP_NOTIFIED=1
+  ai_helper run-record settle-stop --run "$AI_RUN_ID" 2>/dev/null || \
+    ai_helper run-record end --run "$AI_RUN_ID" --pid $$ stopped 'stopped by the human' 2>/dev/null || true
+  ai_helper escalation write human_stop "$AI_STAGE" --run "$AI_RUN_ID" 2>/dev/null || true
+  ai_observe stop '' 'stopped by the human'
+  if [[ .ai/local/last-error -nt .ai/local/last-error.notified ]]; then
+    mapfile -d '' -t rerun < <(ai_helper run-manifest args 2>/dev/null || true)
+    (( ${#rerun[@]} )) || rerun=(--approved)
+    ai_notify "⛔ STOPPED by you: $branch; not resumed automatically. Rerun ai-pipeline ${rerun[*]} to continue."
+    touch .ai/local/last-error.notified 2>/dev/null || true
+  fi
+  # We hold the checkout lock, so no live pipeline owns the marker.
+  rm -f .ai/local/pipeline.active
+  printf 'Error: the run was stopped by you; not resumed automatically.\n' >&2
+  exit 1
+}
 # Own the run record before any long work, so it names this live process (also a watchdog-started
 # recovery with a new pid). We hold the checkout lock, so the current record is this run's.
 AI_RUN_ID=${AI_RUN_ID:-$(ai_helper run-record current 2>/dev/null || true)}
 [[ -n "$AI_RUN_ID" ]] || escalate 'there is no run record to resume.' 'rerun ai-pipeline --approved by hand.'
-ai_helper run-record own --run "$AI_RUN_ID" --pid $$ --launcher ai-recover 2>/dev/null || \
+if ! ai_helper run-record own --run "$AI_RUN_ID" --pid $$ --launcher ai-recover 2>/dev/null; then
+  ! ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null || stopped_by_human
   escalate 'the run was stopped by you or replaced; not resumed automatically.' \
     'rerun ai-pipeline --approved yourself to continue.'
+fi
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
   escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
+# From here an interrupt is a human stop that ai_human_stop records under this gate (its
+# notification names the approved arguments).
+AI_APPROVED_GATE=$approved_gate
+mapfile -d '' -t orig_args < <(ai_helper run-manifest args 2>/dev/null || true)
 # Reserve the attempt before anything that can be interrupted, then publish the marker:
 # a kill in between can never produce an uncounted retry.
 attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || \
@@ -133,7 +163,7 @@ if count=$(ai_helper run-manifest limit-claim 2>/dev/null); then
   relaunch=yes
   [[ -f .ai/local/last-error ]] || reason='stopped at a usage limit; relaunched after the reset'
 fi
-# Any unexpected exit (set -e, kill, Ctrl-C) still tells the human, exactly once.
+# Any unexpected exit (set -e, a kill other than INT/TERM) still tells the human, exactly once.
 on_exit() {
   local code=$?
   if (( code != 0 )) && [[ -z "${AI_STOP_NOTIFIED:-}" ]]; then
@@ -148,8 +178,9 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
-trap 'ai_stop_child; exit 143' TERM
-trap 'ai_stop_child; exit 130' INT
+# Ctrl-C or kill -TERM during recovery is a human stop (lib/common.sh), never "failed unexpectedly".
+trap 'ai_human_stop INT' INT
+trap 'ai_human_stop TERM' TERM
 trap 'ai_stop_child; exit 129' HUP
 # Handlers first, then the marker. Liveness contract: this process stands in for ai-pipeline until it resumes.
 AI_PIPELINE_MARKER=.ai/local/pipeline.active
@@ -271,6 +302,8 @@ if [[ "$relaunch" == yes ]]; then
         escalate "$why; nothing was committed." 'inspect the checkout, commit or discard what changed, then rerun ai-pipeline.'
       relaunch_moved "$why"
     fi
+    # A human stop from here writes nothing tracked (ai_human_stop): the tree stays the armed one.
+    AI_ARMED=yes
   fi
   resume '' ''
 fi

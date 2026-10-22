@@ -44,6 +44,13 @@
   `ai_limit_pause`'s sleep run through `ai_run_child`, so a TERM to the script's pid alone ends
   them within seconds (ai-check's own TERM trap ends its validator; nothing is committed).
   `docs/workflow.md` "Interruption, limits, and recovery". Flow unchanged beyond T303's note.
+- T307 (2026-10-22): `ai-recover` never resumes a human stop: a refused `own` on a stop-requested
+  run records `human_stop` (run record and escalation), sends one ⛔ STOPPED by you only when not
+  yet announced, exits 1 with no attempt and no session; INT/TERM during recovery run
+  `ai_human_stop` (gate from the manifest). The watchdog reads the run record with its own host
+  copy: a dead pipeline whose run was stopped gets one ⛔ STOPPED by you and no recovery; an
+  unrecovered death ends the record `crashed`. `docs/workflow.md` "Recovery contract" and
+  "Checkout health monitoring"; vault flow chart recovery part updated.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -111,6 +118,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T307: `-k human_stop` Ran 19 OK (144.9 s); full gate result in the T307 notes and run log.
 2026-10-22, T323: `-k human_stop` Ran 16 OK, `-k pr_` Ran 33 OK, `-k push` Ran 13 OK; full gate
 result in the run log.
 2026-10-22, T318: `-k human_stop` Ran 13 OK (118.4 s); full gate result in the T318 notes.
@@ -161,7 +169,9 @@ Recorded as B1–B24 in `.ai/project-spec.md`. The ones that shape behaviour mos
 
 ## Flow chart
 Flow chart updated: T306 added the "Stopped by you" path (interrupt → child ended → inline gate
-check → record or nothing → ⛔ STOPPED by you, no recovery) and its notification row. T303, T306, T307, T308, T311, T313 and T320 change the
+check → record or nothing → ⛔ STOPPED by you, no recovery) and its notification row. T307 added
+the recovery's run-record check (stopped by you → no recovery), the watchdog's "stopped by you"
+edge and an interrupt during the recovery decision going to the human-stop path. T303, T306, T307, T308, T311, T313 and T320 change the
 flow and update the vault `agents-flow.md` and the hub Log in their own task; T314 audits them.
 
 ## For mission control (phase 2 switch; filled in by T314)
@@ -246,8 +256,8 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   pause within a scaled bound; partial work kept; exit codes unchanged; `-k check`: a failing
   `tee` logger fails the gate (no PASS stamp).
   Done so far (T303): `test_interrupt_reaches_the_session_ai_run`,
-  `test_interrupt_reaches_the_session_term`, `test_interrupt_reaches_the_recovery_session`,
-  `test_session_exit_codes_unchanged`; T304: `test_interrupt_reaches_the_gate`,
+  `test_interrupt_reaches_the_session_term`, `test_session_exit_codes_unchanged` (the recovery
+  session case became T307's `test_human_stop_interrupt_during_recovery`); T304: `test_interrupt_reaches_the_gate`,
   `test_interrupt_reaches_the_review` (Codex and Claude, group SIGINT and pid-only SIGTERM),
   `test_check_logger_failure_fails_the_gate`; T317: `test_interrupt_pid_only_runner_gate`,
   `test_interrupt_pid_only_recovery_gate`, `test_interrupt_pid_only_limit_pause`.
@@ -277,7 +287,12 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_human_stop_pid_only_review`, `test_human_stop_pid_only_validation` (no PASS stamp),
   `test_human_stop_pid_only_dependency_setup`, `test_human_stop_pid_only_retry_wait`; T323
   (publication stage, no `publish-*.out` left): `test_human_stop_pid_only_push`,
-  `test_human_stop_pid_only_ls_remote`, `test_human_stop_pid_only_gh` (no `gh pr create`).
+  `test_human_stop_pid_only_ls_remote`, `test_human_stop_pid_only_gh` (no `gh pr create`); T307:
+  `test_human_stop_recovery_refuses` (no attempt, no session, `human_stop` records, one ⛔ STOPPED
+  by you, quiet when already announced), `test_human_stop_interrupt_during_recovery` (group
+  SIGINT and pid-only SIGTERM during the decision session), `test_human_stop_watchdog_does_not_recover`
+  (no `systemd-run`, reported once; without a request recovered as before; unrecovered death →
+  `crashed`).
 - `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
   wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
   stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
@@ -300,6 +315,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318 and T323 are DONE (T302's gate PASSED on 086ff5f's source).
+T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323 and T307 are DONE (T302's gate PASSED on 086ff5f's source).
 Next: the rest of the queue by dependency.
 Nothing is merged or deployed.
