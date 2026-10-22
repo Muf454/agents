@@ -464,7 +464,7 @@ if 'TRIAGE CONTRACT' in prompt:
                           + ''.join(f'| {finding} | accepted | fixture defect confirmed | {new_id} |\n'
                                     for finding in re.findall(r'^- (M\d+):',
                                                               pathlib.Path('.ai/reviews/current.md').read_text(), re.M)
-                                    if finding != 'M1' and os.environ.get('MOCK_CODEX') == 'counts')
+                                    if finding != 'M1' and os.environ.get('MOCK_CODEX') in ('counts', 'two-major-minor-always'))
                           + (convergence + '\n' if convergence else ''))
         paths = ['.ai/tasks.md', '.ai/reviews/dispositions.md']
         if mode == 'triage-touches-source':
@@ -782,6 +782,14 @@ if mode == 'verdict-heading':
     path.write_text('# Independent review\n## Overall verdict\n\nApprove with two minor notes\n\n'
                     'Finding counts: BLOCKER=0 MAJOR=0 MINOR=0\n## BLOCKER findings\nNone found.\n'
                     '## MAJOR findings\nNone found.\n## Missing test coverage\nx\n')
+    sys.exit(0)
+if mode == 'two-major-minor-always':
+    path.write_text('# Independent review\nOverall verdict: two majors and a minor\n'
+                    'Finding counts: BLOCKER=0 MAJOR=2 MINOR=1\n## BLOCKER findings\nNone found.\n'
+                    '## MAJOR findings\n- M1: fixture defect at T001.txt:1.\n- M2: second defect.\n'
+                    '## MINOR findings\n- N1: a nit.\n'
+                    '## Missing test coverage\nx\n## Security concerns\nx\n## Architecture concerns\nx\n'
+                    '## Manual testing recommendations\nx\n')
     sys.exit(0)
 major = mode == 'major-always' or (mode in ('major-once', 'two-major-once') and count == 1)
 two = mode == 'two-major-once' and count == 1
@@ -16857,6 +16865,65 @@ PY
         self.helper('tasks', 'set', 'T001', 'TODO')
         self.commit('reopen T001')
         self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', AI_AUTO_RECOVER='0')
+        self.assertFalse(self.escalation_path().exists())
+
+    # The fix-round limit (T321): the run finishes, and every finish path leaves one record.
+    def fix_round_project(self, name, origin=False):
+        project = self.base / name / 'project'
+        project.mkdir(parents=True)
+        self.project = project
+        self.run_cmd(['git', 'init', '-b', 'main'])
+        self.ready()
+        if origin:
+            bare = self.base / name / 'origin.git'
+            subprocess.run(['git', 'init', '-q', '--bare', str(bare)], check=True, env=self.env)
+            self.run_cmd(['git', 'remote', 'add', 'origin', str(bare)])
+
+    def assert_fix_round_record(self, path_label):
+        data = self.escalation_data()
+        self.assertEqual((data['kind'], data['stage'], data['evidence']['review'], data['evidence']['findings']),
+                         ('fix_round_limit', 'review', '.ai/reviews/current.md', ['M1', 'M2']), path_label)
+        more = [a for a in data['answers'] if a['id'] == 'resume_more_rounds']
+        self.assertEqual(len(more), 1, path_label)
+        self.assertEqual(more[0]['argv'][more[0]['argv'].index('--max-fix-rounds') + 1], '2', path_label)
+        record = self.pipeline_records()[-1]
+        self.assertEqual((data['run'], record['outcome']), (record['id'], 'finished'), path_label)
+
+    def test_escalation_wiring_fix_round_limit_paths(self):
+        args = ('--approved', '--base', 'main', '--max-fix-rounds', '1')
+        env = dict(MOCK_CODEX='two-major-minor-always')
+        with self.subTest('no-pr'):
+            self.fix_round_project('a')
+            self.tool('ai-pipeline', *args, '--no-pr', **env)
+            self.assert_fix_round_record('no-pr')
+        with self.subTest('pr through gh'):
+            self.fix_round_project('b', origin=True)
+            self.tool('ai-pipeline', *args, **env)
+            self.assertIn('--draft', [c for c in self.gh_calls() if c[:2] == ['pr', 'create']][-1])
+            self.assert_fix_round_record('pr')
+        with self.subTest('no origin'):
+            self.fix_round_project('c')
+            self.tool('ai-pipeline', *args, **env)
+            self.assert_fix_round_record('no origin')
+        with self.subTest('no gh'):
+            self.fix_round_project('d', origin=True)
+            (self.mock_bin / 'gh').unlink()
+            without = os.pathsep.join(p for p in self.env['PATH'].split(os.pathsep)
+                                      if not os.access(os.path.join(p, 'gh'), os.X_OK))
+            self.tool('ai-pipeline', *args, PATH=without, **env)
+            self.assertIn('gh is not installed', self.notifications())
+            self.assert_fix_round_record('no gh')
+
+    def test_fix_round_limit_written_only_in_finish(self):
+        source = (ROOT / 'scripts/ai-pipeline').read_text()
+        self.assertEqual(source.count('escalation write fix_round_limit'), 1)
+        start = source.index('\nfinish() {')
+        body = source[start:source.index('\n}\n', start)]
+        self.assertIn('escalation write fix_round_limit', body)
+
+    def test_escalation_wiring_no_fix_round_record_without_limit(self):
+        self.ready()
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr')
         self.assertFalse(self.escalation_path().exists())
 
     def test_escalation_wiring_ignores_last_error_text(self):

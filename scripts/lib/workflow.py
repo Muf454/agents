@@ -2671,6 +2671,13 @@ def escalation(arguments):
     if (not RUN_ID.fullmatch(run_id) or len(positional) != (2 if action == 'write' else 1) or not stage_ok
             or (review is not None and review not in ESCALATION_REVIEWS)):
         fail(usage)
+    if action == 'write' and positional[0] == 'fix_round_limit' and review is not None and not findings:
+        # The findings the loop gave up on: the review's BLOCKER and MAJOR ids; unreadable is [].
+        raw = read_small(os.path.join(checkout_root(), review), 1 << 20)
+        if raw is not None:
+            text = raw.decode('utf-8', 'replace')
+            findings = [i for level in ('BLOCKER', 'MAJOR') for i in finding_ids(text, level)
+                        if ESCALATION_FINDING.fullmatch(i)]
     tasks, findings = list(dict.fromkeys(tasks)), list(dict.fromkeys(findings))
     if action == 'write':
         done = write_escalation(runs, positional[0], positional[1], run_id, tasks, findings, review)

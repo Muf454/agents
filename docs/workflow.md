@@ -108,6 +108,14 @@ its own); `ai_die` inside a pipeline only for a direct `ai_die` without `stop()`
 `crash`) and its `stopped_by_human`; a stand-alone `ai-run`'s `on_exit` stop path. The watchdog
 writes none. Tests: `test_escalation_wiring_*`.
 
+Fix-round limit (T321): the run does not stop; it finishes as before (draft PR, local only, or
+pushed without `gh`) and the human decides. When the review loop ends at the limit
+(`fix_round_limit_hit=yes`), `finish()` writes `fix_round_limit review --review
+.ai/reviews/current.md` once, before the run record's end, so all four finish paths (`--no-pr`, no
+`origin`, no `gh`, the PR stage) leave exactly one record. `escalation write` fills the finding ids
+from the review's BLOCKER and MAJOR ids (a regular file of at most 1 MB under the checkout; an
+unreadable review gives none). A deferred-only end of the loop writes nothing.
+
 ## Validation and evidence
 
 `.ai/validate` is the one real project gate. `.ai/bin/ai-check` invokes it from the

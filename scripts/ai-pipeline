@@ -129,6 +129,10 @@ finish() {
   # get another commit-and-rerun for a task; only a human (re)start resets them.
   ai_helper run-manifest clear-attempts 2>/dev/null || true
   [[ -z "${pub_out:-}" ]] || rm -f -- "$pub_out" 2>/dev/null || true
+  # The review loop ended at the fix-round limit: one record on whichever finish path ran.
+  if [[ "${fix_round_limit_hit:-no}" == yes ]]; then
+    ai_helper escalation write fix_round_limit review --run "$AI_RUN_ID" --review .ai/reviews/current.md 2>/dev/null || true
+  fi
   ai_helper run-record end --run "$AI_RUN_ID" --pid $$ finished "${1:-no PR}" 2>/dev/null || \
     printf 'Warning: could not record the end of run %s.\n' "$AI_RUN_ID" >&2
   ai_drop_marker
@@ -633,6 +637,7 @@ if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>
   done
 fi
 plan_decision_check
+fix_round_limit_hit=no
 while true; do
   # Derived from the current review each round, so an earlier deferral doesn't stick.
   unresolved=0
@@ -693,6 +698,7 @@ while true; do
     fi
     if [[ -z "$extra" ]]; then
       unresolved=1
+      fix_round_limit_hit=yes
       printf 'Fix round limit (%s) reached with significant findings; the PR will be a draft.\n' "$max_fix_rounds"
       break
     fi

@@ -6416,7 +6416,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 - 2026-10-22 (claude, opus, second resume): the runner's gate after c666859 failed on one timeout in an unrelated test (`test_committed_bytes_run_stops_on_a_filtered_final_handoff`, 25 s limit; whole run 1868 s against the usual ~900–970 s, so machine load). Recovery checkpoint 87b0099 recorded a gate PASS at 20:38:14Z on the same code. No source change. Targeted: `python3 -m unittest discover -s tests -k escalation` Ran 26 tests OK (134 s).
 
 ## T321 — Fix-round limit escalation on every finish path (RC-01 G9, B9, plan review round 3 P19)
-Status: TODO
+Status: BLOCKED
 Dependencies: T320
 Model: sonnet
 
@@ -6469,6 +6469,13 @@ tests`, N ≥ 1).
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Implemented: `fix_round_limit_hit` set at the limit break in `scripts/ai-pipeline`, written once in
+`finish()` before the run-record end; `escalation write` in `scripts/lib/workflow.py` fills the
+BLOCKER/MAJOR ids from the review; `docs/workflow.md` updated; mock codex mode
+`two-major-minor-always` added. Targeted: `python3 -m unittest discover -s tests -k fix_round_limit
+-k no_fix_round_record` → `Ran 4 tests`, OK (105 s). Full gate `.ai/bin/ai-check`: NOT confirmed. It
+exceeded the 600000 ms foreground timeout in this session (T320 saw a load-induced timeout too), so
+no pass is claimed. Needs one rerun of the gate on an unloaded machine, then `ai-task set T321 DONE`.
 
 ## T327 — Plan-review escalation kinds end to end (RC-01 G9, split from T321 after plan review round 3)
 Status: TODO
