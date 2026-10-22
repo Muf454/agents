@@ -626,3 +626,4 @@
 | 2026-10-23T00:20:00Z | claude (opus) | T310 | background in-session gate: Ran 1200 tests OK (946.8 s), then "Validation modified project content" because the session's own bookkeeping edits and commit 8b8bfd0 landed while it ran; not a clean gate, the runner's gate decides | not clean (concurrent edits) | 8b8bfd0 | no test failures |
 | 2026-10-22T22:46:54Z | runner | T310 | completed | PASS | 8b8bfd0 | Claude checkpointed; continuing queue |
 | 2026-10-23T00:00:00Z | claude (opus) | T311 | DONE: SKIPPED status with host skip authorization (`<state root>/skips/<sha256>`), `tasks skip ID REASON`, `tasks set` refuses SKIPPED, planning guard and pr-body cover SKIPPED; 6 tests | -k skip 23 OK; `.ai/bin/ai-check` PASS 1206 OK (977.7 s) | see next entry | docs/workflow.md, templates prompts, vault flow chart and hub Log updated |
+| 2026-10-22T23:26:44Z | runner | T311 | completed | PASS | c7a0106 | Claude checkpointed; continuing queue |
