@@ -5317,7 +5317,7 @@ Mission control 2026-10-22 01:35Z: returned to TODO (BLOCKED only on the gate ti
   the runner's checkpoint gate decides. DONE.
 
 ## T305 — Escalation record helper: schema 1, redaction, allowed answers (RC-01 G9, helper)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T315
 Model: opus
 
@@ -5412,6 +5412,12 @@ Evidence: `python3 -m unittest discover -s tests -k escalation` Ran 11 OK (the 9
 `DocsConsistencyTest` Ran 3 OK. Full gate result unknown in the session; left to the host gate
 (the background `.ai/bin/ai-check` hit the 20-minute background limit and was stopped).
 Note: `ai-task retry|skip|model` named in the answers land with T312.
+2026-10-22 (resume): the host gate after b99ceac failed 1 of 1131 tests,
+`test_gate_lock_wait_runner_waits_for_the_session_gate` (no `Waiting up to` in stderr): a timing
+race in the lock-holder mock (2 s hold), not this change (T305 touches only the escalation code
+in workflow.py, which has no caller in ai-run). The runner's recovery gate on b13bd5e (same
+source as b99ceac) PASSED at 2026-10-22T03:23:47Z. Re-checked: `-k escalation` Ran 11 OK;
+that gate-lock test plus `-k test_run_record` Ran 12 OK. DONE.
 
 ## T302 — Run records from ai-pipeline: required start, resume, finish, ai_die (RC-01 G3, wiring)
 Status: TODO

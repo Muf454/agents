@@ -83,6 +83,9 @@ Planned tasks (queue order):
 ## Validation run
 2026-10-22, T305: `-k escalation` Ran 11 OK, `-k test_run_record` Ran 11 OK, Docs 3 OK; the full
 gate ran in the background and was stopped at the 20-minute limit, so the runner's gate decides.
+The host gate then failed 1 of 1131 (`test_gate_lock_wait_runner_waits_for_the_session_gate`,
+a lock-holder timing race unrelated to T305; it passes alone); the recovery gate on b13bd5e (same
+source) PASSED at 2026-10-22T03:23:47Z.
 2026-10-22, T315: `-k run_record` Ran 14 OK (51.9 s); full gate not run in session (≈1229 s >
 the tool limit), the runner's gate decides.
 2026-10-22, T301: `.ai/bin/ai-check` PASS, Ran 1113 tests OK (1229 s); `-k run_record` Ran 9 OK.
@@ -235,7 +238,7 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315 and T305 are DONE (T305's full gate is left to the runner's checkpoint validation).
+T301, T315 and T305 are DONE (T305's gate PASSED on the recovery checkpoint b13bd5e).
 T303 has partial WIP from a timed-out session (1e06212) to reconcile; then the rest of the queue
 (T302 next by dependency).
 Nothing is merged or deployed.
