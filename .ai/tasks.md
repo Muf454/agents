@@ -6066,6 +6066,8 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 - Evidence: `-k human_stop` Ran 16 OK (171 s); `-k pr_` Ran 33 OK (436 s); `-k push` Ran 13 OK
   (264 s). Full gate: see the run-log entry.
 
+- Mission control 2026-10-22 17:23: the session's own gate outlived its time limit (FL-38); mission control ran `.ai/bin/ai-check` on a648352 by hand: Ran 1162 tests, OK (942 s). DONE stands.
+
 ## T307 — ai-recover and the watchdog never resume a human stop (RC-01 G1, recovery)
 Status: TODO
 Dependencies: T306, T316
