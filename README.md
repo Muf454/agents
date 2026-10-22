@@ -199,6 +199,17 @@ Before leaving an implementation session unattended:
    `chore(ai): set T005 to TODO (ai-task)` (hooks run). If that commit fails, the status stays
    changed and you commit `.ai/tasks.md` yourself. Plain `ai-task set` (no `--commit`) is what
    sessions use inside a run: no lock, no commit.
+   Three more commands work the same way (lock, branch check, restore on an invalid queue;
+   `--commit` optional) and always take the lock, even without `--commit`:
+   `.ai/bin/ai-task retry T005 --note "use the v2 API" [--commit]` returns a BLOCKED task to
+   TODO (a TODO task keeps its status) and appends `Human note (YYYY-MM-DD, ai-task retry): …`
+   under `### Result / notes` (`chore(ai): return T005 to TODO (ai-task)`, or
+   `chore(ai): note on T005 (ai-task)`); `.ai/bin/ai-task model T005 opus [--commit]` replaces
+   a TODO or BLOCKED task's `Model:` line or inserts one after `Dependencies:`
+   (`chore(ai): set T005 model to opus (ai-task)`); `.ai/bin/ai-task skip T005 --reason
+   "covered by T006" [--commit]` marks a TODO or BLOCKED task SKIPPED with its host skip record
+   (`chore(ai): skip T005 (ai-task)`). Notes and reasons are one line of 1–500 characters
+   without control characters or backticks; DONE, IN_PROGRESS and SKIPPED tasks are refused.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write

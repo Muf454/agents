@@ -842,7 +842,7 @@ def task_command(arguments):
             fail(f'Unknown task: {arguments[1]}')
         done = sum(t['status'] == 'DONE' for t in blocks)
         print(f"{task['id']} {task['title'][:80]} ({done}/{len(blocks)} done)")
-    elif action in ('status', 'show', 'set', 'skip'):
+    elif action in ('status', 'show', 'set', 'skip', 'retry', 'set-model'):
         task = next((task for task in blocks if task['id'] == arguments[1]), None)
         if task is None:
             fail(f'Unknown task: {arguments[1]}')
@@ -855,6 +855,14 @@ def task_command(arguments):
             if len(arguments) != 3:
                 fail('Usage: tasks skip ID REASON')
             tasks_skip(blocks, task, arguments[2])
+        elif action == 'retry':
+            if len(arguments) != 3:
+                fail('Usage: tasks retry ID TEXT')
+            tasks_retry(task, arguments[2])
+        elif action == 'set-model':
+            if len(arguments) != 3:
+                fail('Usage: tasks set-model ID MODEL')
+            tasks_set_model(task, arguments[2])
         else:
             if arguments[2] == 'SKIPPED':
                 fail('Invalid task status: use ai-task skip to skip a task.')
@@ -862,18 +870,19 @@ def task_command(arguments):
                 fail('Invalid task status.')
             path = Path('.ai/tasks.md')
             lines = path.read_text().splitlines(keepends=True)
-            index, _ = task_line_positions(lines, task['id'])
+            index = task_line_positions(lines, task['id'])['Status']
             if index is not None:
                 lines[index] = f'Status: {arguments[2]}\n'
             atomic(path, ''.join(lines))
 
 
 def task_line_positions(lines, task_id):
-    """(index of the task's Status: line, index of its `### Result / notes` heading), each None
-    when absent; the real heading is found by exact ID outside code fences (not a fenced example)."""
+    """Indexes of the task's first Status:, Dependencies: and Model: lines and of its
+    `### Result / notes` heading (keys Status, Dependencies, Model, notes), each None when absent;
+    the real heading is found by exact ID outside code fences (not a fenced example)."""
     fence = None
     active = False
-    status = notes = None
+    found = dict.fromkeys(('Status', 'Dependencies', 'Model', 'notes'))
     for index, line in enumerate(lines):
         marker = re.match(r'^\s*(`{3,}|~{3,})', line)
         if marker:
@@ -889,23 +898,89 @@ def task_line_positions(lines, task_id):
             if active:
                 break
             active = bool(re.match(r'^##\s+' + re.escape(task_id) + r'\s+[—-]\s+', line))
-        elif active and line.startswith('Status:') and status is None:
-            status = index
-        elif active and line.rstrip('\r\n') == '### Result / notes' and notes is None:
-            notes = index
-    return status, notes
+        elif active:
+            key = next((k for k in ('Status', 'Dependencies', 'Model') if line.startswith(k + ':')),
+                       'notes' if line.rstrip('\r\n') == '### Result / notes' else None)
+            if key and found[key] is None:
+                found[key] = index
+    return found
 
 
-def skip_reason_error(reason):
-    """Why REASON can't be a Skipped line's reason, or '' (one line, 1-500 characters, no control,
-    format or line separator characters, no backticks)."""
+def skip_reason_error(reason, name='reason'):
+    """Why REASON can't be a Skipped line's reason (or a Human note's text, NAME 'note'), or ''
+    (one line, 1-500 characters, no control, format or line separator characters, no backticks)."""
     if not 1 <= len(reason) <= 500:
-        return 'the reason must be 1-500 characters'
+        return f'the {name} must be 1-500 characters'
     if reason != reason.strip():
-        return 'the reason must not start or end with whitespace'
+        return f'the {name} must not start or end with whitespace'
     if '`' in reason or any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in reason):
-        return 'the reason must be one line without control characters or backticks'
+        return f'the {name} must be one line without control characters or backticks'
     return ''
+
+
+def append_note(lines, notes, text):
+    """Insert TEXT as a line at the end of the `### Result / notes` section headed at index NOTES:
+    after its last non-blank line."""
+    end = notes + 1
+    while end < len(lines) and not re.match(r'^#{2,3}\s', lines[end]):
+        end += 1
+    while end > notes + 1 and not lines[end - 1].strip():
+        end -= 1
+    if not lines[end - 1].endswith('\n'):
+        lines[end - 1] += '\n'
+    lines.insert(end, text + '\n')
+
+
+def write_queue(path, text):
+    """Replace the queue atomically, keeping its file mode."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path, text)
+    path.chmod(mode)
+
+
+def tasks_retry(task, note):
+    """tasks retry ID TEXT: BLOCKED → TODO (a TODO task keeps its status) with a `Human note
+    (DATE, ai-task retry): TEXT` line under `### Result / notes`."""
+    if task['status'] not in ('TODO', 'BLOCKED'):
+        fail(f"{task['id']} is {task['status']}; only a BLOCKED or TODO task can be retried.")
+    error = skip_reason_error(note, 'note')
+    if error:
+        fail(f'Cannot add a note to {task["id"]}: {error}.')
+    path = Path('.ai/tasks.md')
+    lines = path.read_text().splitlines(keepends=True)
+    found = task_line_positions(lines, task['id'])
+    if found['Status'] is None or found['notes'] is None:
+        fail(f"{task['id']}: Status: line or ### Result / notes not found.")
+    lines[found['Status']] = 'Status: TODO\n'
+    append_note(lines, found['notes'],
+                f"Human note ({datetime.now(timezone.utc).strftime('%Y-%m-%d')}, ai-task retry): {note}")
+    new = ''.join(lines)
+    tasks(new)
+    write_queue(path, new)
+    print(f"{task['id']} TODO: {note}")
+
+
+def tasks_set_model(task, model):
+    """tasks set-model ID MODEL: replace a TODO or BLOCKED task's Model: line, or insert one right
+    after its Dependencies: line."""
+    if task['status'] not in ('TODO', 'BLOCKED'):
+        fail(f"{task['id']} is {task['status']}; only a TODO or BLOCKED task's model can change.")
+    if not re.fullmatch(r'[A-Za-z0-9._:\[\]-]{1,64}', model):
+        fail(f'Invalid model: {model!r} (letters, digits and ._:[]- only, at most 64).')
+    path = Path('.ai/tasks.md')
+    lines = path.read_text().splitlines(keepends=True)
+    found = task_line_positions(lines, task['id'])
+    if found['Model'] is not None:
+        lines[found['Model']] = f'Model: {model}\n'
+    elif found['Dependencies'] is not None:
+        lines.insert(found['Dependencies'] + 1, f'Model: {model}\n')
+    else:
+        fail(f"{task['id']}: Dependencies: line not found.")
+    new = ''.join(lines)
+    if next(t for t in tasks(new) if t['id'] == task['id'])['model'] != model:
+        fail(f"{task['id']}: the Model: line could not be placed in the task.")
+    write_queue(path, new)
+    print(f"{task['id']} Model: {model}")
 
 
 def tasks_skip(blocks, task, reason):
@@ -925,20 +1000,12 @@ def tasks_skip(blocks, task, reason):
         fail(f"{task['id']} already has a Skipped line; remove it first.")
     path = Path('.ai/tasks.md')
     lines = path.read_text().splitlines(keepends=True)
-    status, notes = task_line_positions(lines, task['id'])
-    if status is None or notes is None:
+    found = task_line_positions(lines, task['id'])
+    if found['Status'] is None or found['notes'] is None:
         fail(f"{task['id']}: Status: line or ### Result / notes not found.")
     skipped = f"Skipped ({datetime.now(timezone.utc).strftime('%Y-%m-%d')}, ai-task skip): {reason}"
-    lines[status] = 'Status: SKIPPED\n'
-    # Append to the end of the Result / notes section: after its last non-blank line.
-    end = notes + 1
-    while end < len(lines) and not re.match(r'^#{2,3}\s', lines[end]):
-        end += 1
-    while end > notes + 1 and not lines[end - 1].strip():
-        end -= 1
-    if not lines[end - 1].endswith('\n'):
-        lines[end - 1] += '\n'
-    lines.insert(end, skipped + '\n')
+    lines[found['Status']] = 'Status: SKIPPED\n'
+    append_note(lines, found['notes'], skipped)
     new = ''.join(lines)
     after = next(t for t in tasks(new, check_skips=False) if t['id'] == task['id'])
     if skipped_lines(after) != [skipped]:
@@ -950,9 +1017,7 @@ def tasks_skip(blocks, task, reason):
     except FileExistsError:
         pass
     tasks(new)  # the whole queue, with the new authorization in place
-    mode = stat.S_IMODE(path.stat().st_mode)
-    atomic(path, new)
-    path.chmod(mode)
+    write_queue(path, new)
     print(f"{task['id']} SKIPPED: {reason}")
 
 

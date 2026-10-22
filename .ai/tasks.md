@@ -6711,7 +6711,7 @@ Evidence: `-k skip` Ran 23 tests OK; plan_keeps_done/plan_session_revision/pr_bo
 `.ai/bin/ai-check` PASS, Ran 1206 tests OK (977.7 s). The `ai-task skip` wrapper is T312.
 
 ## T312 — `ai-task retry`, `model` and `skip` (RC-01 G4, G5, G6)
-Status: TODO
+Status: DONE
 Dependencies: T310, T311
 Model: opus
 
@@ -6751,6 +6751,14 @@ Targeted: `python3 -m unittest discover -s tests -k ai_task` (must say `Ran N te
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+DONE 2026-10-23. `scripts/ai-task`: `retry ID --note TEXT`, `model ID MODEL`, `skip ID --reason
+TEXT` (each `[--commit]`, through `task_change`, so the lock is taken even without `--commit`;
+retry's subject is chosen under the lock). `workflow.py`: `tasks retry`, `tasks set-model`;
+`task_line_positions` returns a dict; `append_note`/`write_queue` shared with `tasks skip`.
+Tests `test_ai_task_retry_with_note`, `test_ai_task_model`, `test_ai_task_skip_command`,
+`test_ai_task_subcommands_refuse_while_locked`. README, docs/workflow.md. Flow unchanged.
+Validation: `-k ai_task` Ran 11 OK; `-k skip -k task_set -k tasks` Ran 43 OK;
+`.ai/bin/ai-check` PASS, Ran 1210 OK (956.2 s).
 
 ## T322 — `ai-task skip ID --reauthorize` for a committed skip on another host (RC-01 G6, plan review P6)
 Status: TODO

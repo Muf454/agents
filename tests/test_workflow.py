@@ -3133,6 +3133,94 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         usage = self.tool('ai-task', 'set', 'T001', 'DONE', '--now', expected=2)
         self.assertIn('[--commit]', usage.stderr)
 
+    def subjects_since(self, rev):
+        return self.run_cmd(['git', 'log', '--format=%s', f'{rev}..HEAD']).stdout.splitlines()
+
+    def test_ai_task_retry_with_note(self):
+        self.ready(task('T001', 'BLOCKED') + task('T002') + task('T003', 'DONE'))
+        before = self.head()
+        self.tool('ai-task', 'retry', 'T001', '--note', 'use the v2 API instead', '--commit')
+        self.assertEqual(self.helper('tasks', 'status', 'T001').stdout.strip(), 'TODO')
+        block = self.queue_text().split('## T001')[1].split('## T002')[0]
+        self.assertRegex(block, r'### Result / notes\nPending\.\n'
+                                r'Human note \(\d{4}-\d{2}-\d{2}, ai-task retry\): use the v2 API instead\n')
+        self.assertEqual(self.subjects_since(before), ['chore(ai): return T001 to TODO (ai-task)'])
+        self.assertEqual(self.porcelain(), '')
+        # A TODO task keeps its status and only gets the note.
+        head = self.head()
+        self.tool('ai-task', 'retry', 'T002', '--note', 'mind the cache', '--commit')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'TODO')
+        self.assertIn('ai-task retry): mind the cache\n', self.queue_text().split('## T002')[1])
+        self.assertEqual(self.subjects_since(head), ['chore(ai): note on T002 (ai-task)'])
+        # DONE, a bad note and bad usage are refused with nothing changed.
+        queue, head = self.queue_text(), self.head()
+        self.assertIn('only a BLOCKED or TODO task',
+                      self.tool('ai-task', 'retry', 'T003', '--note', 'again', '--commit', expected=1).stderr)
+        self.assertIn('backticks', self.tool('ai-task', 'retry', 'T002', '--note', 'run `x`', expected=1).stderr)
+        self.assertIn('Usage: ai-task retry', self.tool('ai-task', 'retry', 'T002', 'text', expected=2).stderr)
+        self.assertEqual((self.queue_text(), self.head()), (queue, head))
+        # Without --commit the change stays uncommitted.
+        self.tool('ai-task', 'retry', 'T002', '--note', 'one more')
+        self.assertEqual(self.head(), head)
+        self.assertEqual(self.porcelain(), ' M .ai/tasks.md\n')
+
+    def test_ai_task_model(self):
+        self.ready(task('T001').replace('Dependencies: none\n', 'Dependencies: none\nModel: sonnet\n')
+                   + task('T002', 'BLOCKED') + task('T003', 'DONE'))
+        before = self.head()
+        self.tool('ai-task', 'model', 'T001', 'opus', '--commit')
+        self.assertEqual(self.helper('tasks', 'model', 'T001').stdout.strip(), 'opus')
+        self.assertIn('Dependencies: none\nModel: opus\n\n### Goal', self.queue_text().split('## T001')[1])
+        self.assertNotIn('sonnet', self.queue_text())
+        self.assertEqual(self.subjects_since(before), ['chore(ai): set T001 model to opus (ai-task)'])
+        # A missing Model: line is inserted right after Dependencies:.
+        head = self.head()
+        self.tool('ai-task', 'model', 'T002', 'claude-haiku-5-5', '--commit')
+        self.assertEqual(self.helper('tasks', 'model', 'T002').stdout.strip(), 'claude-haiku-5-5')
+        self.assertIn('Dependencies: none\nModel: claude-haiku-5-5\n\n', self.queue_text().split('## T002')[1])
+        self.assertEqual(self.subjects_since(head), ['chore(ai): set T002 model to claude-haiku-5-5 (ai-task)'])
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'BLOCKED')
+        # An invalid model and a DONE task are refused; the same model again makes no commit.
+        queue, head = self.queue_text(), self.head()
+        self.assertIn('Invalid model', self.tool('ai-task', 'model', 'T001', 'op us', '--commit', expected=1).stderr)
+        self.assertIn('Invalid model', self.tool('ai-task', 'model', 'T001', 'x' * 65, expected=1).stderr)
+        self.assertIn('only a TODO or BLOCKED', self.tool('ai-task', 'model', 'T003', 'opus', expected=1).stderr)
+        self.tool('ai-task', 'model', 'T001', 'opus', '--commit')
+        self.assertEqual((self.queue_text(), self.head()), (queue, head))
+
+    def test_ai_task_skip_command(self):
+        self.ready(task('T001', 'DONE') + task('T002') + task('T003'))
+        before = self.head()
+        self.tool('ai-task', 'skip', 'T002', '--reason', 'covered by T003', '--commit')
+        self.assertEqual(self.helper('tasks', 'status', 'T002').stdout.strip(), 'SKIPPED')
+        self.assertRegex(self.queue_text().split('## T002')[1],
+                         r'### Result / notes\nPending\.\nSkipped \(\d{4}-\d{2}-\d{2}, ai-task skip\): covered by T003\n')
+        self.assertEqual(len(list((self.base / 'host-state/skips').iterdir())), 1)
+        self.assertEqual(self.subjects_since(before), ['chore(ai): skip T002 (ai-task)'])
+        self.assertEqual(self.porcelain(), '')
+        self.tool('ai-task', 'check')
+        head = self.head()
+        self.assertIn('Usage: ai-task skip', self.tool('ai-task', 'skip', 'T003', 'why', expected=2).stderr)
+        self.assertIn('only a TODO or BLOCKED', self.tool('ai-task', 'skip', 'T001', '--reason', 'x', expected=1).stderr)
+        self.assertEqual(self.head(), head)
+
+    def test_ai_task_subcommands_refuse_while_locked(self):
+        self.ready(task('T001', 'BLOCKED') + task('T002'))
+        queue = self.project / '.ai/tasks.md'
+        before, head = queue.read_bytes(), self.head()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with open(self.project / '.ai/local/workflow.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for args in (('retry', 'T001', '--note', 'try again'), ('model', 'T002', 'opus'),
+                         ('skip', 'T002', '--reason', 'not needed')):
+                for commit in ((), ('--commit',)):
+                    with self.subTest(args=args, commit=commit):
+                        result = self.tool('ai-task', *args, *commit, expected=75)
+                        self.assertIn('A run is active in this checkout; nothing changed.', result.stderr)
+                        self.assertEqual(queue.read_bytes(), before)
+                        self.assertEqual(self.head(), head)
+        self.assertFalse((self.base / 'host-state/skips').exists())
+
     def night_queue(self):
         fence = '```\n## T009 — not a heading\n```\n\n'
         return ('# Task queue\n\nPreamble text.\n\n' + task('T001', dependencies='T011') + task('T002')

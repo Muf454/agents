@@ -38,6 +38,13 @@ Task parser contract:
   and counts toward `tasks complete`; `counts`, `progress`, `untouched` and `newly-done` count
   DONE only. The planning guard keeps SKIPPED blocks like DONE ones, and the PR body lists
   `Skipped tasks: T…: reason`.
+- Human queue changes (`ai-task set --commit`, `retry`, `model`, `skip`) run under the
+  checkout lock (exit 75 while a run holds it) on a feature branch and are checked by
+  `tasks check` (the queue is restored on failure); `--commit` commits only `.ai/tasks.md`.
+  `tasks retry ID TEXT` returns BLOCKED to TODO (TODO keeps its status) and appends
+  `Human note (YYYY-MM-DD, ai-task retry): TEXT` under `### Result / notes` (text rules as
+  for a skip reason); `tasks set-model ID MODEL` replaces a TODO or BLOCKED task's `Model:` line
+  or inserts it right after `Dependencies:`.
 
 The first eligible TODO is selected, with an eligible IN_PROGRESS taking priority
 for recovery. BLOCKED tasks do not count as complete (a block without a failing check whose

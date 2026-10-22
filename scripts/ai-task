@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit] | ai-task show <ID> | ai-task check | ai-task reorder
+# Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit] | ai-task retry <ID> --note TEXT [--commit]
+#        | ai-task model <ID> <MODEL> [--commit] | ai-task skip <ID> --reason TEXT [--commit]
+#        | ai-task show <ID> | ai-task check | ai-task reorder
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 ai_root
 
@@ -21,6 +23,14 @@ task_change() {
   esac
   if [[ "$commit" == 1 && -n "$(git status --porcelain --untracked-files=all)" ]]; then
     echo 'The checkout has uncommitted changes; commit or stash them first. Nothing changed.' >&2; exit 1
+  fi
+  # retry's subject depends on the status it finds, so it is read under the lock.
+  if [[ "$subject" == @retry ]]; then
+    if [[ "$(ai_helper tasks status "$3" 2>/dev/null)" == BLOCKED ]]; then
+      subject="chore(ai): return $3 to TODO (ai-task)"
+    else
+      subject="chore(ai): note on $3 (ai-task)"
+    fi
   fi
   original=$(mktemp .ai/local/tasks.md.XXXXXX)
   cp -- .ai/tasks.md "$original"
@@ -50,6 +60,19 @@ case "${1:-}" in
        [[ $# -eq 3 ]] || { echo 'Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit]' >&2; exit 2; }
        # Sessions inside a run use plain set: no lock, no commit.
        ai_helper tasks set "$2" "$3" ;;
+  # retry, model and skip always take the lock (task_change); --commit also commits the queue.
+  retry) [[ ($# -eq 4 || ($# -eq 5 && "$5" == --commit)) && "$3" == --note ]] || {
+           echo 'Usage: ai-task retry <ID> --note TEXT [--commit]' >&2; exit 2; }
+         task_change "$([[ $# -eq 5 ]] && echo 1 || echo 0)" @retry \
+           "$2 has the note but it is not committed; commit .ai/tasks.md yourself." tasks retry "$2" "$4" ;;
+  model) [[ $# -eq 3 || ($# -eq 4 && "$4" == --commit) ]] || {
+           echo 'Usage: ai-task model <ID> <MODEL> [--commit]' >&2; exit 2; }
+         task_change "$([[ $# -eq 4 ]] && echo 1 || echo 0)" "chore(ai): set $2 model to $3 (ai-task)" \
+           "$2 uses model $3 but it is not committed; commit .ai/tasks.md yourself." tasks set-model "$2" "$3" ;;
+  skip) [[ ($# -eq 4 || ($# -eq 5 && "$5" == --commit)) && "$3" == --reason ]] || {
+          echo 'Usage: ai-task skip <ID> --reason TEXT [--commit]' >&2; exit 2; }
+        task_change "$([[ $# -eq 5 ]] && echo 1 || echo 0)" "chore(ai): skip $2 (ai-task)" \
+          "$2 is SKIPPED but not committed; commit .ai/tasks.md yourself." tasks skip "$2" "$4" ;;
   show) [[ $# -eq 2 ]] || { echo 'Usage: ai-task show <ID>' >&2; exit 2; }
         ai_helper tasks show "$2" ;;
   check) [[ $# -eq 1 ]] || { echo 'Usage: ai-task check' >&2; exit 2; }
@@ -60,5 +83,7 @@ case "${1:-}" in
   reorder) [[ $# -eq 1 ]] || { echo 'Usage: ai-task reorder' >&2; exit 2; }
            # Rewrites .ai/tasks.md so dependencies come first; a valid queue is left untouched.
            ai_helper tasks reorder ;;
-  *) echo 'Usage: ai-task set <ID> <STATUS> [--commit] | ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
+  *) echo 'Usage: ai-task set <ID> <STATUS> [--commit] | ai-task retry <ID> --note TEXT [--commit] |' \
+          'ai-task model <ID> <MODEL> [--commit] | ai-task skip <ID> --reason TEXT [--commit] |' \
+          'ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
 esac

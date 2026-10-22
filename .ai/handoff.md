@@ -99,6 +99,14 @@
   refuses SKIPPED; `plan-keeps-done` protects SKIPPED blocks (`SKIPPED task T… was changed or
   removed`); `pr-body` adds `Skipped tasks: T…: reason`. Planning prompt and the runner/triage
   templates say only the human skips. `docs/workflow.md` task parser contract; vault flow chart.
+- T312 (2026-10-23): `ai-task retry ID --note TEXT`, `model ID MODEL` and `skip ID --reason TEXT`
+  (each `[--commit]`, each through `task_change`, so always under the lock). Helpers in
+  `workflow.py`: `tasks retry ID TEXT` (BLOCKED → TODO, TODO keeps its status, DONE/IN_PROGRESS/
+  SKIPPED refused; appends `Human note (DATE, ai-task retry): TEXT`), `tasks set-model ID MODEL`
+  (TODO/BLOCKED; replaces `Model:` or inserts it after `Dependencies:`); skip is T311's `tasks
+  skip`. `task_line_positions` now returns a dict (Status, Dependencies, Model, notes);
+  `append_note` and `write_queue` are shared with skip. retry's commit subject (`return ID to
+  TODO` or `note on ID`) is chosen under the lock. README and `docs/workflow.md`. Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -166,6 +174,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-23, T312: `-k ai_task` Ran 11 OK (7.4 s); `-k skip -k task_set -k tasks` Ran 43 OK; `.ai/bin/ai-check` PASS, Ran 1210 OK (956.2 s).
 2026-10-23, T311: `-k skip` Ran 23 OK (99.7 s); `.ai/bin/ai-check` PASS, Ran 1206 OK (977.7 s).
 2026-10-23, T310: `-k ai_task` Ran 7 OK (3.2 s); full gate result in the T310 notes.
 2026-10-22, T325: `-k stop_command` Ran 12 OK (23.6 s), `-k standalone` Ran 10 OK (61.4 s); full gate in the T325 notes.
@@ -393,7 +402,13 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_ai_task_commit_refuses_dirty_or_protected` (dirty file, `master`, detached HEAD, a change
   that breaks the queue → exit 1, bytes unchanged), `test_ai_task_commit_hook_failure` (failing
   `pre-commit` → "not committed", status changed, no commit), `test_ai_task_plain_set_unchanged`
-  (works while the lock is held).
+  (works while the lock is held). T312: `test_ai_task_retry_with_note` (BLOCKED → TODO with the
+  note, subject `return T001 to TODO`; a TODO task gets only the note, `note on T002`; DONE, a
+  backtick note and bad usage refused; without `--commit` uncommitted), `test_ai_task_model`
+  (replaces `sonnet` with `opus`, inserts a missing `Model:` after `Dependencies:`, invalid model
+  and DONE refused, the same model again no commit), `test_ai_task_skip_command` (SKIPPED, reason
+  line, host record, one commit, `ai-task check` passes), `test_ai_task_subcommands_refuse_while_locked`
+  (all three, with and without `--commit`: exit 75, bytes and HEAD unchanged, no skip record).
 - `skip` (T311): `test_skipped_task_with_host_record` (`next` passes over it, `complete`,
   `pr-body` lists `T002: not needed`, a later dependent is eligible),
   `test_skipped_task_without_host_record_is_invalid` (hand-edited status, forged line, renamed
@@ -417,6 +432,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
-T319, T309 and T320 are DONE as well; T325, T310 and T311 too.
+T319, T309 and T320 are DONE as well; T325, T310, T311 and T312 too.
 Next: the rest of the queue by dependency (T321 the fix-round limit record).
 Nothing is merged or deployed.

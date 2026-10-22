@@ -4,13 +4,13 @@ Project: agents
 Branch: fix/flow-batch-11
 Phase: implementing
 Current task: none
-Last completed task: T311
-Tasks complete: 84
-Tasks remaining: 8
-Last validation: PASS at 2026-10-22T23:26:44Z
+Last completed task: T312
+Tasks complete: 85
+Tasks remaining: 7
+Last validation: PASS at 2026-10-23 (T312, 1210 tests)
 Blocked: yes
 Next action: Continue queue; see task results for any blockers
-Last updated: 2026-10-22T23:26:44Z
+Last updated: 2026-10-23
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
