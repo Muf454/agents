@@ -118,6 +118,7 @@ fi
 [[ -z "$since" || "$triage" == yes || "$revise_plan" == yes ]] || \
   ai_die '--since only applies to --triage and --revise-plan.'
 [[ -z "$base" || "$revise_plan" == yes ]] || ai_die '--base only applies to --revise-plan.'
+ai_session_gate_settings
 ai_supervise_settings
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root

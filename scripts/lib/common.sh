@@ -37,7 +37,7 @@ ai_config() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(AI_[A-Z_]+)=(.*)$ ]] || continue
     key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS) ;; *) continue ;; esac
+    case "$key" in AI_NOTIFY_CMD|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS|AI_SESSION_GATE) ;; *) continue ;; esac
     [[ -z "${!key+x}" ]] || continue
     if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
     printf -v "$key" '%s' "$value"
@@ -69,6 +69,13 @@ ai_review_route_settings() {
   [[ "${AI_REVIEW_ROUTE:-}" =~ ^(|risk|codex)$ ]] || ai_die "Invalid AI_REVIEW_ROUTE: $AI_REVIEW_ROUTE (risk or codex)"
   [[ -z "${AI_REVIEW_SMALL_LINES:-}" || "$AI_REVIEW_SMALL_LINES" =~ ^[1-9][0-9]{0,5}$ ]] || \
     ai_die "Invalid AI_REVIEW_SMALL_LINES: $AI_REVIEW_SMALL_LINES (1-999999)"
+}
+
+# Session gate (TS-01): AI_SESSION_GATE empty/auto lets the measured gate time decide whether an
+# implementation session runs the full gate itself; full or targeted forces it (workflow.py session-gate).
+ai_session_gate_settings() {
+  [[ "${AI_SESSION_GATE:-}" =~ ^(|auto|full|targeted)$ ]] || \
+    ai_die "Invalid AI_SESSION_GATE: $AI_SESSION_GATE (auto, full or targeted)"
 }
 
 # Codex review model/effort: reviews are where a stronger model pays off most.

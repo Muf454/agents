@@ -72,6 +72,7 @@ case "${AI_REVIEWER:-auto}" in
   *) ai_die "Invalid AI_REVIEWER: $AI_REVIEWER (auto, codex or claude)" ;;
 esac
 ai_review_route_settings
+ai_session_gate_settings
 ai_supervise_settings
 ai_root
 # Host authority state must live where agent sessions cannot write; checked before any agent.

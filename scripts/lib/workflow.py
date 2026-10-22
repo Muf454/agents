@@ -2551,7 +2551,7 @@ RUN_SETTINGS = ('AI_NOTIFY_CMD', 'AI_MODEL', 'AI_REVIEW_MODEL', 'AI_REVIEW_EFFOR
                 'AI_REVIEWER', 'AI_CLAUDE_REVIEW_MODEL', 'AI_CLAUDE_REVIEW_EFFORT', 'AI_DIAGNOSIS_MODEL',
                 'AI_SUPERVISE', 'AI_SUPERVISE_PLAN_ROUNDS', 'AI_SUPERVISE_ESCALATE_ROUND',
                 'AI_SUPERVISE_ESCALATE_MODEL', 'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
-                'AI_REVIEW_RISK_WORDS')
+                'AI_REVIEW_RISK_WORDS', 'AI_SESSION_GATE')
 
 
 def _no_duplicate_keys(pairs):
@@ -4479,18 +4479,48 @@ def outcome(arguments):
             remove_marker(marker)
 
 
-def gate_seconds(arguments):
-    """Prints this project's gate time: the largest seconds among its last 3 passing host gate
-    runs (`outcome gate pass`), or 0 without any. Torn or foreign lines are ignored; a missing or
-    unreadable log is 0. The log sits in the host state root, which agents cannot write."""
-    if arguments:
-        fail('Usage: gate-seconds')
+def gate_passes():
+    """This project's last 3 passing host gate runs (`outcome gate pass`), in seconds. Torn or
+    foreign lines are ignored; a missing or unreadable log has none. The log sits in the host
+    state root, which agents cannot write."""
     check_state_root(git('rev-parse', '--show-toplevel').decode().strip())
     project = project_name()
     passes = [r['seconds'] for r in read_outcomes([outcomes_path()])
               if r.get('kind') == 'gate' and r.get('result') == 'pass' and r.get('project') == project
               and type(r.get('seconds')) is int and r['seconds'] >= 0]
-    print(max(passes[-3:], default=0))
+    return passes[-3:]
+
+
+def gate_seconds(arguments):
+    """Prints this project's gate time: the largest of its last 3 passing gate seconds, 0 without any."""
+    if arguments:
+        fail('Usage: gate-seconds')
+    print(max(gate_passes(), default=0))
+
+
+# TS-01: projects whose gate is under 120 s keep running it in the implementation session.
+FAST_GATE_SECONDS = 120
+
+
+def session_gate(arguments):
+    """Prints `MODE SECONDS`: whether an implementation session runs the full gate itself (`full`)
+    or only its targeted checks (`targeted`), and the project's gate time. AI_SESSION_GATE
+    full/targeted forces the mode; empty or auto picks full when at least one pass is recorded and
+    the gate time is under FAST_GATE_SECONDS. Any error or an invalid setting is `targeted 0`."""
+    if arguments:
+        fail('Usage: session-gate')
+    setting = os.environ.get('AI_SESSION_GATE', '')
+    try:
+        if setting not in ('', 'auto', 'full', 'targeted'):
+            raise ValueError(setting)
+        passes = gate_passes()
+    except (Exception, SystemExit):  # fail() exits; the safe answer is still targeted
+        print('targeted 0')
+        return
+    seconds = max(passes, default=0)
+    if setting in ('', 'auto'):
+        setting = 'full' if passes and seconds < FAST_GATE_SECONDS else 'targeted'
+    print(f'{setting} {seconds}')
 
 
 ATTEMPT_NOTE_LIMIT = 600
@@ -5747,6 +5777,8 @@ def main():
         outcome(arguments)
     elif command == 'gate-seconds':
         gate_seconds(arguments)
+    elif command == 'session-gate':
+        session_gate(arguments)
     elif command == 'attempt-info':
         attempt_info(arguments)
     elif command == 'outcomes-report':

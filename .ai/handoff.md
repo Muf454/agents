@@ -14,6 +14,11 @@
   base, `ai-run` the merge-base of `--base`); without `--base` the old rule stays. The helper
   `newly_done_ids` is shared with `tasks newly-done`. `tasks untouched` is now unused by the
   runner scripts (kept as a helper).
+- T203 (TS-01 (2), 2026-10-22): helper `session-gate` prints `MODE SECONDS` (`full` when
+  `AI_SESSION_GATE` is empty/auto and a recorded passing gate is under 120 s, else `targeted`;
+  `full`/`targeted` force it; any error or invalid value → `targeted 0`, exit 0). `AI_SESSION_GATE`
+  is a run setting (config, manifest, recovery restore) validated by `ai-run` and `ai-pipeline`.
+  No caller yet (T204).
 
 The plan was written 2026-10-21 in an unattended planning session on
 `fix/flow-batch-10` (from `fix/flow-batch-9` at 4fea72d; batch 9 is complete there apart from
@@ -147,8 +152,10 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   stops the revision (`test_plan_review_followup_newly_done_still_stops`); the queue repair with
   `--base` reorders, without it does nothing (`test_plan_review_followup_queue_repair_with_base`).
 - `worker_count` (T202): default and override parsing, `Workers:` first line.
-- `session_gate_mode`, `session_gate_setting` (T203): mode from gate time and setting, validation
-  and manifest.
+- `session_gate_mode`, `session_gate_setting` (T203, DONE): mode from gate time and setting, errors
+  → `targeted 0` (`test_session_gate_mode_from_gate_time_and_setting`); `AI_SESSION_GATE=x` stops
+  `ai-run` and `ai-pipeline`, the value is kept in the run manifest
+  (`test_session_gate_setting_is_validated_and_kept`).
 - `session_gate_contract` and the migrated `session_gate_allowance` (T204): contract text and
   allowance per mode, fallback without `Targeted:` lines that excludes every full-gate entry
   point (`bash .ai/validate` fixture).
@@ -182,5 +189,5 @@ Test groups (run with `python3 -m unittest discover -s tests -k <group>`); DONE 
   TS-01 (3) shared fixtures, PR-to-merge time, OR-04.
 
 ## Next action
-The runner continues with the next task after T214.
+The runner continues with the next task after T203 (T204 wires `session-gate` into the runner).
 Nothing is merged or deployed.

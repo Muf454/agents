@@ -6349,6 +6349,19 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-recover', '--stage', 'implementation', expected=1)
         self.assertIn('already tried 1 time(s)', self.notifications())
 
+    def test_session_gate_setting_is_validated_and_kept(self):
+        self.ready()
+        for name, args in (('ai-run', ('--approved',)), ('ai-pipeline', ('--approved', '--base', 'main', '--no-pr'))):
+            with self.subTest(tool=name):
+                result = self.tool(name, *args, expected=1, AI_SESSION_GATE='x')
+                self.assertIn('Invalid AI_SESSION_GATE: x', result.stderr)
+                self.assertFalse((self.project / '.ai/local/mock-invocations').exists())
+        self.tool('ai-pipeline', '--approved', '--base', 'main', '--no-pr', expected=1,
+                  AI_AUTO_RECOVER='1', MOCK_CLAUDE='error', MOCK_RECOVER='escalate', AI_SESSION_GATE='targeted')
+        manifest = json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())
+        self.assertEqual(manifest['env']['AI_SESSION_GATE'], 'targeted')
+        self.assertIn('AI_SESSION_GATE=targeted', self.helper('run-manifest', 'env').stdout.split('\0'))
+
     def held_and_hidden(self, command, **env):
         """Start COMMAND with a session held in MOCK_CLAUDE=hold; once it holds, the host dashboard
         (real /proc, this fixture's base) lists nothing, though a reader blind to the marker would.
@@ -6478,7 +6491,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             self.assertEqual(keys, lists['RUN_SETTINGS'], name)
         self.assertIn('AI_SUPERVISE_ESCALATE_MODEL', lists['RUN_SETTINGS'])
         self.assertLessEqual({'AI_REVIEW_ROUTE', 'AI_REVIEW_SMALL_LINES', 'AI_REVIEW_RISK_PATHS',
-                              'AI_REVIEW_RISK_WORDS'}, lists['RUN_SETTINGS'])
+                              'AI_REVIEW_RISK_WORDS', 'AI_SESSION_GATE'}, lists['RUN_SETTINGS'])
 
     def test_committed_content_must_match_validated_files(self):
         self.ready()
@@ -9797,6 +9810,57 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.gate_seconds(), '60')
         log.write_bytes(log.read_bytes() + b'{"kind": "gate", "project": "project with spaces", "result": "pass", "sec')
         self.assertEqual(self.gate_seconds(), '60')
+
+    def session_gate(self, setting=None, **overrides):
+        env = dict(self.env, **overrides)
+        env.pop('AI_SESSION_GATE', None)
+        if setting is not None:
+            env['AI_SESSION_GATE'] = setting
+        result = self.run_cmd(['python3', str(HELPER), 'session-gate'], env=env)
+        return result.stdout.strip()
+
+    def test_session_gate_mode_from_gate_time_and_setting(self):
+        self.outcome_log_project()
+        log = self.base / 'host-state/outcomes.jsonl'
+        foreign = {'time': 't', 'kind': 'gate', 'project': 'other', 'branch': 'b', 'result': 'pass', 'seconds': 10}
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps(foreign) + '\n')  # another project's fast gate does not count
+        self.assertEqual(self.session_gate(), 'targeted 0')
+        self.assertEqual(self.session_gate('full'), 'full 0')
+        self.helper('outcome', 'gate', 'fail', '5')
+        self.assertEqual(self.session_gate('auto'), 'targeted 0')
+        self.helper('outcome', 'gate', 'pass', '0')  # a sub-second gate is fast
+        self.assertEqual(self.session_gate(), 'full 0')
+        for seconds in ('60', '90'):
+            self.helper('outcome', 'gate', 'pass', seconds)
+        self.assertEqual(self.session_gate(), 'full 90')
+        self.assertEqual(self.session_gate('targeted'), 'targeted 90')
+        self.helper('outcome', 'gate', 'pass', '800')
+        self.assertEqual(self.session_gate(), 'targeted 800')
+        self.assertEqual(self.session_gate('auto'), 'targeted 800')
+        self.assertEqual(self.session_gate('full'), 'full 800')
+        self.assertEqual(self.session_gate('bogus'), 'targeted 0')
+        for seconds in ('60', '60'):
+            self.helper('outcome', 'gate', 'pass', seconds)
+        self.assertEqual(self.session_gate(), 'targeted 800')  # still among the last 3
+        self.helper('outcome', 'gate', 'pass', '60')
+        self.assertEqual(self.session_gate(), 'full 60')
+        self.assertEqual(self.session_gate('targeted'), 'targeted 60')
+        self.helper('outcome', 'gate', 'pass', '119')
+        self.assertEqual(self.session_gate(), 'full 119')
+        self.helper('outcome', 'gate', 'pass', '120')
+        self.assertEqual(self.session_gate(), 'targeted 120')
+        self.helper('session-gate', 'extra', expected=1)
+        log.unlink()
+        log.mkdir()  # unreadable as a log
+        self.assertEqual(self.session_gate(), 'targeted 0')
+        # A state root that cannot be used (relative, inside the checkout) or a git error is an
+        # exception: targeted 0 and exit 0, whatever the setting.
+        for overrides in ({'AI_STATE_DIR': 'relative'}, {'AI_STATE_DIR': str(self.project / '.ai/local')},
+                          {'GIT_DIR': str(self.base / 'no-such-git-dir')}):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.session_gate('full', **overrides), 'targeted 0')
+                self.assertEqual(self.session_gate(**overrides), 'targeted 0')
 
     def attempt_info_project(self, models=('sonnet', 'haiku', 'opus', ''), notes='Pending.'):
         self.setup_project()

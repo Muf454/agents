@@ -5369,7 +5369,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
   after this session is the full gate (batch rule), so it was not rerun.
 
 ## T203 — `session-gate` helper and the `AI_SESSION_GATE` run setting (TS-01 (2), helper)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -5420,6 +5420,18 @@ Targeted: `bash -n scripts/lib/common.sh scripts/ai-recover scripts/ai-run scrip
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (opus): `workflow.py` `gate_passes()` (factored from `gate_seconds`, which prints its
+max as before), `FAST_GATE_SECONDS = 120`, command `session-gate` (`MODE SECONDS`; any exception,
+including a `fail()` exit, or an invalid setting → `targeted 0`, exit 0). `AI_SESSION_GATE` added
+to `RUN_SETTINGS`, the `ai_config` keys, both `ai-recover` lists; `ai_session_gate_settings`
+(common.sh) called in `ai-run` and `ai-pipeline`. Docs: docs/workflow.md (`session-gate`
+paragraph), README config key list. Tests: `test_session_gate_mode_from_gate_time_and_setting`
+(all listed cases; errors via a relative or in-checkout `AI_STATE_DIR` and a bad `GIT_DIR`, and a
+log that is a directory), `test_session_gate_setting_is_validated_and_kept`; key-list test now
+requires the key. Checks: -k session_gate_mode -k session_gate_setting 2 OK; -k gate_time 5 OK;
+-k supervise_settings_key_lists_are_identical -k recovery_restores_the_approved_runs_settings 2
+OK; bash -n OK. Full gate left to the host gate (BATCH 10 GATE RULE); an in-session ai-check was
+started by mistake before reading that rule and passed the 600 s tool limit (not authoritative).
 
 ## T204 — Runner contract and session allowance follow the gate mode (TS-01 (2), FL-28, runner)
 Status: TODO

@@ -1391,6 +1391,15 @@ project's gate time: the largest `seconds` among its last 3 `pass` lines, or `0`
 log (torn lines and other projects' lines ignored). Like `outcome`, it refuses a state root that
 overlaps the checkout (exit 1), so agents cannot write the record it reads.
 
+`session-gate` (TS-01) prints `MODE SECONDS`: whether an implementation session runs the full
+gate itself (`full`) or only its targeted checks (`targeted`), and the gate time above. The run
+setting `AI_SESSION_GATE` (kept with the approved run like the routing settings) decides: empty
+or `auto` → `full` when at least one pass is recorded and the gate time is under 120 s
+(`FAST_GATE_SECONDS`; a sub-second `0` counts), else `targeted`; `full` or `targeted` forces that
+mode. Any error (a refused state root, a git error) or an invalid value prints `targeted 0` with
+exit 0; `ai-run` and `ai-pipeline` reject an invalid value before any agent runs
+(`Invalid AI_SESSION_GATE`). No caller uses it yet (T204 wires it into the runner contract).
+
 `attempt-info TASK [BASE_MODEL]` (BR-03; used by `ai-run`, below) prints `N MODEL RAISED`
 for the next attempt of TASK: N = 1 + this project's, branch's and task's `outcome task` rows
 whose result is not `done`; MODEL is the task's `Model:`, else BASE_MODEL, else `-`; from N = 3 it
