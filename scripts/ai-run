@@ -315,7 +315,7 @@ host_gate() {
   local lock_wait=$remaining
   (( lock_wait <= 900 )) || lock_wait=900
   gate_code=0
-  AI_CHECK_LOCK_WAIT=$lock_wait AI_CHECK_TIMEOUT=$remaining "$AI_BIN/ai-check" || gate_code=$?
+  ai_run_child env AI_CHECK_LOCK_WAIT="$lock_wait" AI_CHECK_TIMEOUT="$remaining" "$AI_BIN/ai-check" || gate_code=$?
 }
 
 knowledge_prompt() {

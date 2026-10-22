@@ -11056,6 +11056,86 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                     self.assertEqual(code, expected, output)
                     self.assertEqual((self.project / '.ai/reviews/current.md').read_bytes(), original)
 
+    def holding_gate(self, marker):
+        """A fixture gate that sleeps 300 s (pid in .ai/local/mock-gate.pid) once MARKER exists."""
+        (self.project / '.ai/validate').write_text(
+            f'#!/usr/bin/env bash\n[[ -e {marker} ]] || exit 0\necho $$ > .ai/local/mock-gate.pid\nexec sleep 300\n')
+        self.commit('gate that holds on the work')
+
+    def test_interrupt_pid_only_runner_gate(self):
+        self.ready()
+        self.holding_gate('T001.txt')
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-gate.pid',
+                                              lambda runner: runner.send_signal(signal.SIGTERM))
+        self.assertEqual(code, 143, output)
+        self.helper('stamp', 'verify', expected=1)
+        self.assertNotIn('PASS', (self.project / '.ai/local/validation.json').read_text())
+
+    def test_interrupt_pid_only_recovery_gate(self):
+        self.ready()
+        self.holding_gate('partial.txt')
+        pid_path = self.project / '.ai/local/mock-gate.pid'
+        pid_path.unlink(missing_ok=True)
+        # The pipeline's own recovery reruns the gate on the timed-out session's partial work.
+        pipeline = subprocess.Popen([str(self.project / '.ai/bin/ai-pipeline'), '--approved', '--base', 'main',
+                                     '--no-pr', '--session-timeout', '1'], cwd=self.project,
+                                    env=dict(self.env, AI_AUTO_RECOVER='1', MOCK_CLAUDE='timeout-once'),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        gate = recover = None
+        try:
+            deadline = time.monotonic() + PIPELINE_TIMEOUT
+            while not (pid_path.exists() and pid_path.read_text()):
+                if pipeline.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the recovery gate never started')
+                time.sleep(0.05)
+            gate = int(pid_path.read_text())
+            pid = gate
+            while recover is None and pid > 1:  # validate < timeout < ai-check < ai-recover
+                pid = int(Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[1])
+                if b'ai-recover' in Path(f'/proc/{pid}/cmdline').read_bytes():
+                    recover = pid
+            self.assertIsNotNone(recover, 'the gate does not run under ai-recover')
+            os.kill(recover, signal.SIGTERM)
+            started = time.monotonic()
+            while True:  # not our child: the pipeline reaps it, so poll until it is gone
+                try:
+                    if Path(f'/proc/{recover}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                        break
+                except FileNotFoundError:
+                    break
+                if time.monotonic() - started > INTERRUPT_TIMEOUT:
+                    self.fail('ai-recover outlived the interrupt bound')
+                time.sleep(0.05)
+            for _ in range(100):
+                try:
+                    os.kill(gate, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f'the fake gate {gate} outlived ai-recover')
+            pipeline.communicate(timeout=PIPELINE_TIMEOUT)
+        finally:
+            if pipeline.poll() is None:
+                os.killpg(pipeline.pid, signal.SIGKILL)
+                pipeline.communicate()
+            if gate is not None:
+                with contextlib.suppress(OSError):
+                    os.kill(gate, signal.SIGKILL)
+        self.assert_partial_uncommitted()
+        self.assertIn('auto-recovery failed unexpectedly (exit 143)', self.notifications())
+
+    def test_interrupt_pid_only_limit_pause(self):
+        self.ready()
+        nap = self.mock_bin / 'held-sleep'
+        nap.write_text('#!/usr/bin/env bash\necho $$ > .ai/local/mock-sleep.pid\nexec sleep 300\n')
+        nap.chmod(0o755)
+        code, output = self.interrupt_session([str(self.project / '.ai/bin/ai-run'), '--approved'], 'mock-sleep.pid',
+                                              lambda runner: runner.send_signal(signal.SIGTERM),
+                                              MOCK_CLAUDE='limit-once', AI_SLEEP=str(nap))
+        self.assertEqual(code, 143, output)
+        self.assertIn('usage limit reached; pausing', output)
+
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()
         (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho fine\nexit 0\n')

@@ -125,7 +125,7 @@ ai_limit_pause() {
     "$(date -u +%FT%TZ)" "$wait" "$agent" "$until" >> .ai/local/pauses.log
   ai_notify "⏸ PAUSED: $agent usage limit reached. Resumes by itself around $until."
   ai_observe pause "$agent until $until"
-  ${AI_SLEEP:-sleep} "$wait"
+  ai_run_child ${AI_SLEEP:-sleep} "$wait"
   ai_observe resume
   AI_WAITED=$(( AI_WAITED + wait ))
 }

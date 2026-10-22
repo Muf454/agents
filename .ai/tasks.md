@@ -5795,7 +5795,7 @@ already in place. Evidence: `python3 -m unittest discover -s tests -k run_record
 say to run only the targeted tests).
 
 ## T317 — Interrupts reach the runner's and recovery's host gates and limit sleeps (RC-01 G2, plan review P2)
-Status: TODO
+Status: DONE
 Dependencies: T304
 Model: opus
 
@@ -5838,6 +5838,18 @@ Targeted: `python3 -m unittest discover -s tests -k interrupt` (must say `Ran N 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): `scripts/ai-run` `host_gate` runs `ai_run_child env AI_CHECK_LOCK_WAIT=…
+AI_CHECK_TIMEOUT=… ai-check`, `scripts/ai-recover` `commit_validated` runs `ai_run_child ai-check`,
+`scripts/lib/common.sh` `ai_limit_pause` runs `ai_run_child ${AI_SLEEP:-sleep}`. New tests (pid-only
+SIGTERM): `test_interrupt_pid_only_runner_gate` (exit 143, fake validate gone, stamp not PASS),
+`test_interrupt_pid_only_recovery_gate` (the pipeline's own timeout-rerun recovery: the ai-recover
+pid found from the fake validate's ancestry gets TERM, ends within INTERRUPT_TIMEOUT, validate gone,
+no recovery checkpoint, partial.txt untracked, "auto-recovery failed unexpectedly (exit 143)"),
+`test_interrupt_pid_only_limit_pause` (exit 143, the sleep fixture gone). The bound used is
+INTERRUPT_TIMEOUT (scaled 30 s), tighter than the 40 s criterion. Evidence: `python3 -m unittest
+discover -s tests -k interrupt` → Ran 17 tests, OK. The full gate ran past the 600 s tool limit
+in this session, so the runner's gate is the evidence for it. docs/workflow.md "Interruption,
+limits, and recovery" names the host gates and the limit pause.
 
 ## T306 — ai-pipeline traps INT/TERM and records a human stop, gate first (RC-01 G1, pipeline)
 Status: TODO

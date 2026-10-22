@@ -40,6 +40,10 @@
   traps, and `on_exit` ends it `finished` on exit 0, else `stopped` (only while the approved gate
   verifies). Inside a pipeline it writes none. The code came from T316's WIP (8df58cb) and was
   checked against the notes unchanged. `docs/workflow.md` "Pipeline contract". Flow unchanged.
+- T317 (2026-10-22): `ai-run`'s host gate, `ai-recover`'s `commit_validated` gate and
+  `ai_limit_pause`'s sleep run through `ai_run_child`, so a TERM to the script's pid alone ends
+  them within seconds (ai-check's own TERM trap ends its validator; nothing is committed).
+  `docs/workflow.md` "Interruption, limits, and recovery". Flow unchanged beyond T303's note.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -240,7 +244,8 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   `test_interrupt_reaches_the_session_term`, `test_interrupt_reaches_the_recovery_session`,
   `test_session_exit_codes_unchanged`; T304: `test_interrupt_reaches_the_gate`,
   `test_interrupt_reaches_the_review` (Codex and Claude, group SIGINT and pid-only SIGTERM),
-  `test_check_logger_failure_fails_the_gate`.
+  `test_check_logger_failure_fails_the_gate`; T317: `test_interrupt_pid_only_runner_gate`,
+  `test_interrupt_pid_only_recovery_gate`, `test_interrupt_pid_only_limit_pause`.
 - `escalation` (T305, T309, T320, T321, T327): kinds, answers, redaction, hint consumption, a repeated
   write keeps the kind, current run only, answers from the current run record never an earlier
   manifest, a stop request wins, cleared by a new run and a resume; hints at the
