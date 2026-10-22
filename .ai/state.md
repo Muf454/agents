@@ -5,12 +5,12 @@ Branch: fix/flow-batch-11
 Phase: implementing
 Current task: none
 Last completed task: T303
-Tasks complete: 69
-Tasks remaining: 23
-Last validation: FAIL at 2026-10-22T08:05:22Z
+Tasks complete: 70
+Tasks remaining: 22
+Last validation: PASS at 2026-10-22T09:34:17Z
 Blocked: no
-Next action: Runner gate for T316, then T328
-Last updated: 2026-10-22T09:12:50Z
+Next action: Continue queue; see task results for any blockers
+Last updated: 2026-10-22T09:34:18Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
