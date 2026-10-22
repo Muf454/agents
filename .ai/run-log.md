@@ -598,3 +598,4 @@
 | 2026-10-22T11:37:08Z | runner | T317 | completed | PASS | 3cecca6 | Claude checkpointed; continuing queue |
 | 2026-10-22T12:20:00Z | claude (opus) | T306 | DONE: ai-pipeline INT/TERM trap and stop() under a stop request → ai_human_stop (gate first; human_stop record, escalation, bookkeeping commit, one ⛔ STOPPED by you, no recovery); 5 test_human_stop_* tests | -k human_stop 8 OK; full gate left to the runner (over the tool limit) | see next entry | vault flow chart and hub Log updated |
 | 2026-10-22T12:30:13Z | runner | T306 | completed | PASS | 715eabc | Claude checkpointed; continuing queue |
+| 2026-10-22T13:10:00Z | claude (opus) | T318 | DONE: ai-pipeline's ai-run, ai-review, ai-check and push retry sleep run via ai_run_child; 5 test_human_stop_pid_only_* tests (signal to the pipeline pid only) | -k human_stop 13 OK; full gate left to the runner (over the tool limit) | see next entry | vault hub Log updated; flow unchanged |

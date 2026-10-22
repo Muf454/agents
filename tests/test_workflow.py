@@ -10944,9 +10944,9 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.tool('ai-run', '--approved')
         self.assertEqual([r[:2] for r in self.task_rows()], [(1, 'interrupted'), (2, 'interrupted'), (3, 'done')])
 
-    def interrupt_session(self, command, pid_file, send, **env):
+    def interrupt_session(self, command, pid_file, send, limit=INTERRUPT_TIMEOUT, **env):
         """Start COMMAND in its own session, wait until its fake session (sleeping 300 s) wrote
-        .ai/local/PID_FILE, SEND(runner) a signal and wait INTERRUPT_TIMEOUT for the runner to exit.
+        .ai/local/PID_FILE, SEND(runner) a signal and wait LIMIT seconds for the runner to exit.
         Asserts the fake session is gone; returns (exit code, output)."""
         pid_path = self.project / '.ai/local' / pid_file
         pid_path.unlink(missing_ok=True)
@@ -10963,7 +10963,7 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
                 time.sleep(0.05)
             session = int(pid_path.read_text())
             send(runner)
-            output = runner.communicate(timeout=INTERRUPT_TIMEOUT)[0].decode(errors='replace')
+            output = runner.communicate(timeout=limit)[0].decode(errors='replace')
             for _ in range(100):  # the runner waited for timeout, which reaped the session
                 try:
                     os.kill(session, 0)
@@ -11232,6 +11232,66 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         line = self.assert_tampered_stop(sentinel)
         self.assertIn('⛔ STOPPED by you:', line)
         self.assertIn('Gate files changed or not yet approved', line)
+
+    # PID-only stop (RC-01 G2, T318): a signal to the pipeline's pid alone reaches every long stage.
+    def pid_only_stop(self, pid_file, stage, sig=signal.SIGTERM, command=None, **env):
+        """Signal only the fixture pipeline's pid once its fake leaf process wrote PID_FILE; asserts
+        it ended within a scaled 40 s with the leaf gone and the T306 human stop records for STAGE."""
+        code, output = self.interrupt_session(command or self.pipeline_command(), pid_file,
+                                              lambda runner: os.kill(runner.pid, sig), limit=40 * TIMEOUT_SCALE,
+                                              AI_AUTO_RECOVER='1', **env)
+        self.assertEqual(code, 128 + sig, output)
+        self.assert_not_recovered()
+        self.assertIn(f'during {stage}.', self.human_stop_lines()[-1])
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'signal'))
+        self.assertEqual((self.escalation_data()['kind'], self.escalation_data()['stage']), ('human_stop', stage))
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.assertIn('stopped by the human (signal)', (self.project / '.ai/run-log.md').read_text())
+        return output
+
+    def test_human_stop_pid_only_implementation(self):
+        self.ready()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig.name):
+                self.pid_only_stop('mock-session.pid', 'build', sig, MOCK_CLAUDE='sleep')
+                self.assertEqual((self.project / 'partial.txt').read_text(), 'interrupted work')
+                if self.run_cmd(['git', 'status', '--porcelain']).stdout:
+                    self.commit('reconcile the stopped run')
+        self.assertEqual(len(self.human_stop_lines()), 2)
+
+    def test_human_stop_pid_only_review(self):
+        self.ready()
+        self.pid_only_stop('mock-review.pid', 'review', command=[*self.pipeline_command(), '--skip-plan-review'],
+                           MOCK_CODEX='sleep')
+        self.helper('tasks', 'complete')
+
+    def test_human_stop_pid_only_validation(self):
+        self.ready(task('T001', 'DONE'))
+        (self.project / '.ai/validate').write_text('#!/usr/bin/env bash\necho $$ > .ai/local/mock-gate.pid\nexec sleep 300\n')
+        self.commit('sleeping gate')
+        self.pid_only_stop('mock-gate.pid', 'checks')
+        self.helper('stamp', 'verify', expected=1)
+        self.assertNotIn('PASS', (self.project / '.ai/local/validation.json').read_text())
+
+    def test_human_stop_pid_only_dependency_setup(self):
+        self.deps_ready()
+        (self.project / '.ai/ci-setup').write_text(
+            '#!/usr/bin/env bash\n# ai-deps-inputs: deps.lock\n# ai-deps-outputs: vendor-deps\n'
+            'echo $$ > .ai/local/mock-deps.pid\nexec sleep 300\n')
+        self.commit('sleeping dependency setup')
+        self.pid_only_stop('mock-deps.pid', 'build')
+        self.assertFalse((self.project / 'vendor-deps').exists())
+
+    def test_human_stop_pid_only_retry_wait(self):
+        self.ready()
+        self.add_origin()
+        self.hook('pre-push', 'exit 1\n')
+        nap = self.mock_bin / 'held-sleep'
+        nap.write_text('#!/usr/bin/env bash\necho $$ > .ai/local/mock-sleep.pid\nexec sleep 300\n')
+        nap.chmod(0o755)
+        output = self.pid_only_stop('mock-sleep.pid', 'pr', command=self.pipeline_command()[:-1], AI_SLEEP=str(nap))
+        self.assertIn('== Pull request ==', output)
 
     def test_check_logger_failure_fails_the_gate(self):
         self.ready()

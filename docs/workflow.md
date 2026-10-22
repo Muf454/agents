@@ -323,9 +323,14 @@ work is kept uncommitted.] Rerun ai-pipeline … to continue.` notification,
 `last-error.notified`, the marker removed, exit 130 (INT) or 143 (TERM). `<stage>` is the
 dashboard step key (`start` before the first step). `stop()` does the same, after its own gate
 check, when the run record carries a stop request, so a stage that fails under a requested
-stop never reaches `ai-recover`. Until T318 the pipeline's own children run in the foreground,
-so a signal to the pipeline's pid alone waits for the running stage; a signal to the group
-(Ctrl-C) ends it at once.
+stop never reaches `ai-recover`. A stop reaches every stage: the pipeline runs its `ai-run`
+(implementation, triage, plan revision), `ai-review` (plan review, review, re-check), `ai-check`
+and the push retry sleep through `ai_run_child`, so a signal to the pipeline's pid alone (not
+only Ctrl-C to the group) ends the running session, reviewer, validator, dependency setup or
+sleep within seconds with the same records. A child that exits 130 or 143 under a stop goes to
+the trap, never to `stop()`; a child still alive 30 s after the TERM skips the bookkeeping
+commit. The publication commands (`git push`, `git ls-remote`, `gh`) still run in the
+foreground (T323).
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

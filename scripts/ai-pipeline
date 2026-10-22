@@ -83,6 +83,8 @@ export AI_LOCK_HELD=$$
 rm -f .ai/local/last-error
 # A human stop (Ctrl-C, kill -TERM, a service stop) is recorded as such, never auto-recovered;
 # trapped before the marker exists so no interrupt leaves it behind. AI_STAGE is the step key.
+# Long children (ai-run, ai-review, ai-check, retry sleeps) run through ai_run_child, so a signal
+# to this pid alone ends them too.
 AI_STAGE=start
 trap 'ai_human_stop INT' INT
 trap 'ai_human_stop TERM' TERM
@@ -282,7 +284,7 @@ push() {
     publish_ready "$stage"
     (( ok )) && break
     if (( try == 3 )); then printf '%s\n' "$failed" > .ai/local/last-error; stop "$stage"; fi
-    ${AI_SLEEP:-sleep} $(( try * 20 ))
+    ai_run_child ${AI_SLEEP:-sleep} $(( try * 20 ))
   done
   remote=$(git ls-remote origin "refs/heads/$branch" | awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }') || remote=''
   [[ "$remote" == "$(git rev-parse HEAD)" ]] || {
@@ -294,7 +296,7 @@ push() {
 ensure_validated() {
   if ! ai_helper stamp verify >/dev/null 2>&1; then
     step checks 'Validation'
-    "$AI_BIN/ai-check" || stop validation
+    ai_run_child "$AI_BIN/ai-check" || stop validation
     ai_guard_verify
   fi
 }
@@ -317,7 +319,7 @@ complete_stage() {
   state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
   if [[ "$state" != committed ]]; then
     read -r _ start _ <<< "$info"
-    "$AI_BIN/ai-run" --approved --triage --since "$start" "${triage_args[@]}" || stop triage
+    ai_run_child "$AI_BIN/ai-run" --approved --triage --since "$start" "${triage_args[@]}" || stop triage
     ai_guard_verify
     state=$(ai_helper stage-verify 2>&1) || stage_fail "$state"
     [[ "$state" == committed ]] || stage_fail 'the triage round was not recorded.'
@@ -361,7 +363,7 @@ complete_plan_stage() {
       stop 'plan revision'
     fi
     model=$(plan_revision_model 2>&1) || plan_stage_fail "$model"
-    "$AI_BIN/ai-run" --approved --revise-plan --since "$start" --base "$base_sha" --model "$model" \
+    ai_run_child "$AI_BIN/ai-run" --approved --revise-plan --since "$start" --base "$base_sha" --model "$model" \
       "${plan_revision_args[@]}" || stop 'plan revision'
     ai_guard_verify
     state=$(ai_helper stage-verify 2>&1) || plan_stage_fail "$state"
@@ -398,7 +400,7 @@ reconcile_disputes() {
   [[ "$status" != none ]] || return 0
   if [[ "$status" == pending ]]; then
     step recheck 'Re-check of rejected findings (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
+    ai_run_child "$AI_BIN/ai-review" --recheck "${review_args[@]}" || stop 're-check'
     ai_guard_verify
   fi
   added=$(ai_helper disputes-record 2>&1) || recheck_fail "$added"
@@ -538,7 +540,7 @@ if [[ "$plan_review" == yes ]] && ! armed_resume && ai_helper tasks untouched 2>
     fi
     if [[ "$review_due" == yes ]]; then
       step plan_review 'Plan review (Codex; Claude fallback)'
-      "$AI_BIN/ai-review" --plan --base "$base_sha" "${review_args[@]}" || stop 'plan review'
+      ai_run_child "$AI_BIN/ai-review" --plan --base "$base_sha" "${review_args[@]}" || stop 'plan review'
       ai_guard_verify
       mapfile -t records < <(review_record .ai/reviews/plan.md)
       host_commit 'chore(ai): record plan review' "${records[@]}"
@@ -581,7 +583,7 @@ while true; do
   # checkpointed there), so the review and publish path never meets the dirty tree.
   if ! ai_helper tasks complete 2>/dev/null || armed_resume; then
     step build 'Implementation (Claude)'
-    "$AI_BIN/ai-run" --approved "${run_args[@]}" || stop implementation
+    ai_run_child "$AI_BIN/ai-run" --approved "${run_args[@]}" || stop implementation
     ai_guard_verify
   fi
   if ! review_current; then
@@ -595,7 +597,7 @@ while true; do
       stop review
     fi
     step review 'Independent review (Codex; Claude fallback)'
-    "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
+    ai_run_child "$AI_BIN/ai-review" --base "$base_sha" "${review_args[@]}" || stop review
     ai_guard_verify
     mapfile -t records < <(review_record .ai/reviews/current.md)
     host_commit 'chore(ai): record independent review' "${records[@]}"

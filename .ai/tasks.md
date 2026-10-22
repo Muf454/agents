@@ -5934,7 +5934,7 @@ session (the suite takes ≈ 20 min), so the runner's host gate decides, as for 
 Limitation (by design, T318): a PID-only TERM waits for the pipeline's foreground stage.
 
 ## T318 — The pipeline forwards a stop to its children and sleeps; PID-only stop at every stage (RC-01 G2, G1, plan review P2)
-Status: TODO
+Status: DONE
 Dependencies: T306
 Model: opus
 
@@ -5981,6 +5981,20 @@ Targeted: `python3 -m unittest discover -s tests -k human_stop` (must say `Ran N
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-22 (claude opus): `scripts/ai-pipeline` runs `ai-run` (triage, plan revision,
+implementation), `ai-review` (re-check, plan review, review), `ai-check` (`ensure_validated`) and
+the push retry sleep through `ai_run_child`; `|| stop …` unchanged, plan-review entry untouched,
+publication commands left to T323. Under a signal the trap (`ai_human_stop`) runs as soon as
+`wait` returns, so a 130/143 child never reaches `stop()`; the 30 s still-alive case is T306's.
+Tests: shared `pid_only_stop` helper (signals only the pipeline pid via `os.kill`, scaled 40 s
+bound through a new `limit` argument of `interrupt_session`, leaf gone, `human_stop` record with
+via `signal`, escalation stage, marker gone, run-log row, no recovery);
+`test_human_stop_pid_only_implementation` (TERM 143, INT 130), `_review` (`--skip-plan-review`,
+sleeping Codex), `_validation` (DONE queue, sleeping `.ai/validate`, stamp not PASS),
+`_dependency_setup` (sleeping `.ai/ci-setup`, no `vendor-deps`), `_retry_wait` (failing pre-push
+hook, sleeping `AI_SLEEP`, stage `pr`). `python3 -m unittest discover -s tests -k human_stop`:
+Ran 13 tests OK (118.4 s). Docs: `docs/workflow.md` (a stop reaches every stage). Flow unchanged.
+Full gate: started in session, exceeded the 600 s tool limit (≈1500 s); the runner's gate decides.
 
 ## T323 — The pipeline forwards a stop to its publication commands: git push, ls-remote, gh (RC-01 G2, G1, plan review round 2 P2)
 Status: TODO

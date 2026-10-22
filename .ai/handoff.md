@@ -111,6 +111,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-22, T318: `-k human_stop` Ran 13 OK (118.4 s); full gate result in the T318 notes.
 2026-10-22, T306: `-k human_stop` Ran 8 OK (57.8 s); full gate result in the T306 notes.
 2026-10-22, T302: `.ai/bin/ai-check` PASS, Ran 1138 tests OK (1482 s) on the recovery checkpoint
 086ff5f's source; in session `-k run_record` Ran 21 OK, the seven formerly failing resume tests OK,
@@ -268,7 +269,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   Done so far (T306): `test_human_stop_during_session` (group SIGINT during a session: exit 130,
   one ⛔ STOPPED by you, no recovery, run record and escalation `human_stop`, marker gone, partial
   work kept), `test_human_stop_bookkeeping_commit`, `test_human_stop_request_wins_in_stop`,
-  `test_human_stop_gate_tamper_child_failure`, `test_human_stop_gate_tamper_interrupt`.
+  `test_human_stop_gate_tamper_child_failure`, `test_human_stop_gate_tamper_interrupt`; T318
+  (signal to the pipeline's pid only, leaf process gone within a scaled 40 s, same records):
+  `test_human_stop_pid_only_implementation` (TERM → 143, INT → 130),
+  `test_human_stop_pid_only_review`, `test_human_stop_pid_only_validation` (no PASS stamp),
+  `test_human_stop_pid_only_dependency_setup`, `test_human_stop_pid_only_retry_wait`.
 - `stop_command` (T308, T319, T325): stop, non-leader, no run, process already gone, identity mismatch,
   wait expiry; completion, a replacing run untouched, cancelled relaunch, stopping a recovery;
   stopping a stand-alone `ai-run` (`human_stop`, second stop exit 3).
@@ -291,6 +296,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   tick them).
 
 ## Next action
-T301, T315, T305, T303, T302, T316, T304, T328, T317 and T306 are DONE (T302's gate PASSED on 086ff5f's source).
+T301, T315, T305, T303, T302, T316, T304, T328, T317, T306 and T318 are DONE (T302's gate PASSED on 086ff5f's source).
 Next: the rest of the queue by dependency.
 Nothing is merged or deployed.
