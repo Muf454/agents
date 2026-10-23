@@ -2738,10 +2738,23 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
             lines = (self.project / '.ai/local' / name).read_text().splitlines()
             self.assertEqual(lines, [f'pid {process.pid}', 'to stderr'])
 
+    def test_exec_logged_accepts_both_log_prefixes(self):
+        script = self.exec_logged_fixture()
+        for name in ('plan-20261021T210000Z-0123abcd.log', 'pipeline-20261021T210000Z-0123abcd.log'):
+            self.exec_marker.unlink(missing_ok=True)
+            self.exec_logged(name, script, expected=0)
+            self.assertTrue(self.exec_marker.exists())
+            self.assertIn('to stderr', (self.project / '.ai/local' / name).read_text())
+
     def test_exec_logged_rejects_bad_names_and_a_relative_command(self):
         script = self.exec_logged_fixture()
         local = self.project / '.ai/local'
-        for name in ('../x.log', 'plan-x.log', f'sub/{self.EXEC_LOG}'):
+        stamp = '20261021T210000Z'
+        bad = ('../x.log', 'plan-x.log', f'sub/{self.EXEC_LOG}', f'pipelines-{stamp}-0123abcd.log',
+               f'pipeline-{stamp}-0123abc.log', f'pipeline-{stamp}-0123ABCD.log',
+               f'pipeline-{stamp}-0123abcd.log.x', f'../pipeline-{stamp}-0123abcd.log',
+               f'pipeline/{stamp}-0123abcd.log')
+        for name in bad:
             result = self.exec_logged(name, script, expected=2)
             self.assertIn('invalid log name', result.stderr)
         (self.project / 'exec-script').write_bytes(script.read_bytes())

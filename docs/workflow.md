@@ -500,7 +500,8 @@ launched, then `.ai/local` is created: `setup-project` does not create it).
   ai-run --plan PROMPT … </dev/null &`. A non-interactive shell's background job is not a
   process-group leader, so `setsid` execs without forking, and `exec-logged` creates the log
   exclusively in the pinned `.ai/local` (no symlink or FIFO followed) and execs the runner on
-  it: `$!` is the runner. Then every 0.2 s for at most `AI_PLAN_ACK_SECONDS` (default 20):
+  it: `$!` is the runner. (`exec-logged` also accepts `pipeline-<UTC stamp>-<8 hex>.log`, for
+  the detached pipeline.) Then every 0.2 s for at most `AI_PLAN_ACK_SECONDS` (default 20):
   `.ai/local/observation.json` with `stage: planning`, `state: active` and `pid` equal to the
   runner's → `Planning session started: pid N, log PATH`, exit 0; the runner exited with 0 and
   the observation is its own `stage: planning`, `state: done` (the plan finished between two

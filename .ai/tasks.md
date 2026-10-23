@@ -6804,7 +6804,7 @@ Evidence: `-k ai_task` Ran 13 tests OK; `.ai/bin/ai-check` PASS, Ran 1212 tests 
 README, docs/workflow.md; flow unchanged.
 
 ## T324 — `exec-logged` accepts the detached pipeline's log name (RC-01 G11, plan review round 2 P12)
-Status: TODO
+Status: BLOCKED
 Dependencies: none
 Model: sonnet
 
@@ -6838,6 +6838,12 @@ Targeted: `python3 -m unittest discover -s tests -k exec_logged` (must say `Ran 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Implemented: `EXEC_LOG_NAME` accepts `(?:plan|pipeline)-…`; `test_exec_logged_accepts_both_log_prefixes`
+added, bad-name test extended, `docs/workflow.md` notes the second prefix. Targeted
+`python3 -m unittest discover -s tests -k exec_logged`: Ran 8 tests, OK.
+BLOCKED only on the gate: `.ai/bin/ai-check` exceeded the 600000 ms foreground timeout (the previous
+full gate rerun took 973 s) and was moved to the background, so no gate result was seen. The
+runner's own gate run decides; rerun it and set the task DONE if it passes.
 
 ## T313 — `ai-pipeline --detach`: own systemd user service, recorded log path (RC-01 G11)
 Status: TODO

@@ -6114,7 +6114,7 @@ def local_dir_fd(root):
     return fds[2]
 
 
-EXEC_LOG_NAME = re.compile(r'plan-\d{8}T\d{6}Z-[0-9a-f]{8}\.log')
+EXEC_LOG_NAME = re.compile(r'(?:plan|pipeline)-\d{8}T\d{6}Z-[0-9a-f]{8}\.log')
 
 
 def exec_logged(arguments):
