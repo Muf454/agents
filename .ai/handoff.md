@@ -130,6 +130,13 @@
   with nothing started, and is passed as `$(cd -- DIR && pwd -P)` from the caller's directory.
   Values of the other value options are copied unread. README, `docs/workflow.md`. Flow unchanged.
 
+- T314 (2026-10-23): docs audit against the code. README: `ai-task show` added (the only subcommand
+  missing), the run and escalation record locations next to `--stop`/`--detach`. `docs/workflow.md`:
+  "Run controls" section (stop, records, detach, task commands with exit statuses); the run record
+  and escalation paths corrected to the binding directory (`runs/` and `escalation.json` are beside
+  each other, not beside `run.json`). `DocsConsistencyTest.test_docs_consistency_run_control_commands`:
+  every `ai-task` subcommand of the script is named in README. Vault flow chart and hub Log checked.
+
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
 `fix/flow-batch-9` at 4fea72d; batch 9 is nearly complete there but not merged; this PR targets
@@ -196,6 +203,7 @@ Planned tasks (queue order):
 - T314 docs, flow chart audit, mission-control note.
 
 ## Validation run
+2026-10-23, T314: `-k Docs` Ran 4 tests OK (the three existing consistency tests and the new run-control test); full gate left to the runner.
 2026-10-23, T312: `-k ai_task` Ran 11 OK (7.4 s); `-k skip -k task_set -k tasks` Ran 43 OK; `.ai/bin/ai-check` PASS, Ran 1210 OK (956.2 s).
 2026-10-23, T311: `-k skip` Ran 23 OK (99.7 s); `.ai/bin/ai-check` PASS, Ran 1206 OK (977.7 s).
 2026-10-23, T310: `-k ai_task` Ran 7 OK (3.2 s); full gate result in the T310 notes.
@@ -253,7 +261,8 @@ Recorded as B1–B24 in `.ai/project-spec.md`. The ones that shape behaviour mos
   own run record.
 
 ## Flow chart
-Flow chart updated: T306 added the "Stopped by you" path (interrupt → child ended → inline gate
+Flow chart updated (T314 audit, 2026-10-23: `agents-flow.md` checked against the code; the
+"Stopped by you" path, the escalation record, SKIPPED and `--detach` match, no change needed). T306 added the "Stopped by you" path (interrupt → child ended → inline gate
 check → record or nothing → ⛔ STOPPED by you, no recovery) and its notification row. T307 added
 the recovery's run-record check (stopped by you → no recovery), the watchdog's "stopped by you"
 edge and an interrupt during the recovery decision going to the human-stop path. T308 named
@@ -261,28 +270,51 @@ edge and an interrupt during the recovery decision going to the human-stop path.
 record human_stop" edge. T303, T306, T307, T308, T311, T313 and T320 change the
 flow and update the vault `agents-flow.md` and the hub Log in their own task; T314 audits them.
 
-## For mission control (phase 2 switch; filled in by T314)
-Planned commands (exact forms land with their tasks; T314 checks this list against the code):
-- `<checkout>/.ai/bin/ai-pipeline --stop <checkout> [--wait SECONDS]`: sends SIGTERM; exit 0
-  stopped and recorded (also: a run whose process was already gone is recorded as stopped so
-  nothing resumes it, or a scheduled usage-limit relaunch cancelled), 3 no run active (or
-  already stopped), 4 signalled and still ending, 1 refused or error. Replaces FR-K's own `/proc`
-  walk and signals (C3, C4, C19). Also stops a recovery the watchdog started and a stand-alone
-  `ai-run`.
-- `<checkout>/.ai/bin/ai-pipeline --detach --approved …`: replaces the app's `systemd-run`
-  builder for resume (FR-P4); prints pid and log; needs `systemd-run` (exit 1 without it); a
-  relative `--knowledge-dir` is resolved against the caller's directory.
-- `<checkout>/.ai/bin/ai-task set ID STATUS --commit`, `retry ID --note TEXT --commit`, `model ID
-  MODEL --commit`, `skip ID --reason TEXT --commit`, `skip ID --reauthorize`: exit 75 while a run
-  holds the checkout. Replaces FR-Q3's `flock` + `git commit` steps; adds the "retry with a
-  note", "raise the model" and "skip" choices FR-E3 left out.
-- Records (host state, `<state root>/reviews/<first 16 hex of sha256(checkout path)>/`):
-  `runs/current` (id, `<UTC stamp>-<pid>-<seq>`) and `runs/<id>.json` (run record schema 1: process identity, launcher,
-  argv, log, base, branch, outcome; the owner's process identity is always the live one, also
-  during a recovery), `escalation.json` (schema 1: kind, stage, run id, tasks, evidence, answers
-  as argv arrays built from that run's own record; treat unknown kinds as `other`). Skip authorizations: `<state
-  root>/skips/<64 hex>` (host-wide per repository). Detached logs:
-  `<checkout>/.ai/local/pipeline-<UTC stamp>-<hex>.log`.
+## For mission control (phase 2 switch; checked against the code by T314)
+Commands, run from the checkout as `<checkout>/.ai/bin/…` (T314 checked each against the code):
+- `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` (SECONDS 1–9999, default 60) sends SIGTERM:
+  to the run's process group only when the recorded pid leads it and it is not the caller's group,
+  else to the pid alone; never SIGKILL. Exit 0: stopped; or the run ended on its own first; or its
+  process was already gone and it is recorded as `human_stop` (nothing resumes it); or a scheduled
+  usage-limit relaunch was cancelled. Exit 3: no run active, or already stopped by you (nothing
+  written). Exit 4: signalled and still ending (the request stays recorded; rerun to wait). Exit 1:
+  refused or error. It also stops a recovery the watchdog started and a stand-alone `ai-run`.
+  Replaces FR-K's own `/proc` walk and signals (C3, C4, C19).
+- `ai-pipeline --detach --approved …` (`--detach` first): exit 0 prints `Pipeline started: pid N,
+  log PATH`, `Follow: tail -f PATH` and `Stop: <…>/ai-pipeline --stop <checkout>`. Exit 1: refused
+  (no `--approved`, no `systemd-run`, invalid `AI_PLAN_ACK_SECONDS`, `--knowledge-dir` missing or
+  not a directory), `systemd-run` failed, or the start not confirmed within `AI_PLAN_ACK_SECONDS`
+  (default 20; the service is left running and the log's last lines are printed). A relative
+  `--knowledge-dir` is resolved against the caller's directory. Replaces the app's `systemd-run`
+  builder for resume (FR-P4).
+- `ai-task set ID STATUS --commit`, `retry ID --note TEXT [--commit]`, `model ID MODEL [--commit]`,
+  `skip ID --reason TEXT [--commit]`, `skip ID --reauthorize` (no `--commit`): exit 0 when done (the
+  same status again makes no commit); 75 while a run holds the checkout (`.ai/local/workflow.lock`,
+  nothing changed); 1 refused (detached HEAD, protected branch, unclean checkout, or a change that
+  makes the queue invalid, which is restored); 2 usage (for example `--commit` with `--reauthorize`).
+  A failed commit keeps the change and says so. Plain `ai-task set ID STATUS` takes no lock and
+  commits nothing (sessions inside a run). `ai-task show ID` and `ai-task check` only read.
+  Replaces FR-Q3's `flock` + `git commit` steps; adds the "retry with a note", "raise the model" and
+  "skip" choices FR-E3 left out.
+- Records (host state; `<state root>` is `AI_STATE_DIR`, else `$XDG_STATE_HOME/ai-toolkit`, else
+  `~/.local/state/ai-toolkit`; `<binding>` is `<state root>/reviews/<first 16 hex of sha256(checkout
+  path)>/`):
+  - `<binding>/runs/current`: one line, the current run id `<UTC YYYYMMDDTHHMMSSZ>-<pid>-<seq>` (`seq`
+    is one more than the highest kept record's).
+  - `<binding>/runs/<id>.json`: run record, schema 1: `kind` (`pipeline` or `ai-run`), checkout,
+    branch, base, argv, log, launcher, `started`, `process` (`pid`, `start_ticks`, group and session),
+    `resumes`, `stop_requested`, `ended`, `outcome` (`running`, `paused`, `finished`, `stopped`,
+    `human_stop`, `crashed`) and `detail`. The 20 newest are kept. The process identity is always the
+    live owner's, also during a recovery.
+  - `<binding>/escalation.json`: schema 1 (kind, stage, run id, branch, created, tasks, redacted
+    evidence, answers as argv arrays built from that run's own record); `escalation-hint.json` beside
+    it is the pending hint. Kinds: `plan_review_limit`, `fix_round_limit`, `task_blocked`,
+    `needs_human_question`, `validation`, `usage_limit`, `crash`, `human_stop`, `other`; treat an
+    unknown kind as `other`. A new run or an automatic resume removes both files.
+  - `<state root>/skips/<64 hex>`: empty skip authorizations, host-wide per repository.
+  - Locks: `<checkout>/.ai/local/workflow.lock` (`ai-task` commits and `ai-pipeline --stop`'s
+    completion) and `<binding>/runs/.lock` (record writes), both flock.
+  - Detached logs: `<checkout>/.ai/local/pipeline-<UTC stamp>-<8 hex>.log`.
 - FR-E1's wording classifier can be replaced by `escalation.json`'s `kind`; FR-K4's "auto-recovery
   may start the run again" no longer applies after a stop through `--stop` (G1).
 
@@ -459,7 +491,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   kept), `test_detach_knowledge_dir_only_caller_relative_exists`,
   `test_detach_knowledge_dir_missing` (only the root `notes/`, no value, neither exists → exit 1,
   no `systemd-run` call, no log, no record).
-- `Docs` (T314).
+- `Docs` (T314): `test_docs_consistency_no_wrong_sentences`, `test_docs_consistency_required_sentences`,
+  `test_docs_consistency_modes_table`, `test_docs_consistency_run_control_commands` (every `ai-task`
+  subcommand in README; stop, detach, record and exit 75 names in README and `docs/workflow.md`).
 
 ## Human todos
 - Gate files: none need changing for this batch. After merge, `setup-project --upgrade --apply` in
@@ -473,5 +507,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
 T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324, T313 and T326 too.
-Next: T314 (docs, flow chart audit, mission-control note).
+T314 (docs, flow chart audit, mission-control note) is DONE, so no task of batch 11 is left open.
+Next: the full gate (`.ai/bin/ai-check`, left to the runner; it exceeds the 600 s tool limit in-session).
 Nothing is merged or deployed.

@@ -63,8 +63,8 @@ acceptance phases are not inferred as passed simply because a CLI succeeded.
 The runner records ready_for_review, never claims that the human accepted the work.
 
 **Run records (RC-01 G3; written by `ai-pipeline`, `ai-recover` and a stand-alone `ai-run`).** `workflow.py run-record` keeps one
-host record per run beside `run.json`: `runs/<id>.json`, `runs/current` (the latest id, one line)
-and `runs/.lock`. `start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (KIND `pipeline` or
+host record per run under the binding directory `<state root>/reviews/<first 16 hex of sha256(checkout path)>/`:
+`runs/<id>.json`, `runs/current` (the latest id, one line) and `runs/.lock`. `start KIND BRANCH BASE_REF BASE_SHA --pid PID -- ARGS…` (KIND `pipeline` or
 `ai-run`; `-` `-` for no base) prints only the new id `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>` (`seq`
 one more than the highest kept record's, chosen under the lock; the file is created exclusively,
 never replaced) and writes schema 1: kind, checkout, branch, base, the exact argv, launcher
@@ -95,7 +95,8 @@ not-ended run whose process is gone as `human_stop`. `stop-requested --run ID` e
 stop is requested or the outcome is `human_stop`, 1 when not.
 
 **Escalation record (RC-01 G9, T305 helper, T309 hints, T320 writers).** `workflow.py escalation`
-keeps `escalation.json` (schema 1) beside `run.json`: why the current run waits for a human.
+keeps `escalation.json` (schema 1) and `escalation-hint.json` in the same binding directory, beside
+`runs/`: why the current run waits for a human.
 `write KIND STAGE --run ID [--task T…]… [--finding ID]… [--review PATH]` and `hint KIND --run ID
 [--task …]… [--finding …]…` hold `runs/.lock` and exit 3, writing nothing, when ID is not the
 current run. KIND is one of `plan_review_limit`, `fix_round_limit`, `task_blocked`,
@@ -329,6 +330,33 @@ credential rotation/revocation, remote publishing, shared-history rewrites, secu
 policy changes, and final acceptance. Never push secrets, suppress failures, or weaken
 security to get a pass. Only `ai-pipeline` pushes: the pipeline pushes the feature branch
 and opens the pull request (never force, never `main`). Nothing merges or deploys.
+
+## Run controls
+
+The commands a human (or mission control) uses to steer a run. Each one is described in full in
+the paragraph named after it; this section lists them together with their exit statuses.
+
+- **Stop**: `ai-pipeline --stop [CHECKOUT] [--wait SECONDS]` (see "`ai-pipeline --stop …`" under
+  "Interruption, limits, and recovery"). Exit 0 stopped or recorded as stopped, 3 nothing to stop,
+  4 still ending after the wait, 1 refused or error. A stopped run is never resumed by
+  `ai-recover` or the watchdog; `--stop` sends SIGTERM and never SIGKILL.
+- **Run record** (see "Run records" under "Durable records"): `<state root>/reviews/<16 hex>/runs/current`
+  holds the current id `<UTC %Y%m%dT%H%M%SZ>-<pid>-<seq>`; `runs/<id>.json` is schema 1 (20 kept).
+  Lifecycle writes exit 3 for a run they do not own; `run-record show|alive|current` exit 1 when
+  there is no valid record.
+- **Escalation record** (see "Escalation record" under "Durable records"): `<state root>/reviews/<16 hex>/escalation.json`
+  (schema 1, with `escalation-hint.json` beside it). Kinds: `plan_review_limit`, `fix_round_limit`,
+  `task_blocked`, `needs_human_question`, `validation`, `usage_limit`, `crash`, `human_stop`, `other`
+  (an unknown kind reads as `other`). `escalation show` exits 1 when there is none.
+- **Detach**: `ai-pipeline --detach --approved …` (see "`ai-pipeline --detach …`" under
+  "Interruption, limits, and recovery") starts the pipeline in a `systemd-run --user` service and
+  prints its log, `.ai/local/pipeline-<UTC stamp>-<8 hex>.log`. It needs `systemd-run`: without it
+  the command refuses with exit 1 (there is no `setsid` fallback yet; that is later work, spec B14).
+- **Task commands** (see the task parser contract at the top of this file): `ai-task set ID STATUS
+  [--commit]`, `retry ID --note TEXT [--commit]`, `model ID MODEL [--commit]`, `skip ID --reason TEXT
+  [--commit]` and `skip ID --reauthorize`. Each takes the checkout lock `.ai/local/workflow.lock`
+  without waiting and exits 75 while a run holds it; exit 1 for a refused change, 2 for usage.
+  The host skip authorization is `<state root>/skips/<64 hex>` (host-wide per repository).
 
 ## Interruption, limits, and recovery
 

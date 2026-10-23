@@ -18882,6 +18882,24 @@ class DocsConsistencyTest(unittest.TestCase):
             for mode in ('interactive claude', 'ai-run', 'ai-pipeline', 'ai-watchdog'):
                 self.assertTrue(any(row.startswith(f'| {mode} |') for row in rows), f'{name}: {mode}')
 
+    def test_docs_consistency_run_control_commands(self):
+        # Every `ai-task` subcommand of the script's dispatch is named in README.md, and the
+        # run controls (stop, detach, records, exit 75) are named in both files.
+        script = (ROOT / 'scripts' / 'ai-task').read_text()
+        subcommands = re.findall(r'^  ([a-z]+)\) ', script, re.M)
+        self.assertGreaterEqual(len(subcommands), 7, subcommands)
+        readme = (ROOT / 'README.md').read_text()
+        for command in subcommands:
+            self.assertIn(f'ai-task {command}', readme, f'README.md: ai-task {command}')
+        for text in ('ai-pipeline --stop', 'ai-pipeline --detach', 'systemd-run', 'exit 75',
+                     'runs/current', 'escalation.json'):
+            self.assertIn(text, readme, f'README.md: {text}')
+        docs = (ROOT / 'docs' / 'workflow.md').read_text()
+        self.assertIn('## Run controls', docs)
+        for text in ('`runs/current`', '`runs/<id>.json`', '`escalation.json`', 'systemd-run',
+                     '`<state root>/skips/<64 hex>`', 'exits 75 while a run holds it'):
+            self.assertIn(text, docs, f'docs/workflow.md: {text}')
+
 
 if __name__ == '__main__':
     unittest.main()

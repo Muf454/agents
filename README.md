@@ -213,6 +213,7 @@ Before leaving an implementation session unattended:
    committed skip (no `--commit`: it changes no file), even while that skip makes the queue
    invalid; it still refuses while a run holds the checkout. Notes and reasons are one line of 1–500 characters
    without control characters or backticks; DONE, IN_PROGRESS and SKIPPED tasks are refused.
+   `.ai/bin/ai-task show T005` prints one task's title, status, model and dependencies (read-only).
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies
    redirects, pipes and chains into commands that aren't allowed, so these can't write
@@ -444,6 +445,10 @@ verifies the process, sends SIGTERM and waits (default 60 s). Exit 0 stopped, 3 
 prints the pid, the log, `Follow: tail -f <log>` and `Stop: <…>/ai-pipeline --stop <checkout>`.
 Without `systemd-run` it refuses (exit 1): run `ai-pipeline` in a terminal or a service instead.
 A relative `--knowledge-dir` is resolved against your working directory, as in the foreground.
+The run record and the escalation record (why a run waits for you) live in the host state
+directory under `<state root>/reviews/<16 hex>/` (`runs/current`, `runs/<id>.json`,
+`escalation.json`), not in the checkout; `docs/workflow.md` "Run controls" lists them with the
+exit statuses.
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed

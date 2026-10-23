@@ -6976,7 +6976,7 @@ left to the runner. README and `docs/workflow.md` detach paragraphs updated; vau
 flow unchanged.
 
 ## T314 — Docs, flow chart audit and the mission-control handoff note (batch 11)
-Status: TODO
+Status: DONE
 Dependencies: T313, T321, T322, T325, T326, T327
 Model: haiku
 
@@ -7022,4 +7022,18 @@ Targeted: `python3 -m unittest discover -s tests -k Docs` (must say `Ran N tests
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-23: audited README, `docs/workflow.md`, `.ai/handoff.md` and the vault flow chart against the
+code (`ai-pipeline` usage and `--stop`/`--detach` dispatch, `ai-task` dispatch, `workflow.py`
+`run-stop`, `run-record`, `escalation`, skip paths). Fixed: `docs/workflow.md` said `escalation.json`
+and the run record were beside `run.json`; the code keeps them in the binding directory beside
+`runs/`. README lacked `ai-task show` and the record locations; both added. `docs/workflow.md` gained
+a "Run controls" section (stop, run and escalation records, detach with `systemd-run` only, the task
+commands with exit statuses). `.ai/handoff.md`: "For mission control" written from the code, its
+"Flow chart updated (…)" first line, the T314 entry and the test list. Vault `agents-flow.md` already
+matched (updated 2026-10-23; "Stopped by you", escalation record G9, SKIPPED and `--detach`): no
+change; hub `agents.md` Log line added. New test `test_docs_consistency_run_control_commands` derives
+the `ai-task` subcommands from `scripts/ai-task` and requires each in README.
+Evidence: `python3 -m unittest discover -s tests -k Docs` Ran 4 tests OK.
+Limitations: the full `.ai/bin/ai-check` was not run in-session (over the 600 s tool limit); the
+runner's gate decides. `.ai/state.md` Phase was not moved to `ready_for_review` for that reason.
 
