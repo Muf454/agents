@@ -18,6 +18,8 @@ changed: a changed gate always escalates. Disable with AI_AUTO_RECOVER=0.
 A stop whose only reason is a usage limit beyond the wait budget is not a failure: it schedules
 a relaunch after the reset (exit 75) that the watchdog timer (--recover) starts, at most
 AI_LIMIT_RELAUNCH_MAX (default 2, 0 = off) times per run, without a Claude session or an attempt.
+A session timeout on an IN_PROGRESS task with uncommitted work commits that work (only if the full
+gate passes) and reruns without a Claude session, once per task per run; a second one escalates.
 EOF
 }
 stage=''
@@ -44,6 +46,10 @@ escalate() {
   ai_observe stop '' "${reason% } (stopped during $stage)"
   ai_notify "⛔ STOPPED, needs you: $branch stopped during $stage: ${reason% } ${1:+Recovery: $1 }${2:+Next: $2}$([[ -f .ai/local/recovery-decision.txt ]] && printf ' Full text: .ai/local/recovery-decision.txt')"
   printf '%s\n' "$reason" > .ai/local/last-error
+  # Events (T208): none once the gate is known broken (ai_gate_check set AI_GATE_BROKEN).
+  ai_recovery_event escalate "${attempt:-}"
+  ai_stop_event "$stage" no
+  ai_run_end stopped
   touch .ai/local/last-error.notified 2>/dev/null || true
   # We hold the checkout lock, so no live pipeline owns the marker: clear it, announced.
   rm -f .ai/local/pipeline.active
@@ -70,16 +76,19 @@ if ! check=$(ai_helper state-root-check 2>&1); then
 fi
 approved_gate=$(ai_helper run-manifest gate 2>/dev/null) || \
   escalate 'there is no approved run to resume.' 'rerun ai-pipeline --approved by hand.'
+# This recovery's events and the resumed pipeline belong to the approved run (as ai-pipeline).
+AI_RUN_ID=$(ai_helper run-manifest run-id 2>/dev/null) || AI_RUN_ID=''
+if [[ "$AI_RUN_ID" =~ ^[0-9a-f]{16}$ ]]; then export AI_RUN_ID; else unset AI_RUN_ID; fi
 # Reserve the attempt before anything that can be interrupted, then publish the marker:
 # a kill in between can never produce an uncounted retry.
 attempt=$(ai_helper run-manifest reserve-attempt) && [[ "$attempt" =~ ^[0-9]{1,3}$ ]] || \
   escalate 'the run manifest is unreadable.' 'rerun ai-pipeline --approved by hand.'
 # Restore the approved run's settings (notifications, budgets, models); settings the run
 # didn't have fall back to their defaults instead of inheriting this environment's.
-unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RELAUNCH_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL
+unset AI_NOTIFY_CMD AI_MODEL AI_REVIEW_MODEL AI_REVIEW_EFFORT AI_RECHECK_EFFORT AI_AUTO_RECOVER AI_RECOVER_MAX AI_LIMIT_RELAUNCH_MAX AI_LIMIT_RETRY AI_LIMIT_MAX_WAIT AI_REVIEWER AI_CLAUDE_REVIEW_MODEL AI_CLAUDE_REVIEW_EFFORT AI_DIAGNOSIS_MODEL AI_SUPERVISE AI_SUPERVISE_PLAN_ROUNDS AI_SUPERVISE_ESCALATE_ROUND AI_SUPERVISE_ESCALATE_MODEL AI_REVIEW_ROUTE AI_REVIEW_SMALL_LINES AI_REVIEW_RISK_PATHS AI_REVIEW_RISK_WORDS AI_SESSION_GATE
 while IFS= read -r -d '' setting; do
   case "${setting%%=*}" in
-    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL)
+    AI_NOTIFY_CMD|AI_MODEL|AI_REVIEW_MODEL|AI_REVIEW_EFFORT|AI_RECHECK_EFFORT|AI_AUTO_RECOVER|AI_RECOVER_MAX|AI_LIMIT_RELAUNCH_MAX|AI_LIMIT_RETRY|AI_LIMIT_MAX_WAIT|AI_REVIEWER|AI_CLAUDE_REVIEW_MODEL|AI_CLAUDE_REVIEW_EFFORT|AI_DIAGNOSIS_MODEL|AI_SUPERVISE|AI_SUPERVISE_PLAN_ROUNDS|AI_SUPERVISE_ESCALATE_ROUND|AI_SUPERVISE_ESCALATE_MODEL|AI_REVIEW_ROUTE|AI_REVIEW_SMALL_LINES|AI_REVIEW_RISK_PATHS|AI_REVIEW_RISK_WORDS|AI_SESSION_GATE)
       export "$setting" ;;
   esac
 done < <(ai_helper run-manifest env)
@@ -124,6 +133,7 @@ on_exit() {
     ai_observe stop '' "auto-recovery failed unexpectedly (exit $code)"
     ai_notify "⛔ STOPPED, needs you: auto-recovery failed unexpectedly (exit $code) during $stage. Inspect the checkout, then rerun ai-pipeline."
     touch .ai/local/last-error.notified 2>/dev/null || true
+    ai_run_end stopped
     ai_drop_marker
   fi
 }
@@ -209,6 +219,7 @@ resume_open_stage() {
     escalate "the interrupted $stage_label left changes outside its scope (${scope#Error: }); nothing was committed." \
       'inspect and discard them, then rerun ai-pipeline.'
   if [[ "${1:-}" == quiet ]]; then resume '' ''; fi
+  ai_recovery_event rerun "$attempt"
   ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage ($stage_label): $reason"
   resume "the resumed pipeline completes the interrupted $stage_label."
 }
@@ -268,6 +279,7 @@ if (( cap > 0 )) && limit=$(ai_helper limit-stop 2>/dev/null); then
   count=$(ai_helper run-manifest limit-schedule "$at" "$cap" "$stage" 2>/dev/null) || \
     escalate "usage limit again after $cap relaunch(es) in this run." 'rerun ai-pipeline after the reset.'
   relaunch_wait "$at" "$agent usage limit" "stopped at a $agent usage limit during $stage" "$count"
+  ai_recovery_event relaunch "$attempt"
   AI_STOP_NOTIFIED=1
   trap - EXIT
   printf 'Paused at a %s usage limit; the watchdog relaunches the run after %s.\n' "$agent" "$RELAUNCH_WHEN"
@@ -289,8 +301,61 @@ case "$reason" in
 esac
 (( attempt <= max )) || escalate "already tried $max time(s) in this run." 'inspect the logs, fix the cause, then rerun ai-pipeline.'
 
+# commit_validated WHY HUMAN: commit the uncommitted work as a recovery checkpoint only if the
+# full gate passes on it; anything else escalates with WHY and HUMAN.
+commit_validated() {
+  [[ -n "$(git status --porcelain --untracked-files=all)" ]] || escalate "$1 (nothing to commit)" "$2"
+  # Leftovers that change a lockfile need their dependencies before the gate can pass.
+  ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}" || \
+    escalate "$1; but dependency setup failed: $AI_DEPS_ERROR." \
+      'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
+  ai_observe recovering "$AI_OBSERVE_RECOVERY" checks
+  # The gate event comes before today's decision, so a failing or timed-out gate is recorded too.
+  local gate_started gate_code=0 gate_secs
+  gate_started=$(date +%s)
+  "$AI_BIN/ai-check" || gate_code=$?
+  gate_secs=$(( $(date +%s) - gate_started ))
+  if ai_gate_check "$approved_gate"; then ai_gate_event recovery "$gate_started" "$gate_secs" "$gate_code"; fi
+  (( gate_code == 0 )) || escalate "$1; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
+  ai_gate_check "$approved_gate" || escalate 'gate files changed during validation.' 'inspect the diff.'
+  git add --all -- .
+  if ! new_files=$(ai_helper checkpoint-guard); then
+    git reset -q
+    escalate "$1; but the leftovers include secret-looking files." 'inspect the uncommitted files.'
+  fi
+  git commit -q -m "chore(ai): recovery checkpoint (validated leftover work)
+
+Stopped during $stage: $reason
+Recovery: $1" || escalate 'the recovery commit failed (commit hook?).' 'inspect the checkout.'
+  ai_gate_check "$approved_gate" || escalate 'gate files changed after the recovery commit (hook?).' 'inspect the diff.'
+  # A commit hook must not have slipped unvalidated content into the checkpoint.
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
+    ai_helper committed-matches-worktree || \
+    escalate 'the recovery checkpoint differs from the validated content (commit hook?).' 'inspect the last commit.'
+}
+
 resume_open_stage
 record_stop_leftovers
+# A session timeout on an IN_PROGRESS task with uncommitted work: deterministic, no decision
+# session (the case is fully known: the task ran out of time, its work is validated by the full
+# gate or nothing is committed). Once per task per run: the record is spent before the gate runs,
+# so a failing gate uses it too, and a second timeout of the same task escalates instead of
+# looping. The attempt budget was already checked above; this spends the reserved attempt.
+if [[ $stage == implementation ]] && \
+   [[ "$reason" == 'Claude exited 124 ('* || "$reason" == 'Claude exited 137 ('* ]] && \
+   task=$(ai_helper run-manifest task 2>/dev/null) && \
+   [[ "$(ai_helper tasks status "$task" 2>/dev/null)" == IN_PROGRESS ]] && \
+   [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  why_once=$(ai_helper run-manifest timeout-rerun "$task" 2>&1) || \
+    escalate "the $task session timed out again after one commit-and-rerun in this run." \
+      'split the task or raise --session-timeout, then rerun ai-pipeline.'
+  ai_notify "🔧 Recovering ($attempt/$max): $branch: the $task session timed out; committing its validated partial work once and rerunning."
+  # WHY also prefixes commit_validated's escalations ("…; but the leftover work fails validation").
+  commit_validated "the $task session timed out with uncommitted partial work" \
+    'fix or discard the uncommitted work, then rerun ai-pipeline.'
+  ai_recovery_event commit_and_rerun "$attempt"
+  resume "the $task session timed out; its validated partial work was committed."
+fi
 [[ -f .ai/prompts/recover.md ]] || escalate 'missing .ai/prompts/recover.md.' 'copy it from the toolkit templates.'
 command -v claude >/dev/null || escalate 'claude is not installed.' 'rerun ai-pipeline by hand.'
 ai_notify "🔧 Recovering ($attempt/$max): $branch stopped during $stage: $reason"
@@ -319,32 +384,11 @@ printf 'Recovery decision: %s (%s)\n' "$action" "$why"
 ai_gate_check "$approved_gate" || escalate 'gate files changed during recovery.' 'inspect the diff.'
 
 case "$action" in
-  commit_and_rerun)
-    [[ -n "$(git status --porcelain --untracked-files=all)" ]] || escalate "$why (nothing to commit)" "$human"
-    # Leftovers that change a lockfile need their dependencies before the gate can pass.
-    ai_deps "$approved_gate" "${AI_DEPS_TIMEOUT:-1200}" || \
-      escalate "$why; but dependency setup failed: $AI_DEPS_ERROR." \
-        'inspect .ai/ci-setup and the log, then rerun ai-pipeline.'
-    ai_observe recovering "$AI_OBSERVE_RECOVERY" checks
-    "$AI_BIN/ai-check" || escalate "$why; but the leftover work fails validation." 'fix or discard the uncommitted work, then rerun ai-pipeline.'
-    ai_gate_check "$approved_gate" || escalate 'gate files changed during validation.' 'inspect the diff.'
-    git add --all -- .
-    if ! new_files=$(ai_helper checkpoint-guard); then
-      git reset -q
-      escalate "$why; but the leftovers include secret-looking files." 'inspect the uncommitted files.'
-    fi
-    git commit -q -m "chore(ai): recovery checkpoint (validated leftover work)
-
-Stopped during $stage: $reason
-Recovery: $why" || escalate 'the recovery commit failed (commit hook?).' 'inspect the checkout.'
-    ai_gate_check "$approved_gate" || escalate 'gate files changed after the recovery commit (hook?).' 'inspect the diff.'
-    # A commit hook must not have slipped unvalidated content into the checkpoint.
-    [[ -z "$(git status --porcelain --untracked-files=all)" ]] && ai_helper stamp verify >/dev/null && \
-      ai_helper committed-matches-worktree || \
-      escalate 'the recovery checkpoint differs from the validated content (commit hook?).' 'inspect the last commit.' ;;
+  commit_and_rerun) commit_validated "$why" "$human" ;;
   rerun)
     [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
       escalate "$why; but the checkout has uncommitted changes." 'inspect and commit or discard them, then rerun ai-pipeline.' ;;
   *) escalate "$why" "$human" ;;
 esac
+ai_recovery_event "$action" "$attempt"
 resume "$why"

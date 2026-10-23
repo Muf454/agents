@@ -52,7 +52,8 @@ Record assumptions. Before significant implementation, create/update the spec,
 plan, and task queue. Planning alone does not authorize implementation.
 
 Tasks need a stable ID, title, status, dependencies, goal, implementation notes,
-likely affected modules, acceptance criteria, validation, and result. Order tasks
+likely affected modules, acceptance criteria, validation (`Targeted:` lines for the
+task's own checks plus a `Gate:` line), and result. Order tasks
 by dependencies. Make them independently understandable and verifiable where
 practical, small enough to checkpoint, and larger than pointless microtasks.
 Follow the exact task format in `.ai/tasks.md`. Never invent completed work.
@@ -63,7 +64,8 @@ under `Dependencies:` on EVERY task (don't rely on the run default, which may di
 - `sonnet`: ordinary features, UI, tests, routine fixes.
 - `opus`: security, authentication/authorization or RLS policies, concurrency and
   locking, data migrations that move or delete data, payment or irreversible
-  operations, and any task that already failed review or validation once.
+  operations. A task whose own earlier attempt failed validation or review is
+  retried on opus; review-fix tasks get a model by their own risk (no blanket promotion).
 Keep tasks small enough that the cheaper model fits; split rather than upgrade.
 
 ## Autonomous implementation loop
@@ -75,7 +77,8 @@ When implementation is authorized, do not request approval between ordinary task
    interrupted IN_PROGRESS task against source, diffs, and tests first.
 3. Mark it IN_PROGRESS and record the current task before editing.
 4. Implement within scope, with appropriate tests. Run its deterministic checks
-   and `.ai/bin/ai-check`. Repair failures caused by your changes.
+   and `.ai/bin/ai-check` (an unattended runner session follows
+   the RUNNER CONTRACT's gate rule instead). Repair failures caused by your changes.
 5. Update relevant documentation and decisions. Mark DONE only after acceptance
    criteria and validation are satisfied; record concrete evidence and limitations.
 6. Update `.ai/state.md` and `.ai/handoff.md`, append a concise outcome to
@@ -85,7 +88,10 @@ When implementation is authorized, do not request approval between ordinary task
 7. Continue to the next unblocked task. Completing one task is not a reason to stop.
 
 Keep `.ai/handoff.md` → "Manual testing for the human" current: `ai-pipeline` puts it
-into the pull request as the human's test instructions.
+into the pull request as the human's test instructions. Write it in two parts: `### Needs you`
+only for things a human must do (look and feel, phone/real devices, live accounts, external
+services, decisions) or "None"; every step a test can reproduce goes under
+`### Covered by automated tests` with its test name in backticks.
 
 The bounded runner may request ONE task per invocation. In that mode, checkpoint
 and return after that task: the runner launches a fresh session for the next task.
@@ -127,7 +133,8 @@ acceptance steps, and set `Phase: ready_for_review`. This is not human acceptanc
 
 Read `.ai/reviews/current.md` (never edit it; record decisions in
 `.ai/reviews/dispositions.md`) and evaluate each finding against repository reality,
-the spec, architecture, and tests. Do not blindly obey Codex. Add tasks for valid
+the spec, architecture, and tests. Do not blindly obey the reviewer (Codex, or the
+read-only Claude fallback reviewer when Codex is at its usage limit). Add tasks for valid
 BLOCKER/MAJOR findings, record accepted/rejected/deferred dispositions and reasons,
 fix valid findings, and rerun checks. Keep findings and evidence intact. A rejection
 needs a concrete explanation. Request another independent review when warranted.
