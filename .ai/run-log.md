@@ -643,3 +643,4 @@
 | 2026-10-23T03:32:21Z | runner | T314 | completed | PASS | 4518676 | Claude checkpointed; continuing queue |
 | 2026-10-23T03:48:18Z | runner | none | queue complete; ready for independent review | PASS | 0b5e32a | Human acceptance remains |
 | 2026-10-23T03:59:58Z | runner | triage | review triaged into dispositions/tasks | n/a | b7c9e54 | Fix tasks run next |
+| 2026-10-23T04:30:01Z | runner | T329 | stopped (exit 1); inspect state/diff before resuming | see local logs | 864fe40 | No merge or deployment performed |

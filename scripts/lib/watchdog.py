@@ -513,11 +513,20 @@ def main():
         scheduled_ns = None
         if not alive and marker_snapshot(marker) is None:
             scheduled_ns = relaunch_at(Path(__file__).resolve().parent.parent)
+        runs = run_id = run = None
+        if died or (args.recover and scheduled_ns is not None and scheduled_ns <= now):
+            runs, run_id, run = current_run()
         if args.recover and scheduled_ns is not None and scheduled_ns <= now:
-            refused = start_recovery(root, local, marker, stage='usage limit relaunch')
-            if refused is not None:  # launched: ai-recover announces itself
-                incidents['relaunch:' + str(scheduled_ns // 1_000_000_000)] = (
-                    f'⛔ STOPPED, needs you: the usage-limit relaunch could not start: {refused}.')
+            # A run the human stopped (its schedule cancelled) or that ended is never relaunched:
+            # the record is checked before any launch, as ai-recover itself refuses it (review M4).
+            if stopped_by_human(run):
+                incidents['human_stop:' + run_id] = ('⛔ STOPPED by you: the run was stopped by the human; '
+                                                     'not resumed automatically.')
+            elif run is None or not run_ended(run):
+                refused = start_recovery(root, local, marker, stage='usage limit relaunch')
+                if refused is not None:  # launched: ai-recover announces itself
+                    incidents['relaunch:' + str(scheduled_ns // 1_000_000_000)] = (
+                        f'⛔ STOPPED, needs you: the usage-limit relaunch could not start: {refused}.')
         # The stall rule is skipped while a usage-limit pause runs, while a relaunch is pending
         # (the host schedule is the authority, with or without a pauses.log line) and while a
         # due relaunch is this probe's to handle (--recover: launched, or refused with its own ⛔
@@ -526,9 +535,6 @@ def main():
                           or (scheduled_ns is not None and scheduled_ns > now)
                           or (scheduled_ns is not None and scheduled_ns <= now and args.recover))
         stall_seen = None
-        runs = run_id = None
-        if died:
-            runs, run_id, run = current_run()
         if died and stopped_by_human(run):
             # The human stopped this run: theirs to rerun, never recovered (said once per run).
             incidents['human_stop:' + run_id] = ('⛔ STOPPED by you: the run was stopped by the human; '

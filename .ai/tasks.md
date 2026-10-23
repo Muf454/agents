@@ -7038,7 +7038,7 @@ Limitations: the full `.ai/bin/ai-check` was not run in-session (over the 600 s 
 runner's gate decides. `.ai/state.md` Phase was not moved to `ready_for_review` for that reason.
 
 ## T329 — The watchdog launches no scheduled relaunch for a human-stopped run (review M4)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 

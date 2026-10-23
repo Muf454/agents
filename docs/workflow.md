@@ -441,7 +441,12 @@ removes `.ai/local/pipeline.active` only when it holds the recorded pid, writes 
 command's own output told the human; recovery announces nothing again), and releases the
 lock. A `paused` run whose manifest has `limit_relaunch_at` (a scheduled usage-limit
 relaunch, its process gone) is handled the same way and prints `Cancelled the scheduled
-usage-limit relaunch of <id>.`; the due relaunch's `ai-recover` then refuses the human stop.
+usage-limit relaunch of <id>.`. Under the same lock every completed stop also drops
+`limit_relaunch_at` from the host manifest, so `limit-at` reports no schedule and no watchdog
+probe launches a relaunch. Independently, the watchdog reads the current run record before a
+due relaunch and never starts `ai-recover` for a run the human stopped (it reports
+`⛔ STOPPED by you` once per run) or one that ended; `ai-recover` itself still refuses the
+human stop (review M4).
 A recovery (`ai-recover`, also one the watchdog started) owns the run record with its own
 process (T316), so `--stop` signals the recovery; its trap records the human stop and nothing
 resumes. `--stop` also stops a stand-alone `ai-run` (T325): its exit handler ends the record
@@ -1400,7 +1405,9 @@ Incidents:
   starts `ai-recover --stage 'usage limit relaunch'` through `start_recovery` (same host
   copy, state root and gate checks as crash recovery; no default `last-error` is written).
   If that is refused it sends one `⛔ STOPPED, needs you: the usage-limit relaunch could not
-  start: <reason>.` per AT (dedupe key `relaunch:<AT>`).
+  start: <reason>.` per AT (dedupe key `relaunch:<AT>`). Before launching it reads the
+  current run record: a run the human stopped gets the once-per-run `human_stop:<run id>`
+  incident instead, and an ended run gets nothing; neither starts `ai-recover` (review M4).
 - **hung**: a live runner whose newest activity is older than `--stale-minutes`
   (default 45). Activity is the newest mtime of `.ai/run-log.md`,
   `.ai/local/pauses.log`, `claude-*.json`, `*events.log` and `check-*.log` in

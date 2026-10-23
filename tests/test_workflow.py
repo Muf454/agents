@@ -12215,6 +12215,50 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(self.human_stop_lines(), [])
         self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
 
+    def test_watchdog_cancelled_relaunch_never_recovers(self):
+        # Review M4: after `--stop` cancels a paused run, no watchdog probe launches ai-recover.
+        self.ready()
+        self.start_recoverable_run()
+        self.mock_systemd_run()
+        start = int(time.time())
+        self.helper('run-manifest', 'limit-schedule', str(start + 60), '2', 'implementation')
+        paused = ('id=$(python3 "$0" run-record start pipeline feature/test - - --pid $$ -- --approved --base main '
+                  '--no-pr) && python3 "$0" run-record pause --run "$id" --pid $$ && printf "%s\\n" "$id"')
+        run_id = self.run_cmd(['bash', '-c', paused, str(HELPER)]).stdout.strip()
+        self.watchdog_phase('implementing')
+        result = self.stop_command()
+        self.assertIn(f'Cancelled the scheduled usage-limit relaunch of {run_id}.', result.stdout)
+        # The cancel is durable: the host schedule is gone, the rest of the manifest stays.
+        self.helper('run-manifest', 'limit-at', expected=1)
+        self.assertEqual(self.helper('run-manifest', 'limit-count').stdout.strip(), '1')
+        for offset in (120, 480, 840):
+            self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_WATCHDOG_NOW=str(start + offset))
+            self.assertNotIn('stalled', self.watchdog_state()['active'])
+        self.assertEqual(self.launches(), '')
+        self.assertNotIn('could not start', self.notifications())
+        self.assertEqual(self.run_record_data(run_id)['outcome'], 'human_stop')
+
+    def test_watchdog_human_stopped_record_blocks_a_due_relaunch(self):
+        # The record guard alone: a human_stop record with its due schedule left in place.
+        self.ready()
+        self.start_recoverable_run()
+        self.mock_systemd_run()
+        start = int(time.time())
+        self.helper('run-manifest', 'limit-schedule', str(start - 10), '2', 'implementation')
+        ended = ('id=$(python3 "$0" run-record start pipeline feature/test - - --pid $$ -- --approved --base main '
+                 '--no-pr) && python3 "$0" run-record end --run "$id" --pid $$ human_stop && printf "%s\\n" "$id"')
+        run_id = self.run_cmd(['bash', '-c', ended, str(HELPER)]).stdout.strip()
+        self.watchdog_phase('implementing')
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        self.assertEqual(self.helper('run-manifest', 'limit-at').stdout.strip(), str(start - 10))
+        for offset in (0, 360, 720):
+            self.host_watchdog('--recover', expected=1, AI_AUTO_RECOVER='1', AI_WATCHDOG_NOW=str(start + offset))
+            self.assertEqual(self.watchdog_state()['active'], ['human_stop:' + run_id])
+        self.assertEqual(self.launches(), '')
+        self.assertNotIn('could not start', self.notifications())
+        self.assertEqual(len(self.notifications().splitlines()), 1)
+        self.assertIn('⛔ STOPPED by you', self.notifications())
+
     def test_stop_command_stops_a_watchdog_recovery(self):
         self.ready()
         self.start_recoverable_run()

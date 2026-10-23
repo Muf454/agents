@@ -2452,6 +2452,7 @@ def stop_complete(runs, checkout, run_id, message):
                 return stop_replaced(run_id, checkout)
             stage = stop_stage(local_fd)
             write_escalation(runs, 'human_stop', stage, run_id, [], [], None)
+            stop_cancel_relaunch()
             marker = read_record(local_fd, 'pipeline.active', SMALL_LIMIT)
             if marker is not None and marker[0].strip() == str(record['process']['pid']):
                 with contextlib.suppress(FileNotFoundError):
@@ -2483,6 +2484,22 @@ def stop_relaunch_scheduled(record):
         return False
     at = manifest.get('limit_relaunch_at') if isinstance(manifest, dict) else None
     return type(at) is int and at > 0
+
+
+def stop_cancel_relaunch():
+    """Drop a pending usage-limit relaunch from the host manifest (review M4), under the checkout
+    lock ai-recover also holds: `limit-at` then reports none, so no watchdog probe launches it.
+    Best effort: the watchdog and ai-recover also refuse a run stopped by the human."""
+    path = binding_dir() / 'run.json'
+    data = read_small(path, RUN_MAX_BYTES)
+    try:
+        manifest = json.loads(data) if data is not None else None
+    except ValueError:
+        return
+    if isinstance(manifest, dict) and 'limit_relaunch_at' in manifest:
+        manifest.pop('limit_relaunch_at')
+        with contextlib.suppress(OSError):
+            atomic(path, json.dumps(manifest) + '\n')
 
 
 def stop_not_running(run_id):

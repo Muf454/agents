@@ -348,7 +348,7 @@ Commands, run from the checkout as `<checkout>/.ai/bin/…` (T314 checked each a
    start the next feature branch from it and check that `ai-task check` (and the pipeline start)
    accept the queue.
 9. Mission control: switch phase 2 to the commands and records in "For mission control" above.
-10. After T329 (review M4): let a real run pause at a usage limit, cancel it with
+10. Review M4 (T329): let a real run pause at a usage limit, cancel it with
     `.ai/bin/ai-pipeline --stop <checkout>`, and check that once the reset time passes the
     watchdog timer starts no recovery and sends no "relaunch could not start" message.
 
@@ -445,6 +445,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   TERM: with a new record "another run replaced it", B's record, marker and no escalation
   untouched; B holding only the lock: "another runner owns"), `test_stop_command_cancels_scheduled_relaunch`
   (cancel message, `human_stop`, the due `ai-recover` refuses quietly, no session),
+  T329 (review M4): `test_watchdog_cancelled_relaunch_never_recovers` (`--stop` on a paused run
+  drops `limit_relaunch_at`; three host `--recover` probes past the reset launch nothing, no
+  "could not start", no stall), `test_watchdog_human_stopped_record_blocks_a_due_relaunch` (the
+  record guard alone: a `human_stop` record with its due schedule left gets no launch and one
+  `⛔ STOPPED by you`),
   `test_stop_command_stops_a_watchdog_recovery` (`ai-recover` with a sleeping decision session:
   exit 0, recovery 143, `human_stop`, no ▶ RESUMED, no implementation session).
   T325: `test_stop_command_stops_a_standalone_ai_run` (ai-run 143, record kind `ai-run`
@@ -512,7 +517,7 @@ T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and
 T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324, T313 and T326 too.
 T314 (docs, flow chart audit, mission-control note) is DONE.
 Review round 1 (Codex, HEAD 68ac201): M4, M5 and N4 accepted; fix tasks T329 (watchdog scheduled
-relaunch after a cancel), T330 (human stop with a surviving tracked child) and T331 (state counts
-SKIPPED as finished) are TODO. See `.ai/reviews/dispositions.md`.
-Next: T329, T330, T331, then the full gate (`.ai/bin/ai-check`).
+relaunch after a cancel) is DONE; T330 (human stop with a surviving tracked child) and T331
+(state counts SKIPPED as finished) are TODO. See `.ai/reviews/dispositions.md`.
+Next: T330, T331, then the full gate (`.ai/bin/ai-check`).
 Nothing is merged or deployed.
