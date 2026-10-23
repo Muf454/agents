@@ -438,6 +438,12 @@ verifies the process, sends SIGTERM and waits (default 60 s). Exit 0 stopped, 3 
 4 still ending (rerun to wait again), 1 error; a stopped run is never resumed automatically (see
 `docs/workflow.md`).
 
+`ai-pipeline --detach --approved [options]` starts the pipeline in its own systemd user service
+(`systemd-run --user`), so it keeps running after the terminal closes, with its output in
+`.ai/local/pipeline-<UTC stamp>-<hex>.log`. It returns once the run record names that log and
+prints the pid, the log, `Follow: tail -f <log>` and `Stop: <…>/ai-pipeline --stop <checkout>`.
+Without `systemd-run` it refuses (exit 1): run `ai-pipeline` in a terminal or a service instead.
+
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed
 dispositions for that review are reused, an interrupted triage is completed (counted

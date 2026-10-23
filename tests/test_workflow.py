@@ -11877,6 +11877,163 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertFalse((self.project / '.ai/local/last-error').exists())
 
+    # `ai-pipeline --detach` (RC-01 G11, T313): a systemd user service, confirmed through the run record.
+    def fake_systemd_run(self, starts=True):
+        """A fake `systemd-run` first on PATH: appends its argv (JSON) to systemd-run.argv and, with
+        STARTS, runs the command as systemd would: a new session, default signal dispositions, the
+        --working-directory, stdin and output on /dev/null, the AI_* environment only from --setenv."""
+        (self.mock_bin / 'systemd-run').write_text(
+            '#!/usr/bin/env python3\nimport json, os, signal, subprocess, sys\n'
+            'with open(os.path.join(os.environ["MOCK_STATE_DIR"], "systemd-run.argv"), "a") as file:\n'
+            '    file.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+            f'if not {starts!r}:\n    sys.exit(0)\n'
+            'args = sys.argv[1:]\ncommand = args[args.index("--") + 1:]\n'
+            'env = {k: v for k, v in os.environ.items() if not k.startswith("AI_")}\ncwd = None\n'
+            'for arg in args[:args.index("--")]:\n'
+            '    if arg.startswith("--setenv="):\n'
+            '        key, _, value = arg[len("--setenv="):].partition("=")\n        env[key] = value\n'
+            '    elif arg.startswith("--working-directory="):\n'
+            '        cwd = arg[len("--working-directory="):]\n'
+            'def defaults():\n'
+            '    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):\n'
+            '        signal.signal(sig, signal.SIG_DFL)\n'
+            'subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n'
+            '                 stderr=subprocess.DEVNULL, start_new_session=True, preexec_fn=defaults)\n')
+        (self.mock_bin / 'systemd-run').chmod(0o755)
+
+    def systemd_run_calls(self):
+        path = self.base / 'systemd-run.argv'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def detach(self, *args, expected=0, cwd=None, **env):
+        result = subprocess.run([str(self.project / '.ai/bin/ai-pipeline'), '--detach', *args],
+                                cwd=cwd or self.project, env=dict(self.env, **env), stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def detach_started(self, result):
+        """(pid, log path, follow line, stop argv) from the confirmation; the fixture pipeline is
+        killed at cleanup if it is still running."""
+        match = re.search(r'^Pipeline started: pid (\d+), log (/.*/\.ai/local/pipeline-\d{8}T\d{6}Z-[0-9a-f]{8}\.log)$',
+                          result.stdout, re.M)
+        self.assertIsNotNone(match, result.stdout + result.stderr)
+        pid, log = int(match.group(1)), Path(match.group(2))
+
+        def cleanup():
+            with contextlib.suppress(OSError):
+                os.killpg(pid, signal.SIGKILL)
+        self.addCleanup(cleanup)
+        follow = re.search(r'^Follow: (.*)$', result.stdout, re.M).group(1)
+        stop = shlex.split(re.search(r'^Stop: (.*)$', result.stdout, re.M).group(1))
+        self.assertEqual(shlex.split(follow), ['tail', '-f', str(log)])
+        self.assertEqual(stop, [str(self.project / '.ai/bin/ai-pipeline'), '--stop', str(self.project)])
+        return pid, log, stop
+
+    def wait_for_file(self, path, limit=PIPELINE_TIMEOUT):
+        deadline = time.monotonic() + limit
+        while not (path.exists() and path.read_text().strip()):
+            if time.monotonic() > deadline:
+                self.fail(f'{path} never appeared')
+            time.sleep(0.05)
+        return path.read_text().strip()
+
+    def manifest_args(self):
+        return json.loads(next((self.base / 'host-state').rglob('run.json')).read_text())['args']
+
+    def test_detach_systemd_run_arguments(self):
+        self.ready()
+        self.fake_systemd_run()
+        args = ['--approved', '--base', 'main', '--no-pr']
+        pid, log, _ = self.detach_started(self.detach(*args))
+        [call] = self.systemd_run_calls()
+        split = call.index('--')
+        options, command = call[:split], call[split + 1:]
+        for option in ('--user', '--collect', '--service-type=exec', f'--working-directory={self.project}',
+                       '--setenv=AI_LAUNCHER=detach-systemd', f'--setenv=AI_RUN_LOG={log}',
+                       f'--setenv=AI_STATE_DIR={self.base / "host-state"}'):
+            self.assertIn(option, options)
+        self.assertTrue(any(re.fullmatch(r'--unit=ai-pipeline-project-with-spaces-\d+', o) for o in options), options)
+        self.assertFalse([o for o in options if o.startswith('--setenv=AI_RUN_ID=')])
+        self.assertEqual(command[-5:], [str(self.project / '.ai/bin/ai-pipeline'), *args])
+        self.assertNotIn('--detach', command)
+        # The fixture pipeline runs to its end in the service; its record names the launcher and log.
+        deadline = time.monotonic() + PIPELINE_TIMEOUT
+        while self.pipeline_records()[-1]['outcome'] == 'running':
+            if time.monotonic() > deadline:
+                self.fail('the detached pipeline never ended')
+            time.sleep(0.1)
+        [record] = self.pipeline_records()
+        self.assertEqual((record['launcher'], record['log'], record['process']['pid'], record['argv']),
+                         ('detach-systemd', str(log), pid, args))
+        self.assertEqual(record['outcome'], 'finished')
+        self.assertIn('== Implementation (Claude) ==', log.read_text())
+        self.assertNotIn('--detach', self.manifest_args())
+        self.assertEqual(self.manifest_args(), args)
+
+    def test_detach_then_stop(self):
+        self.ready()
+        self.fake_systemd_run()
+        session = self.project / '.ai/local/mock-session.pid'
+        pid, log, stop = self.detach_started(self.detach('--approved', '--base', 'main', '--no-pr',
+                                                         AI_AUTO_RECOVER='1', MOCK_CLAUDE='sleep'))
+        fake = int(self.wait_for_file(session))
+        bound = 60 * TIMEOUT_SCALE
+        started = time.monotonic()
+        result = subprocess.run(stop, cwd=self.base, env=self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=bound + SHORT_TIMEOUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertLess(time.monotonic() - started, bound)
+        for process in (pid, fake):
+            for _ in range(100):
+                try:
+                    os.kill(process, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f'process {process} outlived the stop')
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['outcome'], record['stop_requested']['via'], record['launcher']),
+                         ('human_stop', 'ai-pipeline --stop', 'detach-systemd'))
+        self.assertIn(f'Run {record["id"]} stopped (stopped by you).', result.stdout)
+        self.assert_not_recovered()
+        self.assertIn('== Implementation (Claude) ==', log.read_text())
+        self.assertNotIn('--detach', self.manifest_args())
+
+    def test_detach_refuses_without_systemd_run(self):
+        self.ready()
+        bare = self.base / 'bare-bin'
+        bare.mkdir()
+        for tool in ('bash', 'python3', 'git', 'env', 'dirname'):
+            (bare / tool).symlink_to(shutil.which(tool))
+        result = self.detach('--approved', '--base', 'main', '--no-pr', expected=1, PATH=str(bare))
+        self.assertIn('--detach needs systemd-run; run ai-pipeline in a terminal or a service instead.', result.stderr)
+        self.assertEqual(self.pipeline_records(), [])
+        self.assertEqual(list((self.project / '.ai/local').glob('pipeline-*.log')), [])
+        self.assertFalse((self.project / '.ai/local/last-error').exists())
+
+    def test_detach_refuses_without_approved(self):
+        self.ready()
+        self.fake_systemd_run()
+        result = self.detach('--base', 'main', '--no-pr', expected=1)
+        self.assertIn('pass --approved', result.stderr)
+        self.assertEqual(self.systemd_run_calls(), [])
+        self.assertEqual(self.pipeline_records(), [])
+
+    def test_detach_not_confirmed(self):
+        self.ready()
+        self.fake_systemd_run(starts=False)
+        started = time.monotonic()
+        result = self.detach('--approved', '--base', 'main', '--no-pr', expected=1, AI_PLAN_ACK_SECONDS='1')
+        self.assertLess(time.monotonic() - started, 1 + SHORT_TIMEOUT)
+        self.assertIn('could not confirm the detached pipeline started within 1 s', result.stderr)
+        self.assertIn('(no log was created)', result.stderr)
+        self.assertEqual(len(self.systemd_run_calls()), 1)
+        self.assertEqual(self.pipeline_records(), [])
+        self.detach('--approved', expected=1, AI_PLAN_ACK_SECONDS='0')
+        self.assertEqual(len(self.systemd_run_calls()), 1)
+
     # T319: `--stop` completes the records of a run that ended without them, bound to that run.
     def stop_fixture_runner(self, on_term='exit 143'):
         """A fixture runner in its own session: records its run, writes the liveness marker,

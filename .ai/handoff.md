@@ -114,6 +114,16 @@
   skip`); `task_change`'s `tasks check` then reports any other fault ("The skip is authorized,
   but the queue has another fault"). Changes no file in the checkout. README and
   `docs/workflow.md`. Flow unchanged.
+- T313 (2026-10-23): `ai-pipeline --detach <args>` (dispatch beside `--stop`): refuses without
+  `--approved` or an executable `systemd-run` (exit 1, no `last-error`, nothing started), `ai_root`,
+  no lock, then `systemd-run --user --collect --quiet --service-type=exec
+  --unit=ai-pipeline-<base>-<epoch> --working-directory=<checkout>` with `--setenv` for PATH,
+  XDG_CONFIG_HOME, XDG_STATE_HOME and every AI_* without a newline (never AI_RUN_ID), plus
+  AI_LAUNCHER=detach-systemd and AI_RUN_LOG=<abs log>, running `exec-logged pipeline-…log --
+  ai-pipeline <args>`. Polls `run-record show` (0.2 s, AI_PLAN_ACK_SECONDS) for a pipeline record
+  started after the launch with that log; prints pid, log, `Follow: tail -f …`, `Stop: … --stop
+  <checkout>` (shell-quoted). Not confirmed → exit 1 with the log tail, service left running.
+  Caller-relative `--knowledge-dir` is T326. README, `docs/workflow.md`, vault flow chart, hub Log.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -431,6 +441,14 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 - `exec_logged` (T324): both log prefixes accepted, invalid names refused, existing protections.
 - `detach` (T313, T326): `systemd-run` arguments, detach then `--stop`, refusals; a relative
   `--knowledge-dir` from a subdirectory resolves against the caller.
+  Done so far (T313, fake `systemd-run` that starts a new session with default signals):
+  `test_detach_systemd_run_arguments` (`--user`, `--collect`, `--service-type=exec`, working
+  directory, AI_LAUNCHER, AI_RUN_LOG, AI_STATE_DIR forwarded, no AI_RUN_ID, no `--detach`; record
+  launcher `detach-systemd`, the log, the printed pid; manifest args without `--detach`),
+  `test_detach_then_stop` (the printed stop command exits 0 within a scaled 60 s, pipeline and
+  fake session gone, `human_stop`, log holds the output), `test_detach_refuses_without_systemd_run`,
+  `test_detach_refuses_without_approved`, `test_detach_not_confirmed` (exit 1 within the bound,
+  "(no log was created)"; invalid AI_PLAN_ACK_SECONDS refused before launch).
 - `Docs` (T314).
 
 ## Human todos
@@ -444,6 +462,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
-T319, T309 and T320 are DONE as well; T325, T310, T311 and T312 too.
-Next: the rest of the queue by dependency (T321 the fix-round limit record).
+T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324 and T313 too.
+Next: the rest of the queue by dependency (T326 caller-relative `--knowledge-dir` for `--detach`).
 Nothing is merged or deployed.

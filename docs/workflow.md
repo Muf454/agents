@@ -421,6 +421,24 @@ resumes. `--stop` also stops a stand-alone `ai-run` (T325): its exit handler end
 `human_stop`) and notifies `⛔ STOPPED by you: runner stopped at <task>. Rerun ai-run … to
 continue.` instead of the "needs you" text; a signal without a request stays `stopped`.
 
+`ai-pipeline --detach <pipeline arguments>` (RC-01 G11, T313; `--detach` first) starts the run
+in its own systemd user service, outside the caller's cgroup, so closing the terminal or stopping
+the caller's service leaves it running. It refuses (exit 1, nothing started, no `last-error`)
+when the arguments lack `--approved`, when no `systemd-run` is executable (`--detach needs
+systemd-run; run ai-pipeline in a terminal or a service instead.`; there is no `setsid`
+fallback, spec B14) or for an invalid `AI_PLAN_ACK_SECONDS`. It runs the paths safety check
+(`ai_root`), takes no lock (the pipeline does), then `systemd-run --user --collect --quiet
+--service-type=exec --unit=ai-pipeline-<checkout base name>-<epoch> --working-directory=<checkout>`
+with `--setenv` for `PATH`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and every `AI_*` variable
+without a newline (never `AI_RUN_ID`), plus `AI_LAUNCHER=detach-systemd` and `AI_RUN_LOG=<absolute
+log>`, running `python3 -I workflow.py exec-logged pipeline-<UTC stamp>-<8 hex>.log --
+<bin>/ai-pipeline <arguments>`: the remaining arguments unchanged, so neither the run record's
+argv nor the run manifest contains `--detach`. It polls `run-record show` every 0.2 s for up to
+`AI_PLAN_ACK_SECONDS` (default 20) for a pipeline record started after the launch whose `log` is
+that log, then prints `Pipeline started: pid N, log PATH`, `Follow: tail -f PATH` and `Stop:
+<bin>/ai-pipeline --stop <checkout>` (shell-quoted). Not confirmed: exit 1 with the log's last 10
+lines (or `(no log was created)`); the service is left running.
+
 Usage limits pause and resume:
 the scripts read the reset time, sleep and retry the same step (`AI_LIMIT_RETRY`,
 `AI_LIMIT_MAX_WAIT`); pushes retry 3 times; `ai-recover` and `ai-watchdog --recover` handle

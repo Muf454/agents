@@ -6846,7 +6846,7 @@ full gate rerun took 973 s) and was moved to the background, so no gate result w
 runner's own gate run decides; rerun it and set the task DONE if it passes.
 
 ## T313 — `ai-pipeline --detach`: own systemd user service, recorded log path (RC-01 G11)
-Status: TODO
+Status: IN_PROGRESS
 Dependencies: T319, T324
 Model: opus
 
