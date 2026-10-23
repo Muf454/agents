@@ -6846,7 +6846,7 @@ full gate rerun took 973 s) and was moved to the background, so no gate result w
 runner's own gate run decides; rerun it and set the task DONE if it passes.
 
 ## T313 — `ai-pipeline --detach`: own systemd user service, recorded log path (RC-01 G11)
-Status: IN_PROGRESS
+Status: DONE
 Dependencies: T319, T324
 Model: opus
 
@@ -6903,6 +6903,18 @@ Targeted: `python3 -m unittest discover -s tests -k detach` (must say `Ran N tes
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Implemented (code in recovery checkpoint 2c09d10, reviewed against these criteria on resume):
+`--detach` dispatch in `scripts/ai-pipeline` beside `--stop`: refuses without `--approved`, without an
+executable `systemd-run` or for an invalid `AI_PLAN_ACK_SECONDS` (exit 1, nothing started); `ai_root`,
+no lock; `systemd-run --user --collect --quiet --service-type=exec --unit=ai-pipeline-<base>-<epoch>
+--working-directory=<root>` with the planned `--setenv` set (never `AI_RUN_ID`), running `exec-logged
+pipeline-….log -- ai-pipeline <args>` (no `--detach`); polls `run-record show` for the matching record and
+prints pid, log, `Follow: tail -f`, `Stop: … --stop <checkout>`; not confirmed → log tail, exit 1.
+Tests `test_detach_systemd_run_arguments`, `test_detach_then_stop`, `test_detach_refuses_without_systemd_run`,
+`test_detach_refuses_without_approved`, `test_detach_not_confirmed` (fake `systemd-run`).
+Evidence: `-k detach` Ran 14 tests OK (38.8 s); recovery gate `.ai/bin/ai-check` PASS 2026-10-23T02:19:32Z
+on the same source (no source change since). README, docs/workflow.md, vault flow chart (`updated:`) and
+hub Log updated.
 
 ## T326 — `--detach` resolves `--knowledge-dir` against the caller's directory (RC-01 G11, plan review round 3 P17)
 Status: TODO

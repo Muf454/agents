@@ -634,3 +634,4 @@
 | 2026-10-23T01:14:54Z | runner | T324 | blocked; try next independent task | not complete | d5f6f80 | See task result |
 | 2026-10-23T01:14:55Z | runner | none | stopped (exit 1); inspect state/diff before resuming | see local logs | 913afc9 | No merge or deployment performed |
 | 2026-10-23T02:02:30Z | runner | T313 | stopped (exit 1); inspect state/diff before resuming | see local logs | cf32b09 | No merge or deployment performed |
+| 2026-10-23T02:40:00Z | claude (opus) | T313 | DONE (resume): recovery checkpoint 2c09d10 reviewed against all acceptance criteria; no source change | -k detach 14 OK (38.8 s); recovery gate PASS 02:19:32Z on the same source | 2c09d10 | README, docs/workflow.md, vault flow chart and hub Log already updated |
