@@ -628,3 +628,4 @@
 | 2026-10-23T00:00:00Z | claude (opus) | T311 | DONE: SKIPPED status with host skip authorization (`<state root>/skips/<sha256>`), `tasks skip ID REASON`, `tasks set` refuses SKIPPED, planning guard and pr-body cover SKIPPED; 6 tests | -k skip 23 OK; `.ai/bin/ai-check` PASS 1206 OK (977.7 s) | see next entry | docs/workflow.md, templates prompts, vault flow chart and hub Log updated |
 | 2026-10-22T23:26:44Z | runner | T311 | completed | PASS | c7a0106 | Claude checkpointed; continuing queue |
 | 2026-10-23T00:00:00Z | claude (opus) | T312 | DONE: `ai-task retry --note`, `model`, `skip --reason` (optional `--commit`, always locked); helpers `tasks retry`, `tasks set-model`; 4 tests | -k ai_task 11 OK; `.ai/bin/ai-check` PASS 1210 OK (956.2 s) | see next entry | README, docs/workflow.md, vault hub Log; flow unchanged |
+| 2026-10-23T00:04:57Z | runner | T312 | completed | PASS | ac6b00f | Claude checkpointed; continuing queue |

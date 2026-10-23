@@ -7,10 +7,10 @@ Current task: none
 Last completed task: T312
 Tasks complete: 85
 Tasks remaining: 7
-Last validation: PASS at 2026-10-23 (T312, 1210 tests)
+Last validation: PASS at 2026-10-23T00:04:57Z
 Blocked: yes
 Next action: Continue queue; see task results for any blockers
-Last updated: 2026-10-23
+Last updated: 2026-10-23T00:04:57Z
 
 <!-- Phases: planning, implementing, blocked, ready_for_review, fixing_review,
 ready_for_acceptance. State summarizes the queue; tasks and Git are authoritative.
