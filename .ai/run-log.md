@@ -644,3 +644,4 @@
 | 2026-10-23T03:48:18Z | runner | none | queue complete; ready for independent review | PASS | 0b5e32a | Human acceptance remains |
 | 2026-10-23T03:59:58Z | runner | triage | review triaged into dispositions/tasks | n/a | b7c9e54 | Fix tasks run next |
 | 2026-10-23T04:30:01Z | runner | T329 | stopped (exit 1); inspect state/diff before resuming | see local logs | 864fe40 | No merge or deployment performed |
+| 2026-10-23T05:20:23Z | claude | T330 | DONE: KILL escalation in ai_stop_child; human stop stays pending (owner waits, --stop --wait 4) while a child survives KILL | PASS (ai-check 1226 OK) | b87afcf | 2 regression tests; docs/workflow.md, vault flow updated |

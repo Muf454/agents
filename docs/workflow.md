@@ -375,7 +375,8 @@ Limits bound new agent invocations and validation execution. GNU timeout termina
 timed-out command, with a 10-second forced termination grace. An interrupt (INT or TERM, and
 HUP for `ai-recover`) ends the running Claude session of `ai-run` or `ai-recover` at once: the
 session runs as a background child (`ai_run_child`), and the trap TERMs it (`ai_stop_child`,
-waiting up to 30 s) before the script exits 130/143; partial work stays as after a timeout.
+waiting up to 30 s, then KILLing it and waiting up to 5 s more) before the script exits 130/143;
+partial work stays as after a timeout.
 The same holds for the Codex or Claude reviewer of `ai-review`, the validator of `ai-check`
 (its logger `tee` runs on its own descriptor; the stamp stays invalidated, a failed logger
 fails the gate), the `.ai/ci-setup` run of dependency setup, the host's full gate of `ai-run`
@@ -403,8 +404,12 @@ stop never reaches `ai-recover`. A stop reaches every stage: the pipeline runs i
 and the push retry sleep through `ai_run_child`, so a signal to the pipeline's pid alone (not
 only Ctrl-C to the group) ends the running session, reviewer, validator, dependency setup or
 sleep within seconds with the same records. A child that exits 130 or 143 under a stop goes to
-the trap, never to `stop()`; a child still alive 30 s after the TERM skips the bookkeeping
-commit. The publication stage is reached too: `git push` runs through `ai_run_child`, and
+the trap, never to `stop()`. A child that ignores the TERM (a publication `git` or `gh` has no
+`timeout` wrapper) is KILLed after 30 s. One that survives even the KILL keeps the stop pending
+(review M5): gate first, the handler records the stop request, notifies `⏳ STOP PENDING: <branch>
+during <stage>. Process <pid> survived TERM and KILL …` and keeps waiting for it as the run's
+owner. Its record stays open, so `ai-pipeline --stop --wait` exits 4 meanwhile. Only after the
+child is gone does it finish the stop as above, without the bookkeeping commit. The publication stage is reached too: `git push` runs through `ai_run_child`, and
 `git ls-remote` and every `gh` call through `ai_run_capture`, which writes the child's output
 to one ignored `.ai/local/publish-*.out` file (a trap does not run while the shell waits on a
 command substitution) that `finish` and the stop remove. The TERM reaches the `git` or `gh`

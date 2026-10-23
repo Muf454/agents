@@ -7079,7 +7079,7 @@ Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 ### Result / notes
 
 ## T330 — A human stop never reports success while its tracked child survives (review M5)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: opus
 
@@ -7116,6 +7116,18 @@ Targeted: `python3 -m unittest discover -s tests -k human_stop -k stop_command` 
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+Done. `ai_stop_child` KILLs a child still alive after the TERM wait (30 s; `AI_STOP_CHILD_TRIES`
+test hook) and waits 5 s more. When the child survives even the KILL, `ai_human_stop` checks the
+gate first, records the stop request, notifies `⏳ STOP PENDING … Process <pid> survived TERM and
+KILL` and keeps waiting as the run's owner (record stays `running`, `--stop --wait` exits 4); once
+the child is gone it completes the normal human stop without the bookkeeping commit. The
+gate-broken branch only runs after that wait, so it never reports a stop with the child alive.
+Documented in `docs/workflow.md` (the owner-waits option); vault flow chart updated.
+Evidence: `test_human_stop_term_ignoring_publication_child` (real TERM-ignoring `git push`: child
+gone, `human_stop`, one ⛔) and `test_human_stop_pending_while_child_survives` (KILL neutralised via
+`BASH_ENV`: no ⛔ and record `running` while pending, `run-stop --wait 1` exits 4, then `human_stop`).
+`-k human_stop -k stop_command -k term_ignoring`: Ran 34 tests OK. `.ai/bin/ai-check`: Ran 1226
+tests OK. Limitation: a child stuck forever (uninterruptible) keeps the owner waiting until it ends.
 
 ## T331 — State counts authorized SKIPPED tasks as finished (review N4)
 Status: TODO

@@ -11700,13 +11700,15 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.pid_only_stop(pid_file, 'pr', command=self.pipeline_command()[:-1], **env)
         self.assertEqual(list((self.project / '.ai/local').glob('publish-*.out')), [])
 
-    def held_git(self, subcommand):
-        """A fake git first on PATH: SUBCOMMAND writes its pid and sleeps, the rest is the real git."""
+    def held_git(self, subcommand, ignore_term=False):
+        """A fake git first on PATH: SUBCOMMAND writes its pid and sleeps (ignoring TERM with
+        IGNORE_TERM), the rest is the real git."""
         real = shutil.which('git', path=self.env['PATH'])
         held = self.base / 'held-git-bin'
         held.mkdir()
         (held / 'git').write_text(
             f'#!/usr/bin/env bash\nif [[ "$1" == {subcommand} ]]; then\n'
+            + ("  trap '' TERM\n" if ignore_term else '') +
             '  echo $$ > .ai/local/mock-git.pid\n  exec sleep 300\nfi\n'
             f'exec {shlex.quote(real)} "$@"\n')
         (held / 'git').chmod(0o755)
@@ -11721,6 +11723,49 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
     def test_human_stop_pid_only_gh(self):
         self.pid_only_publication_stop('mock-gh.pid', MOCK_GH_HOLD='1')
         self.assertEqual([call[:2] for call in self.gh_calls()], [['pr', 'view']])
+
+    # T330 (review M5): a publication child that ignores TERM is KILLed; while one survives even
+    # that, the stop stays pending (record open, `--stop --wait` exits 4) and nothing says it stopped.
+    def test_human_stop_term_ignoring_publication_child(self):
+        self.pid_only_publication_stop('mock-git.pid', PATH=self.held_git('push', ignore_term=True),
+                                       AI_STOP_CHILD_TRIES='10')
+        self.assertNotIn('STOP PENDING', self.notifications())
+        self.assertEqual(len(self.human_stop_lines()), 1)
+
+    def test_human_stop_pending_while_child_survives(self):
+        self.ready()
+        self.add_origin()
+        # The handler's `kill -KILL` does nothing here, as for a child stuck in the kernel.
+        no_kill = self.base / 'no-kill.sh'
+        no_kill.write_text('kill() { [[ "$1" == -KILL ]] || builtin kill "$@"; }\n')
+        child = self.project / '.ai/local/mock-git.pid'
+        seen = {}
+
+        def send(runner):
+            os.kill(runner.pid, signal.SIGTERM)
+            deadline = time.monotonic() + PIPELINE_TIMEOUT
+            while 'STOP PENDING' not in self.notifications():
+                if runner.poll() is not None or time.monotonic() > deadline:
+                    self.fail('the stop never reported itself pending')
+                time.sleep(0.05)
+            seen['stopped'] = self.human_stop_lines()
+            seen['outcome'] = self.pipeline_records()[-1]['outcome']
+            seen['stop'] = self.stop_command('--wait', '1', expected=4)
+            os.kill(int(child.read_text()), signal.SIGKILL)
+        code, output = self.interrupt_session(self.pipeline_command()[:-1], 'mock-git.pid', send,
+                                              AI_AUTO_RECOVER='1', AI_STOP_CHILD_TRIES='10', BASH_ENV=str(no_kill),
+                                              PATH=self.held_git('push', ignore_term=True))
+        self.assertEqual(code, 143, output)
+        self.assertEqual((seen['stopped'], seen['outcome']), ([], 'running'))
+        self.assertIn('still ending after 1 s', seen['stop'].stderr)
+        [pending] = [line for line in self.notifications().splitlines() if 'STOP PENDING' in line]
+        self.assertIn('during pr. Process', pending)
+        self.assertIn('during pr.', self.human_stop_lines()[-1])
+        self.assertEqual(len(self.human_stop_lines()), 1)
+        record = self.pipeline_records()[-1]
+        self.assertEqual((record['outcome'], record['stop_requested']['via']), ('human_stop', 'signal'))
+        self.assertFalse((self.project / '.ai/local/pipeline.active').exists())
+        self.assert_not_recovered()
 
     # `ai-pipeline --stop` (RC-01 G1, T308): found through the run record, verified, SIGTERM, waited.
     def stop_command(self, *args, expected=0, timeout=None):

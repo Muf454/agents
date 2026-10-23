@@ -450,6 +450,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   "could not start", no stall), `test_watchdog_human_stopped_record_blocks_a_due_relaunch` (the
   record guard alone: a `human_stop` record with its due schedule left gets no launch and one
   `⛔ STOPPED by you`),
+  T330 (review M5): `test_human_stop_term_ignoring_publication_child` (a `git push` that ignores
+  TERM is KILLed after the test-hook wait: child gone, `human_stop`, one `⛔ STOPPED by you`, no
+  pending notice), `test_human_stop_pending_while_child_survives` (KILL made ineffective: `⏳ STOP
+  PENDING`, no `⛔` and record still running, `--stop --wait 1` exits 4; after the child dies the
+  stop completes as `human_stop` with one `⛔ STOPPED by you`),
   `test_stop_command_stops_a_watchdog_recovery` (`ai-recover` with a sleeping decision session:
   exit 0, recovery 143, `human_stop`, no ▶ RESUMED, no implementation session).
   T325: `test_stop_command_stops_a_standalone_ai_run` (ai-run 143, record kind `ai-run`
@@ -517,7 +522,7 @@ T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and
 T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324, T313 and T326 too.
 T314 (docs, flow chart audit, mission-control note) is DONE.
 Review round 1 (Codex, HEAD 68ac201): M4, M5 and N4 accepted; fix tasks T329 (watchdog scheduled
-relaunch after a cancel) is DONE; T330 (human stop with a surviving tracked child) and T331
-(state counts SKIPPED as finished) are TODO. See `.ai/reviews/dispositions.md`.
-Next: T330, T331, then the full gate (`.ai/bin/ai-check`).
+relaunch after a cancel) and T330 (human stop with a surviving tracked child: KILL escalation,
+pending stop) are DONE; T331 (state counts SKIPPED as finished) is TODO. See `.ai/reviews/dispositions.md`.
+Next: T331, then the full gate (`.ai/bin/ai-check`).
 Nothing is merged or deployed.

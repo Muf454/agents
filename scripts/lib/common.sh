@@ -151,14 +151,21 @@ ai_run_capture() {
   ai_run_child "$@" > "$file"
 }
 # From a trap: TERM the recorded child (timeout forwards it and kills after 10 s), wait for it up
-# to 30 s, return 1 if it is still alive. Idempotent (a second signal in the trap is harmless);
-# a no-op without a child. The foreground sleep lets bash reap the exited child.
+# to 30 s, then KILL it (a publication git or gh has no timeout wrapper) and wait up to 5 s more;
+# return 1 if it is still alive (AI_CHILD_PID then stays set). Idempotent (a second signal in the
+# trap is harmless); a no-op without a child. The foreground sleep lets bash reap the exited
+# child. AI_STOP_CHILD_TRIES (0.1 s polls before the KILL, default 300) is a test hook.
 ai_stop_child() {
-  local pid=${AI_CHILD_PID:-} tries=0
+  local pid=${AI_CHILD_PID:-} tries=0 limit=${AI_STOP_CHILD_TRIES:-300}
   [[ -n "$pid" ]] || return 0
+  [[ "$limit" =~ ^[0-9]{1,4}$ ]] || limit=300
   kill -TERM "$pid" 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do
-    (( tries++ < 300 )) || return 1
+    if (( tries++ == limit )); then
+      kill -KILL "$pid" 2>/dev/null || true
+    elif (( tries > limit + 50 )); then
+      return 1
+    fi
     sleep 0.1
   done
   AI_CHILD_PID=
@@ -176,6 +183,20 @@ ai_human_stop() {
   local via=signal line path dirty='' clause='' rerun='ai-pipeline --approved' paths=() others=no
   [[ "$1" != INT ]] || code=130
   ai_stop_child || child=running
+  if [[ "$child" == running ]]; then
+    # Review M5: the child survived TERM and KILL. Never report the stop done while it lives: record
+    # the request (gate first), say the stop is pending and keep this owner, so the record stays
+    # open and `ai-pipeline --stop --wait` exits 4, until the child is gone (then no bookkeeping commit).
+    if [[ -z "${AI_APPROVED_GATE:-}" ]]; then
+      AI_GATE_BROKEN=1
+    elif ai_gate_check "$AI_APPROVED_GATE" && [[ -n "${AI_RUN_ID:-}" ]]; then
+      ai_helper run-record stop-requested --run "$AI_RUN_ID" 2>/dev/null || \
+        ai_helper run-record request-stop --run "$AI_RUN_ID" --via signal 2>/dev/null || true
+    fi
+    ai_notify "⏳ STOP PENDING: $who during $stage. Process $AI_CHILD_PID survived TERM and KILL; the stop completes once it ends."
+    while kill -0 "$AI_CHILD_PID" 2>/dev/null; do sleep 1 || true; done
+    AI_CHILD_PID=
+  fi
   # The pipeline's publication capture file (ai-pipeline pub_capture), best effort.
   [[ -z "${pub_out:-}" ]] || rm -f -- "$pub_out" 2>/dev/null || true
   if [[ -z "${AI_APPROVED_GATE:-}" ]] || ! ai_gate_check "$AI_APPROVED_GATE"; then
