@@ -1,35 +1,35 @@
-<!-- Host evidence: HEAD 41e45a825380b1cc72ac2558606bc93ddbfa1496; merge-base 20fe2ab452cdd7917af6c11e715fbff0ad6b4489; saved 2026-10-21T13:53:14Z. -->
+<!-- Host evidence: HEAD 68ac201c132afc084763bebc3d4e3cb8219f0964; merge-base 4fea72d51a543528c79a0afab423b935757d6acf; saved 2026-10-23T03:58:00Z. -->
 
 # Independent review
 
-Overall verdict: REQUEST CHANGES — one MAJOR routing requirement gap and two MINOR issues remain.
-Finding counts: BLOCKER=0 MAJOR=1 MINOR=2
+Overall verdict: REQUEST CHANGES — two MAJOR stop-path defects and one MINOR status-reporting gap.
+Finding counts: BLOCKER=0 MAJOR=2 MINOR=1
 
-Reviewed HEAD: `41e45a825380b1cc72ac2558606bc93ddbfa1496`
+Reviewed HEAD: `68ac201c132afc084763bebc3d4e3cb8219f0964`
 
-Supplied base and verified merge-base: `20fe2ab452cdd7917af6c11e715fbff0ad6b4489`
+Supplied base and verified merge-base: `4fea72d51a543528c79a0afab423b935757d6acf`
 
 ## Scope and validation
 
-Inspected the repository instructions, specification, plan, task records, state, handoff, review dispositions, relevant documentation, Git history, full supplied diff, changes since the previous review, and affected source/tests. The checkout was clean.
+Inspected repository instructions, specification, plan, relevant task records, state, handoff, review dispositions, documentation, Git history, the supplied diff, affected source and relevant tests. The checkout was clean.
 
 Validation observed:
 
-- `.ai/local/validation.json` records PASS at `2026-10-21T13:46:34Z`, on revision `1aae5fee85cda463660808ace280f5ea44830429`.
-- Its referenced log reports **1,103 tests passed**.
-- Independent `stamp verify` confirms that evidence matches the reviewed checkout.
+- `.ai/local/validation.json` records PASS at `2026-10-23T03:48:18Z`, on revision `0b5e32a498a9a24004fed22aa19eacaad41c8b68`.
+- Its referenced log reports **1,222 tests passed** in 955.7 seconds.
+- Independent `stamp verify` confirms that the evidence matches the reviewed checkout.
 
 Checks independently completed:
 
-- Discovery found 1,103 tests.
-- Three documentation-consistency tests passed.
-- Python AST checks across nine files and shell syntax checks across 14 files passed.
 - Task queue validation and `git diff --check` passed.
-- Write-free reproductions exercised the findings below and the previous fixes. Storage, discovery, and Git inputs were mocked where necessary.
+- Python AST checks across nine files and shell syntax checks across 14 files passed.
+- All four documentation-consistency tests passed.
+- Read-only discovery found 1,222 tests; the temporary-directory initializer was suppressed for discovery.
+- Write-free reproductions exercised the three findings below.
 
-Previous findings **M1, M2 and N1 are fixed**: registry capture precedes discovery; indirectly moved tasks consume queue-order claims; routed reviews default to opus and preserve the human’s model override.
+The full `./scripts/ai-check` and writable integration fixtures were not rerun because this review uses a read-only sandbox. No project files were written or network/MCP integrations invoked.
 
-The full `./scripts/ai-check` and writable integration fixtures were not rerun because the sandbox is read-only. No project files were written or network/MCP integrations invoked.
+The existing review artifact concerns an earlier batch. Code inspection confirms its accepted findings M3, N2 and N3 are addressed. No pre-existing defects are counted below.
 
 ## BLOCKER findings
 
@@ -37,80 +37,93 @@ None found in the inspected scope.
 
 ## MAJOR findings
 
-### M3 — Missing host records allow routing based on commit subjects
+### M4 — Cancelling a scheduled relaunch leaves the watchdog launching recovery
 
-**Location:** `scripts/lib/workflow.py:3718`.
+**Requirement:** FR-4 requires the watchdog never to start recovery for a human-stopped run. FR-5 and T319 require stopping a paused run to cancel its scheduled relaunch.
 
-**Requirement:** R6, assumption A10 and T108 require routing from host records, with missing records retaining Codex.
+**Location:** `scripts/lib/watchdog.py:516` and `scripts/lib/watchdog.py:530`.
 
-**Problem:** When `fix_round_records()` returns `None`, `route_fix_rounds()` counts commits whose subject matches the triage subject. That substitutes agent-controlled Git history for the required host record.
+**Problem:** The scheduled-relaunch path calls `start_recovery()` before checking the run record. The new human-stop check runs only when a dead pipeline marker exists. Stopping a paused run removes that marker but leaves `run.json`’s `limit_relaunch_at`.
 
-**Impact:** A missing or deleted fix-round store can enable a routed Claude review without the required trusted fix-round evidence.
+The launched recovery refuses the stopped record before reaching `limit-claim`, so the due schedule remains available to every later watchdog probe.
 
-**Evidence:** A write-free reproduction used the actual routing functions with a missing fix-round store, a matching triage commit subject, an earlier host Codex review and a one-line low-risk diff. It returned `claude small low-risk fix round (1 lines)`. With an empty host store and identical history, it returned `codex first full code review`.
+**Impact:** A cancelled run continues spawning recovery processes. A quiet refusal also leaves the watchdog without its expected acknowledgement, producing a misleading “usage-limit relaunch could not start” alert. The recovery correctly refuses to resume agent work, but cancellation does not suppress the recovery launches.
 
-**Recommended direction:** Treat a missing store as no eligible fix round. Keep legacy migration separate from routing eligibility, and test that a triage commit subject alone cannot enable routing.
+**Evidence:** A write-free execution of the actual watchdog `main()`, with filesystem and launch effects mocked, supplied a current `human_stop` record, no pipeline marker and a due schedule. Two probes called `start_recovery()` twice and never called `current_run()`. The existing cancellation test invokes `ai-recover` directly; it does not exercise the watchdog’s scheduled path.
+
+**Recommended direction:** Check the current run’s stop/terminal state before scheduled recovery. Ensure cancellation prevents subsequent probes from launching recovery, with a regression that runs multiple watchdog probes after cancelling a paused run.
+
+### M5 — Shutdown reports success while its tracked publication child remains alive
+
+**Requirement:** FR-2 and FR-3 require shutdown to end the running child. FR-5 provides exit 4 for a run still ending, rather than reporting a completed stop.
+
+**Location:** `scripts/lib/common.sh:178`, `scripts/lib/common.sh:206` and `scripts/lib/common.sh:229`.
+
+**Problem:** When `ai_stop_child()` exhausts its 30-second wait, `ai_human_stop()` sets `child=running` but continues to end the run as `human_stop`, announce “STOPPED by you,” remove the marker and exit. That flag only prevents the bookkeeping commit.
+
+Publication commands run directly through `ai_run_child`, without a timeout wrapper. A tracked `git` or `gh` process that survives TERM can therefore continue after the owner exits. Its inherited checkout lock can remain held. Subsequent `--stop` calls refuse the already-ended record.
+
+**Impact:** Publication can continue after the human is told it stopped, while the normal stop command can no longer reach it. This concerns the tracked publication process itself; B21’s documented push-hook limitation does not cover it.
+
+**Evidence:** A write-free reproduction used the actual shutdown functions and a real TERM-ignoring fixture process. Polling delays were accelerated, bookkeeping was mocked and local output redirected to `/dev/null`. The handler exited 143 after issuing `run-record end … human_stop`, announcing the stop and dropping the marker; the tracked child remained alive.
+
+The existing wait-expiry test uses an owner that ignores TERM, so it does not exercise this handler failure.
+
+**Recommended direction:** Preserve a pending stop while a tracked child survives. Keep an owner capable of completing shutdown, report the survivor, and let `--stop --wait` return 4 until termination is confirmed. Add a TERM-ignoring publication-child regression.
 
 ## MINOR findings
 
-### N2 — Existing temporary state skips XDG isolation
+### N4 — Authorized skipped tasks remain counted as unfinished in persistent state
 
-**Location:** `tests/isolation.py:18`.
+**Requirement:** FR-9 defines an authorized SKIPPED task as finished for the queue.
 
-**Requirement:** R8/FL-33 and T111 require both `AI_STATE_DIR` and `XDG_STATE_HOME` to be isolated for tests and subprocesses.
+**Location:** `scripts/lib/workflow.py:1170`.
 
-**Problem:** Initialization checks only `AI_STATE_DIR`. If it already points under the temporary directory, the module leaves `XDG_STATE_HOME` untouched, including when it is unset.
+**Problem:** `update_state()` calculates `Tasks remaining` as total tasks minus DONE tasks. It does not exclude authorized SKIPPED tasks.
 
-**Impact:** A legitimate temporary host-state setting causes the new isolation test to fail. An existing external XDG setting also remains available to children.
+**Impact:** A fully finished queue can reach `ready_for_review` while its persistent state still reports remaining work, misleading humans and app consumers.
 
-**Evidence:** Executing the isolation module with `AI_STATE_DIR=/tmp/reviewer-state` and no `XDG_STATE_HOME` leaves XDG unset. The existing isolation test then raises `KeyError: 'XDG_STATE_HOME'` before creating its fixture.
+**Evidence:** With one DONE task and one authorized SKIPPED task, the actual `tasks complete` action succeeded. The actual state updater nevertheless produced:
 
-**Recommended direction:** Validate and initialize both variables independently. Cover temporary AI state with missing or external XDG state.
+```text
+Tasks complete: 1
+Tasks remaining: 1
+```
 
-### N3 — Advisory-only scans never save the overlap report
-
-**Location:** `scripts/lib/common.sh:362`; `scripts/ai-run:447` and `scripts/ai-run:561`.
-
-**Requirement:** Assumption A5 requires overlap reports to be printed and written to `.ai/local/preflight.md`.
-
-**Problem:** For a valid queue, `ai_queue_ruling()` prints dry-run overlap output and returns before invoking the report writer. Planning and revision paths likewise use only dry-run preflight output.
-
-**Impact:** Ordinary scans leave the promised report missing or stale, despite printing current overlaps.
-
-**Evidence:** Exercising the actual shell function with a valid overlapping queue showed only `tasks preflight --dry-run` being called. The report-writing path was never reached.
-
-**Recommended direction:** Refresh the advisory report after successful scans independently of whether a queue repair or commit is needed.
+**Recommended direction:** Calculate remaining work from statuses outside `FINISHED`. Keep completed and skipped counts distinguishable where displayed, and cover mixed DONE/SKIPPED queues.
 
 ## Missing coverage
 
 Add regressions for:
 
-- Missing fix-round records combined with a matching triage commit subject.
-- Temporary `AI_STATE_DIR` with unset or external `XDG_STATE_HOME`.
-- Creating and refreshing the saved overlap report when no repair is required.
+- Repeated watchdog probes after cancelling a scheduled usage-limit relaunch.
+- A real shutdown handler whose tracked publication child survives TERM.
+- Persistent state for a complete queue containing authorized SKIPPED tasks.
 
-Existing tests cover nearby behavior but do not detect these cases.
+Nearby tests cover direct recovery refusal, an unresponsive owner and skip eligibility, but miss these integrations.
 
 ## Security concerns
 
-M3 weakens the specified boundary between host evidence and agent-controlled history. No additional demonstrated exploitable authentication or authorization defect was found in the inspected changes.
-
-No pre-existing defects are counted. Legacy fix-round migration predates this change; its new use for routing eligibility is the issue reported in M3.
+M5 can leave an already-started publication command executing after shutdown is reported. No additional demonstrated exploitable defect was found in the inspected gate handling, record I/O or task authorization.
 
 ## Architecture concerns
 
-The implementation retains minimal dependencies and deterministic host helpers. Routing should preserve its conservative behavior when authority records are missing.
+The implementation retains minimal dependencies and generally follows the host-record and run-ID locking design. Stop decisions need consistent enforcement across scheduled recovery and shutdown completion.
 
-**Flow chart updated:** the inspected vault note has `updated: 2026-10-21` and documents the batch’s workflow changes. Same-session editing timing was not independently established.
+**Flow chart updated:** the inspected vault note has `updated: 2026-10-23` and documents human stop, escalation, SKIPPED and detach. Corresponding hub log entries exist; same-session edit timing was not independently established.
 
 ## Manual testing recommendations
 
 ### Needs you
 
-After fixes and the normal toolkit upgrade, observe reviewer selection, attribution, notifications and resumption during a real fix round and Codex-limit window using the actual CLIs.
+After fixes and installation, verify with the real CLIs and systemd timer:
+
+- Ctrl-C and `--stop` produce accurate notifications and complete shutdown.
+- Cancelling a paused run causes no recovery launch when its reset becomes due.
+- A detached run survives terminal closure and its printed stop command ends it.
 
 ### Covered by automated tests
 
-The recorded suite covers queue repair, ruling lifecycle, retries, routing, limit memory, reviewer attribution and registry isolation. Add the three regressions above and rerun `./scripts/ai-check`.
+The recorded suite covers lifecycle records, ordinary signal forwarding, recovery refusal, detach arguments, escalation and task controls. Add the three regressions above and rerun `./scripts/ai-check`.
 
 Reviewing does not constitute human acceptance.
