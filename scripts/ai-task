@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED> [--commit] | ai-task retry <ID> --note TEXT [--commit]
 #        | ai-task model <ID> <MODEL> [--commit] | ai-task skip <ID> --reason TEXT [--commit]
-#        | ai-task show <ID> | ai-task check | ai-task reorder
+#        | ai-task skip <ID> --reauthorize | ai-task show <ID> | ai-task check | ai-task reorder
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/common.sh"
 ai_root
 
@@ -34,10 +34,18 @@ task_change() {
   fi
   original=$(mktemp .ai/local/tasks.md.XXXXXX)
   cp -- .ai/tasks.md "$original"
-  if ! ai_helper "$@" || ! ai_helper tasks check; then
+  local failed=''
+  if ! ai_helper "$@"; then
+    failed='Nothing changed.'
+  elif ! ai_helper tasks check; then
+    failed='Nothing changed.'
+    # A re-authorization changes no file; its authorization stays (it matches the committed line).
+    [[ "$subject" != @reauthorize ]] || failed='The skip is authorized, but the queue has another fault (above).'
+  fi
+  if [[ -n "$failed" ]]; then
     cat -- "$original" > .ai/tasks.md
     rm -f -- "$original"
-    echo 'Nothing changed.' >&2
+    echo "$failed" >&2
     exit 1
   fi
   rm -f -- "$original"
@@ -69,8 +77,14 @@ case "${1:-}" in
            echo 'Usage: ai-task model <ID> <MODEL> [--commit]' >&2; exit 2; }
          task_change "$([[ $# -eq 4 ]] && echo 1 || echo 0)" "chore(ai): set $2 model to $3 (ai-task)" \
            "$2 uses model $3 but it is not committed; commit .ai/tasks.md yourself." tasks set-model "$2" "$3" ;;
-  skip) [[ ($# -eq 4 || ($# -eq 5 && "$5" == --commit)) && "$3" == --reason ]] || {
-          echo 'Usage: ai-task skip <ID> --reason TEXT [--commit]' >&2; exit 2; }
+  skip) if [[ "${3:-}" == --reauthorize ]]; then
+          # A committed skip on another host (or a lost state directory): nothing to commit.
+          [[ $# -eq 3 ]] || { echo 'Usage: ai-task skip <ID> --reauthorize (no --commit: nothing changes)' >&2; exit 2; }
+          task_change 0 @reauthorize '' tasks skip-reauthorize "$2"
+          exit 0
+        fi
+        [[ ($# -eq 4 || ($# -eq 5 && "$5" == --commit)) && "$3" == --reason ]] || {
+          echo 'Usage: ai-task skip <ID> --reason TEXT [--commit] | ai-task skip <ID> --reauthorize' >&2; exit 2; }
         task_change "$([[ $# -eq 5 ]] && echo 1 || echo 0)" "chore(ai): skip $2 (ai-task)" \
           "$2 is SKIPPED but not committed; commit .ai/tasks.md yourself." tasks skip "$2" "$4" ;;
   show) [[ $# -eq 2 ]] || { echo 'Usage: ai-task show <ID>' >&2; exit 2; }
@@ -85,5 +99,5 @@ case "${1:-}" in
            ai_helper tasks reorder ;;
   *) echo 'Usage: ai-task set <ID> <STATUS> [--commit] | ai-task retry <ID> --note TEXT [--commit] |' \
           'ai-task model <ID> <MODEL> [--commit] | ai-task skip <ID> --reason TEXT [--commit] |' \
-          'ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
+          'ai-task skip <ID> --reauthorize | ai-task show <ID> | ai-task check | ai-task reorder' >&2; exit 2 ;;
 esac

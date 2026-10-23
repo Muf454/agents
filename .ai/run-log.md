@@ -629,3 +629,4 @@
 | 2026-10-22T23:26:44Z | runner | T311 | completed | PASS | c7a0106 | Claude checkpointed; continuing queue |
 | 2026-10-23T00:00:00Z | claude (opus) | T312 | DONE: `ai-task retry --note`, `model`, `skip --reason` (optional `--commit`, always locked); helpers `tasks retry`, `tasks set-model`; 4 tests | -k ai_task 11 OK; `.ai/bin/ai-check` PASS 1210 OK (956.2 s) | see next entry | README, docs/workflow.md, vault hub Log; flow unchanged |
 | 2026-10-23T00:04:57Z | runner | T312 | completed | PASS | ac6b00f | Claude checkpointed; continuing queue |
+| 2026-10-23T00:30:00Z | claude (opus) | T322 | DONE: `ai-task skip ID --reauthorize` + `tasks skip-reauthorize ID` (skip check off, SKIPPED with one valid Skipped line, no file change, no commit); 2 tests | -k ai_task 13 OK; `.ai/bin/ai-check` PASS 1212 OK (978.6 s) | see next entry | README, docs/workflow.md, vault hub Log; flow unchanged |

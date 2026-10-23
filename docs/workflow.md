@@ -34,7 +34,11 @@ Task parser contract:
   task makes the queue invalid (`T…: SKIPPED without a host skip record …`). `tasks skip` takes
   only a TODO or BLOCKED task no unfinished task depends on, and a one-line reason (1-500
   characters, no control characters or backticks); it writes the authorization before the
-  queue. `tasks set` refuses SKIPPED. A SKIPPED task is never selected, satisfies dependencies
+  queue. `tasks skip-reauthorize ID` (wrapped by `ai-task skip ID --reauthorize`: lock and
+  branch check, no commit) creates the authorization for an already committed SKIPPED task with
+  exactly one valid Skipped line (another host, a lost state directory); it parses the queue
+  with the skip check off and changes no file, and the wrapper's `tasks check` then reports any
+  other fault. `tasks set` refuses SKIPPED. A SKIPPED task is never selected, satisfies dependencies
   and counts toward `tasks complete`; `counts`, `progress`, `untouched` and `newly-done` count
   DONE only. The planning guard keeps SKIPPED blocks like DONE ones, and the PR body lists
   `Skipped tasks: T…: reason`.

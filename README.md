@@ -208,7 +208,10 @@ Before leaving an implementation session unattended:
    a TODO or BLOCKED task's `Model:` line or inserts one after `Dependencies:`
    (`chore(ai): set T005 model to opus (ai-task)`); `.ai/bin/ai-task skip T005 --reason
    "covered by T006" [--commit]` marks a TODO or BLOCKED task SKIPPED with its host skip record
-   (`chore(ai): skip T005 (ai-task)`). Notes and reasons are one line of 1–500 characters
+   (`chore(ai): skip T005 (ai-task)`). On another host, or after the state directory was lost,
+   `.ai/bin/ai-task skip T005 --reauthorize` re-creates the host skip record for an already
+   committed skip (no `--commit`: it changes no file), even while that skip makes the queue
+   invalid; it still refuses while a run holds the checkout. Notes and reasons are one line of 1–500 characters
    without control characters or backticks; DONE, IN_PROGRESS and SKIPPED tasks are refused.
    The template also allows `git rm`/`git mv`, `.ai/bin/ai-task` and read-only shell
    commands (`ls`, `grep`, `cat`, `head`, `tail`, `wc`, `echo`). Claude Code denies

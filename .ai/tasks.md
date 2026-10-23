@@ -6761,7 +6761,7 @@ Validation: `-k ai_task` Ran 11 OK; `-k skip -k task_set -k tasks` Ran 43 OK;
 `.ai/bin/ai-check` PASS, Ran 1210 OK (956.2 s).
 
 ## T322 — `ai-task skip ID --reauthorize` for a committed skip on another host (RC-01 G6, plan review P6)
-Status: TODO
+Status: DONE
 Dependencies: T312
 Model: opus
 
@@ -6795,6 +6795,13 @@ Targeted: `python3 -m unittest discover -s tests -k ai_task` (must say `Ran N te
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-23: `workflow.py tasks skip-reauthorize ID` (handled before the normal parse, queue read
+with `check_skips=False`; requires SKIPPED and exactly one valid Skipped line; shared
+`create_skip_authorization`) and `ai-task skip ID --reauthorize` (`task_change`, no commit;
+`--commit` → exit 2; a failed final `tasks check` says the skip is authorized but the queue has
+another fault). Tests `test_ai_task_skip_reauthorize`, `test_ai_task_skip_reauthorize_refuses`.
+Evidence: `-k ai_task` Ran 13 tests OK; `.ai/bin/ai-check` PASS, Ran 1212 tests OK (978.6 s).
+README, docs/workflow.md; flow unchanged.
 
 ## T324 — `exec-logged` accepts the detached pipeline's log name (RC-01 G11, plan review round 2 P12)
 Status: TODO

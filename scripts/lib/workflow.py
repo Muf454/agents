@@ -786,6 +786,11 @@ def task_command(arguments):
     if arguments[0] == 'preflight':
         tasks_preflight(arguments[1:])
         return
+    if arguments[0] == 'skip-reauthorize':
+        if len(arguments) != 2:
+            fail('Usage: tasks skip-reauthorize ID')
+        tasks_skip_reauthorize(arguments[1])
+        return
     blocks = tasks()
     action = arguments[0]
     if action == 'check':
@@ -1010,15 +1015,38 @@ def tasks_skip(blocks, task, reason):
     after = next(t for t in tasks(new, check_skips=False) if t['id'] == task['id'])
     if skipped_lines(after) != [skipped]:
         fail(f"{task['id']}: the Skipped line could not be placed in the task.")
-    directory = skips_dir()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.close(os.open(directory / skip_key(after, skipped), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-    except FileExistsError:
-        pass
+    create_skip_authorization(after, skipped)
     tasks(new)  # the whole queue, with the new authorization in place
     write_queue(path, new)
     print(f"{task['id']} SKIPPED: {reason}")
+
+
+def create_skip_authorization(task, line):
+    """Create the host authorization for TASK's Skipped LINE (an existing one is kept)."""
+    directory = skips_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.close(os.open(directory / skip_key(task, line), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        pass
+
+
+def tasks_skip_reauthorize(task_id):
+    """tasks skip-reauthorize ID: the host authorization for an already committed SKIPPED task
+    (another host, or a lost state directory). The queue is parsed with the skip check off, since
+    this skip may be what makes it invalid; the caller's `tasks check` reports any other fault.
+    Changes no file in the checkout."""
+    task = next((t for t in tasks(check_skips=False) if t['id'] == task_id), None)
+    if task is None:
+        fail(f'Unknown task: {task_id}')
+    if task['status'] != 'SKIPPED':
+        fail(f"{task_id} is {task['status']}; only a SKIPPED task can be re-authorized.")
+    lines = skipped_lines(task)
+    if len(lines) != 1 or not SKIPPED_LINE.fullmatch(lines[0]):
+        fail(f'{task_id} needs exactly one "Skipped (YYYY-MM-DD, ai-task skip): REASON" line '
+             f'to be re-authorized ({len(lines)} found).')
+    create_skip_authorization(task, lines[0])
+    print(f'{task_id} skip authorized on this host: {lines[0]}')
 
 
 def fingerprint():

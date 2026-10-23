@@ -107,6 +107,13 @@
   skip`. `task_line_positions` now returns a dict (Status, Dependencies, Model, notes);
   `append_note` and `write_queue` are shared with skip. retry's commit subject (`return ID to
   TODO` or `note on ID`) is chosen under the lock. README and `docs/workflow.md`. Flow unchanged.
+- T322 (2026-10-23): `ai-task skip ID --reauthorize` (lock, exit 75 under a run; branch check;
+  `--commit` refused with exit 2) wraps `workflow.py tasks skip-reauthorize ID`, which parses the
+  queue with the skip check off, requires `Status: SKIPPED` and exactly one valid `Skipped (…)`
+  line, and creates the host authorization (`create_skip_authorization`, shared with `tasks
+  skip`); `task_change`'s `tasks check` then reports any other fault ("The skip is authorized,
+  but the queue has another fault"). Changes no file in the checkout. README and
+  `docs/workflow.md`. Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -409,6 +416,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   and DONE refused, the same model again no commit), `test_ai_task_skip_command` (SKIPPED, reason
   line, host record, one commit, `ai-task check` passes), `test_ai_task_subcommands_refuse_while_locked`
   (all three, with and without `--commit`: exit 75, bytes and HEAD unchanged, no skip record).
+  T322: `test_ai_task_skip_reauthorize` (committed skip, empty state root fails `tasks check`;
+  `ai-task skip T002 --reauthorize` makes it pass, queue bytes, HEAD and status unchanged, again
+  is harmless), `test_ai_task_skip_reauthorize_refuses` (TODO task, SKIPPED without a Skipped
+  line, two Skipped lines, `--commit` (exit 2), held lock (exit 75), a broken queue → no record;
+  another unauthorized skip → record kept, "the queue has another fault").
 - `skip` (T311): `test_skipped_task_with_host_record` (`next` passes over it, `complete`,
   `pr-body` lists `T002: not needed`, a later dependent is eligible),
   `test_skipped_task_without_host_record_is_invalid` (hand-edited status, forged line, renamed

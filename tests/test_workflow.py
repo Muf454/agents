@@ -3204,6 +3204,73 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.assertIn('only a TODO or BLOCKED', self.tool('ai-task', 'skip', 'T001', '--reason', 'x', expected=1).stderr)
         self.assertEqual(self.head(), head)
 
+    def test_ai_task_skip_reauthorize(self):
+        self.ready(task('T001', 'DONE') + task('T002') + task('T003'))
+        self.tool('ai-task', 'skip', 'T002', '--reason', 'covered by T003', '--commit')
+        # Another host (or a lost state directory): the committed skip has no record here.
+        shutil.rmtree(self.base / 'host-state/skips')
+        self.assertIn('SKIPPED without a host skip record', self.helper('tasks', 'check', expected=1).stderr)
+        queue = self.project / '.ai/tasks.md'
+        before, head = queue.read_bytes(), self.head()
+        result = self.tool('ai-task', 'skip', 'T002', '--reauthorize')
+        self.assertIn('T002 skip authorized on this host: Skipped (', result.stdout)
+        self.helper('tasks', 'check')
+        self.tool('ai-task', 'check')
+        self.assertEqual(len(list((self.base / 'host-state/skips').iterdir())), 1)
+        self.assertEqual((queue.read_bytes(), self.head(), self.porcelain()), (before, head, ''))
+        # Again: the record already exists, still nothing changes.
+        self.tool('ai-task', 'skip', 'T002', '--reauthorize')
+        self.assertEqual((queue.read_bytes(), self.head(), self.porcelain()), (before, head, ''))
+
+    def test_ai_task_skip_reauthorize_refuses(self):
+        skipped = task('T003', 'SKIPPED')  # a hand-edited status without a Skipped line
+        self.ready(task('T001', 'DONE') + task('T002') + skipped)
+        queue = self.project / '.ai/tasks.md'
+        before, head = queue.read_bytes(), self.head()
+        skips = self.base / 'host-state/skips'
+
+        def refused(args, code, message):
+            result = self.tool('ai-task', 'skip', *args, expected=code)
+            self.assertIn(message, result.stderr)
+            self.assertEqual((queue.read_bytes(), self.head()), (before, head))
+            self.assertFalse(skips.exists() and any(skips.iterdir()))
+        refused(('T002', '--reauthorize'), 1, 'T002 is TODO; only a SKIPPED task can be re-authorized.')
+        refused(('T003', '--reauthorize'), 1, 'T003 needs exactly one "Skipped (YYYY-MM-DD, ai-task skip)')
+        refused(('T003', '--reauthorize', '--commit'), 2, 'Usage: ai-task skip <ID> --reauthorize')
+        # Two Skipped lines are refused too.
+        queue.write_text(task('T001', 'DONE') + task('T002') + skipped.replace(
+            'Pending.\n', 'Pending.\nSkipped (2026-10-01, ai-task skip): a\nSkipped (2026-10-01, ai-task skip): b\n'))
+        self.commit('two skipped lines')
+        before, head = queue.read_bytes(), self.head()
+        refused(('T003', '--reauthorize'), 1, '(2 found)')
+        # A run holding the checkout lock: exit 75 before anything is parsed.
+        queue.write_text(task('T001', 'DONE') + task('T002') + skipped.replace(
+            'Pending.\n', 'Pending.\nSkipped (2026-10-01, ai-task skip): not needed\n'))
+        self.commit('one skipped line')
+        before, head = queue.read_bytes(), self.head()
+        (self.project / '.ai/local').mkdir(exist_ok=True)
+        with open(self.project / '.ai/local/workflow.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            refused(('T003', '--reauthorize'), 75, 'A run is active in this checkout; nothing changed.')
+        # Any other queue fault is still reported: a broken queue authorizes nothing ...
+        valid = queue.read_text()
+        queue.write_text(valid + task('T004', dependencies='T009'))
+        self.commit('broken dependency')
+        before, head = queue.read_bytes(), self.head()
+        refused(('T003', '--reauthorize'), 1, 'T004: dependencies must exist earlier in the queue: T009')
+        # ... and another unauthorized skip fails the final check, this one's record kept.
+        queue.write_text(valid + task('T004', 'SKIPPED').replace(
+            'Pending.\n', 'Pending.\nSkipped (2026-10-01, ai-task skip): also not needed\n'))
+        self.commit('second skip')
+        before, head = queue.read_bytes(), self.head()
+        result = self.tool('ai-task', 'skip', 'T003', '--reauthorize', expected=1)
+        self.assertIn('T004: SKIPPED without a host skip record', result.stderr)
+        self.assertIn('the queue has another fault', result.stderr)
+        self.assertEqual((queue.read_bytes(), self.head(), self.porcelain()), (before, head, ''))
+        self.assertEqual(len(list(skips.iterdir())), 1)
+        self.tool('ai-task', 'skip', 'T004', '--reauthorize')
+        self.tool('ai-task', 'check')
+
     def test_ai_task_subcommands_refuse_while_locked(self):
         self.ready(task('T001', 'BLOCKED') + task('T002'))
         queue = self.project / '.ai/tasks.md'
