@@ -6804,7 +6804,7 @@ Evidence: `-k ai_task` Ran 13 tests OK; `.ai/bin/ai-check` PASS, Ran 1212 tests 
 README, docs/workflow.md; flow unchanged.
 
 ## T324 — `exec-logged` accepts the detached pipeline's log name (RC-01 G11, plan review round 2 P12)
-Status: BLOCKED
+Status: DONE
 Dependencies: none
 Model: sonnet
 
