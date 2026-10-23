@@ -523,6 +523,6 @@ T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, 
 T314 (docs, flow chart audit, mission-control note) is DONE.
 Review round 1 (Codex, HEAD 68ac201): M4, M5 and N4 accepted; fix tasks T329 (watchdog scheduled
 relaunch after a cancel) and T330 (human stop with a surviving tracked child: KILL escalation,
-pending stop) are DONE; T331 (state counts SKIPPED as finished) is TODO. See `.ai/reviews/dispositions.md`.
-Next: T331, then the full gate (`.ai/bin/ai-check`).
+pending stop) and T331 (state counts SKIPPED as finished) are DONE; gate PASSED (1227 tests). See `.ai/reviews/dispositions.md`.
+Next: queue complete; request another independent review.
 Nothing is merged or deployed.

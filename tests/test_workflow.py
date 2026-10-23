@@ -1958,6 +1958,18 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.helper('tasks', 'set', 'T004', 'DONE')
         self.helper('tasks', 'check')
 
+    def test_update_state_skipped_task_not_remaining(self):
+        self.ready(task('T001', 'DONE') + task('T002') + task('T003'))
+        self.helper('tasks', 'skip', 'T002', 'not needed')
+        self.helper('state', 'implementing', 'next')
+        state = (self.project / '.ai/state.md').read_text()
+        self.assertIn('Tasks complete: 1\n', state)
+        self.assertIn('Tasks remaining: 1\n', state)
+        self.helper('tasks', 'set', 'T003', 'DONE')
+        self.helper('state', 'implementing', 'next')
+        state = (self.project / '.ai/state.md').read_text()
+        self.assertIn('Tasks remaining: 0\n', state)
+
     def test_skipped_task_without_host_record_is_invalid(self):
         self.ready(task('T001') + task('T002'))
         queue = self.queue_text()

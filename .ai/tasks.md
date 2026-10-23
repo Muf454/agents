@@ -7130,7 +7130,7 @@ gone, `human_stop`, one ⛔) and `test_human_stop_pending_while_child_survives` 
 tests OK. Limitation: a child stuck forever (uninterruptible) keeps the owner waiting until it ends.
 
 ## T331 — State counts authorized SKIPPED tasks as finished (review N4)
-Status: TODO
+Status: DONE
 Dependencies: none
 Model: sonnet
 
@@ -7157,4 +7157,8 @@ Targeted: `python3 -m unittest discover -s tests -k update_state` (must say `Ran
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+`update_state()` now counts "Tasks remaining" as tasks outside `FINISHED`; "Tasks complete" stays the DONE
+count and no new state key was added. Regression `test_update_state_skipped_task_not_remaining` covers
+DONE+SKIPPED → 0 remaining and a TODO task still remaining. Targeted run: Ran 1 test OK; `.ai/bin/ai-check`
+PASS (Ran 1227 tests OK).
 

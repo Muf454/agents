@@ -1167,7 +1167,7 @@ def update_state(phase, next_action):
         validation = f"{data['result']} at {data.get('timestamp', data.get('started', 'unknown'))}"
     values = {'Branch': git('symbolic-ref', '--short', 'HEAD').decode().strip(), 'Phase': phase,
               'Current task': active, 'Last completed task': done[-1] if done else 'none',
-              'Tasks complete': str(len(done)), 'Tasks remaining': str(len(blocks) - len(done)),
+              'Tasks complete': str(len(done)), 'Tasks remaining': str(sum(t['status'] not in FINISHED for t in blocks)),
               'Last validation': validation,
               'Blocked': 'yes' if phase == 'blocked' or any(t['status'] == 'BLOCKED' for t in blocks) else 'no',
               'Next action': next_action, 'Last updated': now()}
