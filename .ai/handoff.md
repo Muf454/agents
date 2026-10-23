@@ -124,6 +124,11 @@
   started after the launch with that log; prints pid, log, `Follow: tail -f …`, `Stop: … --stop
   <checkout>` (shell-quoted). Not confirmed → exit 1 with the log tail, service left running.
   Caller-relative `--knowledge-dir` is T326. README, `docs/workflow.md`, vault flow chart, hub Log.
+- T326 (2026-10-23): the `--detach` dispatch walks its arguments once before `ai_root` and copies
+  them in order into `detach_args`; `--knowledge-dir` needs a value (`Missing knowledge
+  directory`) and an existing directory (`Knowledge directory must already exist.`), both exit 1
+  with nothing started, and is passed as `$(cd -- DIR && pwd -P)` from the caller's directory.
+  Values of the other value options are copied unread. README, `docs/workflow.md`. Flow unchanged.
 
 Batch 11 (RC-01, run controls for humans and apps) was
 planned 2026-10-21 by an unattended planning session on `fix/flow-batch-11` (from
@@ -449,6 +454,11 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
   fake session gone, `human_stop`, log holds the output), `test_detach_refuses_without_systemd_run`,
   `test_detach_refuses_without_approved`, `test_detach_not_confirmed` (exit 1 within the bound,
   "(no log was created)"; invalid AI_PLAN_ACK_SECONDS refused before launch).
+  T326: `test_detach_knowledge_dir_is_caller_relative` (from `sub`, `./notes` with both `notes/`
+  dirs → `systemd-run` argv, run record argv and manifest args hold `<checkout>/sub/notes`, order
+  kept), `test_detach_knowledge_dir_only_caller_relative_exists`,
+  `test_detach_knowledge_dir_missing` (only the root `notes/`, no value, neither exists → exit 1,
+  no `systemd-run` call, no log, no record).
 - `Docs` (T314).
 
 ## Human todos
@@ -462,6 +472,6 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
-T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324 and T313 too.
-Next: the rest of the queue by dependency (T326 caller-relative `--knowledge-dir` for `--detach`).
+T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324, T313 and T326 too.
+Next: T314 (docs, flow chart audit, mission-control note).
 Nothing is merged or deployed.

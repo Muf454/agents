@@ -426,13 +426,17 @@ in its own systemd user service, outside the caller's cgroup, so closing the ter
 the caller's service leaves it running. It refuses (exit 1, nothing started, no `last-error`)
 when the arguments lack `--approved`, when no `systemd-run` is executable (`--detach needs
 systemd-run; run ai-pipeline in a terminal or a service instead.`; there is no `setsid`
-fallback, spec B14) or for an invalid `AI_PLAN_ACK_SECONDS`. It runs the paths safety check
+fallback, spec B14), for an invalid `AI_PLAN_ACK_SECONDS`, or when `--knowledge-dir` has no
+value (`Missing knowledge directory`) or names no existing directory (`Knowledge directory must
+already exist.`). Before changing to the checkout root it resolves `--knowledge-dir` against your
+working directory, as in the foreground (T326), and passes the absolute path in the same argument
+position; values of other options are copied unread. It runs the paths safety check
 (`ai_root`), takes no lock (the pipeline does), then `systemd-run --user --collect --quiet
 --service-type=exec --unit=ai-pipeline-<checkout base name>-<epoch> --working-directory=<checkout>`
 with `--setenv` for `PATH`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and every `AI_*` variable
 without a newline (never `AI_RUN_ID`), plus `AI_LAUNCHER=detach-systemd` and `AI_RUN_LOG=<absolute
 log>`, running `python3 -I workflow.py exec-logged pipeline-<UTC stamp>-<8 hex>.log --
-<bin>/ai-pipeline <arguments>`: the remaining arguments unchanged, so neither the run record's
+<bin>/ai-pipeline <arguments>`: the remaining arguments in order, so neither the run record's
 argv nor the run manifest contains `--detach`. It polls `run-record show` every 0.2 s for up to
 `AI_PLAN_ACK_SECONDS` (default 20) for a pipeline record started after the launch whose `log` is
 that log, then prints `Pipeline started: pid N, log PATH`, `Follow: tail -f PATH` and `Stop:

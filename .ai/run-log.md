@@ -636,3 +636,4 @@
 | 2026-10-23T02:02:30Z | runner | T313 | stopped (exit 1); inspect state/diff before resuming | see local logs | cf32b09 | No merge or deployment performed |
 | 2026-10-23T02:40:00Z | claude (opus) | T313 | DONE (resume): recovery checkpoint 2c09d10 reviewed against all acceptance criteria; no source change | -k detach 14 OK (38.8 s); recovery gate PASS 02:19:32Z on the same source | 2c09d10 | README, docs/workflow.md, vault flow chart and hub Log already updated |
 | 2026-10-23T02:37:32Z | runner | T313 | completed | PASS | 81edabf | Claude checkpointed; continuing queue |
+| 2026-10-23T03:10:00Z | claude (opus) | T326 | DONE: `--detach` resolves `--knowledge-dir` against the caller's directory before `ai_root` (absolute path, same position; missing value/dir → exit 1, nothing started); 3 tests | -k detach 17 OK (57.8 s); full gate over the 600 s tool limit, left to the runner | see next entry | README, docs/workflow.md, vault hub Log; flow unchanged |

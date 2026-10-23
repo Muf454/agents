@@ -6917,7 +6917,7 @@ on the same source (no source change since). README, docs/workflow.md, vault flo
 hub Log updated.
 
 ## T326 — `--detach` resolves `--knowledge-dir` against the caller's directory (RC-01 G11, plan review round 3 P17)
-Status: TODO
+Status: DONE
 Dependencies: T313
 Model: opus
 
@@ -6964,6 +6964,16 @@ Targeted: `python3 -m unittest discover -s tests -k detach` (must say `Ran N tes
 Gate: `.ai/bin/ai-check` (gate rule in the queue header).
 
 ### Result / notes
+2026-10-23: the `--detach` dispatch (`scripts/ai-pipeline`) walks the arguments once before
+`ai_root` into `detach_args` (order kept): `--knowledge-dir` needs a value and an existing
+directory (else `Missing knowledge directory` / `Knowledge directory must already exist.`, exit 1,
+nothing started) and is passed as `$(cd -- DIR && pwd -P)`; values of the other value options are
+copied unread; `systemd-run` runs `ai-pipeline "${detach_args[@]}"`. Tests
+`test_detach_knowledge_dir_is_caller_relative`, `_only_caller_relative_exists`, `_missing`
+(three cases as subtests). Evidence: `python3 -m unittest discover -s tests -k detach` → Ran 17
+tests OK (57.8 s). The full gate exceeds the 600 s tool limit in-session (moved to background),
+left to the runner. README and `docs/workflow.md` detach paragraphs updated; vault hub Log line;
+flow unchanged.
 
 ## T314 — Docs, flow chart audit and the mission-control handoff note (batch 11)
 Status: TODO

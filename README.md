@@ -443,6 +443,7 @@ verifies the process, sends SIGTERM and waits (default 60 s). Exit 0 stopped, 3 
 `.ai/local/pipeline-<UTC stamp>-<hex>.log`. It returns once the run record names that log and
 prints the pid, the log, `Follow: tail -f <log>` and `Stop: <…>/ai-pipeline --stop <checkout>`.
 Without `systemd-run` it refuses (exit 1): run `ai-pipeline` in a terminal or a service instead.
+A relative `--knowledge-dir` is resolved against your working directory, as in the foreground.
 
 Rerunning `ai-pipeline --approved` resumes where it stopped: finished tasks aren't
 redone, a review is reused while only workflow records changed since it, completed

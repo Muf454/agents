@@ -12034,6 +12034,65 @@ print('Runner stopped after a failed check.\\nInspect validation evidence.')
         self.detach('--approved', expected=1, AI_PLAN_ACK_SECONDS='0')
         self.assertEqual(len(self.systemd_run_calls()), 1)
 
+    # T326: --detach resolves --knowledge-dir against the caller's directory, as in the foreground.
+    def detach_knowledge_from_sub(self, root_notes, sub_notes):
+        self.ready()
+        self.fake_systemd_run()
+        sub = self.project / 'sub'
+        sub.mkdir()
+        for path, marker, wanted in ((self.project / 'notes', 'root-marker', root_notes),
+                                     (sub / 'notes', 'sub-marker', sub_notes)):
+            if wanted:
+                path.mkdir()
+                (path / marker).write_text('marker\n')
+        with (self.project / '.git/info/exclude').open('a') as exclude:
+            exclude.write('/notes/\n/sub/\n')
+        return sub, str((sub / 'notes').resolve()) if sub_notes else None
+
+    def wait_for_pipeline_end(self):
+        deadline = time.monotonic() + PIPELINE_TIMEOUT
+        while self.pipeline_records()[-1]['outcome'] == 'running':
+            if time.monotonic() > deadline:
+                self.fail('the detached pipeline never ended')
+            time.sleep(0.1)
+        return self.pipeline_records()[-1]
+
+    def test_detach_knowledge_dir_is_caller_relative(self):
+        sub, notes = self.detach_knowledge_from_sub(True, True)
+        root = str((self.project / 'notes').resolve())
+        self.detach_started(self.detach('--approved', '--no-pr', '--knowledge-dir', './notes', '--sessions', '1',
+                                        cwd=sub, MOCK_KNOWLEDGE_DIR=notes))
+        [call] = self.systemd_run_calls()
+        expected = ['--approved', '--no-pr', '--knowledge-dir', notes, '--sessions', '1']
+        self.assertEqual(call[-7:], [str(self.project / '.ai/bin/ai-pipeline'), *expected])
+        record = self.wait_for_pipeline_end()
+        self.assertEqual(record['argv'], expected)
+        self.assertEqual(self.manifest_args(), expected)
+        self.assertNotIn(root, record['argv'] + self.manifest_args())
+
+    def test_detach_knowledge_dir_only_caller_relative_exists(self):
+        sub, notes = self.detach_knowledge_from_sub(False, True)
+        self.detach_started(self.detach('--approved', '--no-pr', '--knowledge-dir', './notes', '--sessions', '1',
+                                        cwd=sub, MOCK_KNOWLEDGE_DIR=notes))
+        [call] = self.systemd_run_calls()
+        self.assertEqual(call[call.index('--knowledge-dir') + 1], notes)
+        self.wait_for_pipeline_end()
+
+    def test_detach_knowledge_dir_missing(self):
+        sub, _ = self.detach_knowledge_from_sub(True, False)
+        for name, args, message in (
+                ('only at the root', ('--knowledge-dir', './notes'), 'Knowledge directory must already exist.'),
+                ('no value', ('--knowledge-dir',), 'Missing knowledge directory'),
+                ('neither exists', ('--knowledge-dir', './notes'), 'Knowledge directory must already exist.')):
+            with self.subTest(name):
+                if name == 'neither exists':
+                    shutil.rmtree(self.project / 'notes')
+                result = self.detach('--approved', '--no-pr', *args, cwd=sub, expected=1)
+                self.assertIn(f'Error: {message}', result.stderr)
+                self.assertEqual(self.systemd_run_calls(), [])
+                self.assertEqual(list((self.project / '.ai/local').glob('pipeline-*.log')), [])
+                self.assertEqual(self.pipeline_records(), [])
+
     # T319: `--stop` completes the records of a run that ended without them, bound to that run.
     def stop_fixture_runner(self, on_term='exit 143'):
         """A fixture runner in its own session: records its run, writes the liveness marker,

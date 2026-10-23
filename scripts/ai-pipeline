@@ -65,7 +65,8 @@ fi
 # Detach (RC-01 G11): the pipeline in its own systemd user service (outside the caller's cgroup),
 # its output in .ai/local/pipeline-….log named by its run record, which confirms the start. No
 # checkout lock (the pipeline takes it) and no last-error (a running pipeline's stays). The
-# remaining arguments go to the pipeline unchanged, so its run manifest never sees --detach.
+# remaining arguments go to the pipeline in order (--knowledge-dir made absolute), so its run
+# manifest never sees --detach.
 if [[ "${1:-}" == --detach ]]; then
   shift
   detach_approved=no
@@ -77,6 +78,21 @@ if [[ "${1:-}" == --detach ]]; then
     exit 1; }
   ack=${AI_PLAN_ACK_SECONDS:-20}
   [[ "$ack" =~ ^[1-9][0-9]{0,5}$ ]] || { printf 'Error: Invalid AI_PLAN_ACK_SECONDS: %s\n' "$ack" >&2; exit 1; }
+  # --knowledge-dir is resolved against the caller's directory, as in the foreground, before
+  # ai_root changes to the checkout root (T326). Values of other options are copied unread; the
+  # pipeline's own parser validates everything else.
+  detach_args=()
+  while (( $# )); do
+    case "$1" in
+      --knowledge-dir)
+        (( $# >= 2 )) || { printf '%s\n' 'Error: Missing knowledge directory' >&2; exit 1; }
+        [[ -d "$2" ]] || { printf '%s\n' 'Error: Knowledge directory must already exist.' >&2; exit 1; }
+        detach_args+=("$1" "$(cd -- "$2" && pwd -P)"); shift 2 ;;
+      --base|--pr-base|--max-fix-rounds|--review-timeout|--sessions|--session-timeout|--run-timeout|--model)
+        detach_args+=("$1" "${@:2:1}"); shift $(( $# >= 2 ? 2 : 1 )) ;;
+      *) detach_args+=("$1"); shift ;;
+    esac
+  done
   ai_root
   name=pipeline-$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').log
   log=$AI_ROOT/.ai/local/$name
@@ -92,7 +108,7 @@ if [[ "${1:-}" == --detach ]]; then
   # exec-logged creates the log exclusively in the pinned .ai/local and execs the pipeline on it.
   systemd-run --user --collect --quiet --service-type=exec "--unit=$unit" "--working-directory=$AI_ROOT" \
     "${setenv[@]}" --setenv=AI_LAUNCHER=detach-systemd "--setenv=AI_RUN_LOG=$log" -- \
-    python3 -I "$AI_BIN/lib/workflow.py" exec-logged "$name" -- "$AI_BIN/ai-pipeline" "$@" </dev/null || {
+    python3 -I "$AI_BIN/lib/workflow.py" exec-logged "$name" -- "$AI_BIN/ai-pipeline" "${detach_args[@]}" </dev/null || {
     printf 'Error: systemd-run could not start the pipeline (unit %s).\n' "$unit" >&2; exit 1; }
   for (( i = 0; i < ack * 5; i++ )); do
     pid=$(ai_helper run-record show 2>/dev/null | python3 -I -c '
