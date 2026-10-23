@@ -647,3 +647,4 @@
 | 2026-10-23T05:20:23Z | claude | T330 | DONE: KILL escalation in ai_stop_child; human stop stays pending (owner waits, --stop --wait 4) while a child survives KILL | PASS (ai-check 1226 OK) | b87afcf | 2 regression tests; docs/workflow.md, vault flow updated |
 | 2026-10-23T05:36:59Z | runner | T330 | completed | PASS | 0a01131 | Claude checkpointed; continuing queue |
 | 2026-10-23T05:58:00Z | claude | T331 | DONE: Tasks remaining counts only non-FINISHED tasks (SKIPPED no longer remaining) | PASS (ai-check 1227 OK) | 74e1705 | regression test_update_state_skipped_task_not_remaining |
+| 2026-10-23T06:11:13Z | runner | T331 | completed | PASS | 49648fb | Claude checkpointed; continuing queue |
