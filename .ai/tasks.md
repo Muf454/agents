@@ -7037,3 +7037,112 @@ Evidence: `python3 -m unittest discover -s tests -k Docs` Ran 4 tests OK.
 Limitations: the full `.ai/bin/ai-check` was not run in-session (over the 600 s tool limit); the
 runner's gate decides. `.ai/state.md` Phase was not moved to `ready_for_review` for that reason.
 
+## T329 — The watchdog launches no scheduled relaunch for a human-stopped run (review M4)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+Once the human cancels a paused run (`ai-pipeline --stop` while a usage-limit relaunch is
+scheduled), no later watchdog probe starts `ai-recover` for it, and the watchdog says nothing
+misleading ("the usage-limit relaunch could not start").
+
+### Implementation notes
+- `scripts/lib/watchdog.py` `main()`: before `start_recovery(... stage='usage limit relaunch')`
+  for a due `scheduled_ns`, read the current run (`current_run()`) and skip the launch when
+  `stopped_by_human(run)` or the run has ended. Report a human stop at most once per run (reuse
+  the `human_stop:<run_id>` incident key, as the died path does), never the ⛔ "could not start".
+- Also make the cancel itself durable: check whether `run_stop`/`stop_gone` for a dead process with
+  a scheduled relaunch (`stop_relaunch_scheduled`) clears or neutralises the host schedule
+  (`run-manifest` `limit_relaunch_at`); if it leaves it due, clear it there too (host record write
+  under the existing lock), so `relaunch_at()` returns None afterwards. Either guard alone must
+  stop the relaunch; keep both.
+- Keep `relaunch_quiet` behaviour: a cancelled schedule must not turn into a "stalled" alert.
+- Do not change `ai-recover`'s own refusal (it stays as defence in depth).
+
+### Likely affected modules
+scripts/lib/watchdog.py, scripts/lib/workflow.py (run_stop / stop_gone / run-manifest), tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_watchdog_cancelled_relaunch_never_recovers`: a paused run with a due schedule is
+  cancelled through the real `run-stop`; then two or more watchdog `--recover` probes run past the
+  reset time; `ai-recover` is never launched (launch stub records no call), and no "could not
+  start" notification is sent.
+- Regression for the record guard alone: a `human_stop` run record with a due schedule left in
+  place (no marker) gets no recovery launch from the watchdog.
+- Existing limit-relaunch and watchdog tests still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k watchdog -k relaunch` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T330 — A human stop never reports success while its tracked child survives (review M5)
+Status: TODO
+Dependencies: none
+Model: opus
+
+### Goal
+`ai_human_stop` does not end the run as `human_stop`, announce "STOPPED by you" and drop the marker
+while the tracked child (e.g. a publication `git push` or `gh` that ignores TERM) is still alive;
+the stop either confirms the child is gone or stays pending and reachable by `--stop`.
+
+### Implementation notes
+- `scripts/lib/common.sh` `ai_stop_child`: after the TERM wait expires, escalate to KILL for the
+  tracked child (publication commands have no `timeout` wrapper, unlike agent sessions, which
+  `timeout` kills after 10 s), then wait briefly again; return 1 only if it still survives.
+- `ai_human_stop` when the child still survives after KILL: do not call `run-record end ...
+  human_stop`, do not drop the marker as if finished; keep the stop request recorded
+  (`stop-requested`), notify that the stop is pending with the surviving PID, and keep the owner
+  (or a state `--stop` can reach) so `ai-pipeline --stop --wait` returns 4 until the child is gone,
+  then 0. Decide and document in `docs/workflow.md` which of the two the code does; keep exit
+  statuses as already documented (0/1/3/4).
+- Gate-first order and the "no host write while armed" rule stay unchanged.
+- Check the gate-broken early branch (lines 181-194) for the same survivor case.
+
+### Likely affected modules
+scripts/lib/common.sh, scripts/ai-pipeline, scripts/lib/workflow.py (run_stop), docs/workflow.md, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_human_stop_term_ignoring_publication_child`: the real shutdown handler with a
+  real TERM-ignoring child process (fast poll via the test hook); afterwards the child is not alive,
+  or the run record is not ended `human_stop` and `run-stop --wait 1` exits 4.
+- No "STOPPED by you" notification is sent while the tracked child is alive.
+- Existing human-stop and `--stop` tests (`test_human_stop_*`, `test_stop_command_*`) still pass.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k human_stop -k stop_command` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+
+## T331 — State counts authorized SKIPPED tasks as finished (review N4)
+Status: TODO
+Dependencies: none
+Model: sonnet
+
+### Goal
+`.ai/state.md` "Tasks remaining" counts only tasks whose status is outside `FINISHED`, so a queue
+of DONE and authorized SKIPPED tasks reports 0 remaining.
+
+### Implementation notes
+- `scripts/lib/workflow.py` `update_state()`: `Tasks remaining` = tasks whose status is not in
+  `FINISHED`. Keep "Tasks complete" as the DONE count; add a "Tasks skipped" line only if the state
+  template and its readers tolerate a new key (check `templates/` and any parser of state.md first;
+  otherwise leave the keys as they are).
+
+### Likely affected modules
+scripts/lib/workflow.py, tests/test_workflow.py
+
+### Acceptance criteria
+- Regression `test_update_state_skipped_task_not_remaining`: one DONE and one authorized SKIPPED
+  task give "Tasks remaining: 0" after `tasks complete`.
+- A queue with a TODO task still counts it as remaining.
+
+### Validation
+Targeted: `python3 -m unittest discover -s tests -k update_state` (must say `Ran N tests`, N ≥ 1).
+Gate: `.ai/bin/ai-check` (gate rule in the queue header).
+
+### Result / notes
+

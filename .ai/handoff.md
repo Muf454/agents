@@ -348,6 +348,9 @@ Commands, run from the checkout as `<checkout>/.ai/bin/…` (T314 checked each a
    start the next feature branch from it and check that `ai-task check` (and the pipeline start)
    accept the queue.
 9. Mission control: switch phase 2 to the commands and records in "For mission control" above.
+10. After T329 (review M4): let a real run pause at a usage limit, cancel it with
+    `.ai/bin/ai-pipeline --stop <checkout>`, and check that once the reset time passes the
+    watchdog timer starts no recovery and sends no "relaunch could not start" message.
 
 ### Covered by automated tests
 Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`):
@@ -507,6 +510,9 @@ Planned test groups (run with `python3 -m unittest discover -s tests -k <group>`
 ## Next action
 T301, T315, T305, T303, T302, T316, T304, T328, T317, T306, T318, T323, T307 and T308 are DONE (T302's gate PASSED on 086ff5f's source).
 T319, T309 and T320 are DONE as well; T325, T310, T311, T312, T322, T321, T327, T324, T313 and T326 too.
-T314 (docs, flow chart audit, mission-control note) is DONE, so no task of batch 11 is left open.
-Next: the full gate (`.ai/bin/ai-check`, left to the runner; it exceeds the 600 s tool limit in-session).
+T314 (docs, flow chart audit, mission-control note) is DONE.
+Review round 1 (Codex, HEAD 68ac201): M4, M5 and N4 accepted; fix tasks T329 (watchdog scheduled
+relaunch after a cancel), T330 (human stop with a surviving tracked child) and T331 (state counts
+SKIPPED as finished) are TODO. See `.ai/reviews/dispositions.md`.
+Next: T329, T330, T331, then the full gate (`.ai/bin/ai-check`).
 Nothing is merged or deployed.
