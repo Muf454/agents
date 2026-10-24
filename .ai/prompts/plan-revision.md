@@ -14,7 +14,8 @@ actual source yourself and decide:
   the queue into dependency order and stops on cycles, unknown IDs or prose in
   `Dependencies:`. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`,
   `Status: TODO`, `Dependencies:`, `Model:`, then `### Goal`, `### Implementation notes`,
-  `### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+  `### Likely affected modules`, `### Acceptance criteria`, `### Validation` (one `Targeted:` line per task-specific check, a
+  selector that runs at least one test, and a `Gate:` line), and an empty
   `### Result / notes`.
 - rejected: the finding is wrong or out of scope. Give concrete evidence (file and line,
   plan section, or the decision that covers it). A rejected finding is judged again by the
@@ -30,6 +31,16 @@ The runner created the section for this round at the end of
 `.ai/reviews/plan-dispositions.md`. Add one row per finding to its table: the finding ID alone in the first cell
 (no severity or title; the runner tolerates them, nothing before the ID), e.g.
 `| P1 | accepted | <evidence> | T012 |`; leave the Task cell empty for rejected and needs-human rows.
+The table the host wrote has this header, and your rows look like this:
+
+```
+| Finding | Disposition | Evidence / reason | Task |
+| --- | --- | --- | --- |
+| P1 | accepted | the plan has no test for the restart path | T012 |
+| P2 | rejected | the rollback is covered in docs/rollback.md:12 | |
+| P3 | needs-human | Should the rollback keep option A or switch to B? | |
+```
+
 (In a table cell, write a pipe as `\|`,
 better: avoid it, e.g. write "or"; an unescaped `|` splits the row and the runner stops),
 keep its header and its "Plan review HEAD:" line, and never edit earlier sections, the preamble or

@@ -11,8 +11,8 @@ If the task is IN_PROGRESS from an interrupted session, reconcile the partial di
 first; preserve it, don't reset it.
 
 For the assigned task: mark it IN_PROGRESS, implement it within scope with tests,
-run its targeted checks and `.ai/bin/ai-check`, and fix failures your change
-caused. Update relevant docs/decisions (and the configured knowledge base, if
+run its targeted checks (the `Targeted:` lines) and follow the RUNNER CONTRACT's gate rule,
+and fix failures your change caused. Update relevant docs/decisions (and the configured knowledge base, if
 any). Mark it DONE only when its acceptance criteria are met, with evidence in
 "Result / notes". Update `.ai/state.md` and `.ai/handoff.md` (keep "Manual testing
 for the human" current for the whole feature, in two parts: `### Needs you` only for
@@ -46,17 +46,28 @@ your checkpoint and continues the queue.
   redirect edits (`>`, `>>`, `tee`).
 - Run plain commands, and never prefix commands with `cd`: the shell already starts in the
   project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` in the foreground with the Bash tool's `timeout`
-  set to 600000 ms; never run it in the background or poll it. If it still times out, mark
-  the task BLOCKED with the evidence instead of ending without a checkpoint. When the task
-  names its own targeted test command, run that command as written.
+- The gate rule of this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT) says whether to
+  run the full gate in this session. By default run only the targeted checks: the runner runs
+  the full gate after the session and it decides DONE. When the rule says to run it: run the
+  full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+  wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
+  `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and
+  after; a change fails it with `Validation modified project content`) and do not end the
+  session. Never mark a task BLOCKED only because the gate outlived a tool call or its result
+  could not be read: finish on the targeted checks, write `full gate result unknown in the
+  session; left to the host gate` in the result, and mark the task DONE when everything else is
+  met. The runner runs the full gate after the session and sets a DONE task whose gate fails
+  back to IN_PROGRESS. Run a task's targeted test command as written, in the foreground.
 - Use `git rm` and `git mv` for tracked files, never `rm` or `mv`.
 - Scratch files (experiments, throwaway scripts or tests) go only under `.ai/local/scratch/`
   (ignored by Git; the runner empties it before and after every session). Never create them in
   source or test directories, never name them like tests (`*.test.*`, `test_*.py`), and do not
   try to delete files: `rm` is not allowed.
-- A new script must be executable: run `chmod +x <path>` on the file you created inside this
-  checkout (never other modes, never paths outside the checkout), then `git add -- <path>`.
+- A script must be executable: run `chmod +x <path>` on a file inside this checkout, then
+  `git add -- <path>`. `chmod +x` is the only chmod form allowed (never numeric modes such as
+  `chmod 755`, never paths outside the checkout). It also repairs a tracked script that lost its
+  executable bit (`git diff` shows `old mode 100755` / `new mode 100644`); the runner restores
+  such a bit after the session too.
 - Change task status with `.ai/bin/ai-task set <ID> <TODO|IN_PROGRESS|DONE|BLOCKED>` and read
   it with `.ai/bin/ai-task show <ID>`; do not hand-edit the `Status:` line.
 - Never tick or untick checkboxes in the project's knowledge base (Obsidian vault or similar).
