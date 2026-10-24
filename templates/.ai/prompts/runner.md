@@ -11,8 +11,8 @@ If the task is IN_PROGRESS from an interrupted session, reconcile the partial di
 first; preserve it, don't reset it.
 
 For the assigned task: mark it IN_PROGRESS, implement it within scope with tests,
-run its targeted checks and `.ai/bin/ai-check`, and fix failures your change
-caused. Update relevant docs/decisions (and the configured knowledge base, if
+run its targeted checks (the `Targeted:` lines) and follow the RUNNER CONTRACT's gate rule,
+and fix failures your change caused. Update relevant docs/decisions (and the configured knowledge base, if
 any). Mark it DONE only when its acceptance criteria are met, with evidence in
 "Result / notes". Update `.ai/state.md` and `.ai/handoff.md` (keep "Manual testing
 for the human" current for the whole feature, in two parts: `### Needs you` only for
@@ -46,7 +46,10 @@ your checkpoint and continues the queue.
   redirect edits (`>`, `>>`, `tee`).
 - Run plain commands, and never prefix commands with `cd`: the shell already starts in the
   project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+- The gate rule of this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT) says whether to
+  run the full gate in this session. By default run only the targeted checks: the runner runs
+  the full gate after the session and it decides DONE. When the rule says to run it: run the
+  full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
   wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
   `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and
   after; a change fails it with `Validation modified project content`) and do not end the

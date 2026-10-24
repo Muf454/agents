@@ -23,7 +23,8 @@ to `.ai/tasks.md` with a new ID (never reuse IDs), Status TODO, correct
 dependencies, and acceptance criteria that include a regression test where
 practical. Copy the exact format of `.ai/tasks.md`: heading `## T0NN — Title`, `Status: TODO`,
 `Dependencies:` (`none` or IDs), `Model:`, then `### Goal`, `### Implementation notes`,
-`### Likely affected modules`, `### Acceptance criteria`, `### Validation`, and an empty
+`### Likely affected modules`, `### Acceptance criteria`, `### Validation` (one `Targeted:` line per task-specific check, a
+selector that runs at least one test, and a `Gate:` line), and an empty
 `### Result / notes`. Update `.ai/handoff.md` if test steps change: "Needs you" only for what a
 human must do, everything a test reproduces under "Covered by automated tests" with the
 test name in backticks.
@@ -52,7 +53,10 @@ handoff/state with explicit paths, then return.
   redirect edits (`>`, `>>`, `tee`).
 - Run plain commands, and never prefix commands with `cd`: the shell already starts in the
   project root and every part of a compound command is checked against the allowlist.
-- Run the full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
+- The gate rule of this session's contract (RUNNER CONTRACT or TRIAGE CONTRACT) says whether to
+  run the full gate in this session. By default run only the targeted checks: the runner runs
+  the full gate after the session and it decides DONE. When the rule says to run it: run the
+  full gate as `.ai/bin/ai-check` with the Bash tool's `run_in_background: true`, then
   wait for its completion notice and read its result (exit status, `Ran N tests`, `OK` or
   `FAILED`). While it runs, make no edits and no commits (the gate hashes the tree before and
   after; a change fails it with `Validation modified project content`) and do not end the

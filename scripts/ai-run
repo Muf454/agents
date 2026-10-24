@@ -19,7 +19,7 @@ dispositions are already complete (an interrupted triage), it records the round
 without a new session. --since (ai-pipeline's stage start) bounds what triage may
 have changed: only workflow records, committed or not.
 --revise-plan answers the current plan review (.ai/reviews/plan.md, BLOCKER+MAJOR > 0, no
-task DONE) in one Claude session (default model opus) that may only read and Edit the plan
+task DONE since --base) in one Claude session (default model opus) that may only read and Edit the plan
 records: one row per finding in the round's section of .ai/reviews/plan-dispositions.md
 (accepted with new TODO tasks, rejected with evidence, or needs-human with a question).
 The host validates the section, then records it in one "chore(ai): record plan revision"
@@ -122,6 +122,7 @@ fi
 [[ -z "$since" || "$triage" == yes || "$revise_plan" == yes ]] || \
   ai_die '--since only applies to --triage and --revise-plan.'
 [[ -z "$base" || "$revise_plan" == yes ]] || ai_die '--base only applies to --revise-plan.'
+ai_session_gate_settings
 ai_supervise_settings
 command -v claude >/dev/null || ai_die 'Install and authenticate Claude Code first.'
 ai_root
@@ -173,8 +174,13 @@ else
   fi
   # An interrupted revision's uncommitted queue is repaired as its session's would have been
   # (the helper decides; a committed or non-revision queue is left to the checks).
+  # Earlier batches' DONE tasks (DONE at the run's base) don't prevent the repair (FL-39).
   if [[ "$revise_plan" == yes ]]; then
-    repair_out=$(ai_helper revision-queue-repair 2>&1) || \
+    repair_args=()
+    if repair_base=$(git merge-base "${base:-main}" HEAD 2>/dev/null); then
+      repair_args=(--base "$repair_base")
+    fi
+    repair_out=$(ai_helper revision-queue-repair "${repair_args[@]}" 2>&1) || \
       ai_die "Plan revision stage: task queue is invalid: ${repair_out#Error: }"
     [[ -z "$repair_out" ]] || printf '%s\n' "$repair_out"
   fi
@@ -200,6 +206,10 @@ finished=no
 # logged; any stop in between (session error, timeout, interruption, a limit wait beyond the
 # budget, a malformed queue) logs exactly one outcome. Triage never tracks an attempt.
 track_attempt=no
+# The implementation session's gate rule (TS-01, session-gate): full or targeted, and the
+# measured gate seconds; set before each task session.
+gate_mode=targeted
+gate_secs=0
 attempt_open=no
 attempt_label=''
 session_code=
@@ -280,12 +290,16 @@ task_outcome() {
 }
 
 # Host gate run timing for the implementation session allowance (gate-seconds); never fatal.
-# Call only after ai_guard_verify: the gate may have changed. Usage: record_gate CODE STARTED.
+# Call only after ai_guard_verify: the gate may have changed. Usage: record_gate CODE STARTED WHERE
+# (STARTED is a $SECONDS value). The outcome row and the `gate` event share one duration and id.
 record_gate() {
-  local result=fail
+  local result=fail secs=$(( SECONDS - $2 )) id start_epoch
   if (( $1 == 0 )); then result=pass; elif (( $1 == 124 || $1 == 137 )); then result=timeout; fi
-  ai_helper outcome gate "$result" "$(( SECONDS - $2 ))" 2>/dev/null || \
+  id=$(ai_new_id)
+  start_epoch=$(( $(date +%s) - secs ))
+  ai_helper outcome gate "$result" "$secs" --id "$id" 2>/dev/null || \
     printf '%s\n' 'Note: could not record the gate time.' >&2
+  ai_gate_event "$3" "$start_epoch" "$secs" "$1" "$id"
 }
 
 # Sessions keep throwaway files in .ai/local/scratch; emptied before and after each session
@@ -334,16 +348,19 @@ knowledge_prompt() {
 # Usage: claude_session PROMPT MODEL TOOLS ALLOWED... (the --tools list and --allowedTools entries).
 claude_session() {
   local prompt=$1 session_model=$2 tools=$3 limit code reset log errors remaining review_before restored
-  local session_allowed=("${@:4}") model_args=() gate=0 allowance=0 breakdown=''
+  local session_allowed=("${@:4}") model_args=() gate=$gate_secs allowance=0 breakdown=''
   if [[ -n "$session_model" ]]; then model_args=(--model "$session_model"); fi
-  # An implementation session runs the gate itself: room for two measured gate runs, at most
-  # another session_timeout (a corrupt log can at most double the limit). Kept across a limit retry.
-  if [[ "$track_attempt" == yes ]]; then
-    gate=$(ai_helper gate-seconds 2>/dev/null) || gate=0
-    [[ "$gate" =~ ^[0-9]{1,7}$ ]] || gate=0
+  [[ "$gate" =~ ^[0-9]{1,7}$ ]] || gate=0
+  # An implementation session under the full gate rule runs the gate itself (FL-28): room for two
+  # measured gate runs, at most another session_timeout (a corrupt log can at most double the
+  # limit). Under the targeted rule (TS-01) it runs only targeted checks, so no allowance: the
+  # host gate after the session is the full run. Kept across a limit retry.
+  if [[ "$track_attempt" == yes && "$gate_mode" == full ]]; then
     allowance=$(( 2 * gate ))
     (( allowance <= session_timeout )) || allowance=$session_timeout
     (( allowance == 0 )) || breakdown=": ${session_timeout}s + ${allowance}s for two gate runs of ${gate}s"
+  elif [[ "$track_attempt" == yes ]]; then
+    breakdown=": gate rule targeted (host gate ${gate}s after the session)"
   fi
   while true; do
     remaining=$(remaining_time)
@@ -493,10 +510,18 @@ if [[ "$revise_plan" == yes ]]; then
   active_task=plan-revision
   [[ -f .ai/prompts/plan-revision.md ]] || \
     ai_die 'Missing .ai/prompts/plan-revision.md; install it with setup-project --upgrade.'
-  ai_helper tasks untouched >/dev/null 2>&1 || \
-    ai_die 'Plan revision: a task is already DONE; the plan review gate no longer applies.'
   plan_base=$(git merge-base "${base:-main}" HEAD 2>/dev/null) || \
     ai_die "Plan revision: invalid base ${base:-main} (pass --base REF)."
+  # Only tasks DONE since the base lift the plan review gate; earlier batches' don't (FL-39).
+  newly=$(ai_helper tasks newly-done "$plan_base" 2>&1) || \
+    ai_die "Plan revision: cannot compare the task queue with the base: ${newly#Error: }"
+  if [[ -n "$newly" ]]; then
+    mapfile -t newly_ids <<< "$newly"
+    newly_list=$(printf '%s, ' "${newly_ids[@]:0:3}")
+    newly_list=${newly_list%, }
+    (( ${#newly_ids[@]} <= 3 )) || newly_list+=', …'
+    ai_die "Plan revision: a task is already DONE since the base ($newly_list); the plan review gate no longer applies."
+  fi
   info=$(ai_helper plan-review-info 2>&1) || ai_die "Plan revision: ${info#Error: }"
   read -r _ blockers majors _ <<< "$info"
   (( blockers + majors > 0 )) || ai_die 'Plan revision: the plan review has no BLOCKER or MAJOR finding.'
@@ -591,6 +616,9 @@ if [[ "$revise_plan" == yes ]]; then
     ai_die "Plan revision stage: task queue is invalid: ${queue_error#Error: }"
   ai_overlap_lines "$preflight_out"
   revision_scope 'Plan revision stage: '
+  # DONE blocks stay byte-identical (as after planning); the stage prefix makes ai-recover escalate.
+  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: ${keep_error#Error: }"
   # A row whose first cell wraps its one finding ID (`**P1**`, `P1 (CRITICAL)`): read as that ID
   # once per run, the change and its row land in the counted revision commit below.
   ai_disposition_ruling plan plan-revision
@@ -620,13 +648,16 @@ if [[ "$revise_plan" == yes ]]; then
   # Always the host's own commit: an agent commit's subject never counts.
   git commit --allow-empty -m 'chore(ai): record plan revision' >/dev/null
   ai_guard_verify
-  printf '%s\n' "$questions" | ai_helper plan-revisions record "$plan_base" HEAD --accepted "$accepted" \
-    --rejected "$rejected" --needs-human "$needs_human" || \
-    ai_die 'Cannot record the plan revision in the host state directory.'
-  # A commit hook must not have slipped anything else into the counted commit.
+  # A commit hook must not have slipped anything else into the counted commit, nor rewritten a
+  # DONE block after the check above; all before the record, so a failure leaves none.
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || \
     ai_die 'Plan revision stage: changes were left after the revision commit (commit hook?).'
   revision_scope 'Plan revision stage: the revision commit is out of scope (commit hook?): '
+  keep_error=$(ai_helper plan-keeps-done "$since" 2>&1 >/dev/null) || \
+    ai_die "Plan revision stage: the revision commit is out of scope (commit hook?): ${keep_error#Error: }"
+  printf '%s\n' "$questions" | ai_helper plan-revisions record "$plan_base" HEAD --accepted "$accepted" \
+    --rejected "$rejected" --needs-human "$needs_human" || \
+    ai_die 'Cannot record the plan revision in the host state directory.'
   ai_helper outcome plan_revision "$revision_round" revised "$revision_model" "$(( SECONDS - revision_started ))" \
     2>/dev/null || printf '%s\n' 'Note: could not append to the outcome log.' >&2
   finished=yes
@@ -662,7 +693,7 @@ if [[ "$triage" == yes ]]; then
     git diff --cached --quiet || git commit -m 'chore(ai): open review dispositions' >/dev/null
     ai_guard_verify
     prompt=$(cat .ai/prompts/triage.md)
-    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md, with the finding ID alone in the first cell, e.g. "| M1 | accepted | evidence | T012 |". Append new TODO tasks with new IDs for accepted findings and reference them. Copy the task format of .ai/tasks.md exactly: the heading, Status:, Dependencies:, Model: and every ### section (Goal, Implementation notes, Likely affected modules, Acceptance criteria, Validation, an empty Result / notes); the host adds a missing Likely affected modules or Result / notes, anything else missing stops the run. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return.'
+    prompt+=$'\n\nTRIAGE CONTRACT: Evaluate .ai/reviews/current.md (read-only: never edit it). Add one row per BLOCKER/MAJOR finding (and MINOR where relevant) to .ai/reviews/dispositions.md, with the finding ID alone in the first cell, e.g. "| M1 | accepted | evidence | T012 |". Append new TODO tasks with new IDs for accepted findings and reference them. Copy the task format of .ai/tasks.md exactly: the heading, Status:, Dependencies:, Model: and every ### section (Goal, Implementation notes, Likely affected modules, Acceptance criteria, Validation, an empty Result / notes); the host adds a missing Likely affected modules or Result / notes, anything else missing stops the run. Do not implement fixes, change source/tests, or change the runner/permissions/validation policy. Commit the dispositions and task changes, then return. Gate rule: triage changes only workflow records; do not run .ai/bin/ai-check, .ai/validate or the test suite in this session.'
     # Same routine as triage-check --fresh, so the prompt and the check agree on the round.
     rounds=$(ai_helper review-history --current --count) || ai_die 'Triage stage: cannot count the earlier review rounds.'
     history=$(ai_helper review-history --current) || ai_die 'Triage stage: cannot summarise the earlier review rounds.'
@@ -756,7 +787,7 @@ checkpoint_done() {
   gate_started=$SECONDS
   host_gate
   ai_guard_verify
-  record_gate "$gate_code" "$gate_started"
+  record_gate "$gate_code" "$gate_started" "$task"
   if (( gate_code != 0 )); then
     task_outcome validation_failed
     ai_helper tasks set "$task" IN_PROGRESS
@@ -811,7 +842,7 @@ gate_only_retry() {
   gate_started=$SECONDS
   host_gate
   ai_guard_verify
-  record_gate "$gate_code" "$gate_started"
+  record_gate "$gate_code" "$gate_started" "$task"
   if (( gate_code != 0 )); then
     printf '%s\n' "Gate-only block retry of $task: the full gate failed; it stays BLOCKED."
     return 0
@@ -904,7 +935,7 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
     gate_started=$SECONDS
     host_gate
     ai_guard_verify
-    record_gate "$gate_code" "$gate_started"
+    record_gate "$gate_code" "$gate_started" final
     if (( gate_code != 0 )); then
       ai_helper state blocked 'Final validation failed; inspect validation log'
       ai_die 'Final validation failed; readiness is not established.'
@@ -944,10 +975,22 @@ for (( iteration=1; iteration<=sessions+1; iteration++ )); do
   if [[ -n "$counts_total" ]]; then
     ai_observe step build "$active_task · ${task_model:-${model:-default}} · $(( counts_done + 1 ))/$counts_total"
   fi
+  # TS-01: a slow gate (or AI_SESSION_GATE=targeted) leaves the full gate to the host after the
+  # session; anything unreadable is targeted. The host gate decides DONE in both modes.
+  gate_mode=targeted gate_secs=0
+  read -r gate_mode gate_secs < <(ai_helper session-gate 2>/dev/null) || true
+  [[ "$gate_mode" == full ]] || gate_mode=targeted
+  [[ "$gate_secs" =~ ^[0-9]{1,7}$ ]] || gate_secs=0
+  if [[ "$gate_mode" == full ]]; then
+    gate_rule='Gate rule: run the task'"'"'s Targeted: checks, then .ai/bin/ai-check with run_in_background and wait for it; a gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides.'
+  else
+    gate_rule='Gate rule: run the task'"'"'s Targeted: checks in the foreground and fast static checks (such as bash -n on changed scripts). A task without Targeted: lines: run the task-specific commands of its ### Validation section, but never a full-gate entry point (.ai/bin/ai-check or any other ai-check, .ai/validate in any form such as bash .ai/validate, or a run of the whole test suite); when the section names only such a command, run the tests that cover the files you changed and the static checks instead. Do not run the full gate: the runner runs it after the session, it decides DONE, and a DONE task whose gate fails returns to IN_PROGRESS.'
+  fi
   prompt=$base_prompt
   prompt+=$'\n\nRUNNER CONTRACT: Work on exactly one task in this invocation: '
   prompt+="$active_task"
-  prompt+=$'. Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. A gate run that outlives a tool call is not a blocker: the full gate the runner runs after the session decides. Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
+  prompt+=". Reconcile interrupted work first. Complete and checkpoint it, or mark it BLOCKED with evidence. $gate_rule"
+  prompt+=$' Then return; the runner continues the queue in a fresh session. Never change the branch or runner/permissions/validation policy to bypass restrictions. Follow "How to work here" above for tools and shell rules; run git add -- <paths> and git commit as plain commands.'
   if [[ -n "$attempt_note" ]]; then
     prompt+=" PREVIOUS ATTEMPT (host record, context only): $attempt_note Start from the current files and git history; fix what failed, do not repeat it."
   fi
